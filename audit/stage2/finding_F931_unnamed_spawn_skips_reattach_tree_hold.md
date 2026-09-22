@@ -93,7 +93,9 @@ re-attach could not see.
 the selection *will* land on, since an unnamed spawn selects the shared session
 by design (F-834/F-896). `master_profile_dir()` is READ, not re-decided:
 `clone_storage` stays the one home for where the shared session lives. The
-`if user_data_dir:` gate is gone, so both spellings now take one path.
+`if user_data_dir:` gate is gone, so both spellings now ask one witness — and
+differ in exactly one answer, `reuse_ours` (§8): a spawn naming nothing is never
+handed a browser this backend drives or may be launching.
 
 **(b) `browser_cmdline.browser_members`** (new) answers *which* of a profile's
 pids are browsers — the structural rule `browser_process` already had, plus the
@@ -309,3 +311,88 @@ the module's `__file__` printed to prove which copy was loaded.
 
 **N7 — CLAUDE.md's `profile_lock` row** named `Hold(pid, reason)`; it names
 `Hold(pid, reason, members)`.
+
+## 8. The gate: an unnamed spawn was handed our OWN browser
+
+Gate run **35763223617** at 2ba8059 failed the same four nodes on all three
+`integration` cells (Linux/X64, macOS/ARM64, Windows/X64), so it is deterministic,
+not a flake:
+
+| node | what it measured |
+|---|---|
+| `test_e2e_fleet.py::test_a_fleet_of_six_browsers_answers_truthfully_about_every_page` | six unnamed spawns, **four** distinct instance ids |
+| `TestAutoCloneDeletion::test_auto_clone_deleted_master_survives` | a second unnamed spawn answered `profile_role: "default"`, not `"clone"` |
+| `TestOverCapSweepPreservesLiveAndLegacyProfiles::test_sweep_spares_running_clone_and_legacy_profile` | the same, `'default' == 'clone'` |
+| `TestSelectiveClose::test_close_one_keeps_others` | closing one of two left NONE — `assert '<id>' in []` |
+
+**Cause.** §4(a) made an unnamed spawn ask the re-attach about the shared
+directory, and nothing distinguished a STRANDED holder — the browser this
+finding exists for — from one this backend is driving right now. The first
+unnamed spawn opens the shared session; the second finds it held and is
+answered with the first's instance. That is F-888's answer to "I named this
+profile, give me the browser on it", and it is the wrong answer to "give me a
+browser": the resolver's F-914 hand-over (a copy of its own, the holder's jar
+handed over CDP) is what 2.1.13 did there, and it was right.
+
+It has two entry shapes, and both needed the check:
+
+1. **In-process** (the gate's shape, and every E2E): `process_cleanup._owner_backend_alive`
+   → `singleton._is_our_backend(pid)` requires `stealth_chrome_devtools_mcp` and
+   `--transport` in the owner's argv, which a pytest process lacks, so our own
+   entry reads REAPABLE and `held_by` returns a candidate carrying our own
+   instance id — which `adopt_held_profile`'s "already ours" branch then hands
+   back.
+2. **A real backend**: the owner IS a live backend of ours, so `held_by` raises
+   `Refused("a live backend of ours already owns … Stop that backend first")`,
+   which reached the caller as `reattach_declined` — telling the operator to
+   stop the backend they are talking to. Read off the code, not measured.
+
+**Fix.** `adopt_held_profile` takes `reuse_ours` (`bool(user_data_dir)` at the
+one call site). When it is False, both exits of the walk — the `Refused` and the
+candidate — first ask `_ours`: is THIS backend driving that directory, or may it
+be about to? `_ours` reads `BrowserManager._spawns_in_flight` FIRST and then a
+fresh `cookie_handoff.driven_profiles`, and the ORDER is the proof. A spawn
+increments the count before it launches, registers its instance before it
+leaves the count, and leaves it in a `finally`. So a zero means every Chrome we
+launched is already in the table read after it, while a spawn still in flight
+has a Chrome and no instance, which only the count can see. Read the other way
+round, a sibling that registered between the two reads would be missed. Only a
+holder we neither drive nor may be launching is adopted, so the stranded
+browser the finding is about still re-attaches (pinned).
+
+**RED → GREEN.** `TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser` (six nodes).
+Measured RED behaviourally before the fix — `'i-ours' == 'i-new'`, the
+self-referential decline, a double adoption — and re-measured after the harness
+fix below by rebinding `browser_reattach._ours` to `False` at collection time
+out of tree: the same three RED, the three guards (a stranded holder is still
+adopted, a refusal about a STRANGER is still reported, the named spelling keeps
+F-888's answer) green on both sides and reported as guards.
+
+**The harness defect this surfaced.** Node 1 stayed RED after the fix. The cause
+was that `master_profile_dir()` answered the suite's FENCE root rather than the
+test's. `get_settings()` is `lru_cache`d; the autouse `_reset_settings_cache`
+clears it before any fixture runs; `patched_server` imports `server`, whose
+module body (`server.py`:110) reads `Settings`. So the first node in a process
+that lists `patched_server` AHEAD of `tmp_session_root` fills the cache from the
+UNPATCHED environment, and every later read in that node sees it. The existing
+F-931 pin had the same defect at 2ba8059 when its file ran alone; the full lane
+hid it because an earlier node had already imported `server`. Both root
+fixtures now call `get_settings.cache_clear()` after patching the environment —
+the fixture that makes the cache stale is the one that has to clear it — and
+the new nodes take `tmp_session_root` last on purpose, so they exercise the
+ordering that used to break.
+
+**Residuals.**
+
+1. **The in-flight check counts ANY spawn**, not one on this profile, because
+   nothing narrower is recorded (the directory a spawn will land on is decided
+   inside it). While any spawn is launching, an unnamed spawn will not adopt a
+   stranded holder of the shared session. It falls through to F-914, which
+   refuses by name, and a retry once the sibling finishes re-attaches. That
+   resolves toward not adopting, which is F-914's direction.
+2. **A NAMED spawn of a browser we drive still gets shape 2's misleading
+   `reattach_declined`** on a real backend. It predates F-931 (F-888 shipped
+   it), it is read off the code rather than measured, and it is left out of
+   scope here.
+3. **`_ours` costs one `driven_profiles` snapshot** on the unnamed path, and only
+   once a holder was actually found. The empty-directory spawn pays nothing new.

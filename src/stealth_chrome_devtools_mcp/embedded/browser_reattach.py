@@ -2,40 +2,28 @@
 adopt it, where is its CDP endpoint, the door back in, and the pass that walks
 through it" (F-888).
 
-Four parts, and they are one module because each exists only to serve the first:
-a classification that names nothing to attach to is useless, a door nothing is
-allowed through is a second spawn path, and a pass in another file is a second
-place the rule gets asked from. What is NOT here is reading a live process's argv
-(``browser_cmdline``), the claim's WRITE (``browser_pid_registry``) or the
-lifecycle that holds that claim across the attach (``browser_claim``) — three
-leaves, each with one question of its own.
+Four parts, one module, because each exists only to serve the first: a door
+nothing is allowed through is a second spawn path, and a pass in another file is
+a second place the rule gets asked from. NOT here: reading a live argv
+(``browser_cmdline``), the claim's WRITE (``browser_pid_registry``) and holding
+it across the attach (``browser_claim``) — three leaves, one question each.
 
-Both collaborators arrive as ARGUMENTS — the ``ProcessCleanup`` and the
-``BrowserManager`` — on ``spawn_leak.reap_launched_browsers``'s precedent, which
-takes its ``ProcessCleanup`` the same way and reaches the same private helpers.
-That is what keeps the import graph acyclic: ``process_cleanup`` imports THIS
-module for its two decisions (which orphans to spare, and the reap a failed
-adoption falls back to), so this module may import neither of them.
+Both collaborators, ``ProcessCleanup`` and ``BrowserManager``, arrive as
+ARGUMENTS (``spawn_leak.reap_launched_browsers``' precedent). That keeps the
+graph acyclic: ``process_cleanup`` imports THIS module for its two decisions.
 
-**The adoption rule** (:func:`adoptable`). A recorded browser may be adopted when
-all four hold, asked in cheapest-first order:
+**The adoption rule** (:func:`adoptable`), all four, cheapest first:
 
 1. Its recorded OWNER is not a live backend of ours — exactly
-   ``browser_pid_registry.is_reapable``, the one ownership rule, asked here with
-   the same injected witness startup recovery uses. Two backends driving one
-   Chrome is the harm F-886 exists to prevent, so a browser a LIVE sibling still
-   owns is never taken; recovering such a browser needs the operator to stop that
-   backend first (RUNBOOK, "recover a stranded login").
-2. Its profile is PERSISTENT — ``browser_pid_registry.on_persistent_profile``,
-   the same predicate that spares the directory from deletion. A disposable
-   auto-clone is never adopted: its whole contract is that it dies with its
+   ``browser_pid_registry.is_reapable``, the one ownership rule. Two backends
+   driving one Chrome is F-886's harm; recovering a browser a LIVE sibling owns
+   means stopping that backend first (RUNBOOK, "recover a stranded login").
+2. Its profile is PERSISTENT (``on_persistent_profile``, the predicate that
+   spares the directory from deletion): a disposable auto-clone dies with its
    browser, and adopting one would keep a throwaway profile alive forever.
-3. The recorded Chrome pid is still that Chrome — pid alive, create_time within
-   the recorded tolerance, and a Chromium-family process name. Supplied as
-   ``browser_alive`` rather than re-implemented, so the recycled-pid tolerance
-   has one home (``process_cleanup``).
+3. The recorded Chrome pid is still that Chrome, asked through
+   ``browser_alive`` so the recycled-pid tolerance keeps ONE home.
 4. A CDP endpoint is recoverable for it (:func:`cdp_endpoint.endpoint`).
-   Without a port there is nothing to attach to.
 
 Conditions 1 and 2 are DECISIONS — a live sibling owns it, or its profile is
 disposable — and an entry failing either is the reaper's. Conditions 3 and 4 can
@@ -44,27 +32,17 @@ PERSISTENT that is not a decision at all: those answer
 :data:`reap_guard.UNDECIDED`, which spares the entry without adopting it
 (F-916). :mod:`reap_guard` carries the rule and names what sparing costs.
 
-**The address is not here either.** Which PORT to knock on is
-``cdp_endpoint``'s — a three-witness ladder over a RECORD ENTRY, extracted by
-F-916 when this file was at its 1000-LOC cap and needed a third answer in it.
-It is its own leaf rather than part of the door: ``cdp_attach`` never calls it,
-and its witnesses are a recorded field, a live process's argv and a file in a
-profile, none of which a websocket knows about.
+**Neither the address nor the door is here.** Which PORT to knock on is
+``cdp_endpoint``'s, a ladder over a RECORD ENTRY that ``cdp_attach`` never calls;
+entering a running browser is :mod:`cdp_attach`'s, one leaf with two consumers
+(``desktop_launch`` asks too), owning the nodriver gate, the reclaiming attach
+and the close that spares the process. What is HERE is when to knock and what to
+do with what answers.
 
-**The door is not here.** Entering a browser that is already running is a
-question ``desktop_launch.launch_and_attach`` had too, so it is ONE leaf with two
-consumers: :mod:`cdp_attach`, which owns the nodriver gate (setting BOTH ``host``
-and ``port`` on a ``Config`` is what makes ``uc.start`` connect instead of spawn),
-the reclaiming attach and the close that drops connections without touching the
-process. What this module owns is WHEN to knock and what to do with what answers.
-
-A leaf in the sense that matters: it imports no module that imports it. Both
-liveness witnesses arrive as ARGUMENTS on ``backend_liveness``'s pattern, so the
-ownership rule stays single-homed in ``browser_pid_registry``. ``nodriver`` is
-imported LAZILY inside the door, for ``desktop_launch``'s reason: the
-classification half is reached from ``process_cleanup`` on every backend
-startup, and a module-level nodriver import would put that cost on a path that
-usually has nothing to adopt.
+It imports no module that imports it; both liveness witnesses arrive as
+ARGUMENTS (``backend_liveness``' pattern). ``nodriver`` is imported LAZILY, for
+``desktop_launch``'s reason: the classification half runs on every backend
+startup, which usually has nothing to adopt.
 """
 
 from __future__ import annotations
@@ -499,19 +477,34 @@ def _directory_lock(user_data_dir: str) -> asyncio.Lock:
     return lock
 
 
+async def _ours(manager: BrowserManager, user_data_dir: str) -> bool:
+    """True when THIS backend drives *user_data_dir*, or may be about to (F-931).
+
+    The in-flight count is read FIRST and the order is the proof: a spawn
+    registers its instance before it leaves the count, so a zero means every
+    Chrome we launched is in the table read after it, while one still in flight
+    has a Chrome and no instance, which only the count sees. ANY spawn counts —
+    nothing narrower is recorded — resolving toward not adopting (F-914).
+    """
+    if manager._spawns_in_flight:
+        return True
+    from stealth_chrome_devtools_mcp.embedded import cookie_handoff  # nodriver
+
+    return (await cookie_handoff.driven_profiles(manager)).holds(Path(user_data_dir))
+
+
 @dataclass(frozen=True)
 class Held:
     """What the spawn path's re-attach question answered.
 
-    Two fields, because "it was not taken" is not the same statement as "there
-    was nothing to take": a spawn that meets a live browser on the directory the
-    caller named owes that caller a reason — since F-915 the refusal carries
-    this text, and a silent None would leave that refusal unexplained.
+    Two fields, because "it was not taken" is not "there was nothing to take":
+    since F-915 a refusal carries this text, and a silent None would leave it
+    unexplained.
     """
 
     instance_id: str | None = None
-    # Why the re-attach was NOT taken; None when it was, and None when nothing
-    # held the directory at all (the ordinary spawn, which has nothing to say).
+    # Why the re-attach was NOT taken; None when it was, when nothing held the
+    # directory, and when the holder is ours to copy (F-931's unnamed spawn).
     declined: str | None = None
 
 
@@ -521,13 +514,13 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
     user_data_dir: str,
     *,
     ignored_args: list[str] | None = None,
+    reuse_ours: bool = True,
 ) -> Held:
     """Re-attach to the live Chrome holding *user_data_dir*, or say why not.
 
-    The spawn path's one question, asked BEFORE profile selection because that
-    is where a held directory is settled: since F-915 a holder we cannot reach
-    is REFUSED and one we drive is copied with its jar handed over, and F-871's
-    silent walk to a logged-out ``<name>-2`` is what both of those replaced.
+    Asked BEFORE profile selection, where a held directory is settled: since
+    F-915 a holder we cannot reach is REFUSED and one we drive is copied with
+    its jar handed over — both replacing F-871's silent walk to ``<name>-2``.
 
     **A failure here never reaps.** That is the one place this differs from
     :func:`run`, and the difference is the caller's intent: `run` is startup
@@ -542,6 +535,12 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
     the diagnostics rather than refused, because refusing over a viewport is the
     walk to ``<name>-2`` and the lost login all over again.
 
+    *reuse_ours* is False for a spawn that NAMED nothing (F-931): it asked for a
+    browser of its own, so a holder we drive or may be launching is the
+    resolver's to copy, jar handed over; only a STRANDED one is adopted. Asked
+    on both exits of the walk: a real backend meets its own browser as
+    ``Refused`` (a live owner of ours), an in-process one as a candidate.
+
     Never raises.
     """
     async with _directory_lock(user_data_dir):
@@ -555,6 +554,8 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
                 new_instance_id=str(uuid.uuid4()),
             )
         except Refused as exc:
+            if not reuse_ours and await _ours(manager, user_data_dir):
+                return Held()
             # The rule working, and the ONE case a caller has to be told about:
             # their browser is alive, we did not touch it, and the remedy is to
             # stop the backend that owns it.
@@ -573,12 +574,11 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
                 f"({type(exc).__name__})"
             )
         if candidate is None:
-            # Nothing holds the directory, or something does and no witness
-            # could name a pid at all (Windows' bare `lockfile`). Both are the
-            # ordinary spawn with nothing to report; every case where a browser
-            # was FOUND and not taken arrives as `Refused` above, so a silent
-            # None can no longer stand for one. The F-871 walk and its
-            # `walk_reason` are untouched either way.
+            # Nothing holds it, or no witness could name a pid (Windows' bare
+            # `lockfile`): the ordinary spawn. A browser FOUND and not taken
+            # arrives as `Refused` above, never as this silent None.
+            return Held()
+        if not reuse_ours and await _ours(manager, user_data_dir):
             return Held()
         async with manager._lock:
             running = candidate.instance_id in manager._instances

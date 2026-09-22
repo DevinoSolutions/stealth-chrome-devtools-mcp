@@ -557,12 +557,40 @@ contradicts F-910 at the same file, and it closes one door of several — a
 browser killed by a crash, by `kill-orphans` or from Task Manager leaves the
 same orphans.
 
+**One place the two spellings still differ, on purpose.** The first version of
+this fix made them identical, and the release gate caught what that costs: an
+unnamed spawn was handed the browser this backend was *already driving* on the
+shared session. In gate run 35763223617 the same four tests failed on all three
+`integration` cells. A fleet of six unnamed spawns came back with four distinct
+instance ids. A second unnamed spawn reported `profile_role: "default"` where it
+should have got a clone of its own. And closing one of two browsers left none,
+because both were the same instance. A caller who names nothing is asking for a
+browser of their own. So a holder this
+backend drives — or a sibling spawn of ours still launching, which has a Chrome
+but no instance yet — is left to the resolver. The resolver copies that holder
+and hands its cookies over, exactly as it did before F-931. Only a browser whose
+backend is gone is re-attached to. The in-flight check counts ANY spawn in
+flight, not just one on this profile, because nothing narrower is recorded. The
+named cost: while any spawn is launching, an unnamed spawn will not adopt a
+stranded holder of the shared session. It gets F-914's refusal instead, which
+names the holder, and a retry once the other spawn finishes re-attaches.
+
 **The WIRE description of `spawn_browser` moved**, so `tests/goldens/tool_surface.json`
 is regenerated in this change: the `session` documentation now states that a
-spawn naming nothing re-attaches exactly as `session="default"` does, because a
-caller reading the old text would not know the default call had gained the
-guarantee. The golden diff is one tool, one field, three lines of prose — no
-name and no schema — and the tool count is unchanged at 94.
+spawn naming nothing re-attaches too, and that it is never handed a browser this
+backend already drives. A caller reading the old text would not know the default
+call had gained the guarantee. The golden diff is one tool, one field, a few
+lines of prose — no name and no schema — and the tool count is unchanged at 94.
+
+**A test-harness defect came out of the same investigation.** `get_settings()`
+is cached, and the `patched_server` fixture imports the server, whose module
+body reads `Settings`. So the first test in a process that lists `patched_server`
+before `tmp_session_root` cached the UNPATCHED environment, and the shared
+session resolved to the suite's fence root instead of the test's temporary one.
+The existing F-931 pin had this defect when its file ran alone; it was hidden
+in the full lane. Both root fixtures now clear the cache after patching the
+environment, because the fixture that makes the cache stale is the one that has
+to clear it.
 
 Two messages an operator reads also changed. `profile_lock`'s "could not be
 read" sentence now names a pid we actually failed to read, where it reported the
