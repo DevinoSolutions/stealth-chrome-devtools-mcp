@@ -138,15 +138,16 @@ async def spawn_browser(
             ``block_resources`` IS applied. What the dead backend held and nobody
             can read back off a running browser is named in
             ``spawn_diagnostics["not_restored"]``. The one case that refuses is a
-            browser some OTHER LIVE backend still owns (two backends driving one
-            Chrome is a defect), and since F-915 that REFUSES the whole spawn
-            rather than starting a new browser beside it: that browser holds the
-            session's cookies and a copy of a profile Chrome is writing to
-            carries none of them. Nothing is created, the old browser is left
-            running and untouched, and the error names the holder and both ways
-            on — stop that backend first (see RUNBOOK, "Recover a stranded
-            login"), or pass a free ``session`` name for a new session of your
-            own.
+            browser this backend does not DRIVE — another backend's Chrome, or
+            the human's own — because its cookies can only come over a CDP
+            connection of ours and there is none: a copy of a profile Chrome is
+            writing to carries none of them. Since F-915 that REFUSES the whole
+            spawn rather than starting a new browser beside it. Nothing is
+            created, that browser is left running and untouched, and the error
+            names the holder and both ways on — close it (``stealthy close``, or
+            stop the backend that owns it: RUNBOOK, "Recover a stranded login")
+            and spawn again, or pass a free ``session`` name for a new session
+            of your own.
         seed_from (Optional[str]): The NAME of an existing session to copy when
             ``session`` names one that does not exist yet — so a new session
             starts with that session's cookies and logins instead of the

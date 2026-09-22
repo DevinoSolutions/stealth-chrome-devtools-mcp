@@ -54,6 +54,26 @@ with its jar handed over. Every sentence about a walk — the resolver's, the
 tool's ``warning``, the CLI's line — has to be true of THAT walk and not of the
 seed copy that no longer happens.
 
+**Which is why the walk must land on a directory that does not EXIST yet**, and
+why ``clone_storage._next_available_explicit_dir`` grew a ``fresh`` flag that
+this path passes and nothing else does (F-914 review). That function skipped a
+candidate that was BUSY — a live browser or an in-flight reservation — and
+existence was never consulted, while ``resolve_profile_selection`` gates the
+copy AND the ``LIVE_SEED_KEY`` stamp on the target not existing. So a CLOSED
+``<name>-2`` that an earlier walk left behind was handed back verbatim: nothing
+copied, nothing handed over, ``seeded_via`` never set, and the caller given
+whatever that directory last held — a STALE THIRD identity, neither the
+holder's jar nor a fresh copy of anything, under the tool's own warning saying
+its cookies came across. That is this finding's substitution with one extra
+step, and it is the SHIPPED state that reaches it: 17 leftover directories on
+the owner's machine, one at ``-22``, are exactly what a first walk lands on.
+The flag is not the default because for every other caller an existing
+directory is precisely what reopening a named session MEANS; and it carries the
+attempt token into the timestamp rung so the ladder cannot run out onto an
+existing directory at the -99 boundary. A walk that could not land fresh would
+have to REFUSE — returning an existing directory on this path is the one thing
+it may not do.
+
 A leaf: ``profile_lock`` for the type of the answer it is handed,
 ``profile_seed`` for the one naming rule, ``tool_errors`` for the convention.
 The directories arrive as a ``profile_seed.Roots`` and the "do we drive it"
