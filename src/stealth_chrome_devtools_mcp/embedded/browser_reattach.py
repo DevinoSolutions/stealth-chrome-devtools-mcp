@@ -504,7 +504,7 @@ class Held:
 
     instance_id: str | None = None
     # Why the re-attach was NOT taken; None when it was, when nothing held the
-    # directory, and when the holder is ours to copy (F-931's unnamed spawn).
+    # directory, and when the holder is ours (F-931: left to the resolver).
     declined: str | None = None
 
 
@@ -527,8 +527,8 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
     recovery, where an unreachable orphan must end somewhere, and the fallback is
     the reap 2.1.9 already did. Here a CLIENT asked for a browser, and killing
     the Chrome they were trying to reach because we could not attach to it would
-    be this finding's own harm committed by the fix. Every failure returns None
-    and the spawn proceeds exactly as it does today.
+    be this finding's own harm committed by the fix. Every failure answers a
+    ``Held`` (a refusal carries its text since F-915) and the spawn proceeds.
 
     *ignored_args* names the spawn arguments the caller passed that describe a
     LAUNCH, which a browser already running cannot be given; they are reported in
@@ -536,10 +536,10 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
     walk to ``<name>-2`` and the lost login all over again.
 
     *reuse_ours* is False for a spawn that NAMED nothing (F-931): it asked for a
-    browser of its own, so a holder we drive or may be launching is the
-    resolver's to copy, jar handed over; only a STRANDED one is adopted. Asked
-    on both exits of the walk: a real backend meets its own browser as
-    ``Refused`` (a live owner of ours), an in-process one as a candidate.
+    browser of its own, so a holder we drive or are still launching is never
+    adopted; only a STRANDED one is. The resolver then copies a REGISTERED
+    holder, jar handed over, and refuses one still launching (F-914, as before
+    F-931). Asked on both exits of the walk: ``Refused`` or a candidate.
 
     Never raises.
     """

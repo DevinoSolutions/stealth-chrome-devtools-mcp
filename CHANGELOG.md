@@ -565,15 +565,24 @@ shared session. In gate run 35763223617 the same four tests failed on all three
 instance ids. A second unnamed spawn reported `profile_role: "default"` where it
 should have got a clone of its own. And closing one of two browsers left none,
 because both were the same instance. A caller who names nothing is asking for a
-browser of their own. So a holder this
-backend drives — or a sibling spawn of ours still launching, which has a Chrome
-but no instance yet — is left to the resolver. The resolver copies that holder
-and hands its cookies over, exactly as it did before F-931. Only a browser whose
-backend is gone is re-attached to. The in-flight check counts ANY spawn in
-flight, not just one on this profile, because nothing narrower is recorded. The
-named cost: while any spawn is launching, an unnamed spawn will not adopt a
-stranded holder of the shared session. It gets F-914's refusal instead, which
-names the holder, and a retry once the other spawn finishes re-attaches.
+browser of their own. So a holder this backend drives — or a sibling spawn of
+ours still launching, which has a Chrome but no instance yet — is never
+adopted; only a browser whose backend is gone is. What the resolver then does
+with that holder is unchanged from before F-931: a REGISTERED one is copied
+and its live cookies handed over; one still launching gets F-914's refusal,
+because the resolver's witness is the instance table read once at the top of
+the spawn, which cannot hold it yet. That refusal calls the shared session
+"open in a browser this backend does not drive", which is wrong about whose
+browser it is — read off the code, not measured, and a window `main` already
+had, since an unnamed spawn used to go straight to that resolver. The in-flight
+check counts ANY spawn in flight, not just one on this profile, because nothing
+narrower is recorded. The named cost: while any spawn is launching, an unnamed
+spawn will not adopt a stranded holder of the shared session either; a retry
+once the other spawn finishes re-attaches. Two more windows, read off the code
+and named in the finding: an adoption in progress and a `close_instance` still
+waiting for Chrome to exit are visible to neither the count nor the table, so
+a concurrent unnamed spawn in either window keeps the second shape's refusal
+about our own backend.
 
 **The WIRE description of `spawn_browser` moved**, so `tests/goldens/tool_surface.json`
 is regenerated in this change: the `session` documentation now states that a

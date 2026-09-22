@@ -130,8 +130,8 @@ async def spawn_browser(
             pid, and the page is the one that was already open — not a fresh tab
             on the same cookies. A spawn naming nothing is never handed a browser
             THIS backend already drives, though: it asked for a browser of its
-            own, so it gets a new session copied from that one, cookies handed
-            over. So to recover a logged-in browser whose backend
+            own, so it gets a new session copied from the seed, with that
+            browser's live cookies handed over. So to recover a logged-in browser whose backend
             died, just spawn with the same session. On that path the
             arguments that describe a LAUNCH cannot apply to a browser already
             running: headless, user_agent, viewport, proxy, browser_args,

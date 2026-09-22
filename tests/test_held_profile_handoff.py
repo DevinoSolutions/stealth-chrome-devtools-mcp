@@ -630,7 +630,8 @@ class TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser:
         )
 
         assert adoptions == [], "one Chrome registered as two instances"
-        assert answer["instance_id"] == "i-new"
+        # Not `instance_id == "i-new"`: that answer is the FAKED resolver's. In
+        # production this shape is refused by F-914 (finding §8, residual 4).
         assert resolved == [None]
 
     async def test_a_stranded_holder_is_still_re_attached(

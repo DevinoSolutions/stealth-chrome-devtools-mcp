@@ -363,7 +363,7 @@ browser the finding is about still re-attaches (pinned).
 **RED → GREEN.** `TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser` (six nodes).
 Measured RED behaviourally before the fix — `'i-ours' == 'i-new'`, the
 self-referential decline, a double adoption — and re-measured after the harness
-fix below by rebinding `browser_reattach._ours` to `False` at collection time
+fix below by rebinding `browser_reattach._ours` to an async stub answering `False` at collection time
 out of tree: the same three RED, the three guards (a stranded holder is still
 adopted, a refusal about a STRANGER is still reported, the named spelling keeps
 F-888's answer) green on both sides and reported as guards.
@@ -396,3 +396,28 @@ ordering that used to break.
    scope here.
 3. **`_ours` costs one `driven_profiles` snapshot** on the unnamed path, and only
    once a holder was actually found. The empty-directory spawn pays nothing new.
+4. **The resolver's witness is older than `_ours`'s** (read off the code, not
+   measured; found in review). `_ours` takes a FRESH `driven_profiles` snapshot;
+   the resolver takes the one read at `browser_management.py:273`, before the
+   re-attach and its directory-lock wait — F-898 reads it ONCE so the
+   `seed_from` pre-flight and the resolver cannot disagree, and it resolves
+   staleness toward refusal on purpose. So a sibling still launching on the
+   shared session, or a named `session="default"` re-attach that registered
+   during the lock wait, is NOT handed over: `profile_target.hand_over_or_refuse`
+   refuses with "open in a browser this backend does not drive", which is wrong
+   about whose browser it is. Unchanged from `main`, where an unnamed spawn went
+   straight to that resolver and met the same refusal. The snapshot is
+   deliberately not re-taken here: a second read is a second witness, which is
+   what F-898 removed. The fleet gate node does not cross this window — its lead
+   is awaited before the followers race, so the shared session's holder is
+   REGISTERED by the time any follower asks.
+5. **Two windows neither witness covers** (read off the code): an adoption in
+   progress (`run` and a named re-attach claim the record, attach, and register
+   only at the end, touching no count) and a `close_instance` that has popped
+   its instance but is still waiting for Chrome to exit (F-910). A concurrent
+   unnamed spawn inside either sees `Refused` on a real backend with `_ours`
+   False, and keeps shape 2's "Stop that backend first" about our own backend;
+   in-process it may attach to a browser that is closing. Both need a second
+   task or client — a sequential close then spawn is safe, because the tool
+   returns after the exit wait. Bracketing the adoption paths with the same
+   in-flight count is the obvious follow-up and is out of scope here.
