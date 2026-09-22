@@ -32,6 +32,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import psutil
 import pytest
 
 from fakes import FakeBrowser, FakeTab
@@ -904,6 +905,38 @@ class TestHeldProfileAdoption:
         assert "could not be read" in message
         assert "a live browser holds that directory" not in message
 
+    def test_two_browsers_are_refused_without_contradicting_the_witness(self):
+        """F-931 M4. ``browser_process`` answers None for TWO shapes — no member
+        is the browser, and MORE than one is — and the refusal spoke only the
+        first, while quoting a ``hold.reason`` that says a browser IS there.
+
+        Measured, that sentence read "a live browser process (pid 5005) has this
+        profile open, but none of its processes could be identified as the
+        browser itself": a self-contradiction, in the one message an operator
+        gets about a directory they asked for. The state is reachable — it is
+        exactly what a stale ``SingletonLock`` (F-871) leaves — so the ambiguity
+        is NAMED instead, and the witness's own sentence stays true beside it.
+        """
+        argv = self._browser_argv()
+        with pytest.raises(browser_reattach.Refused) as refusal:
+            self._held(
+                hold=profile_lock.Hold(
+                    5005,
+                    "a live browser process (pid 5005) has this profile open",
+                    members=(5005, 5006),
+                ),
+                table={5005: argv, 5006: argv},
+            )
+
+        message = str(refusal.value)
+        assert "none of its processes could be identified" not in message, (
+            f"the refusal contradicts the hold it quotes: {message}"
+        )
+        assert "a live browser process (pid 5005) has this profile open" in message
+        # BOTH pids, because which one is named decides nothing here and an
+        # operator looking for "the" browser would find two.
+        assert "5005" in message and "5006" in message, message
+
     def test_the_holder_is_read_off_the_hold_without_a_second_scan(self):
         """F-931 M2. ``profile_hold`` already walked the process table to answer
         "is this held"; re-asking ``live_pids`` here walks every process on the
@@ -1133,6 +1166,33 @@ class TestWhatTheCommandLineSays:
         ):
             assert browser_cmdline.browser_process({41001}, r"C:\ours") == 41001
             assert browser_cmdline.browser_process(set(table), r"C:\ours") is None
+
+    def test_a_pid_psutil_will_not_describe_still_counts_as_running(self):
+        """F-931 N5. ``_still_running`` is what separates ``browser_members``'
+        two negatives — a pid that has GONE contributes nothing, one we were
+        REFUSED is ``unreadable`` and holds the profile — and it had no witness
+        of its own. An unreadable answer resolves toward HELD, the direction
+        ``profile_lock._pid_alive`` and ``reap_guard`` already take."""
+        with patch.object(
+            browser_cmdline.psutil, "pid_exists", side_effect=psutil.AccessDenied(9)
+        ):
+            assert browser_cmdline._still_running(9) is True
+        with patch.object(browser_cmdline.psutil, "pid_exists", return_value=False):
+            assert browser_cmdline._still_running(9) is False
+
+    def test_an_argv_we_cannot_read_is_unreadable_and_a_gone_pid_is_not(self):
+        """The pair that fact exists for: the scan that produced these pids and
+        this read are two moments, so a process that exited between them is an
+        established negative, while one psutil refused to describe is not."""
+        with (
+            patch.object(browser_cmdline, "arguments", return_value=[]),
+            patch.object(
+                browser_cmdline, "_still_running", side_effect=lambda pid: pid == 41001
+            ),
+        ):
+            members = browser_cmdline.browser_members({41001, 41002}, r"C:\ours")
+        assert members.browsers == ()
+        assert members.unreadable == (41001,)
 
 
 class TestIgnoredArgsNamesOnlyWhatTheCallerPassed:

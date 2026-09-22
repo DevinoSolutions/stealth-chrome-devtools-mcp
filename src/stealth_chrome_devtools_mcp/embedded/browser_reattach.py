@@ -386,36 +386,38 @@ def held_by(
 
     hold = profile_lock.profile_hold(Path(user_data_dir), live_pids)
     if hold is None or not isinstance(hold.pid, int):
-        # Nothing holds it, or something does but no witness could name the pid
-        # (Windows' bare `lockfile`). Without a pid there is no command line to
-        # read and no process to prove alive, so this is not adoptable — the
-        # caller spawns, exactly as before.
+        # Nothing holds it, or no witness could name the pid (Windows' bare
+        # `lockfile`): with no pid there is no command line to read and no
+        # process to prove alive, so the caller spawns, exactly as before.
         return None
 
     # Not redundant with `profile_hold`'s own F-931 ask: that one is "is
     # anything there", this is "which member is the browser, and is there
-    # EXACTLY ONE" — an ambiguous tree is no answer to adopt from while it is
-    # still plainly held (F-888 measured it deciding on set ordering). Asked
-    # about the set the hold already READ, so the table is walked once per
-    # question; a lock-derived hold carries none and keeps the older path.
+    # EXACTLY ONE" (F-888 measured an ambiguous tree deciding on set order).
+    # Asked of the set the hold already READ; a lock-derived hold carries none.
     members = hold.members or (
         live_pids(user_data_dir) if callable(live_pids) else (hold.pid,)
     )
-    holder = browser_cmdline.browser_process(members, user_data_dir)
+    found = browser_cmdline.browser_members(members, user_data_dir)
+    holder = found.sole
     if holder is None:
-        # The hold's OWN sentence, never a second claim composed here: one of
-        # its answers means "could not be READ", and "a live browser holds that
-        # directory" would assert a browser we never saw (F-931 M2).
-        raise Refused(
-            f"{hold.reason}, but none of its processes could be identified as "
-            f"the browser itself, so there was nothing safe to attach to; it "
-            f"was left alone"
+        # The hold's OWN sentence, never a second claim composed here (F-931
+        # M2), then WHICH of `sole`'s two Nones this is: with TWO browsers,
+        # "none identified" contradicted the hold it had just quoted (M4).
+        detail = (
+            f"{len(found.browsers)} of its processes are browsers (pids "
+            f"{', '.join(map(str, found.browsers))}), so Chrome's process "
+            f"singleton did not hold and entering one could drive a profile "
+            f"another owns"
+            if found.browsers
+            else "none of its processes could be identified as the browser "
+            "itself, so there was nothing safe to attach to"
         )
+        raise Refused(f"{hold.reason}, but {detail}; it was left alone")
 
-    # The record is read ONLY once something is known to hold the directory, and
-    # `read_entries` is a callable for exactly that reason: the overwhelmingly
-    # common spawn is onto a directory nobody holds, and that one must not pay
-    # for a record read it cannot use.
+    # The record is read ONLY once something is known to hold the directory —
+    # hence a callable: the common spawn is onto a directory nobody holds, and
+    # must not pay for a record read it cannot use.
     entries = read_entries()
     recorded_id: str | None = None
     for instance_id, entry in entries.items():
@@ -429,9 +431,8 @@ def held_by(
         # RAISED, not returned as None, and it is the same `Refused` the claim
         # raises one step later: this is the case an operator has to be TOLD
         # about — their browser is still there and the remedy is to stop that
-        # backend — where every other None here means "an ordinary spawn, nothing
-        # to say". Returning None would make the two indistinguishable to the
-        # caller, and the diagnostics would have nothing to report.
+        # backend — while a None here means "an ordinary spawn, nothing to say",
+        # and the caller's diagnostics could not tell the two apart.
         if not browser_pid_registry.is_reapable(entry, owner_alive):
             raise Refused(
                 f"a live backend of ours already owns the browser holding that "
@@ -449,11 +450,10 @@ def held_by(
     )
     port = cdp_endpoint.endpoint(entry_for_port)
     if port is None:
-        # A holder was FOUND and we still cannot get in — the one outcome that
-        # must not read as "an ordinary spawn, nothing to say". The browser is
-        # left running (this path never reaps). What the spawn does NEXT is not
-        # said here since F-915 refuses a held session: this text is appended to
-        # THAT refusal, and "a new browser was started instead" contradicted it.
+        # A holder was FOUND and we cannot get in: the one outcome that must not
+        # read as "an ordinary spawn", and it is left running (this path never
+        # reaps). Not what the spawn does NEXT — F-915 appends this text to its
+        # refusal, and "a new browser was started instead" contradicted that.
         raise Refused(
             f"a live browser holds that directory (pid {holder}) but no CDP "
             f"endpoint could be recovered for it — no port in the record, none "

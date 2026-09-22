@@ -164,7 +164,8 @@ def _tree_hold(profile_dir: Path, pids: Collection[int]) -> Hold | None:
     refusal, so a pid it is not about sends an operator after the wrong process.
     """
     members = browser_cmdline.browser_members(pids, str(profile_dir))
-    scanned = tuple(pids)
+    # Ints only, `browser_members`' own filter: `Hold.members` is typed as pids.
+    scanned = tuple(pid for pid in pids if isinstance(pid, int))
     if members.browsers:
         pid = min(members.browsers)
         return Hold(

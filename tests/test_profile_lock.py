@@ -357,6 +357,21 @@ class TestWhichMemberOfTheTreeHolds:
 
         assert profile_lock.profile_hold(tmp_path, lambda _d: {9009}) is None
 
+    def test_the_members_handed_on_are_pids_and_nothing_else(
+        self, tmp_path, monkeypatch
+    ):
+        """F-931 N6. ``Hold.members`` is typed ``tuple[int, ...]`` and
+        ``browser_reattach.held_by`` hands it straight back to
+        ``browser_cmdline``, so a non-int the scan let through must be dropped
+        HERE, by the same filter ``browser_members`` applies — not carried on
+        as a "pid" the next reader has to re-validate."""
+        fake_process_table(monkeypatch, {2002: browser_argv(str(tmp_path))})
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: [2002, "2002", None])
+
+        assert hold is not None
+        assert hold.members == (2002,)
+
     def test_a_browser_on_another_profile_does_not_hold_this_one(
         self, tmp_path, monkeypatch
     ):
