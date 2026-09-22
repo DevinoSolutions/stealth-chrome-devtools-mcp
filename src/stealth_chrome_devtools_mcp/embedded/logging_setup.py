@@ -539,6 +539,36 @@ def install_payload_arg_redaction() -> None:
     halves of that premise are pinned, so an SDK that moved its hook upstream
     makes this RED instead of quietly re-opening the door.
 
+    **F-913, the third rule.** The first one here that is not about the log
+    RECORD at all: ``mcp/client/streamable_http.py`` logs a STATIC message with
+    no arguments at ERROR, so F-907's rule sees nothing to shape, F-911's would
+    withhold the one part that is safe, and F-908's WARNING floor on
+    ``mcp.client`` sits below it — while its ``exc_info`` carries a pydantic
+    ``ValidationError`` whose ``str()`` quotes the SSE data, which on the proxy
+    leg is the answer to a ``tools/call``. Its table, its structural test and
+    the restatement are ``payload_log_sites``' too; what lives here is the same
+    thing as for F-911 — the rewrite, inside the one factory.
+
+    Keyed on the same species of fact as the other two: the identity of the
+    CODE (the record's ``pathname``) and the identity of the exception's TYPE,
+    never the wording of either. It is gated on the SITE and not on the type
+    alone deliberately — see :data:`payload_log_sites.PAYLOAD_EXCEPTION_SITES`
+    for the measured reason (``expected_events``' ``caller-input`` class reads
+    that same exception type off FastMCP's own records).
+
+    It does NOT reopen F-907's exception clause. That clause says an exception
+    is never SHAPED where a traceback renders it anyway, which is still true of
+    every exception that quotes nobody; this rule is about the one measured
+    shape whose rendering IS the payload, and it replaces the rendering rather
+    than suppressing the diagnostic — the pydantic error type, the model, the
+    error count and up to :data:`payload_log_sites.MAX_RESTATED_ERRORS` distinct
+    ``type``/``loc`` pairs survive, with a count of how many more there were.
+    "Up to", because the union shape F-913 is about OVERFLOWS it: the measured
+    frame reports 9 errors and 9 DISTINCT pairs against a cap of 8, so the
+    restatement ends ``…+1``. This said "every field path" until the F-913
+    review; the cap is deliberately unchanged and it was the sentence that was
+    wrong (finding §"What survives, and what does not").
+
     The residual is F-906's, named rather than hidden: a caller who installs
     their own record factory AFTER this one replaces it.
     """
@@ -548,14 +578,20 @@ def install_payload_arg_redaction() -> None:
 
     def factory(*args: object, **kwargs: object) -> logging.LogRecord:
         record = previous(*args, **kwargs)
-        # TWO rules, ONE factory, and the order is the argument. F-911's asks
-        # about the SITE and answers for the whole record; F-907's asks about
-        # an ARGUMENT. A record whose site is withholding has no arguments left
-        # to shape -- they are cleared one line down -- so the second rule has
-        # nothing to do and the `elif` is the cheaper spelling of that, not a
-        # precedence anyone has to reason about.
+        # THREE rules, ONE factory, and the grouping is the argument. F-911's
+        # asks about the SITE and answers for the whole MESSAGE; F-907's asks
+        # about an ARGUMENT. A record whose site is withholding has no
+        # arguments left to shape -- they are cleared one line down -- so the
+        # second rule has nothing to do and the `elif` is the cheaper spelling
+        # of that, not a precedence anyone has to reason about.
         #
-        # A SECOND factory install would be the defect here, not a second rule
+        # F-913's is a separate `if` below and NOT part of that chain, because
+        # it replaces a different half of the record: the two site tables are
+        # disjoint today, but a module that both root-logs a payload AND
+        # carries a payload-quoting exception would need both rules, and an
+        # `elif` would silently give it one.
+        #
+        # A SECOND factory install would be the defect here, not a third rule
         # inside this one: the chain is ordered by install time, so two
         # factories make "which rewrite saw the record first" depend on the
         # order `configure_logging` happens to call them in.
@@ -565,8 +601,8 @@ def install_payload_arg_redaction() -> None:
             # `getMessage()` runs `msg % args`, so leaving a `%s`-carrying
             # tuple beside a message that no longer has a `%s` raises
             # `TypeError` in every handler that formats -- turning a redaction
-            # into an outage. `exc_info` is deliberately untouched (see
-            # `payload_log_sites`, and F-907's exception clause).
+            # into an outage. `exc_info` is F-913's rule below, never this
+            # one's (see `payload_log_sites`, and F-907's exception clause).
             record.msg = payload_log_sites.withheld(site, record)
             record.args = ()
         # `record.args` is a TUPLE unless the caller passed a single mapping,
@@ -578,6 +614,18 @@ def install_payload_arg_redaction() -> None:
         # redacted exactly as nodriver's own is. See that function.
         elif isinstance(record.args, tuple) and record.args:
             record.args = _redacted(record.args)
+        # F-913. The only rule here that touches `exc_info`, and it does so by
+        # REPLACING what the record carries rather than by mutating anything:
+        # the SDK sends the very exception it just logged downstream
+        # (`streamable_http.py`:241), so the live object has to survive intact.
+        # The original TRACEBACK is handed through, so every FRAME survives
+        # (measured byte-identical). Not "and therefore the grouping": the
+        # type and value change by construction, so the default
+        # stacktrace-first strategy does not move but one keyed on either
+        # does. The inference is what the F-913 review struck out.
+        restated = payload_log_sites.restated_exc_info(record)
+        if restated is not None:
+            record.exc_info = restated
         return record
 
     # Through the CONSTANT, never a literal: the mark is read one function up

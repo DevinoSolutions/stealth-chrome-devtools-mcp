@@ -3,14 +3,15 @@
 Owns the disposable-session lifecycle extracted verbatim from ``server.py``
 (F-201): where every session, clone and seed directory IS, refreshing the seed,
 per-session profile copying, the storage-cap sweep (idle auto-clone eviction
-plus named-profile regenerable trim), the trash/retention mechanism, and
-profile-selection resolution. Extracting it means a fault in storage GC can no
-longer disable the whole tool surface. What a request MAY name and what the
-seed means is `profile_seed`'s; WHICH SESSION a new one is copied from is
-`profile_source`'s; HOW the copy is made is `profile_copy`'s (F-897). This
-module is the only thing that knows where those directories live, and hands
-them over as `profile_seed.Roots`; what stays here is the POLICY around a
-copy: into which directory, refused when, and reported how.
+plus named-profile regenerable trim), and profile-selection resolution.
+Extracting it means a fault in storage GC can no longer disable the whole tool
+surface. What a request MAY name and what the seed means is `profile_seed`'s;
+WHICH SESSION a new one is copied from is `profile_source`'s; what happens when
+the session a spawn ASKED FOR is already open is `profile_target`'s (F-914/
+F-915); HOW the copy is made is `profile_copy`'s and what an EVICTION means is
+`clone_trash`'s (F-897). This module is the only thing that knows where those
+directories live, and hands them over as `profile_seed.Roots`; what stays here
+is the POLICY around a copy: into which directory, refused when, reported how.
 
 ``server.py`` (the browser tools) and ``cli.py`` (the ops CLI) import this module
 and call its public functions; ``spawn_browser`` delegates profile selection to
@@ -24,7 +25,6 @@ import itertools
 import os
 import re
 import threading
-import time
 import urllib.parse
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -32,10 +32,12 @@ from pathlib import Path
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import (
+    clone_trash,
     profile_copy,
     profile_lock,
     profile_seed,
     profile_source,
+    profile_target,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
@@ -158,89 +160,6 @@ def _clear_protected_clone_dirs() -> None:
         _PROTECTED_CLONE_DIRS.clear()
 
 
-# Evicted auto-clones are moved here — a rename within the clone root, so it is
-# instant and same-volume — instead of being deleted outright, then purged only
-# after a retention window. This turns a wrong eviction (the worst incident this
-# project has had) into a recoverable event rather than irreversible data loss.
-# The dir is excluded from every clone-root scan below so its contents are never
-# re-selected, re-sized, or re-swept.
-_CLONE_TRASH_DIRNAME = ".trash"
-
-
-def _clone_trash_dir(clone_root: Path) -> Path:
-    return clone_root / _CLONE_TRASH_DIRNAME
-
-
-def _clone_trash_retention_seconds() -> float:
-    """How long an evicted clone stays recoverable in ``.trash`` before purge.
-
-    Default 24h; override with ``STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS``. A
-    value <= 0 purges on the next sweep, restoring the old delete-immediately
-    behavior for anyone who wants it.
-    """
-    hours = get_settings().clone_trash_retention_hours
-    return max(0.0, hours) * 3600.0
-
-
-def _trash_clone(entry: Path, clone_root: Path):
-    """Move an evicted auto-clone into ``.trash`` so it stays recoverable.
-
-    Returns the new path on success, or ``None`` if the move was refused or the
-    entry had to be deleted instead. A running profile is never moved (selection
-    already excludes live sessions; this is belt-and-suspenders). If the rename
-    fails (e.g. a Windows lock) the storage cap must still be honored, so we fall
-    back to a best-effort delete — strictly no worse than the old behavior.
-    """
-    if _profile_has_running_browser(entry):
-        return None
-    trash = _clone_trash_dir(clone_root)
-    try:
-        trash.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return None
-    target = trash / entry.name
-    counter = 1
-    while target.exists():
-        target = trash / f"{entry.name}-{counter}"
-        counter += 1
-    try:
-        os.replace(str(entry), str(target))
-    except OSError:
-        profile_copy.rmtree_robust(entry)
-        return None
-    try:
-        # Stamp the trash time so retention is measured from eviction, not from
-        # the clone's original creation (rename preserves the old mtime).
-        os.utime(target, None)
-    except OSError:
-        pass
-    return target
-
-
-def _purge_expired_trash(clone_root: Path, max_age_seconds: float) -> int:
-    """Delete trashed clones whose time-in-trash exceeds ``max_age_seconds``,
-    and say how many went. Never raises; missing or non-dir trash is a no-op."""
-    trash = _clone_trash_dir(clone_root)
-    if not trash.exists():
-        return 0
-    try:
-        entries = list(trash.iterdir())
-    except OSError:
-        return 0
-    cutoff = time.time() - max_age_seconds
-    purged = 0
-    for entry in entries:
-        try:
-            if not entry.is_dir() or entry.stat().st_mtime > cutoff:
-                continue
-        except OSError:
-            continue
-        profile_copy.rmtree_robust(entry)
-        if not entry.exists():
-            purged += 1
-    return purged
-
-
 def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     """Oldest-first idle auto-clones whose removal brings total auto-clone
     storage within ``cap_bytes``. Read-only — selection only, no deletion.
@@ -259,9 +178,9 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     except OSError:
         return []
     for entry in entries:
-        if entry.name == _CLONE_TRASH_DIRNAME or profile_copy.is_scratch(entry.name):
-            continue  # never a clone: the recoverable-eviction holding area, and
-            # a copy that is half-built or already displaced (F-925)
+        name = entry.name
+        if name == clone_trash.TRASH_DIRNAME or profile_copy.is_scratch(name):
+            continue  # not a clone: the eviction holding area, or F-925 scratch
         try:
             if not entry.is_dir() or not clone_is_auto(entry):
                 continue
@@ -293,12 +212,12 @@ def _enforce_clone_storage_cap_in(
     ``clone_root`` is within ``cap_bytes``. Returns the number of dirs evicted.
     Selection (and its safety invariants) lives in ``_idle_autoclones_over_cap``.
 
-    Eviction is *recoverable*: victims are moved into ``.trash`` (see
-    ``_trash_clone``) rather than deleted, and trash older than the retention
-    window is purged first — so disk is reclaimed from expired trash before any
-    live clone is touched.
+    Eviction is *recoverable*: victims are moved aside rather than deleted, and
+    trash older than the retention window is purged first — so disk is reclaimed
+    from expired trash before any live clone is touched. What "moved aside"
+    means, and for how long it can be undone, is ``clone_trash``'s.
     """
-    _purge_expired_trash(clone_root, _clone_trash_retention_seconds())
+    clone_trash.purge_expired(clone_root, clone_trash.retention_seconds())
     removed = 0
     for entry in _idle_autoclones_over_cap(clone_root, cap_bytes):
         if _clone_dir_is_protected(entry):
@@ -306,7 +225,7 @@ def _enforce_clone_storage_cap_in(
             # mid-sweep) — respect it rather than evict a now-in-flight clone.
             continue
         size = profile_copy.dir_size_bytes(entry)
-        _trash_clone(entry, clone_root)
+        clone_trash.trash(entry, clone_root, _profile_has_running_browser)
         if not entry.exists():
             removed += 1
             debug_logger.log_info(
@@ -349,10 +268,10 @@ def _named_profiles_over_session_cap(clone_root: Path, cap_bytes: int) -> list[P
     except OSError:
         return []
     for entry in entries:
-        if entry.name == _CLONE_TRASH_DIRNAME or profile_copy.is_scratch(entry.name):
-            continue  # trashed clones and F-925's scratch siblings are not named
-            # profiles and must not inflate the session-cap total, or real
-            # profiles get over-trimmed
+        name = entry.name
+        if name == clone_trash.TRASH_DIRNAME or profile_copy.is_scratch(name):
+            continue  # trashed clones and F-925 scratch are not named profiles
+            # and must not inflate the session-cap total, or real ones over-trim
         try:
             if not entry.is_dir():
                 continue
@@ -663,16 +582,21 @@ def _next_available_explicit_dir(requested: Path) -> Path:
 
 
 def _copy_clone_from_source(
-    source: Path, clone: Path, clone_root: Path, source_kind: str
+    seed: profile_source.SeedSource, clone: Path, clone_root: Path
 ) -> dict[str, Any]:
+    """The clone role's answer. It takes the whole ``SeedSource`` rather than a
+    (path, kind) pair for ``resolve_profile_selection``'s ``override`` reason:
+    the three facts are decided together, and splitting them lets a caller
+    record a copy as having come from somewhere it did not."""
     selection: dict[str, Any] = {
         "user_data_dir": str(clone),
         "profile_role": "clone",
-        "clone_source": source_kind,
-        "clone_source_path": str(source),
+        "clone_source": seed.kind,
+        "clone_source_path": str(seed.path),
         "seed_path": str(master_snapshot_dir()),
+        **_live_seed_fields(seed),
     }
-    _require_copied(_copy_profile_tree(source, clone, clone_root, source_kind), clone)
+    _require_copied(_copy_profile_tree(seed.path, clone, clone_root, seed.kind), clone)
     return selection
 
 
@@ -804,6 +728,26 @@ def _seed_source_for_copy(
 #: directory, an instruction to this process rather than a field a client reads.
 LIVE_SEED_KEY = "seed_live_source"
 
+#: Its PUBLIC half (F-914/F-915): the NAME of the browser whose jar this
+#: session was seeded from — a word the caller can pass back as ``session=``,
+#: on ``seeded_from``'s precedent, where the path beside it is an instruction.
+HANDED_OVER_KEY = "handed_over_from"
+
+
+def _live_seed_fields(seed: profile_source.SeedSource) -> dict[str, Any]:
+    """The two fields a seed with a LIVE source adds, or ``{}``. ONE home
+    because THREE branches stamp them — F-897's ``seed_from`` and F-914/F-915's
+    two held-target hand-overs — and a second spelling is how one of them would
+    come to name a source another does not."""
+    if seed.live is None:
+        return {}
+    return {
+        LIVE_SEED_KEY: str(seed.live),
+        HANDED_OVER_KEY: profile_seed.seed_name(
+            seed.live, master_profile_dir(), master_snapshot_dir()
+        ),
+    }
+
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
     """The selection as ``spawn_diagnostics.profile_selection`` reports it — the
@@ -844,6 +788,14 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     with a LIVE source makes the answer carry :data:`LIVE_SEED_KEY` — set by the
     branch that actually COPIED, so a target that raced into existence between
     the pre-flight and here is never handed another session's jar.
+
+    **Since F-914/F-915 it is also the witness for the TARGET.** Both held
+    branches — a NAMED session and the shared one — ask
+    ``profile_target.hand_over_or_refuse``, so there is one rule and two call
+    sites rather than two rules. What differs is only which directory the copy
+    is taken FROM: a named holder is its own source (no closed form of it
+    exists), while the shared session keeps one — the seed — so its copy still
+    comes from a directory nothing is writing to and only the jar comes live.
     """
     master = master_profile_dir()
     clone_root = clone_root_dir()
@@ -857,9 +809,10 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # because only anchoring turns a name into a directory.
     landed = require_allowed_user_data_dir(user_data_dir)
     # F-897: refused BEFORE the walk, because `--from` is about the session the
-    # caller NAMED. A target that is held is walked to `<name>-2`, which does
-    # not exist — so asking afterwards would seed a substitute directory under
-    # a flag the caller passed about theirs.
+    # caller NAMED. A held target that we DRIVE is walked to `<name>-2`, which
+    # does not exist — so asking afterwards would seed a substitute directory
+    # under a flag the caller passed about theirs; one we do not drive is
+    # refused below, and asking afterwards would never be reached at all.
     # `driven` is INERT here — `check_source=False` gates its only reader — and
     # is passed for symmetry, so a future True cannot fail closed (review S5).
     seed_from = require_allowed_seed_from(
@@ -872,26 +825,37 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     )
 
     if explicit is not None:
-        # If the requested path (inside clone_root) is already held by a running
-        # browser, find the next free numbered variant rather than crashing.
-        # For a NAMED profile that walk is an identity change — a different set
-        # of cookies and logins than the caller asked for — so the answer has to
-        # carry what was asked for and what held it (F-871).
+        # The requested path (inside clone_root) is held by a running browser,
+        # and what happens next is `profile_target`'s rule — the walk to
+        # `<name>-N` is CONDITIONAL since F-915 and its module docstring is
+        # where that is argued. What stays here is the walk's own REPORT
+        # (F-871) and the holder as this copy's source.
         walk: dict[str, Any] = {}
+        handed_over: profile_source.SeedSource | None = None
         if _is_relative_to(explicit, clone_root):
             hold = _profile_hold(explicit)
             if hold is not None:
+                holder = profile_target.hand_over_or_refuse(
+                    explicit, hold, _roots(), driven=driven
+                )
                 requested, explicit = explicit, _next_available_explicit_dir(explicit)
                 walk = {
                     "requested_user_data_dir": str(requested),
                     "walked_to": str(explicit),
                     "walk_reason": hold.reason,
                 }
+                handed_over = profile_source.SeedSource(
+                    holder, profile_source.LIVE_SESSION_KIND, holder
+                )
         live_seed: dict[str, Any] = {}
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            # `_for_copy`, never `_seed_source`: this read owns the freshen and
-            # is the AUTHORITATIVE hold check — the pre-flight skipped it (S).
-            seed = _seed_source_for_copy(seed_from, driven)
+            # A hand-over REPLACES the seed for this copy and can never drop a
+            # caller's `seed_from`: a held session is one that EXISTS, which is
+            # `require_new_session`'s fourth refusal, raised before this line.
+            # `_for_copy`, never `_seed_source`: that read owns the freshen and
+            # is the AUTHORITATIVE hold check — the pre-flight skipped it (S) —
+            # and a hand-over needs neither, copying from the holder instead.
+            seed = handed_over or _seed_source_for_copy(seed_from, driven)
             _require_copied(
                 _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
             )
@@ -901,8 +865,7 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
             # directories, and reading the kind is how `--from default` got no
             # hand-off at all (review M1). Stamped inside the branch that
             # copied, the only place that knows a copy happened.
-            if seed.live is not None:
-                live_seed = {LIVE_SEED_KEY: str(seed.live)}
+            live_seed = _live_seed_fields(seed)
         explicit.parent.mkdir(parents=True, exist_ok=True)
         return {
             "user_data_dir": str(explicit),
@@ -913,14 +876,26 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         }
 
     master.parent.mkdir(parents=True, exist_ok=True)
-    if not force_clone and not _profile_has_running_browser(master):
-        snapshot_result = _refresh_master_snapshot_if_safe("before-default-open")
-        return {
-            "user_data_dir": str(master),
-            "profile_role": profile_seed.DEFAULT_SESSION,
-            "clone_source": None,
-            **snapshot_result,
-        }
+    # ONE hold read where there used to be one liveness bool: F-914 needs the
+    # REASON as well as the fact, and a second walk of the process table for it
+    # would be a second answer to one question a line apart. The shared session
+    # being OPEN is the same rule the named branch above asks, about a
+    # different directory — `profile_target` argues it once for both.
+    shared_hold = _profile_hold(master)
+    if shared_hold is None:
+        if not force_clone:
+            snapshot_result = _refresh_master_snapshot_if_safe("before-default-open")
+            return {
+                "user_data_dir": str(master),
+                "profile_role": profile_seed.DEFAULT_SESSION,
+                "clone_source": None,
+                **snapshot_result,
+            }
+        shared_live = None
+    else:
+        shared_live = profile_target.hand_over_or_refuse(
+            master, shared_hold, _roots(), driven=driven
+        )
 
     base_clone = await _clone_profile_dir_for_session(clone_root)
     clone = (
@@ -943,11 +918,15 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     elif snapshot.exists():
         seed = profile_source.SeedSource(snapshot, "default-seed")
     elif master.exists():
-        # No seed yet (first run, seed deleted, or the seed copy failed). Fall
-        # back to copying directly from the live shared profile.
-        # profile_copy.copy_delta skips locked files (PermissionError/OSError),
-        # and _copy_profile_tree does a double-pass — cookies and login data
-        # transfer successfully even while Chrome has it open.
+        # No seed yet (first run, seed deleted, or the seed copy failed), so the
+        # only copy available is of the shared profile itself. F-920: this
+        # comment used to claim cookies "transfer successfully even while Chrome
+        # has it open", which `profile_copy.copy_file`'s own docstring
+        # contradicts — a held file is SKIPPED, twice for the double pass, and
+        # the gap cannot be enumerated. What makes the branch honest is the
+        # hold read above: OPEN here means `profile_target` allowed it and the
+        # jar is about to arrive over CDP; CLOSED here is a copy of a directory
+        # at rest, which is what 2.1.11's first run always was.
         seed = profile_source.SeedSource(master, "live-default-fallback")
     else:
         raise RuntimeError(
@@ -955,6 +934,13 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
             "browser with no session first to create and populate the "
             f"{profile_seed.DEFAULT_SESSION!r} session."
         )
+    if shared_live is not None:
+        # The hand-off's source is the SHARED profile, the copy's is whichever
+        # of the three above answered — different directories, which is why
+        # `SeedSource` carries `live` as a third fact and not a flag on `kind`
+        # (F-898 review M1). A live shared session decided HERE outranks the one
+        # `override` may have carried forward from a previous attempt.
+        seed = seed._replace(live=shared_live)
 
     # Shield this clone from the storage-cap sweep BEFORE its marker is written.
     # The marker (written inside the copy below) makes the clone a reclaim target,
@@ -962,12 +948,14 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # could delete it out from under the spawning browser. Released when the
     # instance closes (or when this spawn attempt fails).
     _protect_clone_dir(clone)
-    return _copy_clone_from_source(seed.path, clone, clone_root, seed.kind)
+    return _copy_clone_from_source(seed, clone, clone_root)
 
 
 async def _fallback_profile_selection(
     previous_selection: dict[str, Any],
     attempt: int,
+    *,
+    driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
 ) -> dict[str, Any] | None:
     # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
     # the two non-clone roles retry the SAME directory, which this attempt's
@@ -976,6 +964,13 @@ async def _fallback_profile_selection(
     # took is still the best profile here, while one a sibling DID take falls
     # through. The hold is asked about the directory this attempt DROVE, off the
     # selection, never config. No wait, no reservation: CLAUDE.md's row.
+    #
+    # `driven` is F-914/F-915's witness, threaded for TWO reasons. This is the
+    # SECOND DOOR onto the held-shared-session rule — F-834 widened this
+    # function to all three roles, so without it a spawn that failed once
+    # answers a held shared session with exactly the snapshot clone the
+    # resolver refuses one call earlier — and it is what decides whether a
+    # hand-off the previous attempt was making survives this one.
     shared = profile_seed.DEFAULT_SESSION
     role = previous_selection.get("profile_role")
     same = previous_selection.get("user_data_dir")
@@ -992,7 +987,12 @@ async def _fallback_profile_selection(
         None,
         force_clone=True,
         override=profile_source.SeedSource(
-            snapshot, "default-seed-final" if final else "default-seed-retry"
+            snapshot,
+            "default-seed-final" if final else "default-seed-retry",
+            profile_target.still_driven_source(
+                previous_selection.get(LIVE_SEED_KEY), driven
+            ),
         ),
         clone_suffix="seed" if final else "retry",
+        driven=driven,
     )

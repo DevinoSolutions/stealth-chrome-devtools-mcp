@@ -28,6 +28,7 @@ identically.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -43,6 +44,7 @@ import nodriver.cdp.page as cdp_page
 import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
 from nodriver.core.connection import ProtocolException
+from nodriver.core.util import get_registered_instances
 
 #: "this double was not told to answer anything unusual" — distinct from every
 #: value a test might legitimately want it to answer with, ``None`` included.
@@ -1967,6 +1969,51 @@ class FakeAttachedTab(FakeDiscoveredTarget):
             self.awaited += 1
 
         return _wait().__await__()
+
+
+# ---------------------------------------------------------------------------
+# nodriver's process-wide Browser registry
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def nodriver_registry() -> Any:
+    """nodriver's ``__registered__instances__`` set, restored on the way out.
+
+    It is a MODULE GLOBAL of nodriver's and an ``atexit`` hook walks it, so a
+    test that adds to it and does not clean up poisons the interpreter's exit
+    and every later reader. Yields the live set; discards exactly what the
+    block added and leaves what it found — which is the discipline
+    ``test_browser_connect.py`` had written out by hand at two of its nodes.
+    """
+    known = set(get_registered_instances())
+    try:
+        yield get_registered_instances()
+    finally:
+        for browser in tuple(get_registered_instances()):
+            if browser not in known:
+                get_registered_instances().discard(browser)
+
+
+class LaunchedBrowser:
+    """nodriver's ``Browser`` as a FAILED launch leaves it (F-919).
+
+    ``Browser.start`` sets ``_process``/``_process_pid`` and registers the
+    object BEFORE it polls ``/json/version``, so a connect failure leaves
+    exactly this shape behind: the caller's ``config`` stored verbatim, a live
+    ``asyncio`` process handle whose ``returncode`` is still None, and the pid.
+    Those three attributes are all ``spawn_leak.launched_pid`` reads.
+
+    A double of a library object, so it is pinned against the article rather
+    than trusted: ``test_spawn_leak`` drives the REAL ``Browser.start`` over a
+    faked subprocess at one node and asserts the same pid comes back, which is
+    what would catch this class drifting from nodriver.
+    """
+
+    def __init__(self, config: Any, pid: int) -> None:
+        self.config = config
+        self._process = SimpleNamespace(pid=pid, returncode=None)
+        self._process_pid = pid
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_reattach,
     cdp_attach,
+    cdp_endpoint,
     desktop_launch,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
@@ -314,30 +315,39 @@ class TestAdoptionRule:
 
 class TestEndpointLadder:
     """Three witnesses, most trusted first. The last two exist for the 2.1.8 /
-    2.1.9 records that carry today's stranded logins and no port at all."""
+    2.1.9 records that carry today's stranded logins and no port at all.
+
+    The ladder lives in its own leaf, ``cdp_endpoint``, since F-916 —
+    ``browser_reattach`` was at its 1000-LOC cap and the fix needed a third
+    answer in it. Not in ``cdp_attach``: that module never calls it, and the
+    ladder's witnesses are about a RECORD ENTRY where the door is about a
+    websocket. The pins stay here, because what they are about is which port an
+    ADOPTION reaches a recorded browser on, and the two at the end are about the
+    record's and the command line's own readers.
+    """
 
     def test_the_recorded_port_wins(self, tmp_path):
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
         entry = _entry(user_data_dir=str(profile), cdp_port=PORT)
-        assert browser_reattach.endpoint(entry) == PORT
+        assert cdp_endpoint.endpoint(entry) == PORT
 
     def test_then_the_command_line(self, tmp_path):
         """Second rung: definitionally the live process's own port."""
         entry = _entry(user_data_dir=str(tmp_path / "gone"), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=8123):
-            assert browser_reattach.endpoint(entry) == 8123
+            assert cdp_endpoint.endpoint(entry) == 8123
 
     def test_the_command_line_outranks_chromes_file(self, tmp_path):
         """Ordering, stated as a pin rather than left to the reader. The file
         outlives the browser that wrote it; the command line cannot."""
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=8123):
-            assert browser_reattach.endpoint(entry) == 8123
+            assert cdp_endpoint.endpoint(entry) == 8123
 
     def test_a_legacy_entry_falls_back_to_chromes_own_file(self, tmp_path):
         """Last rung, and it still earns its place: a caller passing
@@ -350,12 +360,12 @@ class TestEndpointLadder:
         """
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text(
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text(
             "9999\n/devtools/browser/abc\n"
         )
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=None):
-            assert browser_reattach.endpoint(entry) == 9999
+            assert cdp_endpoint.endpoint(entry) == 9999
 
     @pytest.mark.parametrize("cmdline_port", ["0", "70000", "nonsense", ""])
     def test_an_unusable_port_is_no_port(self, tmp_path, cmdline_port):
@@ -363,10 +373,10 @@ class TestEndpointLadder:
         a real number before it writes the file."""
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / browser_reattach.DEVTOOLS_PORT_FILE).write_text(cmdline_port)
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text(cmdline_port)
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=None):
-            assert browser_reattach.endpoint(entry) is None
+            assert cdp_endpoint.endpoint(entry) is None
 
     def test_a_hand_edited_boolean_is_not_port_one(self):
         """``bool`` is an ``int`` subclass; a recorded ``true`` must not read as
@@ -862,11 +872,14 @@ class TestHeldProfileAdoption:
         assert self._held(hold_pid=None) is None
 
     def test_a_holder_we_cannot_name_a_port_for_refuses_with_a_reason(self):
-        """A browser IS there and we cannot get in. The spawn still goes ahead —
-        this path never reaps — but "no endpoint" must not arrive at the caller
-        as the same silence "nothing holds this directory" produces: the whole
-        point of the decline is to tell an operator that the login they were
-        reaching for is still running."""
+        """A browser IS there and we cannot get in. This path never reaps, so it
+        is left running — but "no endpoint" must not arrive at the caller as the
+        same silence "nothing holds this directory" produces: the whole point of
+        the decline is to tell an operator that the login they were reaching for
+        is still running. What happens to the spawn afterwards is no longer this
+        module's sentence to write (F-915): a held session directory is refused
+        by ``profile_target``, and only a path outside the clone root still goes
+        ahead."""
         with pytest.raises(browser_reattach.Refused, match="no CDP endpoint"):
             self._held(cmdline_port=None)
 

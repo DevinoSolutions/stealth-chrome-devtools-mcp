@@ -683,6 +683,38 @@ def _cmd_restart(_args) -> int:
     return 1
 
 
+def _persistent_profile_preflight(force: bool) -> list[str]:
+    """The PHRASING of `persistent_profile_risk`'s answer, printed before
+    anything dies (F-921) — a line and never a prompt: agents drive this CLI
+    and a blocking `input()` on a non-tty hangs them, and `--force` is already
+    the opt-in, so only the disclosure was missing. Three shapes on purpose:
+    an empty record, and one whose profiles are all CLOSED, must not be told
+    that logins are about to be lost — "in the record" is the reap's scope."""
+    from stealth_chrome_devtools_mcp.embedded import (
+        persistent_profile_risk,
+        process_cleanup,
+    )
+
+    cs = _clone_storage()
+    risk = persistent_profile_risk.assess(
+        process_cleanup.process_cleanup._load_tracked_pids(),
+        is_open=cs._profile_has_running_browser,
+    )
+    if not risk.tracked:
+        return ["profiles    : none tracked on a persistent profile"]
+    if not risk.open_names:
+        return [
+            f"profiles    : {risk.tracked} persistent profile(s) in the record, "
+            "none open — this reap ends no logged-in browser"
+        ]
+    ends = "--force ends EVERY tracked browser" if force else "only --force ends them"
+    return [
+        f"profiles    : {risk.tracked} persistent profile(s) in the record, "
+        f"{len(risk.open_names)} open now ({', '.join(risk.open_names)})",
+        f"              {ends}; these keep logins that must be re-entered BY HAND",
+    ]
+
+
 def _cmd_kill_orphans(args) -> int:
     """Thin, gated trigger of the existing orphan reaper — a direct call on
     the already-constructed `process_cleanup` module singleton (import-time
@@ -703,7 +735,8 @@ def _cmd_kill_orphans(args) -> int:
     would be a no-op against exactly the wedged backend it exists for), and
     F-888's persistent-profile spare. That last one is why `--force` is the only
     verb left that can still end a human's logged-in browser: every other path
-    now re-attaches to it instead.
+    now re-attaches to it instead. Since F-921 it is PRINTED too, with a count,
+    before anything dies; `--dry-run` prints that pre-flight and reaps nothing.
     """
     _server()
     from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
@@ -716,6 +749,12 @@ def _cmd_kill_orphans(args) -> int:
             "use restart to recover it, or pass --force."
         )
         return 1
+
+    for line in _persistent_profile_preflight(args.force):
+        print(line)
+    if args.dry_run:
+        print("(dry run - nothing was reaped. Drop --dry-run to act.)")
+        return 0
 
     process_cleanup.process_cleanup.recover_orphans(force=args.force)
     print(
@@ -861,7 +900,14 @@ def build_parser() -> argparse.ArgumentParser:
     kill_orphans.add_argument(
         "--force",
         action="store_true",
-        help="override the live-backend guard and reap anyway",
+        help="override the live-backend guard AND F-888's persistent-profile "
+        "spare: this can terminate a browser holding a logged-in profile, whose "
+        "logins must then be re-entered by hand. Preview it with --dry-run",
+    )
+    kill_orphans.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the persistent profiles at risk, then exit without reaping",
     )
 
     serve = sub.add_parser(

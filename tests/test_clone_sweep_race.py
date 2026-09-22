@@ -23,7 +23,7 @@ import os
 import pytest
 
 from fakes import held_profile
-from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_seed
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     _enforce_clone_storage_cap_in,
 )
@@ -138,9 +138,16 @@ class TestSpawnFlowProtectsClone:
         # SOFT GOLDEN UPDATED for F-871: a `SingletonLock` holding the bytes
         # "lock" is what Chromium calls an INVALID lockfile (it unlinks it and
         # starts), so it never meant "busy". `held_profile` names a live pid.
-        held_profile(tmp_session_root["master"])
+        # SOFT GOLDEN UPDATED for F-914: a busy shared session is a clone only
+        # when THIS backend drives the browser holding it — otherwise the spawn
+        # is refused and there is no clone to protect. The reservation this node
+        # is about is unchanged; the witness that reaches the branch is new.
+        master = tmp_session_root["master"]
+        held_profile(master)
 
-        result = await clone_storage.resolve_profile_selection(None)
+        result = await clone_storage.resolve_profile_selection(
+            None, driven=lambda profile: profile_seed.same_dir(profile, master)
+        )
 
         assert result["profile_role"] == "clone"
         assert clone_storage._clone_dir_is_protected(result["user_data_dir"]), (

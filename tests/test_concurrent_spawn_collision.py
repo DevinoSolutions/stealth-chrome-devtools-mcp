@@ -53,6 +53,35 @@ from stealth_chrome_devtools_mcp.embedded.process_cleanup import (
     ProcessCleanup,
     process_cleanup,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+#: The instance id of the sibling spawn that WON a stage-1 race — see
+#: :func:`_sibling_driving`.
+SIBLING_ID = "sibling-on-master"
+
+
+def _driving(directory: Path):
+    """The F-898 witness as a plain predicate, answering True for exactly one
+    directory. ``profile_seed.same_dir`` and not ``==`` because the product
+    compares that way — a caller names a session, the resolver holds a path."""
+    return lambda profile: profile_seed.same_dir(profile, directory)
+
+
+def _sibling_driving(directory: Path) -> dict:
+    """``FakeBrowserManager`` kwargs for "this backend ALREADY drives a browser
+    on *directory*" — the snapshot ``spawn_browser`` takes before its loop.
+
+    Needed since F-914: the winner of a stage-1 race is a spawn of THIS backend,
+    and that is now what decides whether the loser gets a clone with the shared
+    jar handed over or a refusal by name. The directory is seeded through
+    ``profiles=`` because it lives on the instance ENTRY's ``options`` and
+    nowhere else — ``BrowserInstance`` has no such field (F-898).
+    """
+    return {
+        "instances": [SimpleNamespace(instance_id=SIBLING_ID)],
+        "profiles": {SIBLING_ID: str(directory)},
+    }
+
 
 # ---------------------------------------------------------------------------
 # Layer 1: per-attempt clone directories
@@ -243,7 +272,7 @@ def doomed_manager(monkeypatch, tmp_path):
     read the contention paragraph alone.
     """
 
-    async def failing_launch(self, options, browser_executable, launch_args):
+    async def failing_launch(self, options, browser_executable, launch_args, attempt):
         await asyncio.sleep(0.02)  # overlap the sibling spawn's in-flight window
         raise RuntimeError(INNER_FAILURE)
 
@@ -423,8 +452,16 @@ async def test_a_master_loser_retries_onto_a_reserved_clone(
 
     A sibling HOLDS master here, which is what makes a clone the right answer:
     retrying a directory another Chrome owns would fail the same way again.
+
+    SOFT GOLDEN UPDATED for F-914 — the clone and its reservation are unchanged
+    and the ``driven`` witness is new. The sibling in a real stage-1 race is a
+    spawn of THIS backend, so the clone it lands on gets the shared session's
+    live jar handed over and is no longer the logged-out copy of a frozen seed
+    F-914 is about. A loser whose holder is NOT ours is the node below.
     """
-    fallback = await clone_storage._fallback_profile_selection(_master_selection(), 0)
+    fallback = await clone_storage._fallback_profile_selection(
+        _master_selection(), 0, driven=_driving(master_taken)
+    )
 
     assert fallback is not None, "a master-role loser got no retry at all (F-834)"
     assert fallback["profile_role"] == "clone"
@@ -435,6 +472,27 @@ async def test_a_master_loser_retries_onto_a_reserved_clone(
         "the retry clone must be RESERVED — being reserved is the whole reason a "
         "clone is a safe place for a master loser to land"
     )
+    assert fallback[clone_storage.LIVE_SEED_KEY] == str(master_taken)
+
+
+async def test_a_master_loser_is_refused_when_the_holder_is_not_ours(
+    tmp_session_root, master_taken
+):
+    """F-914 reached through F-834's door, which is the door it would otherwise
+    have reappeared through.
+
+    This function was widened to all three roles by F-834, so left alone it
+    answers a held shared session with exactly the snapshot clone the resolver
+    now refuses — one spawn failure later, and with no pin watching it. What
+    that costs is named rather than hidden: a spawn that lost the profile
+    singleton to a Chrome this backend does not drive now FAILS, where 2.1.12
+    handed back a working browser on a seed frozen at the last clean close. The
+    owner's ruling is that the second one is the harm.
+    """
+    with pytest.raises(ToolError, match=profile_seed.DEFAULT_SESSION):
+        await clone_storage._fallback_profile_selection(_master_selection(), 0)
+
+    assert not clone_storage._PROTECTED_CLONE_DIRS, "a refusal reserved a directory"
 
 
 async def test_a_master_attempt_retries_master_when_no_sibling_took_it(
@@ -478,9 +536,19 @@ async def test_the_master_hold_is_asked_about_the_directory_the_attempt_drove(
 
 async def test_two_master_losers_land_in_distinct_dirs(tmp_session_root, master_taken):
     """Both losers of one master race retry at once; layer 1's per-attempt token
-    has to hold for this new entry point too."""
-    first = await clone_storage._fallback_profile_selection(_master_selection(), 0)
-    second = await clone_storage._fallback_profile_selection(_master_selection(), 0)
+    has to hold for this new entry point too.
+
+    ``driven`` for F-914's reason, stated on the node above: the holder of a
+    stage-1 race is a sibling spawn of this backend, and a retry onto a held
+    shared session we do NOT drive is a refusal now, not a clone.
+    """
+    driven = _driving(master_taken)
+    first = await clone_storage._fallback_profile_selection(
+        _master_selection(), 0, driven=driven
+    )
+    second = await clone_storage._fallback_profile_selection(
+        _master_selection(), 0, driven=driven
+    )
 
     assert first["user_data_dir"] != second["user_data_dir"]
 
@@ -520,7 +588,11 @@ class _MasterRefusingManager(FakeBrowserManager):
     """
 
     def __init__(self, race, spawn_instance):
-        super().__init__(spawn_instance=spawn_instance, spawn_diagnostics={})
+        super().__init__(
+            spawn_instance=spawn_instance,
+            spawn_diagnostics={},
+            **_sibling_driving(race.dir),
+        )
         self._race = race
         self.dirs: list[str] = []
 
@@ -551,9 +623,13 @@ async def test_a_spawn_deciding_its_retry_is_not_counted_in_flight(
     seen: list[int] = []
     real = clone_storage._fallback_profile_selection
 
-    async def _sampling(previous, attempt):
+    async def _sampling(previous, attempt, **kwargs):
+        # ``**kwargs`` rather than a named ``driven``: this double exists to
+        # sample one counter and must not restate the signature it wraps, or it
+        # goes stale the next time a witness is threaded through (F-914 added
+        # one and this node failed on the arity, not on its subject).
         seen.append(doomed_manager._spawns_in_flight)
-        return await real(previous, attempt)
+        return await real(previous, attempt, **kwargs)
 
     monkeypatch.setattr(clone_storage, "_fallback_profile_selection", _sampling)
     srv = patched_server(browser_manager=doomed_manager)
@@ -572,7 +648,9 @@ class _AlwaysFailsManager(FakeBrowserManager):
     """Every attempt fails, so the loop runs its full budget and then raises."""
 
     def __init__(self, race):
-        super().__init__(spawn_instance=None, spawn_diagnostics={})
+        super().__init__(
+            spawn_instance=None, spawn_diagnostics={}, **_sibling_driving(race.dir)
+        )
         self._race = race
         self.dirs: list[str] = []
 
