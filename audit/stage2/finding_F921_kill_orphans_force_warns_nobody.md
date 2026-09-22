@@ -130,7 +130,8 @@ options:
   --force     override the live-backend guard AND F-888's persistent-profile
               spare: this can terminate a browser holding a logged-in profile,
               whose logins must then be re-entered by hand. Preview it with
-              --dry-run
+              --force --dry-run; a plain --dry-run still refuses while a
+              backend is live
   --dry-run   print the persistent profiles at risk, then exit without reaping
 ```
 
