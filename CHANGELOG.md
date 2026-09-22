@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.14
 
 ### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
 
