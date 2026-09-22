@@ -393,6 +393,19 @@ change; `clone_storage.py` keeps the policy around a copy and its
 `PTH105`/`SIM105` suppressions SHRANK by exactly the two codes that went with
 the trash mechanism.
 
+**A walk we DO take now lands on a directory that does not exist yet.** The
+target came from the `<name>-2`, `-3`, … ladder, which skipped a candidate a
+live browser or an in-flight spawn held and never one that merely EXISTED —
+while the copy and the hand-off are both gated on the target being new. So a
+closed `<name>-N` an earlier walk left behind was handed back verbatim: nothing
+copied, no cookies carried, and the caller given whatever that directory last
+held, under a warning saying the holder's jar had come across. The ladder now
+skips what exists on this path only, so the copy and the CDP hand-off always
+happen and that warning is true on every path a walk can take; its timestamp
+rung carries the per-spawn attempt token, so it cannot land on an existing
+directory past `-99` either. A pin pre-creating a closed leftover with a
+distinct jar covers it, and asserts the leftover is left untouched.
+
 Full detail, including the measurements and every residual, is in
 `audit/stage2/finding_F914_unnamed_spawn_substitutes_seed_clone.md` and
 `audit/stage2/finding_F915_held_named_session_walks_and_reseeds.md`.
@@ -455,8 +468,10 @@ does: persistent-vs-clone is `browser_pid_registry.on_persistent_profile`, the
 very predicate `--force` skips, and whether a profile is OPEN is
 `profile_lock.profile_hold` through `clone_storage`'s established adapter —
 never a presence test (F-871). One record read, no new probe pass, counted by
-DIRECTORY because the reap is directory-matched too. No message names a path:
-counts and session names only.
+DIRECTORY so that two entries on one profile count once — since F-922 a
+persistent profile's reap ends only the pids the record names, and those two
+entries are that one profile's logins. No message names a path: counts and
+session names only.
 
 The counting is a new leaf, `embedded/persistent_profile_risk.py`, which takes
 the entries and the hold predicate as arguments and imports nothing of the

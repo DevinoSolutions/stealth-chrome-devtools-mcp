@@ -93,10 +93,17 @@ open, and `master` is the owner's logged-in shared session.** The word "master"
 appeared nowhere in the verb's output or help.
 
 Note the two `master` ENTRIES resolve to one DIRECTORY (one holder, pid 33840).
-That is why the count below is by directory: the reap is directory-matched
-(`process_cleanup._kill_processes_for_metadata:325` kills every browser on the
-entry's `user_data_dir`), so two entries on one profile end one profile, and a
-count of entries would have said "3" about two.
+That is why the count below is by directory: at the time of this measurement
+the reap was directory-matched (`process_cleanup._kill_processes_for_metadata`
+killed every browser on the entry's `user_data_dir`), so two entries on one
+profile end one profile, and a count of entries would have said "3" about two.
+
+F-922 has since landed and narrowed that scan to DISPOSABLE directories
+(`process_cleanup.py:339-348`), so on a persistent profile the reap now ends
+only the pids the record names. The de-duplication above is unaffected and its
+justification is now the plainer one: both of `master`'s recorded entries are
+that ONE profile's logins, so counting them twice would still say "3" about
+two. See 6.3.
 
 ### Before
 
@@ -123,7 +130,8 @@ options:
   --force     override the live-backend guard AND F-888's persistent-profile
               spare: this can terminate a browser holding a logged-in profile,
               whose logins must then be re-entered by hand. Preview it with
-              --dry-run
+              --force --dry-run; a plain --dry-run still refuses while a
+              backend is live
   --dry-run   print the persistent profiles at risk, then exit without reaping
 ```
 
@@ -377,20 +385,31 @@ both bit on the first attempt:
 
 **Green**: `tests/test_cli.py` + `tests/test_persistent_profile_risk.py`
 **44/44**, and the WHOLE non-integration suite at this revision —
-**3711 passed, 1 skipped, 290 deselected**
-(`-m "not integration"`, 492.73 s, exit 0). The whole suite rather than a named
+**3824 passed, 1 skipped, 290 deselected**
+(`-m "not integration"`, 482.88 s, exit 0). The whole suite rather than a named
 subset because this revision edits a doc fence as well as code, and
 `test_doc_examples.py` screens those: a subset chosen by the author of the
 change is a subset that can miss the file the change broke.
 
-Measured AFTER merging 2.1.13 (`fe5cef6`), not before: this branch's own lane
-was green on both trees, but a suite count taken before a merge describes a
-revision nobody will ever run. The merge also re-checked the claims these
-artefacts MAKE — every product symbol named by the module docstring, §3.1 and
-the two CLAUDE.md rows still resolves, `process_cleanup.py:349-355` is still
-the recorded-pid fallback §6.7 cites, and `clone_storage` still imports the
-process-cleanup SINGLETON, which is the one import §5 says the hermeticity of
-every `test_cli.py` node here depends on.
+Measured at `7da54a5`, which is this branch AFTER the 2.1.13 release merge
+(`fe5cef6`) and after the five queued lanes ahead of it — F-919, F-916/F-917/
+F-918 with F-922, F-913, and F-914/F-915 — not before either. A suite count
+taken before a merge describes a revision nobody will ever run.
+
+The count was PREDICTED before the lane ran, from this tree's own
+`--collect-only`: **3825 selected** (3824 passed + 1 skipped;
+selected is passed plus skipped, and conflating them reads a correct forecast as
+a miss). It is the lane ahead's 3805 plus exactly this finding's 20
+nodes — 8 in `tests/test_persistent_profile_risk.py` and 12 in the F-921 class
+of `tests/test_cli.py` — so a green lane also confirms the merge delivered the
+tests it claimed to rather than merely passing the ones that survived.
+
+The merges also re-checked the claims these artefacts MAKE — every product
+symbol named by the module docstring, §3.1 and the two CLAUDE.md rows still
+resolves, `process_cleanup.py:349-355` is still the recorded-pid fallback §6.7
+cites, and `clone_storage` still imports the process-cleanup SINGLETON, which is
+the one import §5 says the hermeticity of every `test_cli.py` node here depends
+on.
 
 **Gates**: `ruff format --check`, `ruff check`, `ty check
 --exit-zero-on-warning src/`, `vulture`, `check_suppression_owners.py`,
@@ -421,17 +440,22 @@ stops being read — the same failure mode as the silence this finding fixes, wi
 the sign reversed. There are now three shapes, and the harm sentence appears
 only when something is actually open.
 
-**6.3 — The count is the RECORD's scope, and it is a FLOOR.** The reap kills by
-directory, so a directory the record calls DISPOSABLE has every browser on it
-ended — including one a human started there by hand, which is absent from this
-count because the record classifies by how WE made a profile, not by what is
-inside it. The printed line no longer implies otherwise: it says "in the record"
-and, under `--force`, "ends EVERY tracked browser", so the operator learns the
-reap is wider than the named set rather than inferring a death toll from it.
-**F-922 is the decided follow-up** (owner ruling, assigned to the F-916 lane):
-directory-wide reaping is being restricted to auto-clone directories, and on a
-named or persistent profile only recorded pids will be killed. That is what
-closes the gap; this finding does not treat directory-wide reaping as permanent.
+**6.3 — The count is the RECORD's scope, and it is a FLOOR.** A directory the
+record calls DISPOSABLE has every browser on it ended — including one a human
+started there by hand, which is absent from this count because the record
+classifies by how WE made a profile, not by what is inside it. The printed line
+no longer implies otherwise: it says "in the record" and, under `--force`, "ends
+EVERY tracked browser", so the operator learns the reap is wider than the named
+set rather than inferring a death toll from it.
+
+**F-922 has since LANDED** (owner ruling, assigned to the F-916 lane; it is an
+ancestor of this branch and `process_cleanup._kill_processes_for_metadata`
+now gates its directory scan on `on_persistent_profile` —
+`process_cleanup.py:339-348`), which narrows the gap
+rather than closing it: a PERSISTENT profile's reap ends only the pids the
+record names, while a disposable clone directory is still swept directory-wide.
+So the floor survives on the disposable side, and the wording above is what is
+true after F-922 as well as before it.
 
 **6.4 — "Tracked but none open" gets its own wording, deliberately.** With
 profiles in the record and nothing holding any of them, this invocation ends no
@@ -493,7 +517,9 @@ the record that is not what we expect, so it is named rather than assumed away.
 The direction is the safe one — the line under-counts, and already says the
 reap is wider than the set it names (§6.3). Fixing it properly means the
 pre-flight iterating the REAP's own per-entry decision rather than the record's
-directories, which is F-922's shape and not this finding's.
+directories. That is F-922's shape and not this finding's — but F-922 has landed
+and did NOT do it: it narrowed which pids a reap may take, leaving this
+pre-flight still reading the record's directories, so the residual stands.
 
 **6.8 — The count is a snapshot, not a lease.** The pre-flight reads the record
 at T0; `recover_orphans` re-reads it at T1, after the line is printed. A browser

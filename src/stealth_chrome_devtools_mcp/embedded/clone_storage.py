@@ -568,17 +568,24 @@ def _available_clone_dir(base_clone: Path) -> Path:
     return base_clone.with_name(f"{base_clone.name}-{_attempt_token()}")
 
 
-def _next_available_explicit_dir(requested: Path) -> Path:
+def _next_available_explicit_dir(requested: Path, *, fresh: bool = False) -> Path:
     """The next free variant of a busy user-supplied profile path: ``-2``,
     ``-3``, … up to -99, then a timestamp suffix. Clean numeric suffixes and no
-    PID, because these names are user-visible."""
-    for index in range(2, 100):
-        candidate = requested.with_name(f"{requested.name}-{index}")
-        if not _dir_unavailable(candidate):
+    PID, because these names are user-visible.
+
+    ``fresh`` also skips a candidate that merely EXISTS, and is the HAND-OVER
+    walk's alone — ``profile_target`` argues why, and why it is not the default.
+    """
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    if fresh:
+        # Unique per spawn here, so the ladder cannot run out ONTO an existing
+        # directory at the -99 boundary. `profile_target` says why that matters.
+        stamp = f"{stamp}-{_attempt_token()}"
+    for suffix in (*range(2, 100), stamp):
+        candidate = requested.with_name(f"{requested.name}-{suffix}")
+        if not _dir_unavailable(candidate) and not (fresh and candidate.exists()):
             return candidate
-    return requested.with_name(
-        f"{requested.name}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
-    )
+    return requested.with_name(f"{requested.name}-{stamp}")
 
 
 def _copy_clone_from_source(
@@ -639,38 +646,32 @@ def require_allowed_seed_from(
     """THE gate for a ``seed_from`` request (F-897): the name it may be, and
     that there is a NEW session for it to apply to. None when none was given.
 
-    It takes *landed* — ``require_allowed_user_data_dir``'s answer, the
-    DIRECTORY the caller's session request means — so "is this the shared
-    session" and "does it already exist" are asked about the directory a
-    request MEANS. Both are wrong for a relative spelling otherwise.
+    It takes *landed* — ``require_allowed_user_data_dir``'s answer, the DIRECTORY
+    the caller's session request MEANS — so "is this the shared session" and
+    "does it already exist" are asked about it, not about a relative spelling.
 
-    Asked TWICE on ``require_allowed``'s precedent, and for a sharper reason:
-    ``spawn_browser`` asks it in front of ``browser_reattach.adopt_held_profile``,
-    because a session whose browser is still running is a session that EXISTS —
-    so without it ``spawn --session work --from other`` would be silently
-    ADOPTED onto the running ``work`` browser with nothing said about the flag.
-    The resolver asks again because it is public and has its own callers.
+    Asked TWICE on ``require_allowed``'s precedent, for a sharper reason:
+    ``spawn_browser`` asks it ahead of ``browser_reattach.adopt_held_profile``,
+    because a session whose browser is running EXISTS — so without it
+    ``spawn --session work --from other`` is silently ADOPTED onto that running
+    browser, nothing said about the flag. The resolver asks again: it is public.
 
     The SOURCE question is asked here too and its answer DISCARDED (review S1;
-    finding §2.3): its three refusals are raised inside
-    ``profile_source.seed_source``, which the resolver calls from INSIDE
-    ``spawn_browser``'s ``try``, so they reached the caller re-labelled
-    ``Failed to spawn browser: ...``, and an inner ``except ToolError: raise``
-    does not fix that. Discarding is the point: "is this source open" is a fact
-    with a LIFETIME, so the read that DECIDES stays the statement before the
-    copy, with no ``await`` between.
+    finding §2.3): its refusals are raised inside ``profile_source.seed_source``,
+    which the resolver calls from INSIDE ``spawn_browser``'s ``try``, so they
+    reached the caller re-labelled ``Failed to spawn browser: ...``, and an inner
+    ``except ToolError: raise`` does not fix that. Discarding is the point: "is
+    this source open" is a fact with a LIFETIME, so the read that DECIDES stays
+    the statement before the copy, with no ``await`` between.
 
-    *check_source* is False for exactly one caller, the RESOLVER (memo review
-    S): its ask already runs inside that ``try``, and ``_seed_source_for_copy``
-    raises the same sentences one statement later with no ``await`` between, so
-    a third walk of the process table decides nothing. A 1 s memo bought the
-    same saving and is REPLACED by this flag — no process-global state, no
-    clock, no reset hook, no answer that can go stale. What is left is one
-    ``exists()`` and a psutil walk only where the answer is used.
+    *check_source* is False for exactly one caller, the RESOLVER (memo review S):
+    its ask already runs inside that ``try`` and ``_seed_source_for_copy`` raises
+    the same sentences one statement later with no ``await`` between, so a third
+    walk of the process table decides nothing. The 1 s memo it replaced is
+    argued at ``profile_source``.
 
     *driven* is F-898's witness — "does THIS backend hold a browser there" —
-    passed to ``_seed_source``; its rule and its NO default are
-    ``profile_source``'s."""
+    passed to ``_seed_source``; its rule and NO default are ``profile_source``'s."""
     requested = profile_source.seed_request(seed_from)
     if requested is None:
         return None
@@ -838,7 +839,8 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
                 holder = profile_target.hand_over_or_refuse(
                     explicit, hold, _roots(), driven=driven
                 )
-                requested, explicit = explicit, _next_available_explicit_dir(explicit)
+                requested = explicit
+                explicit = _next_available_explicit_dir(explicit, fresh=True)
                 walk = {
                     "requested_user_data_dir": str(requested),
                     "walked_to": str(explicit),

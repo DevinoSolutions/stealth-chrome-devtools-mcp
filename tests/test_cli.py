@@ -458,8 +458,11 @@ class TestKillOrphansForceWarning:
     def test_two_entries_on_one_profile_count_once(
         self, tmp_session_root, tmp_path, monkeypatch, capsys
     ):
-        """The reap is DIRECTORY-matched (`_kill_processes_for_metadata`), so two
-        entries on one profile end one profile, not two."""
+        """The count is of PROFILES, not of record entries: since F-922 a named
+        profile's reap ends the pids the RECORD names
+        (`_kill_processes_for_metadata` gates its directory scan on
+        `on_persistent_profile`), and both of these entries are one profile's
+        logins."""
         shared = _named(tmp_session_root["sessions"], "github-session", model_mb=1)
         self._bind(
             monkeypatch,
