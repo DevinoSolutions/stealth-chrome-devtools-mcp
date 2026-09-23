@@ -9,6 +9,18 @@
 > Undetectable browser automation for AI agents via the Model Context Protocol —
 > one shared backend built for 50+ concurrent Claude Code sessions.
 
+**Onboard your agent to Stealth Chrome DevTools MCP** — copy the sentence below
+into any AI coding agent (Claude Code, Codex, Cursor, Windsurf, OpenCode, …) and
+it installs the server, registers it in that agent, and verifies the backend:
+
+```text
+Fetch and execute the appropriate instructions to set me up for Stealth Chrome DevTools MCP from https://raw.githubusercontent.com/DevinoSolutions/stealth-chrome-devtools-mcp/main/agent-setup/prompt.md
+```
+
+The instructions it fetches are [`agent-setup/prompt.md`](agent-setup/prompt.md) —
+readable by humans too. Signing in to websites stays yours: the agent prepares the
+browser, you prepare the logins.
+
 A self-contained **stealth Chrome DevTools MCP server** with smart profile management, anti-detection stealth arg filtering, and robust process lifecycle handling. Built on [nodriver](https://github.com/AminDhouib/nodriver) (CDP-based) for full anti-bot evasion.
 
 ---

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added — agent onboarding: one sentence installs and registers the server
+
+The README now carries an **Onboard your agent** block: a single copyable
+sentence that points any AI coding agent at
+`agent-setup/prompt.md` (served raw from `main` on GitHub). The prompt walks the
+agent through the requirements, `uv tool install stealth-chrome-devtools-mcp`,
+registering the stdio server in Claude Code (`claude mcp add --scope user …`),
+Codex (`codex mcp add …`), Cursor (`~/.cursor/mcp.json`) or any other MCP client,
+verifying with `stealthy status` / `stealthy doctor` and a headless
+`spawn_browser` → `close_instance` round trip, and printing a completion message
+that tells the **user** to run `stealthy spawn --headed` and sign in themselves.
+Signing in, entering credentials and CAPTCHAs are stated as human-only.
+
+There is no docs host or app domain for this project, so the fleet spec's
+`/faq` and `faq.<domain>` redirects, `llms.txt` and page analytics have no
+surface to land on; the raw GitHub URL is the one public address.
+`tests/test_agent_setup.py` pins the sentence, the file's location, the absence
+of template placeholders and the per-agent sections hermetically, and checks
+every URL in the prompt answers 200 in the integration lane.
+
 ## 2.1.14
 
 ### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
