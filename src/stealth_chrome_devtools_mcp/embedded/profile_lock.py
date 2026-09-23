@@ -10,7 +10,18 @@ Two witnesses, in order, and no third:
 
 1. **The process table.** A browser whose ``--user-data-dir`` is this directory
    holds it. ``process_cleanup`` owns that scan; it arrives here as an argument
-   so this module stays a leaf.
+   so this module never learns what an orchestrator is. What that scan answers
+   with is a whole process TREE — it applies no ``--type`` filter — and only
+   the BROWSER member of it holds the profile, which is
+   ``browser_cmdline.browser_members``' question and the one thing this module
+   imports (F-931). Chromium gives every child a ``--type=``, so a set of
+   survivors that are all children says the browser has GONE: measured on the
+   release gate, that window between ``close_instance`` killing the browser and
+   its children following it refused the very next spawn onto the shared
+   session, and ``min(pids)`` before it named a renderer as the holder in the
+   message a caller reads. ``browser_reattach.held_by`` has asked the same
+   question since F-888; this is that rule reached from the other side, so the
+   two witnesses can no longer disagree.
 2. **Chrome's own process singleton**, which is a FACT ABOUT A PID, not a file
    that exists. On POSIX ``ProcessSingleton::Create`` writes ``SingletonLock``
    as a SYMLINK whose target is the string ``<hostname>-<pid>``
@@ -69,6 +80,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
+from stealth_chrome_devtools_mcp.embedded import browser_cmdline
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -93,19 +105,34 @@ class Hold:
 
     ``pid`` is ``None`` when the holder is named but not addressable from here
     (a lock written on another host).
+
+    ``members`` is the process set this answer was read FROM — empty when the
+    answer came from the lock rather than the process table (F-931 M2). It
+    exists so a consumer asking a DIFFERENT question of the same tree — which
+    member is the browser, and is there exactly one
+    (``browser_reattach.held_by``) — does not walk every process on the machine
+    a second time for a set this module has just read. It is the input to that
+    question and never its answer: who the browser is stays
+    ``browser_cmdline``'s to decide.
     """
 
     pid: int | None
     reason: str
+    members: tuple[int, ...] = ()
 
 
 def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
     """Return what holds *profile_dir*, or ``None`` when nothing does."""
     pids = _browser_pids(profile_dir, live_pids)
     if pids:
-        pid = min(pids)
-        return Hold(pid, f"a live browser process (pid {pid}) has this profile open")
-    if pids is None and not _LOCK_IS_A_WITNESS:
+        held = _tree_hold(profile_dir, pids)
+        if held is not None:
+            return held
+        # Every survivor carries a `--type=`, so the BROWSER has exited and what
+        # is left are children outliving it. They hold no profile — Chrome's own
+        # singleton is the browser's, not the tree's — so the question falls
+        # through to the lock exactly as it does for an empty scan.
+    elif pids is None and not _LOCK_IS_A_WITNESS:
         # The one witness this platform has did not answer. Every unanswerable
         # question here resolves toward HELD (see `_pid_alive`) and for the same
         # reason: one extra walk is survivable, two browsers on one profile is
@@ -116,6 +143,45 @@ def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
             "leaves no lock to read instead, so this profile cannot be shown free",
         )
     return _lock_hold(profile_dir / LOCK_NAME)
+
+
+def _tree_hold(profile_dir: Path, pids: Collection[int]) -> Hold | None:
+    """What the process TREE on *profile_dir* proves, or None for "nothing".
+
+    Three answers from two facts (F-931). A browser member holds it and is the
+    pid a caller is told about — the LOWEST when Chrome's singleton has failed
+    and there are two, because a directory with two browsers is held whichever
+    one is named. A member whose argv could not be READ leaves the question
+    open, and an open question resolves toward HELD here exactly as it does in
+    :func:`_pid_alive`: one extra walk is survivable, two browsers on one
+    profile is not. Only "asked every member, none is a browser" is a negative,
+    and it is the one the caller may act on.
+
+    **Each sentence names a pid it is true of** (F-931 M1): the unreadable
+    branch reports one of the pids that could not be READ, never ``min(pids)``
+    over the whole scan, which routinely named a member we had identified
+    perfectly well as a child. That sentence is quoted verbatim by F-914's
+    refusal, so a pid it is not about sends an operator after the wrong process.
+    """
+    members = browser_cmdline.browser_members(pids, str(profile_dir))
+    # Ints only, `browser_members`' own filter: `Hold.members` is typed as pids.
+    scanned = tuple(pid for pid in pids if isinstance(pid, int))
+    if members.browsers:
+        pid = min(members.browsers)
+        return Hold(
+            pid,
+            f"a live browser process (pid {pid}) has this profile open",
+            members=scanned,
+        )
+    if members.unreadable:
+        pid = min(members.unreadable)
+        return Hold(
+            pid,
+            f"a live process (pid {pid}) on this profile could not be read, so "
+            "this profile cannot be shown free",
+            members=scanned,
+        )
+    return None
 
 
 def _browser_pids(profile_dir: Path, live_pids: PidScan) -> Collection[int] | None:

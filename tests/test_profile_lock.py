@@ -35,6 +35,7 @@ import pytest
 
 from fakes import FakeBrowserManager, held_profile, write_singleton
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
     clone_storage,
     profile_lock,
     profile_seed,
@@ -63,6 +64,46 @@ def no_pids(_user_data_dir):
     return set()
 
 
+#: The profile every F-931 tree fixture below is about, spelled once.
+TREE_DIR = r"C:\sessions\held"
+
+
+def browser_argv(directory: str = TREE_DIR) -> list[str]:
+    """A Chrome BROWSER process's argv: a ``--user-data-dir`` and no ``--type``."""
+    return [
+        "chrome.exe",
+        f"--user-data-dir={directory}",
+        "--remote-debugging-port=9222",
+    ]
+
+
+def child_argv(kind: str = "renderer", directory: str = TREE_DIR) -> list[str]:
+    """A CHILD of that browser — same profile, same port for a renderer
+    (measured on Chrome 153), and the one structural difference: ``--type``."""
+    return [*browser_argv(directory), f"--type={kind}"]
+
+
+def fake_process_table(monkeypatch, table: dict[int, list[str] | None]) -> None:
+    """Make ``browser_cmdline`` read *table* instead of the real process table.
+
+    ``None`` is a pid that IS there and whose argv could not be read (a Windows
+    ``AccessDenied`` on an elevated Chrome); a pid absent from the table has
+    EXITED. The two are different answers and this fixture keeps them apart,
+    because the whole of F-931's direction rule turns on it.
+
+    It patches ``browser_cmdline._still_running`` and never
+    ``psutil.pid_exists``: the two modules share ONE psutil module object, so
+    setting the attribute there also rebinds ``profile_lock._pid_alive``'s
+    witness — which read this test's own live ``SingletonLock`` as orphaned and
+    made a correct fall-through look like a defect. A seam of ours, in the
+    module that owns the question.
+    """
+    monkeypatch.setattr(
+        browser_cmdline, "arguments", lambda pid: list(table.get(pid) or [])
+    )
+    monkeypatch.setattr(browser_cmdline, "_still_running", lambda pid: pid in table)
+
+
 # ---------------------------------------------------------------------------
 # The premise the finding rests on
 # ---------------------------------------------------------------------------
@@ -87,8 +128,18 @@ class TestProfileHold:
     def test_untouched_profile_is_not_held(self, tmp_path):
         assert profile_lock.profile_hold(tmp_path, no_pids) is None
 
-    def test_live_browser_process_is_a_hold(self, tmp_path):
+    def test_live_browser_process_is_a_hold(self, tmp_path, monkeypatch):
+        """SOFT GOLDEN UPDATED for F-931. The shipped node handed the scan a
+        bare pid nobody had established anything about and asserted a hold; the
+        scan's answer is a process TREE and only its browser member holds the
+        profile, so the fixture now says which member 4242 is. Written with a
+        bare pid it was also latently flaky — ``4242`` may be a real live
+        process on a busy machine, and the answer then depended on whose.
+        """
+        fake_process_table(monkeypatch, {4242: browser_argv(str(tmp_path))})
+
         hold = profile_lock.profile_hold(tmp_path, lambda _d: {4242})
+
         assert hold is not None
         assert hold.pid == 4242
         assert "4242" in hold.reason
@@ -159,6 +210,195 @@ class TestProfileHold:
     def test_a_missing_pid_scan_does_not_raise(self, tmp_path):
         """An absent collaborator is a replaced seam, not a runtime failure."""
         assert profile_lock.profile_hold(tmp_path, None) is None
+
+
+# ---------------------------------------------------------------------------
+# F-931 — a profile is held by its BROWSER, not by whatever of its tree is left
+# ---------------------------------------------------------------------------
+
+
+class TestWhichMemberOfTheTreeHolds:
+    """The process scan answers about a TREE, and only one member of it is the
+    browser.
+
+    ``process_cleanup._get_browser_pids_for_profile`` matches every
+    Chromium-family process carrying ``--user-data-dir=<dir>`` and applies no
+    ``--type`` filter, and ``profile_hold`` reported ``min(pids)`` — so the pid
+    it named was whichever member sorted first, which for a real Chrome is a
+    renderer or a utility five times out of six. ``browser_reattach.held_by``
+    has asked ``browser_cmdline.browser_process`` since F-888 for exactly that
+    reason; this is the same rule reached from the other side, and until F-931
+    the two witnesses disagreed.
+
+    The consequence is not cosmetic. ``close_instance`` waits for the BROWSER's
+    own exit (``process_exit.browser_pid`` answers ``None`` for any ``--type=``
+    child, deliberately) and kills only the browser, so for a window after a
+    close a surviving child is enough to make the profile read HELD — and since
+    F-914 a held profile we do not drive is REFUSED. On the release gate
+    (``integration (Windows/X64)``, run 35689647688) an unnamed spawn refused
+    with "the 'default' session is open in a browser this backend does not
+    drive (pid 8084)" immediately after the previous test closed its own
+    browser on that profile.
+
+    **That log is the symptom, not the proof, and these nodes are the proof.**
+    It never says whether 8084 was the browser or one of its children, so the
+    fixtures below deliberately do NOT reuse that pid: dressing a renderer in
+    the incident's number would assert exactly the thing the log leaves open.
+    The defect is read off ``profile_hold``'s ``min(pids)`` over a scan with no
+    ``--type`` filter, and pinned here without a Chrome.
+    """
+
+    def test_a_tree_with_no_browser_member_left_does_not_hold(
+        self, tmp_path, monkeypatch
+    ):
+        """Every survivor carries a ``--type=``, so the browser has gone and
+        what is left holds no profile. This is the shape the window after a
+        close leaves — neutral pids, for the reason in the class docstring."""
+        fake_process_table(
+            monkeypatch,
+            {
+                4101: child_argv("renderer", str(tmp_path)),
+                4102: child_argv("gpu-process", str(tmp_path)),
+                4103: child_argv("crashpad-handler", str(tmp_path)),
+            },
+        )
+
+        assert (
+            profile_lock.profile_hold(tmp_path, lambda _d: {4101, 4102, 4103}) is None
+        )
+
+    def test_the_hold_names_the_browser_and_not_the_lowest_pid(
+        self, tmp_path, monkeypatch
+    ):
+        """``min(pids)`` is set ordering wearing an answer's clothes: the
+        refusal a caller reads, and ``walk_reason``, named a renderer."""
+        fake_process_table(
+            monkeypatch,
+            {
+                1001: child_argv("renderer", str(tmp_path)),
+                1002: child_argv("utility", str(tmp_path)),
+                2002: browser_argv(str(tmp_path)),
+            },
+        )
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {1001, 1002, 2002})
+
+        assert hold is not None
+        assert hold.pid == 2002
+        assert "2002" in hold.reason
+
+    def test_the_unreadable_reason_names_a_pid_we_could_not_read(
+        self, tmp_path, monkeypatch
+    ):
+        """The sentence is quoted VERBATIM by F-914's refusal, so the pid in it
+        has to be one the claim is about.
+
+        ``min(pids)`` over the whole scan names whichever sorted first, which is
+        routinely a member we read perfectly well — here a renderer we
+        positively identified as a child. Telling an operator that pid 1001
+        "could not be read" sends them after the wrong process, and it is the
+        same class of defect as the ``min(pids)`` holder F-931 removes one
+        branch above.
+        """
+        fake_process_table(
+            monkeypatch,
+            {
+                1001: child_argv("renderer", str(tmp_path)),
+                7007: None,
+            },
+        )
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {1001, 7007})
+
+        assert hold is not None
+        assert hold.pid == 7007
+        assert "7007" in hold.reason
+        assert "1001" not in hold.reason
+
+    def test_a_child_only_tree_still_consults_the_lock(self, tmp_path, monkeypatch):
+        """The fall-through is the whole of why a child-only tree is safe.
+
+        ``profile_hold``'s ``if pids: … elif pids is None:`` restructure is
+        exactly where it could be lost: an early ``return None`` for a tree with
+        no browser member would make this module stop asking Chrome's own
+        singleton, and a POSIX profile whose lock names a LIVE browser would be
+        shown free. Children present AND a live lock must answer the lock.
+        """
+        held_profile(tmp_path)
+        fake_process_table(monkeypatch, {4101: child_argv("renderer", str(tmp_path))})
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {4101})
+
+        assert hold is not None
+        assert hold.pid == os.getpid()
+        assert profile_lock.LOCK_NAME in hold.reason
+
+    def test_a_member_we_could_not_read_still_reads_as_held(
+        self, tmp_path, monkeypatch
+    ):
+        """The direction, uniform with ``_pid_alive`` and ``_browser_pids``: a
+        witness we could not READ is not an established negative. The reason
+        says so rather than claiming a browser we never saw — that sentence is
+        quoted verbatim to the caller by F-914's refusal.
+        """
+        fake_process_table(monkeypatch, {7007: None})
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {7007})
+
+        assert hold is not None
+        assert hold.pid == 7007
+        assert "could not be read" in hold.reason
+
+    def test_a_pid_that_has_since_exited_is_not_a_hold(self, tmp_path, monkeypatch):
+        """The scan and this read are two moments. A pid gone between them is
+        an ESTABLISHED negative and must not be confused with one we could not
+        read — the distinction ``reap_guard.UNDECIDED`` exists for, here."""
+        fake_process_table(monkeypatch, {})
+
+        assert profile_lock.profile_hold(tmp_path, lambda _d: {9009}) is None
+
+    def test_the_members_handed_on_are_pids_and_nothing_else(
+        self, tmp_path, monkeypatch
+    ):
+        """F-931 N6. ``Hold.members`` is typed ``tuple[int, ...]`` and
+        ``browser_reattach.held_by`` hands it straight back to
+        ``browser_cmdline``, so a non-int the scan let through must be dropped
+        HERE, by the same filter ``browser_members`` applies — not carried on
+        as a "pid" the next reader has to re-validate."""
+        fake_process_table(monkeypatch, {2002: browser_argv(str(tmp_path))})
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: [2002, "2002", None])
+
+        assert hold is not None
+        assert hold.members == (2002,)
+
+    def test_a_browser_on_another_profile_does_not_hold_this_one(
+        self, tmp_path, monkeypatch
+    ):
+        """A scan replaced by a looser one must not make a stranger's Chrome
+        this directory's holder; the argv is re-read against the directory for
+        the same reason ``browser_cmdline.debug_port`` does it (F-888 M4)."""
+        fake_process_table(monkeypatch, {3003: browser_argv(r"C:\somewhere\else")})
+
+        assert profile_lock.profile_hold(tmp_path, lambda _d: {3003}) is None
+
+    def test_two_browsers_on_one_directory_still_hold_it(self, tmp_path, monkeypatch):
+        """``browser_cmdline.browser_process`` answers None for an AMBIGUOUS
+        tree because adopting one of two is a coin flip. "Which one may we
+        attach to" and "is anything there" are different questions, and reusing
+        that None here would call a directory with two live browsers free."""
+        fake_process_table(
+            monkeypatch,
+            {
+                5005: browser_argv(str(tmp_path)),
+                6006: browser_argv(str(tmp_path)),
+            },
+        )
+
+        hold = profile_lock.profile_hold(tmp_path, lambda _d: {5005, 6006})
+
+        assert hold is not None
+        assert hold.pid in (5005, 6006)
 
 
 # ---------------------------------------------------------------------------

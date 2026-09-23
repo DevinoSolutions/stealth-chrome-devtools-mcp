@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added — agent onboarding: one sentence installs and registers the server
+
+The README now carries an **Onboard your agent** block: a single copyable
+sentence that points any AI coding agent at
+`agent-setup/prompt.md` (served raw from `main` on GitHub). The prompt walks the
+agent through the requirements, `uv tool install stealth-chrome-devtools-mcp`,
+registering the stdio server in Claude Code (`claude mcp add --scope user …`),
+Codex (`codex mcp add …`), Cursor (`~/.cursor/mcp.json`) or any other MCP client,
+verifying with `stealthy status` / `stealthy doctor` and a headless
+`spawn_browser` → `close_instance` round trip, and printing a completion message
+that tells the **user** to run `stealthy spawn --headed` and sign in themselves.
+Signing in, entering credentials and CAPTCHAs are stated as human-only.
+
+There is no docs host or app domain for this project, so the fleet spec's
+`/faq` and `faq.<domain>` redirects, `llms.txt` and page analytics have no
+surface to land on; the raw GitHub URL is the one public address.
+`tests/test_agent_setup.py` pins the sentence, the file's location, the absence
+of template placeholders and the per-agent sections hermetically, and checks
+every URL in the prompt answers 200 in the integration lane.
+
+## 2.1.14
+
 ### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser
 
 A spawn that fails after Chrome launched reaps what it left running (F-860), and
@@ -516,25 +538,105 @@ sweep never looks.
 
 No new setting, and nothing about how a session is selected or named changes.
 
-### Added — agent onboarding: one sentence installs and registers the server
+### Fixed — F-931: an unnamed spawn can re-attach, and a dead browser's children no longer hold its profile
 
-The README now carries an **Onboard your agent** block: a single copyable
-sentence that points any AI coding agent at
-`agent-setup/prompt.md` (served raw from `main` on GitHub). The prompt walks the
-agent through the requirements, `uv tool install stealth-chrome-devtools-mcp`,
-registering the stdio server in Claude Code (`claude mcp add --scope user …`),
-Codex (`codex mcp add …`), Cursor (`~/.cursor/mcp.json`) or any other MCP client,
-verifying with `stealthy status` / `stealthy doctor` and a headless
-`spawn_browser` → `close_instance` round trip, and printing a completion message
-that tells the **user** to run `stealthy spawn --headed` and sign in themselves.
-Signing in, entering credentials and CAPTCHAs are stated as human-only.
+`spawn_browser()` — no `session`, no `user_data_dir`, the call you make by
+default — could not re-attach to a browser already open on the shared session,
+while `spawn_browser(session="default")`, the other spelling of the *same*
+directory, could. The re-attach was gated on the string the caller typed, and an
+unnamed spawn types nothing, so it went to the resolver instead, where F-914
+refuses a holder this backend does not drive. Two spellings of one profile, two
+outcomes, and the one that lost is the default. The re-attach is now asked about
+the directory the selection **will land on** — for an unnamed spawn, the shared
+session, which is what F-834/F-896 already say it selects.
 
-There is no docs host or app domain for this project, so the fleet spec's
-`/faq` and `faq.<domain>` redirects, `llms.txt` and page analytics have no
-surface to land on; the raw GitHub URL is the one public address.
-`tests/test_agent_setup.py` pins the sentence, the file's location, the absence
-of template placeholders and the per-agent sections hermetically, and checks
-every URL in the prompt answers 200 in the integration lane.
+Under it was a second defect that made the refusal fire against a profile
+nothing was using. A profile is held by a whole process TREE and
+`profile_hold` reported `min(pids)` of it, with no `--type` filter — so a
+renderer, a GPU process or a crashpad handler counted as the holder and was
+NAMED as one in the refusal. `close_instance` waits for and kills the BROWSER
+only (a `--type=` child is deliberately never waited on, F-910), so for a window
+after every close a surviving child is enough to make the profile read held.
+Release gate run 35689647688, `integration (Windows/X64)`: an unnamed spawn
+refused with "the 'default' session is open in a browser this backend does not
+drive (pid 8084)" immediately after the previous test closed its own browser on
+that profile. That log is the symptom and not the proof — it does not say
+whether 8084 was the browser or a child — so both defects are established by
+reading the code and the shape is pinned hermetically.
+
+`browser_cmdline.browser_members` is the one rule now —
+`browser_reattach.held_by` has asked its structural half since F-888 and
+`profile_lock` never did, which is how the two witnesses came to disagree — and
+it answers the third thing neither had: whether a member's argv could not be
+**read**. So a tree whose members are all readable children does not hold the
+profile; a tree with a browser in it is held by that browser, named; and a
+member we could not read still holds it, with a reason that says so instead of
+claiming a browser we never saw. What cannot be established resolves toward not
+acting, as it does in `reap_guard`, `_pid_alive` and `backend_eviction`.
+
+Waiting for the whole tree on close was rejected: it costs close latency, it
+contradicts F-910 at the same file, and it closes one door of several — a
+browser killed by a crash, by `kill-orphans` or from Task Manager leaves the
+same orphans.
+
+**One place the two spellings still differ, on purpose.** The first version of
+this fix made them identical, and the release gate caught what that costs: an
+unnamed spawn was handed the browser this backend was *already driving* on the
+shared session. In gate run 35763223617 the same four tests failed on all three
+`integration` cells. A fleet of six unnamed spawns came back with four distinct
+instance ids. A second unnamed spawn reported `profile_role: "default"` where it
+should have got a clone of its own. And closing one of two browsers left none,
+because both were the same instance. A caller who names nothing is asking for a
+browser of their own. So a holder this backend drives — or a sibling spawn of
+ours still launching, which has a Chrome but no instance yet — is never
+adopted; only a browser whose backend is gone is. What the resolver then does
+with that holder is unchanged from before F-931: a REGISTERED one is copied
+and its live cookies handed over; one still launching gets F-914's refusal,
+because the resolver's witness is the instance table read once at the top of
+the spawn, which cannot hold it yet. That refusal calls the shared session
+"open in a browser this backend does not drive", which is wrong about whose
+browser it is — read off the code, not measured, and a window `main` already
+had, since an unnamed spawn used to go straight to that resolver. The in-flight
+check counts ANY spawn in flight, not just one on this profile, because nothing
+narrower is recorded. The named cost: while any spawn is launching, an unnamed
+spawn will not adopt a stranded holder of the shared session either; a retry
+once the other spawn finishes re-attaches. Two more windows, read off the code
+and named in the finding: an adoption in progress and a `close_instance` still
+waiting for Chrome to exit are visible to neither the count nor the table, so
+a concurrent unnamed spawn in either window keeps the "a live backend of ours
+already owns … Stop that backend first" refusal — about our own backend.
+
+**The WIRE description of `spawn_browser` moved**, so `tests/goldens/tool_surface.json`
+is regenerated in this change: the `session` documentation now states that a
+spawn naming nothing re-attaches too, and that it is never handed a browser this
+backend already drives. A caller reading the old text would not know the default
+call had gained the guarantee. The golden diff is one tool, one field, a few
+lines of prose — no name and no schema — and the tool count is unchanged at 94.
+
+**A test-harness defect came out of the same investigation.** `get_settings()`
+is cached, and the `patched_server` fixture imports the server, whose module
+body reads `Settings`. So the first test in a process that lists `patched_server`
+before `tmp_session_root` cached the UNPATCHED environment, and the shared
+session resolved to the suite's fence root instead of the test's temporary one.
+The existing F-931 pin had this defect when its file ran alone; it was hidden
+in the full lane. Both root fixtures now clear the cache after patching the
+environment, because the fixture that makes the cache stale is the one that has
+to clear it.
+
+Two messages an operator reads also changed. `profile_lock`'s "could not be
+read" sentence now names a pid we actually failed to read, where it reported the
+lowest pid in the whole tree — routinely one we had identified perfectly well as
+a child, sending the reader after the wrong process. And the re-attach refusal
+quotes that sentence instead of opening "a live browser holds that directory
+(pid N)", which for an unreadable member asserted both that the pid was a
+browser and that we had established anything about it. It then says WHICH of
+two things stopped it: no member identifiable as the browser, or TWO browsers
+on one profile (Chrome's own singleton did not hold). The second used to read
+"none of its processes could be identified" straight after quoting a sentence
+that named a live browser.
+
+Full detail and every residual is in
+`audit/stage2/finding_F931_unnamed_spawn_skips_reattach_tree_hold.md`.
 
 ## 2.1.13
 

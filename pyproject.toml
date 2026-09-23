@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stealth-chrome-devtools-mcp"
-version = "2.1.13"
+version = "2.1.14"
 description = "Undetectable browser automation for AI agents via the Model Context Protocol — one shared backend built for 50+ concurrent Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.11"
