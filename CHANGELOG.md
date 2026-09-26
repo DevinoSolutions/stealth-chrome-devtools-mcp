@@ -22,6 +22,25 @@ surface to land on; the raw GitHub URL is the one public address.
 of template placeholders and the per-agent sections hermetically, and checks
 every URL in the prompt answers 200 in the integration lane.
 
+### Fixed — a Task Scheduler launch no longer runs the backend or a delegated Chrome at BelowNormal priority (F-932)
+
+Both launches that go through `schtasks` — the backend's F-867 `scheduler`
+rung and F-810's delegated headed Chrome — created their task without a
+priority, and a task created that way runs its processes at priority 7:
+measured on Windows 11 10.0.26200, the process it started read
+`PriorityClass = BelowNormal`. Under CPU load that starved the scheduler rung
+past its 20 s pid deadline, so the backend fell to the `plain` rung and was
+left inside the MCP client's job, and the backend that did start competed at
+a lower priority than everything the operator was running. The child now asks
+for Normal itself: `backend_launch`'s launcher creates the backend with
+`NORMAL_PRIORITY_CLASS`, and the delegated launcher sets
+`$p.PriorityClass = 'Normal'` on Chrome before it publishes the pid.
+`desktop_launch.TASK_CHILD_PRIORITY_CLASS` / `TASK_CHILD_PRIORITY_NAME` are
+the one home for the value. `/Create` is unchanged — only `/XML` takes a
+priority, and that would move the 253-character `/TR` budget — so the
+short-lived launcher process itself still runs at BelowNormal.
+`tests/test_scheduled_task_priority.py` pins both launchers' text.
+
 ## 2.1.14
 
 ### Fixed — F-919: a failed spawn no longer reaps a sibling spawn's browser

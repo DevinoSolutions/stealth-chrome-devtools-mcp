@@ -93,6 +93,17 @@ TR_MAX_CHARS = 253
 # has to fit. 48 bits per attempt is ample for a name that lives for one launch,
 # and 12 characters instead of 32 is 20 more characters of headroom (F-867).
 TOKEN_CHARS = 12
+# The priority class a scheduled task's CHILD is given, and the one home for it:
+# both launchers that run under ``schtasks`` ask for it (F-932). Measured, not
+# documented: a task created without ``<Priority>`` runs at priority 7, and on
+# Windows 11 10.0.26200 (2026-09-24) the process it started read
+# ``PriorityClass = BelowNormal``. Under CPU load that starved the F-867
+# scheduler rung past its 20 s pid deadline, so the backend fell to ``plain``
+# and was left inside the client's job. ``/Create`` takes no priority switch
+# (only ``/XML`` does, and that moves the 253-char ``/TR`` budget), so the
+# launched child asks for Normal itself; the short-lived launcher does not.
+TASK_CHILD_PRIORITY_CLASS = 0x00000020  # NORMAL_PRIORITY_CLASS
+TASK_CHILD_PRIORITY_NAME = "Normal"
 # How far apart two readings of one process's start time may be and still be
 # the same process. psutil reports it deterministically, so this only absorbs
 # float representation — it is NOT slack for "probably the same pid".
@@ -273,6 +284,8 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
     this file, and the file carries the args. That is what makes a pathological
     profile path or a proxy's worth of switches cost ``/TR`` nothing at all.
     ``-PassThru`` gives us the pid, which is the only thing we need back.
+    Chrome is raised to ``TASK_CHILD_PRIORITY_NAME`` before that pid is
+    published (F-932): a task's processes start at BelowNormal otherwise.
 
     **Two quoting layers, both load-bearing.** ``subprocess.list2cmdline`` builds
     the Windows command line by the MS C-runtime rules Chrome's own argv parser
@@ -289,6 +302,7 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
         "$ErrorActionPreference = 'Stop'\n"
         f"$p = Start-Process -FilePath {_ps_quote(executable)} "
         f"-ArgumentList {_ps_quote(command_line)} -PassThru\n"
+        f"$p.PriorityClass = {_ps_quote(TASK_CHILD_PRIORITY_NAME)}\n"
         f"Set-Content -LiteralPath {_ps_quote(str(pid_file))} -Value $p.Id\n"
     )
 

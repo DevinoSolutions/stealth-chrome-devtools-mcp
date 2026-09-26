@@ -182,8 +182,12 @@ try:
             # spawner could not read its own, which is what Popen does anyway.
             cwd=spec["cwd"],
             close_fds=True,
+            # F-932: a scheduled task runs at BelowNormal and its children
+            # inherit that, so ask for Normal explicitly.
             creationflags=(
-                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.NORMAL_PRIORITY_CLASS
             ),
         )
     finally:
