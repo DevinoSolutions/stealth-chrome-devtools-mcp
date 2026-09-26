@@ -285,7 +285,12 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
     profile path or a proxy's worth of switches cost ``/TR`` nothing at all.
     ``-PassThru`` gives us the pid, which is the only thing we need back.
     Chrome is raised to ``TASK_CHILD_PRIORITY_NAME`` before that pid is
-    published (F-932): a task's processes start at BelowNormal otherwise.
+    published (F-932): a task's processes start at BelowNormal otherwise. The
+    raise is best-effort and may never cost the pid: under
+    ``$ErrorActionPreference = 'Stop'`` a setter on a Chrome that has already
+    exited (one that handed its arguments to a running browser) would end the
+    script before ``Set-Content`` and turn a reportable launch into a 20 s
+    timeout.
 
     **Two quoting layers, both load-bearing.** ``subprocess.list2cmdline`` builds
     the Windows command line by the MS C-runtime rules Chrome's own argv parser
@@ -302,7 +307,8 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
         "$ErrorActionPreference = 'Stop'\n"
         f"$p = Start-Process -FilePath {_ps_quote(executable)} "
         f"-ArgumentList {_ps_quote(command_line)} -PassThru\n"
-        f"$p.PriorityClass = {_ps_quote(TASK_CHILD_PRIORITY_NAME)}\n"
+        "try { $p.PriorityClass = "
+        f"{_ps_quote(TASK_CHILD_PRIORITY_NAME)} }} catch {{}}\n"
         f"Set-Content -LiteralPath {_ps_quote(str(pid_file))} -Value $p.Id\n"
     )
 

@@ -34,7 +34,9 @@ left inside the MCP client's job, and the backend that did start competed at
 a lower priority than everything the operator was running. The child now asks
 for Normal itself: `backend_launch`'s launcher creates the backend with
 `NORMAL_PRIORITY_CLASS`, and the delegated launcher sets
-`$p.PriorityClass = 'Normal'` on Chrome before it publishes the pid.
+`$p.PriorityClass = 'Normal'` on Chrome before it publishes the pid. That
+raise is best-effort, so a Chrome that has already exited cannot cost the
+launch its pid.
 `desktop_launch.TASK_CHILD_PRIORITY_CLASS` / `TASK_CHILD_PRIORITY_NAME` are
 the one home for the value. `/Create` is unchanged — only `/XML` takes a
 priority, and that would move the 253-character `/TR` budget — so the

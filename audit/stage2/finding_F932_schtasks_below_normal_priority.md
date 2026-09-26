@@ -63,7 +63,12 @@ The CHILD asks for Normal itself. The task definition is unchanged.
 - **`desktop_launch._launcher_script`** now sets
   `$p.PriorityClass = 'Normal'` right after `Start-Process … -PassThru` and
   before `Set-Content` publishes the pid. Whoever attaches to that pid therefore
-  attaches to a Normal-priority Chrome.
+  attaches to a Normal-priority Chrome. The raise is wrapped in
+  `try { … } catch {}`: the script runs under `$ErrorActionPreference = 'Stop'`,
+  and a Chrome that exits at once (it handed its arguments to an already running
+  browser) would make the setter throw before `Set-Content`. That would turn a
+  reportable launch into a 20 s pid timeout, so the raise is best-effort and can
+  never cost the pid.
 - **One home for the value:** `desktop_launch.TASK_CHILD_PRIORITY_CLASS`
   (`0x20`) and `TASK_CHILD_PRIORITY_NAME` (`"Normal"`), beside the rest of the
   `schtasks` seam. The backend launcher is a string evaluated in another
@@ -89,7 +94,8 @@ what runs under `schtasks`; a fake's argv would not show the priority. Before th
 fix it ran RED: 2 failed, 3 passed. It pins:
 
 - The constant's value, and that it equals the OS value (Windows only).
-- The PowerShell raise line sits after `-PassThru` and before `Set-Content`.
+- The PowerShell raise line is best-effort (`try { … } catch {}`) and sits after
+  `-PassThru` and before `Set-Content`.
 - `NORMAL_PRIORITY_CLASS` is inside the backend launcher's `creationflags` (an
   AST read), next to the two detach flags that were already there.
 - The backend launcher still imports only stdlib modules.
@@ -100,8 +106,8 @@ After the fix, that file plus `tests/test_backend_launch.py` and
 **The PowerShell half, measured live (2026-09-26).** Windows PowerShell 5.1
 was started at BelowNormal with `start /belownormal`, which reproduces the
 inheritance condition a task creates. It ran two `Start-Process … -PassThru`
-children and raised only the second with the shipped
-`$p.PriorityClass = 'Normal'` line:
+children and raised only the second with the `$p.PriorityClass = 'Normal'`
+setter that the shipped line wraps in `try { … } catch {}`:
 
 ```
 {"launcher": "BelowNormal", "child_unraised": "BelowNormal", "child_raised": "Normal"}

@@ -43,7 +43,7 @@ def test_the_delegated_browser_launcher_raises_its_child_to_normal() -> None:
     lines = script.splitlines()
     start = next(i for i, line in enumerate(lines) if "-PassThru" in line)
     record = next(i for i, line in enumerate(lines) if line.startswith("Set-Content"))
-    raise_line = "$p.PriorityClass = 'Normal'"
+    raise_line = "try { $p.PriorityClass = 'Normal' } catch {}"
     assert raise_line in lines, script
     # After ``$p`` exists and before the pid is published, so the process the
     # caller attaches to is already at Normal when it learns the pid.
