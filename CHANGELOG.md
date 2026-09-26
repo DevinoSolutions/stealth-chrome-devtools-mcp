@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.15
 
 ### Added — agent onboarding: one sentence installs and registers the server
 
