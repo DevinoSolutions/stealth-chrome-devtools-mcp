@@ -369,7 +369,7 @@ spawn_browser(headless=True, browser_args=["--enable-automation"])
 | `get_cookies` / `set_cookie` | Manage browser cookies |
 
 **94 tools** across 11 sections — the count is derived from the live tool registry,
-never hand-maintained. [See the full navigation map →](CLAUDE.md).
+never hand-maintained. [See the full navigation map →](NAVMAP.md).
 
 That is what the server **serves**, which is not the same as what the release
 gate **proves**. At the release SHA in the evidence ledger, 3 of those 94 are
@@ -591,7 +591,8 @@ Unit tests run on pre-push.
 
 ## Documentation
 
-- **[CLAUDE.md](CLAUDE.md)** — navigation map of the source tree + glossary + conventions
+- **[CLAUDE.md](CLAUDE.md)** — conventions + glossary; the navigation map of the source tree is
+  **[NAVMAP.md](NAVMAP.md)**
 - **[DESIGN.md](DESIGN.md)** — architecture invariants and the *why* behind them
 - **[RUNBOOK.md](RUNBOOK.md)** — operating the backend: verbs, logs, recovery, MCP smoke path
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — clone → install → test, the quality gate, conventions

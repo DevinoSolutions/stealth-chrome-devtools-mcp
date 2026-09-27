@@ -2,7 +2,7 @@
 
 Audience: the maintainer and any agent placing a change. This document explains the
 **invariants and rationale** behind the architecture — the things a reader must not
-break without understanding *why they exist*. It is the *why*; `CLAUDE.md` is the
+break without understanding *why they exist*. It is the *why*; `CLAUDE.md` + `NAVMAP.md` are the
 *where* (the navigation map + glossary), `RUNBOOK.md` is the *how to operate*, and
 `CONTRIBUTING.md` is the *how to change*. Terms in **bold-italic** like ***backend***
 are pinned in the glossary in [`CLAUDE.md`](./CLAUDE.md#glossary); this document uses
