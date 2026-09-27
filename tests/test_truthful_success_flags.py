@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
+import socket
 
 import pytest
 
@@ -115,6 +117,8 @@ async def test_navigate_to_an_unresolvable_host_raises_instead_of_reporting_succ
     assert UNRESOLVABLE_URL in message, message
     assert "chrome-error://" in message, message
     assert "failed" in message, message
+    # F-933: Chrome's own reason, whichever one this host's resolver produced.
+    assert re.search(r"Chrome's reason: net::ERR_[A-Z_]+\.", message), message
 
     # No wedge: the SAME instance still navigates and still runs script.
     result = await navigate_and_settle(instance, f"{fixture_app_server}/index.html")
@@ -123,6 +127,32 @@ async def test_navigate_to_an_unresolvable_host_raises_instead_of_reporting_succ
         await eval_js(instance, "document.getElementById('sentinel').textContent")
         == "fixture-index-page"
     )
+
+
+async def test_a_refused_connection_is_named_by_chromes_own_reason(instance):
+    """F-933: the refusal quotes the ``errorText`` Chrome answered
+    ``Page.navigate`` with, rather than listing three causes it might have been.
+
+    A refused connection is the shape the Windows fleet flake is suspected of
+    (a fixture server whose accept backlog overflowed), and the message those
+    runs carried could not confirm or rule it out. The port is BOUND and never
+    listening, and stays bound for the whole navigation, so nothing else can
+    take it and nothing accepts on it: a refusal by construction.
+    """
+    navigate = get_fn("navigate")
+
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{held.getsockname()[1]}/"
+        with pytest.raises(ToolError) as raised:
+            await _bounded(
+                navigate(instance_id=instance, url=url, timeout=NAV_TIMEOUT_MS),
+                "navigate to a port nothing accepts on",
+            )
+
+    message = str(raised.value)
+    assert url in message, message
+    assert "Chrome's reason: net::ERR_CONNECTION_REFUSED." in message, message
 
 
 async def test_a_loaded_page_is_a_success_even_when_the_server_said_no(

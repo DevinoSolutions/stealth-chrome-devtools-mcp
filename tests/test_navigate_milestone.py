@@ -28,7 +28,7 @@ import pytest
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
-from fakes import TARGET_SWAPPED_ERROR, FakeTab
+from fakes import CHROME_ERROR_PAGE, TARGET_SWAPPED_ERROR, FakeTab
 from stealth_chrome_devtools_mcp.embedded import navigation_milestone
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -457,6 +457,59 @@ async def test_an_abort_whose_page_took_our_place_is_followed_not_called_a_downl
     result = await manager.navigate(instance_id="iid-1", url=URL, timeout=4000)
 
     assert result == {"url": LANDING, "title": "Landing", "success": True}
+
+
+#: Chrome's own reason for a connection nothing accepted. Typed here, never read
+#: from the product, so the pins below measure what the product carries against
+#: what Chrome says.
+REFUSED = "net::ERR_CONNECTION_REFUSED"
+
+
+async def test_chromes_own_reason_for_an_error_page_rides_in_the_answer(
+    monkeypatch, manager
+):
+    """F-933: Chrome answers ``Page.navigate`` for a navigation it cannot perform
+    with its own reason, then commits its error page under OUR loader and fires
+    ``load`` for it — the ordinary lifecycle. The reason was compared with
+    ``net::ERR_ABORTED`` and dropped, so the refusal F-802 raises over that page
+    could only list causes nobody had observed (release-gate runs 36268702476
+    and 36280896091, ``integration (Windows/X64)``). RED at 13bfc45: the answer
+    had no ``error_text``."""
+    tab = FakeTab(lifecycle="after", navigate_error=REFUSED)
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=2000)
+
+    assert result == {
+        "url": CHROME_ERROR_PAGE,
+        "title": "",
+        "success": True,
+        "error_text": REFUSED,
+    }
+
+
+async def test_an_ordinary_landing_answers_with_the_three_keys_it_always_had(
+    monkeypatch, manager
+):
+    """The truthful half: only a navigation Chrome gave a reason for carries one,
+    so a page that loaded answers exactly as it did before F-933."""
+    tab = FakeTab(lifecycle="after", title_at_load="Alpha")
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(instance_id="iid-1", url=URL, timeout=2000)
+
+    assert result == {"url": URL, "title": "Alpha", "success": True}
+
+
+async def test_a_timeout_after_chrome_gave_a_reason_names_it(monkeypatch, manager):
+    """The other failure a caller of ``navigate`` can get: a budget that ran out
+    after Chrome had already answered with its reason. RED at 13bfc45: the
+    message said only ``accepted, never committed``."""
+    tab = FakeTab(lifecycle="never", navigate_error=REFUSED)
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(ToolError, match=rf"Chrome's reason: {REFUSED}\)"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
 
 
 class _LateAbortTab(FakeTab):

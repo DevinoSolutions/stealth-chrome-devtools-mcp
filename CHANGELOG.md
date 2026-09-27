@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a failed `navigate` names Chrome's own reason instead of three guesses (F-933)
+
+When Chrome could not perform a navigation, `navigate` raised
+`Chrome loaded an error page (chrome-error://chromewebdata/). The host may not
+resolve, the connection may have been refused, or the TLS handshake may have
+failed.` Chrome had already said which: `Page.navigate` answers with an
+`errorText` such as `net::ERR_CONNECTION_REFUSED`, and
+`navigation_milestone.navigate` received it and only compared it with
+`net::ERR_ABORTED`. Two Windows integration gates (runs 36268702476 and
+36280896091) failed this way in `test_e2e_fleet.py`, and their messages could
+not tell a refused connection from a DNS miss. The refusal now ends
+`Chrome's reason: net::ERR_CONNECTION_REFUSED.`, and a navigate timeout after
+Chrome gave a reason carries it too. `Progress.error_text` holds the reason and
+`navigation_milestone.answer` builds `BrowserManager.navigate`'s payload, which
+adds `error_text` only when Chrome gave one; an ordinary landing still answers
+exactly `{url, title, success}`. `net::ERR_ABORTED` is excluded: our document
+never commits under it, and the page the tab shows afterwards is someone
+else's. `go_back`, `go_forward`, `reload_page` and `new_tab` never see
+`Page.navigate`'s answer, so they keep the list of likely causes. Pinned
+hermetically in `tests/test_navigate_milestone.py` and
+`tests/test_tool_errors.py`, and against real Chrome in
+`tests/test_truthful_success_flags.py`: a bound port that never listens gives
+`net::ERR_CONNECTION_REFUSED`, and the `.invalid` host gives a `net::ERR_*`
+code.
+
 ## 2.1.15
 
 ### Added — agent onboarding: one sentence installs and registers the server

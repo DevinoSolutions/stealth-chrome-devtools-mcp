@@ -328,6 +328,25 @@ class TestTruthfulSuccessGuards:
                 srv, "navigate", instance_id="i1", url="https://nope.invalid/"
             )
 
+    async def test_navigate_error_quotes_chromes_own_reason(
+        self, call_tool, patched_server
+    ):
+        # F-933: when Chrome said WHY, the refusal says it too, instead of the
+        # three guesses — two CI failures carried only the guesses, and nothing
+        # in them could tell a refused connection from a DNS miss.
+        payload = {**ERROR_PAGE_RESULT, "error_text": "net::ERR_CONNECTION_REFUSED"}
+        srv = patched_server(
+            browser_manager=FakeBrowserManager(navigate_result=dict(payload))
+        )
+        with pytest.raises(ToolError) as raised:
+            await call_tool(
+                srv, "navigate", instance_id="i1", url="http://127.0.0.1:9/"
+            )
+        message = str(raised.value)
+        assert "Chrome's reason: net::ERR_CONNECTION_REFUSED." in message, message
+        assert "chrome-error://chromewebdata/" in message, message
+        assert "may not resolve" not in message, message
+
     @pytest.mark.parametrize(
         "final_url",
         [
