@@ -4,7 +4,7 @@ The single failure mode of the M14 docs is *docs that lie about the tree*. This
 harness is the guard: it fails loudly if a root doc names a module, env var, CLI
 verb, or load-bearing symbol the tree does not have, if a tombstoned module comes
 back, or if the documented tool count drifts from the live registry. It keeps
-DESIGN / CLAUDE / RUNBOOK / CONTRIBUTING + README honest against the code, in CI.
+DESIGN / CLAUDE / NAVMAP / RUNBOOK / CONTRIBUTING + README honest against the code, in CI.
 
 It deliberately does NOT assert the F-403 "uv run fails on the &-path" claim: that
 is true only in a checkout whose path contains spaces/`&` (the dev checkout), not on
@@ -26,7 +26,14 @@ from stealth_chrome_devtools_mcp.settings import Settings
 
 REPO = Path(__file__).resolve().parent.parent
 PKG = REPO / "src" / "stealth_chrome_devtools_mcp"
-DOCS = ["README.md", "DESIGN.md", "CLAUDE.md", "RUNBOOK.md", "CONTRIBUTING.md"]
+DOCS = [
+    "README.md",
+    "DESIGN.md",
+    "CLAUDE.md",
+    "NAVMAP.md",
+    "RUNBOOK.md",
+    "CONTRIBUTING.md",
+]
 
 
 def _doc_text() -> str:
@@ -120,7 +127,7 @@ class TestDocumentedCliVerbs:
 
 
 class TestNavMapModules:
-    # Every embedded module the CLAUDE.md nav map points at must exist.
+    # Every embedded module the nav map (NAVMAP.md) points at must exist.
     LIVE_EMBEDDED: ClassVar[list[str]] = [
         "browser_manager",
         "singleton",
