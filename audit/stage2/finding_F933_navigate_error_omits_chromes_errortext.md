@@ -92,9 +92,15 @@ exclusion.
 - `tests/test_tool_errors.py`: the refusal quotes the reason and drops the
   guesses (RED).
 - `tests/test_truthful_success_flags.py`, real Chrome: a bound, never-listening
-  loopback port gives exactly `net::ERR_CONNECTION_REFUSED` (RED), and the
-  `.invalid` host's refusal now carries some `net::ERR_*` code (RED; the
-  resolver decides which one).
+  loopback port gives exactly `HELD_PORT_REASON` (RED). The `.invalid` host's
+  refusal now carries some `net::ERR_*` code (RED; the resolver decides which
+  one). `HELD_PORT_REASON` is `net::ERR_CONNECTION_REFUSED` on Windows and
+  Linux and `net::ERR_CONNECTION_TIMED_OUT` on macOS. macOS drops a SYN to a
+  bound port that is not listening instead of resetting it. PR #172's first
+  gate run (36339713109) measured it: its macOS cell failed this node on the
+  first expectation with `net::ERR_CONNECTION_TIMED_OUT`, while Linux passed
+  it in 1.6 s. The product quoted Chrome's code correctly on all three; only
+  the test's premise was Windows-shaped.
 - `tests/fakes.py`: `FakeTab` now models what Chrome does with any `errorText`
   other than the abort. `location.href` reads `chrome-error://chromewebdata/`
   while `target.url` keeps the requested URL.

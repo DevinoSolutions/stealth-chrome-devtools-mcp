@@ -32,6 +32,7 @@ import asyncio
 import contextlib
 import re
 import socket
+import sys
 
 import pytest
 
@@ -57,6 +58,17 @@ NAV_TIMEOUT_MS = 20_000
 # is a DNS failure by specification rather than by luck.
 UNRESOLVABLE_URL = "https://this-host-does-not-exist.invalid/"
 DATA_URL = "data:text/html,<h1 id='t'>truthful-data-url</h1>"
+
+# What Chrome says about a loopback port that is bound and never listening.
+# Windows and Linux answer the SYN with a reset, so the connect is refused;
+# macOS drops it, and Chrome's connect times out instead. Measured on all three:
+# Windows 11 locally, and CI run 36339713109's integration Linux/X64 and
+# macOS/ARM64 cells.
+HELD_PORT_REASON = (
+    "net::ERR_CONNECTION_TIMED_OUT"
+    if sys.platform == "darwin"
+    else "net::ERR_CONNECTION_REFUSED"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -129,7 +141,7 @@ async def test_navigate_to_an_unresolvable_host_raises_instead_of_reporting_succ
     )
 
 
-async def test_a_refused_connection_is_named_by_chromes_own_reason(instance):
+async def test_a_port_nothing_accepts_on_is_named_by_chromes_own_reason(instance):
     """F-933: the refusal quotes the ``errorText`` Chrome answered
     ``Page.navigate`` with, rather than listing three causes it might have been.
 
@@ -137,7 +149,8 @@ async def test_a_refused_connection_is_named_by_chromes_own_reason(instance):
     (a fixture server whose accept backlog overflowed), and the message those
     runs carried could not confirm or rule it out. The port is BOUND and never
     listening, and stays bound for the whole navigation, so nothing else can
-    take it and nothing accepts on it: a refusal by construction.
+    take it and nothing accepts on it. Which code that earns is the platform's
+    answer to the SYN, so the node expects :data:`HELD_PORT_REASON`.
     """
     navigate = get_fn("navigate")
 
@@ -152,7 +165,7 @@ async def test_a_refused_connection_is_named_by_chromes_own_reason(instance):
 
     message = str(raised.value)
     assert url in message, message
-    assert "Chrome's reason: net::ERR_CONNECTION_REFUSED." in message, message
+    assert f"Chrome's reason: {HELD_PORT_REASON}." in message, message
 
 
 async def test_a_loaded_page_is_a_success_even_when_the_server_said_no(

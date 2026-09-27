@@ -24,8 +24,9 @@ else's. `go_back`, `go_forward`, `reload_page` and `new_tab` never see
 hermetically in `tests/test_navigate_milestone.py` and
 `tests/test_tool_errors.py`, and against real Chrome in
 `tests/test_truthful_success_flags.py`: a bound port that never listens gives
-`net::ERR_CONNECTION_REFUSED`, and the `.invalid` host gives a `net::ERR_*`
-code.
+`net::ERR_CONNECTION_REFUSED` on Windows and Linux and
+`net::ERR_CONNECTION_TIMED_OUT` on macOS, whose kernel drops the SYN instead of
+refusing it. The `.invalid` host gives a `net::ERR_*` code.
 
 ## 2.1.15
 
