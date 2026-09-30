@@ -228,7 +228,8 @@ cdp_transport.install()
 # this is a separate seam from the connection's.
 element_box.install()
 
-browser_manager = BrowserManager()
 network_interceptor = NetworkInterceptor()
+# F-935: a tab the manager starts driving after spawn is captured like the first.
+browser_manager = BrowserManager(tab_armers=(network_interceptor.arm_tab,))
 dom_handler = DOMHandler()
 cdp_function_executor = CDPFunctionExecutor()

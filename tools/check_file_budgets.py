@@ -134,10 +134,15 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # collapsing `start_idle_reaper`'s and `stop_idle_reaper`'s `Returns: None`
     # blocks, which restated `-> None` twice over (the plan_F856 mechanism).
     # Cap == actual.
+    # F-935 +27: every tab the manager starts driving after spawn (recovery,
+    # recycle, retry, switch_tab, re-point after close) is armed like the spawn
+    # tab. `_arm_tracked_tab` + the `tab_armers=` seam (network capture lives
+    # outside this class) + one call per site; spawn's own header send folded
+    # into the shared `_apply_tab_overrides`, so there is one way, not two.
     "embedded/browser_manager.py": (
-        1447,
+        1474,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888 + F-834b - F-910 - F-919",
+        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

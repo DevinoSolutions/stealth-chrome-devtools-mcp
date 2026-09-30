@@ -5,7 +5,7 @@ import contextlib
 import json
 import time
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,7 +63,9 @@ class BrowserManager:
     CLOSE_KILL_TIMEOUT: float = get_settings().close_kill_timeout
     _KILL_RETRIES = 3
 
-    def __init__(self):
+    def __init__(
+        self, tab_armers: Sequence[Callable[[Tab, str], Awaitable[None]]] = ()
+    ):
         self._instances: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._spawn_diagnostics: dict[str, dict[str, Any]] = {}
@@ -80,6 +82,24 @@ class BrowserManager:
         # garbage-collect them mid-run; the done-callback discards each entry and
         # surfaces any failure instead of letting it vanish (RUF006).
         self._background_tasks: set[asyncio.Task] = set()
+        # F-935: ``armer(tab, instance_id)`` for per-tab state kept OUTSIDE this
+        # class (network capture), run on every tab tracked after spawn.
+        self._tab_armers = tuple(tab_armers)
+
+    async def _arm_tracked_tab(self, instance_id: str, tab: Tab) -> None:
+        """Give a newly tracked tab what the spawn tab got (F-935): its per-target
+        overrides and every armer. Logged, never raised — the tab works, and the
+        navigation it serves is the caller's answer."""
+        data = await self.get_instance(instance_id)
+        try:
+            if data and data.get("options") is not None:
+                await self._apply_tab_overrides(tab, data["options"])
+            for armer in self._tab_armers:
+                await armer(tab, instance_id)
+        except Exception as error:
+            debug_logger.log_warning(
+                "browser_manager", "_arm_tracked_tab", f"{instance_id}: {error!r}"
+            )
 
     def _run_in_background(
         self, coro: Coroutine[object, object, object], label: str
@@ -535,18 +555,21 @@ class BrowserManager:
             )
 
         await reconcile_launched_browser_version(tab, browser_executable)
+        applied_timezone_id = await self._apply_tab_overrides(tab, options)
+        window_metrics = await window_sizing.apply_and_measure(tab, options)
+        return applied_timezone_id, window_metrics
 
+    async def _apply_tab_overrides(
+        self, tab: Tab, options: BrowserOptions
+    ) -> str | None:
+        """The spawn's per-TARGET overrides (headers, timezone), for the spawn tab
+        and every tab tracked after it (F-935); the applied IANA id or None."""
         if options.extra_headers:
             headers = uc.cdp.network.Headers(options.extra_headers)
             await tab.send(uc.cdp.network.set_extra_http_headers(headers=headers))
-
-        window_metrics = await window_sizing.apply_and_measure(tab, options)
-
-        applied_timezone_id = await self._apply_timezone_override(
-            tab=tab,
-            timezone_id=options.timezone_id,
+        return await self._apply_timezone_override(
+            tab=tab, timezone_id=options.timezone_id
         )
-        return applied_timezone_id, window_metrics
 
     @staticmethod
     def _warn_spawn_cleanup(
@@ -1017,6 +1040,7 @@ class BrowserManager:
                 "its last tab was closed); spawn a new instance or retry."
             ) from e
         await new_tab
+        await self._arm_tracked_tab(instance_id, new_tab)
 
         if close_existing and previous_tab:
             previous_target_id = self._get_tab_target_id(previous_tab)
@@ -1249,6 +1273,7 @@ class BrowserManager:
         try:
             target_id = target_tab.target.target_id
             await browser.connection.send(uc.cdp.target.activate_target(target_id))
+            await self._arm_tracked_tab(instance_id, target_tab)
             async with self._lock:
                 if instance_id in self._instances:
                     self._instances[instance_id]["tab"] = target_tab
@@ -1285,6 +1310,8 @@ class BrowserManager:
             (t for t in browser.tabs if self._get_tab_target_id(t) != closed_id),
             None,
         )
+        if survivor is not None:
+            await self._arm_tracked_tab(instance_id, survivor)
         async with self._lock:
             if instance_id in self._instances:
                 self._instances[instance_id]["tab"] = survivor

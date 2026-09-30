@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a tab the tools move onto is captured like the first one (F-935)
+
+Network capture, `extra_headers` and `timezone_id` were applied to the tab
+`spawn_browser` launched with and to no other tab. When the tools moved onto a
+new tab, the page loaded and `navigate` answered success, but
+`list_network_requests` stayed empty for the rest of the instance's life. The
+spawn's headers and timezone were gone too. Five paths move the tools onto a
+new tab: `navigate`'s stale-tab recovery, its 25-navigation recycle, its retry
+after a failed attempt, `switch_tab`, and the re-point after `close_tab`. The
+Windows integration gate went red this way on 3 of the 6 runs before 2.1.16
+shipped, in three different tests. Each found its first request "never
+captured" right after the page had loaded.
+`BrowserManager._arm_tracked_tab` is now the one place a newly tracked tab is
+prepared. It re-applies the spawn's headers and timezone and runs
+`NetworkInterceptor.arm_tab`, which repeats the instance's own
+`setup_interception`, including `block_resources`. It registers the handlers
+once per target. The handler tasks are now held by a strong reference.
+Pinned against real Chrome in `tests/test_e2e_replaced_tab_capture.py`, which
+drives recycle, a failed tab health check and `switch_tab`, and hermetically in
+`tests/test_network_interceptor.py`.
+
 ## 2.1.16
 
 ### Fixed — a failed `navigate` names Chrome's own reason instead of three guesses (F-933)

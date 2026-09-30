@@ -7,6 +7,7 @@ filter logic that the MCP network tools call. These are the filters an agent
 relies on to find the one request that matters among thousands.
 """
 
+import asyncio
 import base64
 import json
 
@@ -760,3 +761,57 @@ class TestCookieSameSite:
             same_site="Lax",
         )
         assert tab.cdp_frames[0]["params"]["sameSite"] == "Lax"
+
+
+class TestArmingANewTrackedTab:
+    """F-935: capture was per TAB, so a tab the browser manager started driving
+    after spawn loaded its pages with nobody listening. ``arm_tab`` arms it the
+    way the instance's first tab was armed — and never twice."""
+
+    @staticmethod
+    def _network_handlers(tab):
+        kinds = (uc.cdp.network.RequestWillBeSent, uc.cdp.network.ResponseReceived)
+        return [evt for evt, _ in tab.handlers if evt in kinds]
+
+    async def test_arming_the_same_target_twice_registers_its_handlers_once(self):
+        ni = NetworkInterceptor()
+        tab = FakeTab(target_id="T-first")
+        await ni.setup_interception(tab, "i1")
+        await ni.arm_tab(tab, "i1")
+        assert len(self._network_handlers(tab)) == 2
+
+    async def test_a_second_tab_of_an_armed_instance_is_captured(self):
+        ni = NetworkInterceptor()
+        await ni.setup_interception(FakeTab(target_id="T-first"), "i1", ["*.png"])
+        second = FakeTab(target_id="T-second")
+
+        await ni.arm_tab(second, "i1")
+        second._deliver(_cdp_request_event("R-2", "https://fake.test/second"))
+        await asyncio.gather(*ni._handler_tasks)
+
+        assert [r.url for r in await ni.list_requests("i1")] == [
+            "https://fake.test/second"
+        ]
+        # The spawn's block_resources came across with the handlers.
+        assert "set_blocked_ur_ls" in second.send_calls
+
+    async def test_a_handler_task_is_held_until_it_finishes(self):
+        ni = NetworkInterceptor()
+        tab = FakeTab(target_id="T-first")
+        await ni.setup_interception(tab, "i1")
+        tab._deliver(_cdp_request_event("R-1", "https://fake.test/"))
+        assert len(ni._handler_tasks) == 1
+        await asyncio.gather(*ni._handler_tasks)
+        assert not ni._handler_tasks
+
+    async def test_an_instance_never_armed_or_already_closed_is_left_alone(self):
+        ni = NetworkInterceptor()
+        never = FakeTab(target_id="T-never")
+        await ni.arm_tab(never, "i-unknown")
+        assert self._network_handlers(never) == []
+
+        await ni.setup_interception(FakeTab(target_id="T-first"), "i1")
+        await ni.clear_instance_data("i1")
+        after_close = FakeTab(target_id="T-late")
+        await ni.arm_tab(after_close, "i1")
+        assert self._network_handlers(after_close) == []
