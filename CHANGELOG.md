@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 2.1.18
+
+2.1.17 was tagged but never reached PyPI: its publish gate went red on the
+defect fixed below. Its changes (F-935) ship in this release.
 
 ### Fixed — a spawned browser opens on `about:blank`, so its first navigation cannot be lost (F-936)
 
