@@ -7,7 +7,7 @@ It is also Medium for CI: the Windows integration cell went red on 3 of the 6
 runs before 2.1.16 shipped.
 **Files:** `embedded/browser_manager.py`, `embedded/network_interceptor.py`,
 `embedded/tool_runtime.py` (the fix); `tools/check_file_budgets.py` (the
-`browser_manager.py` row moves to its honest actual, 1447 → 1477, `+ F-935`);
+`browser_manager.py` row moves to its honest actual, 1447 → 1474, `+ F-935`);
 `tests/test_e2e_replaced_tab_capture.py` and `tests/test_network_interceptor.py`
 (the pins).
 
@@ -96,8 +96,10 @@ raises: the tab works and the navigation it serves is the caller's answer, so a
 failure is logged instead. `_replace_main_tab` calls it, which covers recovery,
 recycle and retry. So do `switch_to_tab` and `_repoint_after_close`.
 
-`tool_runtime` builds both singletons and registers
-`network_interceptor.arm_tab`. `arm_tab` repeats `setup_interception` with the
+`tool_runtime` builds the interceptor first and hands
+`network_interceptor.arm_tab` to `BrowserManager(tab_armers=...)`. It is a
+constructor argument, not a module-body call, because F-904's rule forbids the
+latter. `arm_tab` repeats `setup_interception` with the
 `block_resources` the instance was armed with. It does nothing for an instance
 that was never armed or was cleared at close. `setup_interception` now records
 which targets already carry the handlers, so arming a target twice (for example

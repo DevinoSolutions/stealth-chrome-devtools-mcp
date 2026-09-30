@@ -5,7 +5,7 @@ import contextlib
 import json
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,7 +63,9 @@ class BrowserManager:
     CLOSE_KILL_TIMEOUT: float = get_settings().close_kill_timeout
     _KILL_RETRIES = 3
 
-    def __init__(self):
+    def __init__(
+        self, tab_armers: Sequence[Callable[[Tab, str], Awaitable[None]]] = ()
+    ):
         self._instances: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._spawn_diagnostics: dict[str, dict[str, Any]] = {}
@@ -80,14 +82,9 @@ class BrowserManager:
         # garbage-collect them mid-run; the done-callback discards each entry and
         # surfaces any failure instead of letting it vanish (RUF006).
         self._background_tasks: set[asyncio.Task] = set()
-        # F-935: per-tab state kept OUTSIDE this class (network capture); see
-        # ``add_tab_armer``, called once by ``tool_runtime``.
-        self._tab_armers: list[Callable[[Tab, str], Awaitable[None]]] = []
-
-    def add_tab_armer(self, armer: Callable[[Tab, str], Awaitable[None]]) -> None:
-        """Run ``armer(tab, instance_id)`` on every tab tracked after spawn (F-935)."""
-        if armer not in self._tab_armers:
-            self._tab_armers.append(armer)
+        # F-935: ``armer(tab, instance_id)`` for per-tab state kept OUTSIDE this
+        # class (network capture), run on every tab tracked after spawn.
+        self._tab_armers = tuple(tab_armers)
 
     async def _arm_tracked_tab(self, instance_id: str, tab: Tab) -> None:
         """Give a newly tracked tab what the spawn tab got (F-935): its per-target
