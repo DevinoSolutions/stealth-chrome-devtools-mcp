@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.16
 
 ### Fixed — a failed `navigate` names Chrome's own reason instead of three guesses (F-933)
 
