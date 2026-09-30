@@ -89,9 +89,12 @@ larger fleet raises the demand the pin checks.
 - **RED at 13bfc45.** The run used main's harness in an out-of-tree
   `git archive` export, with only the new test file copied in. Result:
   `connection 6 of the fleet's 36 was not queued: ConnectionRefusedError(10061, …)`
-  in 8.71 s. On Linux the RED would be a later connect hanging until its
-  budget, because Linux drops a SYN that arrives while the accept queue is
-  full. That is reasoned from the kernel's behaviour, not measured here.
+  in 8.71 s. On Linux, RED looks different: the kernel drops a SYN that
+  arrives while the accept queue is full, so the connect hangs until its
+  budget. I measured this on WSL2's Linux 6.18 (`net.core.somaxconn` 4096)
+  with the same stdlib server and 3 s budget. At backlog 5, six connects queue
+  and the 7th fails with `TimeoutError` at 3.0 s. At backlog 128, all 36
+  queue. macOS was not measured.
 - **GREEN with the fix:** `31 passed` over the whole of
   `test_fixture_dynamic_routes.py`, which is the 30 existing nodes plus the
   pin.
