@@ -1,11 +1,16 @@
 # F-936 — capture misses the first requests on a freshly spawned tab, after F-935
 
 **Severity:** Medium for CI: it made every attempt of the v2.1.17 publish gate
-red. It is Medium for users too if the gate is telling the truth, because an
-instance that misses capture stays silent. Cause **not yet known**. This change
-is the instrument that should find it.
-**Files:** `tests/e2e_helpers.py` (the spies and `capture_miss_report`), plus the
-five assertion sites that missed on the gate:
+red. It is Medium for users too: a caller's first navigation after spawn could
+be lost to Chrome's own start page, and `navigate` still answered. **Cause
+found (§5) and fixed (§6):** the spawn now opens on `about:blank`.
+**Files:** `embedded/platform_utils.py` (`START_PAGE_URL`, `append_start_page`)
+and `embedded/browser_manager.py` (its one call in `_resolve_launch_args`), the
+fix; `tools/check_file_budgets.py` (the `browser_manager.py` row, 1474 → 1476,
+`+ F-936`); `tests/test_e2e_spawn_start_page.py`, `tests/test_platform_utils.py`
+and `tests/test_bug_prone_tools.py`, the pins. `tests/e2e_helpers.py` (the spies
+and `capture_miss_report`), the instrument, plus the five assertion sites that
+missed on the gate:
 - `tests/test_e2e_data_tools.py`
 - `tests/test_e2e_extra_headers.py`
 - `tests/test_e2e_network_capture_shape.py`
@@ -92,7 +97,62 @@ Each outcome points at a layer:
   `handlers {'ResponseReceived': 1}`. That names the missing handler, which is
   the layer the mutation removed.
 
-## 5. Next
+## 5. What the report named
 
-Read the report from the next red gate. Then write the RED pin and the fix for
-whichever layer it names, under this finding number.
+PR #177's gate went red once more, on Windows, in
+`test_e2e_replaced_tab_capture[failed-health-check]`, on the spawn tab's first
+request. The report read:
+- the handler table was `{'RequestWillBeSent': 1, 'ResponseReceived': 1}` and
+  the listener was running, so capture was armed and alive;
+- `_on_request` ran 6 times and stored 5, and 5 rows were listed. The first URLs
+  were all `data:image/png;base64,…`;
+- the request for `network.html` was not among them.
+
+So every layer worked, and the caller's request was never sent. The
+`data:image/png` requests are what Chrome's own start page loads. A local run
+that missed the same way found the tracked tab on `chrome://newtab/` after
+`navigate` had answered. The spawn probe then showed that every spawned tab it ran
+starts on `chrome://new-tab-page/`: nodriver launches Chrome with no URL, so
+Chrome opens its start page and is still loading it when the spawn answers. A
+`navigate` issued in that window can lose to the start page's navigation. The
+tab stays where it was, and the answer does not say so.
+
+The race itself would not reproduce on demand: 0 in 170 local probes, and 1 in
+20 loops of the module sequence. Its precondition does, on every spawn.
+
+## 6. Fix
+
+`platform_utils.append_start_page` adds `START_PAGE_URL` (`about:blank`) to the
+launch arguments. `_resolve_launch_args` calls it last, so both launch paths
+open on it: nodriver's own and the delegated desktop launch (F-810). A URL on
+Chrome's command line replaces the start page, and `about:blank` commits with no
+network, so nothing is left to race the first navigation. The helper leaves the
+arguments alone when the caller already passed a page: any argument that is not
+a switch is a URL to Chrome, and the caller's stays the only start page rather
+than gaining a second tab.
+
+## 7. Verification
+
+- **RED before the fix.** `tests/test_e2e_spawn_start_page.py` asserts that the
+  tracked tab is on `about:blank` straight after spawn and still there 2 s
+  later, and that the browser has exactly that one tab. Against the unfixed
+  tree: `the spawned tab was on 'chrome://new-tab-page/', then
+  'chrome://new-tab-page/'`.
+- **GREEN with it.** The same run plus `test_e2e_extra_headers`,
+  `test_e2e_network_capture_shape`, `test_e2e_replaced_tab_capture`,
+  `test_network_debugging_flow` and `test_e2e_navigation_truthfulness`: 16
+  passed.
+- **Mutation check** by runtime rebinding, via a `-p` plugin in the test
+  process (out of tree; nothing was edited): `append_start_page` was replaced
+  with the identity. The E2E pin failed with the start-page message. The two
+  hermetic pins failed too: the helper's own test and the `_resolve_launch_args`
+  assertion.
+
+## 8. Not done here
+
+- `navigate` still answers success when a navigation the page did not start
+  replaces the caller's. That is `navigation_milestone`'s deliberate adoption of
+  the replacement commit after `net::ERR_ABORTED`, which is right for a page's
+  own redirect. With the start page gone, nothing in the spawn path triggers it.
+- The instrument (§3) stays: it is how the next capture miss will say which
+  layer lost the request.

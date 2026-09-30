@@ -304,4 +304,7 @@ class TestSpawnBrowserSubMethodSeam:
         )
         assert browser_executable == "/opt/google/chrome/chrome"
         assert "--no-sandbox" in launch_args
+        # F-936: the browser opens on about:blank, not on Chrome's start page.
+        assert launch_args[-1] == "about:blank"
+        assert launch_args.count("about:blank") == 1
         assert isinstance(stealth_warnings, list)

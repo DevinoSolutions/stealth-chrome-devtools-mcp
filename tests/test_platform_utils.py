@@ -18,6 +18,8 @@ import pytest
 
 from stealth_chrome_devtools_mcp.embedded import platform_utils
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+    START_PAGE_URL,
+    append_start_page,
     build_reduced_user_agent,
     filter_stealth_args,
     get_platform_info,
@@ -109,6 +111,18 @@ class TestMergeBrowserArgs:
         assert "--foo" in combined
         assert "--no-sandbox" in combined
         assert combined.count("--no-sandbox") == 1
+
+
+class TestAppendStartPage:
+    # F-936: Chrome's own start page raced the caller's first navigation, so a
+    # spawn names the page to open on.
+    def test_start_page_is_appended_when_no_page_is_named(self):
+        assert START_PAGE_URL == "about:blank"
+        assert append_start_page(["--lang=en-US"]) == ["--lang=en-US", "about:blank"]
+
+    def test_a_page_the_caller_named_stays_the_only_one(self):
+        args = ["--lang=en-US", "https://example.test/"]
+        assert append_start_page(args) == args
 
 
 class TestPlatformInfo:

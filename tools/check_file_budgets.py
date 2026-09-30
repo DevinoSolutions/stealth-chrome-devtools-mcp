@@ -139,10 +139,12 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # tab. `_arm_tracked_tab` + the `tab_armers=` seam (network capture lives
     # outside this class) + one call per site; spawn's own header send folded
     # into the shared `_apply_tab_overrides`, so there is one way, not two.
+    # F-936 +2: the launch args name `about:blank` as the start page (the helper
+    # lives in platform_utils; here, its import and its one call).
     "embedded/browser_manager.py": (
-        1474,
+        1476,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935",
+        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
