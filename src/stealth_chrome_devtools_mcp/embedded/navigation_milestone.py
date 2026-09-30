@@ -46,7 +46,9 @@ frame has reached it. Measured on Chrome 152 (finding F-882 §2):
 * a navigation Chrome could not perform (``errorText`` set) still commits its
   error page under the SAME ``loaderId`` and fires ``load`` for it, so the wait
   ends and F-802/F-833's ``chrome-error://`` detector reads the landing as
-  before — **except** ``net::ERR_ABORTED``, below;
+  before — **except** ``net::ERR_ABORTED``, below. The ``errorText`` itself is
+  kept (:attr:`Progress.error_text`) and handed on in :func:`answer`, so the
+  detector's refusal quotes Chrome's reason rather than guessing at it (F-933);
 * a same-document navigation answers ``loaderId: null`` and fires nothing —
   there is nothing to wait for and the tool returns at the response.
 
@@ -162,23 +164,30 @@ class Progress:
     ``superseded``: how many LATER documents committed in the same frame — the
     one number that separates "this page is slow" from "this page keeps
     replacing itself".
+    ``error_text``: Chrome's own reason (``net::ERR_CONNECTION_REFUSED``, …) when
+    it answered ``Page.navigate`` with one and committed its error page for it.
+    Never ``net::ERR_ABORTED``: that one commits nothing of ours, and the page
+    the tab lands on after it is some other document's (F-933).
     """
 
     accepted: bool = False
     committed: bool = False
     superseded: int = 0
+    error_text: str | None = None
 
     def describe(self) -> str:
         """This attempt's facts as one clause, for the caller's warning line.
 
-        Never the URL and never anything the page authored: the three fields
-        are ours, and the caller already names the url it was given.
+        Never the URL and never anything the page authored: the fields are ours
+        or Chrome's, and the caller already names the url it was given.
         """
         if not self.accepted:
             return "Chrome never answered Page.navigate"
         parts = ["accepted", "committed" if self.committed else "never committed"]
         if self.superseded:
             parts.append(f"superseded by {self.superseded} later document(s)")
+        if self.error_text:
+            parts.append(f"Chrome's reason: {self.error_text}")
         return ", ".join(parts)
 
 
@@ -346,6 +355,20 @@ async def landing(tab: Tab) -> tuple[str, str]:
     return await _read_landing(tab)
 
 
+def answer(url: str, title: str, progress: Progress) -> dict[str, object]:
+    """``BrowserManager.navigate``'s answer for a navigation that landed.
+
+    Exactly ``{url, title, success}``, as it always was — plus ``error_text``
+    when Chrome gave a reason for not performing it (F-933). The landing is
+    then Chrome's error page, which ``tool_errors``' one detector refuses, and
+    the refusal quotes this instead of listing causes nobody observed.
+    """
+    landed: dict[str, object] = {"url": url, "title": title, "success": True}
+    if progress.error_text:
+        landed["error_text"] = progress.error_text
+    return landed
+
+
 def _aborted_error(url: str) -> ToolError:
     """The one message for a navigation Chrome accepted and then abandoned."""
     # Names the ONE cause measured for this shape (§2e) and leaves the rest of
@@ -394,6 +417,8 @@ async def navigate(
         frame_id, loader_id, error_text = await tab.send(cdp.page.navigate(url))
         progress.accepted = True
         aborted = error_text == ABORTED
+        if error_text and not aborted:
+            progress.error_text = str(error_text)
         if loader_id is None and not aborted:
             return  # same-document: nothing will fire (measured)
         chain = _Chain(
