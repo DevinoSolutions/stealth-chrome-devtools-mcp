@@ -149,13 +149,24 @@ def _require_navigation_ok(target: str, result: object) -> object:
     Only a Chrome-level navigation failure is one: a page answering 404/500, a
     redirect to a different final URL, ``about:blank`` and ``data:`` URLs all
     keep their own scheme and pass through untouched.
+
+    The refusal quotes Chrome's own reason when the payload carries it
+    (``error_text``: the ``errorText`` ``Page.navigate`` answered, F-933), and
+    only lists the likely causes when nothing said which — a history move and a
+    reload never see ``Page.navigate``'s answer.
     """
     final_url = result.get("url") if isinstance(result, dict) else result
     if isinstance(final_url, str) and final_url.startswith(CHROME_ERROR_SCHEME):
+        reason = result.get("error_text") if isinstance(result, dict) else None
+        cause = (
+            f"Chrome's reason: {reason}."
+            if reason
+            else "The host may not resolve, the connection may have been "
+            "refused, or the TLS handshake may have failed."
+        )
         raise ToolError(
             f"Navigation to {target} failed: Chrome loaded an error page "
-            f"({final_url}). The host may not resolve, the connection may have "
-            "been refused, or the TLS handshake may have failed."
+            f"({final_url}). {cause}"
         )
     return result
 

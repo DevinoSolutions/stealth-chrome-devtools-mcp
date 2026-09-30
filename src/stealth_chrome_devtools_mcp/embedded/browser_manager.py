@@ -1093,7 +1093,7 @@ class BrowserManager:
         timeout: int = 30000,  # noqa: ASYNC109  plan_M7
         referrer: str | None = None,
     ) -> dict[str, Any]:
-        """Navigate (``timeout`` in ms) and answer ``{url, title, success}``.
+        """Navigate (``timeout`` in ms); answer ``navigation_milestone.answer``.
 
         One stale-tab recovery retry (F-824) — but only for a failure Chrome
         never accepted; a timeout after ``Page.navigate`` answered is the page's
@@ -1156,7 +1156,7 @@ class BrowserManager:
                             self._instances[instance_id].get("navigation_count", 0) + 1
                         )
 
-                return {"url": final_url, "title": title, "success": True}
+                return navigation_milestone.answer(final_url, title, progress)
             except Exception as error:
                 last_error = error
                 # The reason comes from BOTH witnesses (F-882): a TimeoutError's

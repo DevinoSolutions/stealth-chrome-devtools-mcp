@@ -61,6 +61,10 @@ SUPERSEDED_MARK = "-sup"
 #: The one ``errorText`` under which OUR loader never commits (a download, or a
 #: page that navigated itself away while we were still pending).
 ABORTED_NAVIGATION = "net::ERR_ABORTED"
+#: What ``location.href`` reads on the page Chrome commits for any OTHER
+#: ``errorText`` (a refused connection, a host that does not resolve): its own
+#: error page, under our loader, whatever URL was asked for (F-802's evidence).
+CHROME_ERROR_PAGE = "chrome-error://chromewebdata/"
 #: ``supersede_after`` for the abort that IS a supersession: no document of ours
 #: ever commits, and the one that aborted us takes its place.
 ABORTED_SUPERSESSION = "aborted"
@@ -289,6 +293,9 @@ class FakeTab:
     ``navigate_error`` is the ``errorText`` ``Page.navigate`` answers with — and
     for ``net::ERR_ABORTED`` (a download) nothing commits and no event ever
     fires, which is measured and is why the tool must answer rather than wait.
+    Any other ``errorText`` commits Chrome's error page under OUR loader, so the
+    lifecycle is the ordinary one and ``location.href`` then reads
+    :data:`CHROME_ERROR_PAGE` while ``target.url`` keeps the URL asked for.
 
     **The hold.** ``supersede_held`` keeps the replacement BACK until the test
     calls :meth:`deliver_supersession`. It exists for the nodes that pin "the
@@ -516,7 +523,8 @@ class FakeTab:
                 cdp_network.LoaderId(loader_id),
                 self._navigate_error,
             )
-        self.url = url
+        failed = self._navigate_error is not None and not same_document
+        self.url = CHROME_ERROR_PAGE if failed else url
         self.target.url = url
         if same_document:
             return (cdp_page.FrameId(MAIN_FRAME), None, None)
