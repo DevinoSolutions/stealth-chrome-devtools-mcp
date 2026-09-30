@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.17
 
 ### Fixed — a tab the tools move onto is captured like the first one (F-935)
 
