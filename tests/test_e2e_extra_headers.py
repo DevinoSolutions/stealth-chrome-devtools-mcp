@@ -21,6 +21,7 @@ import time
 import pytest
 
 from e2e_helpers import (
+    capture_miss_report,
     eval_js,
     get_fn,
     integration_pytestmark,
@@ -76,7 +77,10 @@ async def test_spawn_with_extra_headers_launches_and_sends_them(fixture_app_serv
         assert await eval_js(iid, "document.readyState") in ("interactive", "complete")
 
         details = await _request_details_for(iid, "/network.html")
-        assert details is not None, "the navigation request was never captured"
+        assert details is not None, (
+            "the navigation request was never captured\n"
+            f"{await capture_miss_report(iid)}"
+        )
         sent = {k.lower(): v for k, v in (details.get("headers") or {}).items()}
         assert sent.get(EXTRA_HEADER_NAME.lower()) == EXTRA_HEADER_VALUE, (
             f"extra header absent from the outgoing request: {sorted(sent)}"

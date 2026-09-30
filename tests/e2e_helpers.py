@@ -14,6 +14,7 @@ E2E files stay consistent with the existing integration suite.
 from __future__ import annotations
 
 import asyncio
+import collections
 import ctypes
 import importlib.util
 import json
@@ -119,7 +120,10 @@ _warmed_up = False
 
 async def warmup_once() -> None:
     global _warmed_up
-    if _warmed_up or not _can_run:
+    if not _can_run:
+        return
+    _install_capture_spies()
+    if _warmed_up:
         return
     _warmed_up = True
     spawn = get_fn("spawn_browser")
@@ -139,6 +143,122 @@ async def warmup_once() -> None:
             return
         except Exception:  # warmup failure is non-fatal
             await asyncio.sleep(2.0 * (attempt + 1))
+
+
+# ── F-936: what a capture miss looked like from inside. On the gate a spawned
+# tab sometimes captures nothing while the page itself loads and answers, and
+# the bare "was never captured" could not say which layer lost the request.
+# Two spies record the path in order: nodriver parsing each Network event off
+# the websocket, then the interceptor's own request handler. The report reads
+# them beside the tracked tab's CDP state. It only observes: a spy passes the
+# original's result and exception through unchanged. ──
+_CAPTURE_WINDOW_S = 30.0
+_network_events: collections.deque = collections.deque(maxlen=5000)
+_on_request_calls: collections.deque = collections.deque(maxlen=5000)
+_spies_installed = False
+
+
+def _install_capture_spies() -> None:
+    global _spies_installed
+    if _spies_installed:
+        return
+    _spies_installed = True
+    from nodriver.cdp import util as cdp_util
+
+    parse = cdp_util.parse_json_event
+
+    def spied_parse(message):
+        method = message.get("method", "?") if isinstance(message, dict) else "?"
+        parsed = False
+        try:
+            event = parse(message)
+            parsed = True
+            return event
+        finally:
+            if method.startswith("Network."):
+                _network_events.append((time.monotonic(), method, parsed))
+
+    cdp_util.parse_json_event = spied_parse
+
+    interceptor = runtime.network_interceptor
+    on_request = interceptor._on_request
+
+    async def spied_on_request(event, instance_id):
+        await on_request(event, instance_id)
+        request = getattr(event, "request", None)
+        stored = getattr(event, "request_id", None) in interceptor._requests
+        _on_request_calls.append(
+            (time.monotonic(), instance_id, getattr(request, "url", None), stored)
+        )
+
+    interceptor._on_request = spied_on_request
+
+
+async def capture_miss_report(iid: str) -> str:
+    """Where a request an E2E test expected was lost, as far as the spies saw.
+
+    For an assertion message only, so it never raises: a report that failed
+    says so instead of hiding the miss it was called to explain.
+    """
+    try:
+        return await _capture_miss_report(iid)
+    except Exception as error:  # noqa: BLE001  PERMANENT(a diagnostic must not mask the assertion it explains)
+        return f"F-936 capture-miss report failed: {error!r}"
+
+
+async def _capture_miss_report(iid: str) -> str:
+    manager = runtime.browser_manager
+    interceptor = runtime.network_interceptor
+    since = time.monotonic() - _CAPTURE_WINDOW_S
+    events = [(method, ok) for t, method, ok in _network_events if t >= since]
+    sent = [ok for method, ok in events if method == "Network.requestWillBeSent"]
+    calls = [(url, stored) for _, i, url, stored in _on_request_calls if i == iid]
+    lines = [
+        f"spies installed: {_spies_installed}",
+        f"Network events parsed in the last {_CAPTURE_WINDOW_S:.0f}s (all "
+        f"instances): {sum(ok for _, ok in events)} ok, "
+        f"{sum(not ok for _, ok in events)} failed; requestWillBeSent "
+        f"{sum(sent)} ok, {len(sent) - sum(sent)} failed",
+        f"_on_request calls for {iid}: {len(calls)}, stored "
+        f"{sum(stored for _, stored in calls)}; first urls "
+        f"{[url for url, _ in calls[:5]]}",
+        f"rows listed: {len(await interceptor.list_requests(iid))}",
+        f"armed: {iid in interceptor._armed_with}, targets "
+        f"{sorted(interceptor._armed_targets.get(iid, ()))}, filters "
+        f"{interceptor._instance_filters.get(iid)}",
+    ]
+    tab = await manager.get_tab(iid)
+    if tab is not None:
+        handlers = {
+            getattr(kind, "__name__", str(kind)): len(callbacks)
+            for kind, callbacks in tab.handlers.items()
+        }
+        domains = [
+            getattr(d, "__name__", str(d)).rsplit(".", 1)[-1]
+            for d in tab.enabled_domains
+        ]
+        listener = getattr(tab, "_listener_task", None)
+        if listener is None:
+            listening = "none"
+        elif not listener.done():
+            listening = "running"
+        elif listener.cancelled():
+            listening = "cancelled"
+        else:
+            listening = f"ended: {listener.exception()!r}"
+        socket = getattr(tab, "websocket", None)
+        lines.append(
+            f"tracked tab {id(tab):#x} target {manager._get_tab_target_id(tab)} "
+            f"handlers {handlers} domains {domains} listener {listening} "
+            f"websocket close_code {getattr(socket, 'close_code', '?')}"
+        )
+    browser = await manager.get_browser(iid)
+    if browser is not None:
+        lines.append(
+            "browser targets: "
+            f"{[(manager._get_tab_target_id(t), getattr(getattr(t, 'target', None), 'type_', '?')) for t in browser.targets]}"
+        )
+    return "\n  ".join(["F-936 capture-miss report:", *lines])
 
 
 async def navigate_and_settle(iid: str, url: str, timeout: float = 10.0):

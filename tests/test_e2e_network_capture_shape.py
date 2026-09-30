@@ -21,6 +21,7 @@ import time
 import pytest
 
 from e2e_helpers import (
+    capture_miss_report,
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
@@ -82,7 +83,9 @@ async def test_capture_shape_resource_type_filter_and_no_internal_noise(
         # distinct CDP resource types (Document / Stylesheet / Script).
         await navigate_and_settle(iid, f"{base}/network.html")
         rows = await _poll_rows(iid, "/network.html")
-        assert rows, "no network requests captured at all"
+        assert rows, (
+            f"no network requests captured at all\n{await capture_miss_report(iid)}"
+        )
 
         # (1) resource_type is populated. In 2.0.0 this was None on every row.
         typed = [r for r in rows if r.get("resource_type")]

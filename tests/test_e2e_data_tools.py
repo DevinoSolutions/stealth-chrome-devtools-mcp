@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from e2e_helpers import (
+    capture_miss_report,
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
@@ -116,7 +117,9 @@ async def test_network_debugging_flow(fixture_app_server, tmp_path):
         # Trigger a same-origin fetch to /api/json and wait for it to be captured.
         assert await click(instance_id=iid, selector="#fetch-json-btn")
         req = await _find_request(iid, "/api/json")
-        assert req is not None, "fetch to /api/json was not captured"
+        assert req is not None, (
+            f"fetch to /api/json was not captured\n{await capture_miss_report(iid)}"
+        )
         rid = req["request_id"]
 
         assert isinstance(await get_request_details(request_id=rid), dict)

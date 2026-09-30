@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Tests — a capture miss now says which layer lost the request (F-936)
+
+The v2.1.17 publish gate went red on all three attempts, on macOS and Windows.
+Each time, a freshly spawned tab's first request was never captured, while the
+page itself loaded and answered. This corrects the 2.1.17 entry below: the
+gate reds it attributes to the unarmed replacement tab continued with that fix
+in place. F-935 is a real defect, proven against real Chrome, but it is not
+what these runs hit. The cause is not yet known.
+`tests/e2e_helpers.py` now spies on nodriver's event parser and on the
+interceptor's request handler. `capture_miss_report` puts the following into
+every capture assertion that missed on the gate:
+- what was parsed and handled;
+- the tracked tab's handler table, enabled domains, listener and websocket
+  state;
+- the browser's targets.
+
 ## 2.1.17
 
 ### Fixed — a tab the tools move onto is captured like the first one (F-935)
