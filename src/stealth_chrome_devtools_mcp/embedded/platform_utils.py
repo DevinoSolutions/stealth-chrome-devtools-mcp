@@ -571,6 +571,26 @@ def _apply_default_user_agent(args: list[str]) -> list[str]:
     return [*args, f"{_USER_AGENT_ARG_PREFIX}{agent}"]
 
 
+# The page a spawned browser opens on (F-936). Launched with no URL, Chrome opens
+# its own start page (``chrome://newtab/``) and is still loading it when the
+# spawn answers, so the caller's first ``navigate`` can lose to it: the tab stays
+# on the start page and the caller's request is never sent. A URL on the command
+# line replaces the start page, and ``about:blank`` commits with no network and
+# nothing to race.
+START_PAGE_URL = "about:blank"
+
+
+def append_start_page(args: list[str]) -> list[str]:
+    """Append ``START_PAGE_URL`` unless the caller already named a page to open.
+
+    Any argument that is not a switch is a URL to Chrome, so a caller who passed
+    one keeps it as the only start page instead of getting a second tab.
+    """
+    if any(not arg.startswith("-") for arg in args):
+        return args
+    return [*args, START_PAGE_URL]
+
+
 def merge_browser_args(user_args: list[str] | None = None) -> tuple:
     """
     Merge user-provided browser arguments with platform-specific required arguments.

@@ -37,6 +37,7 @@ from stealth_chrome_devtools_mcp.embedded.models import (
     PageState,
 )
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
+    append_start_page,
     check_browser_executable,
     get_platform_info,
     merge_browser_args,
@@ -479,6 +480,7 @@ class BrowserManager:
         # platform/user choice, not an accidental automation leak).
         if options.sandbox is False and "--no-sandbox" not in launch_args:
             launch_args.append("--no-sandbox")
+        launch_args = append_start_page(launch_args)
 
         return launch_args, browser_executable, stealth_warnings
 

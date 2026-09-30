@@ -47,6 +47,11 @@ re-applied them when the tracked tab changed. Five paths change it:
 
 After any of them, the tools drive a tab nobody is listening on.
 
+**Corrected by F-936:** the gate reds went on with this fix in place, and all of
+them missed on the spawn tab itself. This mechanism is real, but it is not what
+those runs hit. What they hit was Chrome's own start page racing the first
+navigation (F-936 §5).
+
 The CI logs carry no debug output, so they cannot say which path those runs
 took. The first navigation after spawn goes through `get_navigation_tab`. A
 transient failure of its `update_targets()` on a loaded runner fits all three

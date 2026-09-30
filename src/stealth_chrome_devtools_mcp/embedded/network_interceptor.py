@@ -17,9 +17,10 @@ from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkR
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
-# URL schemes Chrome uses for its OWN traffic, not the page's (F-803). A fresh
-# launch emits dozens of chrome://new-tab-page/* requests before the first
-# navigation, so capturing them buries the page's real requests. Matched as a
+# URL schemes Chrome uses for its OWN traffic, not the page's (F-803). Chrome's
+# start page emits dozens of chrome://new-tab-page/* requests (a spawn opens on
+# about:blank since F-936, but a tab can still load it), so capturing them buries
+# the page's real requests. Matched as a
 # case-insensitive prefix on the raw URL — `about:` and friends have no `//`
 # authority, so a prefix test is the correct shape here, not urlsplit().
 INTERNAL_URL_SCHEMES: tuple[str, ...] = (

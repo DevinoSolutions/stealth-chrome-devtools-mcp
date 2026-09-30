@@ -22,6 +22,7 @@ import time
 import pytest
 
 from e2e_helpers import (
+    capture_miss_report,
     eval_js,
     get_fn,
     integration_pytestmark,
@@ -115,7 +116,9 @@ async def test_a_new_tracked_tab_is_captured_and_keeps_the_spawn_overrides(
         # The spawn tab is armed: this half passed before the fix too, and is
         # what makes a miss below about the NEW tab rather than the fixture.
         await navigate_and_settle(iid, f"{fixture_app_server}/network.html?tab=first")
-        assert await _captured(iid, "tab=first") is not None
+        assert await _captured(iid, "tab=first") is not None, (
+            f"the spawn tab's request was never captured\n{await capture_miss_report(iid)}"
+        )
         first_tab = await _tracked_target_id(iid)
 
         await move_to_new_tab(iid, monkeypatch)
@@ -126,7 +129,8 @@ async def test_a_new_tracked_tab_is_captured_and_keeps_the_spawn_overrides(
 
         details = await _captured(iid, "tab=second")
         assert details is not None, (
-            "a request on the new tracked tab was never captured"
+            "a request on the new tracked tab was never captured\n"
+            f"{await capture_miss_report(iid)}"
         )
         sent = {k.lower(): v for k, v in (details.get("headers") or {}).items()}
         assert sent.get(HEADER_NAME.lower()) == HEADER_VALUE, (
