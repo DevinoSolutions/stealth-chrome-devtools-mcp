@@ -230,5 +230,7 @@ element_box.install()
 
 browser_manager = BrowserManager()
 network_interceptor = NetworkInterceptor()
+# F-935: a tab the manager starts driving after spawn is captured like the first.
+browser_manager.add_tab_armer(network_interceptor.arm_tab)
 dom_handler = DOMHandler()
 cdp_function_executor = CDPFunctionExecutor()

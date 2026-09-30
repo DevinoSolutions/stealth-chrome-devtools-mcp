@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from collections import deque
+from collections.abc import Coroutine
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,12 @@ def to_cookie_same_site(
     return member
 
 
+def _target_id_of(tab: Tab) -> str | None:
+    """The CDP target id a tab (or a rediscovered raw Connection) drives."""
+    target_id = getattr(getattr(tab, "target", None), "target_id", None)
+    return None if target_id is None else str(target_id)
+
+
 class NetworkInterceptor:
     """Intercepts and manages network traffic for browser instances."""
 
@@ -110,6 +117,15 @@ class NetworkInterceptor:
         # Count-bounded request store (A3): FIFO capture order used for
         # oldest-first eviction once the retained request count exceeds the cap.
         self._request_order: deque[str] = deque()
+        # F-935: what each instance was armed with, so a tab the browser manager
+        # starts driving later is armed the same way (``arm_tab``), and which
+        # targets already carry the handlers, so arming one twice never doubles
+        # the work every event does.
+        self._armed_with: dict[str, list[str] | None] = {}
+        self._armed_targets: dict[str, set[str]] = {}
+        # Strong references to the per-event handler tasks: the loop keeps only a
+        # weak one, and asyncio's documentation says to hold the result.
+        self._handler_tasks: set[asyncio.Task] = set()
 
     async def setup_interception(
         self, tab: Tab, instance_id: str, block_resources: list[str] | None = None
@@ -175,23 +191,51 @@ class NetworkInterceptor:
                         url_patterns,
                     )
 
-            tab.add_handler(
-                uc.cdp.network.RequestWillBeSent,
-                lambda event: asyncio.create_task(self._on_request(event, instance_id)),
-            )
-            tab.add_handler(
-                uc.cdp.network.ResponseReceived,
-                lambda event: asyncio.create_task(
-                    self._on_response(event, instance_id, tab)
-                ),
-            )
-
             async with self._lock:
+                armed = self._armed_targets.setdefault(instance_id, set())
+                target_id = _target_id_of(tab)
+                if target_id is None or target_id not in armed:
+                    tab.add_handler(
+                        uc.cdp.network.RequestWillBeSent,
+                        lambda event: self._handle(
+                            self._on_request(event, instance_id)
+                        ),
+                    )
+                    tab.add_handler(
+                        uc.cdp.network.ResponseReceived,
+                        lambda event: self._handle(
+                            self._on_response(event, instance_id, tab)
+                        ),
+                    )
+                    if target_id is not None:
+                        armed.add(target_id)
+                self._armed_with[instance_id] = block_resources
                 if instance_id not in self._instance_requests:
                     self._instance_requests[instance_id] = []
         except Exception as e:
             debug_logger.log_error("network_interceptor", "setup_interception", e)
             raise Exception(f"Failed to setup network interception: {e!s}")
+
+    async def arm_tab(self, tab: Tab, instance_id: str) -> None:
+        """Arm a tab the browser manager has started driving (F-935) exactly as
+        ``setup_interception`` armed the instance's first one.
+
+        A no-op for an instance that was never armed, or whose data was cleared
+        at close. Capture was per TAB: every later tracked tab — a stale-tab
+        replacement, the recycle threshold, a navigation retry, ``switch_tab`` —
+        loaded its pages with nobody listening.
+        """
+        async with self._lock:
+            if instance_id not in self._armed_with:
+                return
+            block_resources = self._armed_with[instance_id]
+        await self.setup_interception(tab, instance_id, block_resources)
+
+    def _handle(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run one event handler as a task this interceptor keeps a reference to."""
+        task = asyncio.create_task(coro)
+        self._handler_tasks.add(task)
+        task.add_done_callback(self._handler_tasks.discard)
 
     async def _on_request(self, event, instance_id: str):
         """
@@ -939,3 +983,5 @@ class NetworkInterceptor:
                         self._body_bytes -= len(removed.body)
                 del self._instance_requests[instance_id]
             self._instance_filters.pop(instance_id, None)
+            self._armed_with.pop(instance_id, None)
+            self._armed_targets.pop(instance_id, None)
