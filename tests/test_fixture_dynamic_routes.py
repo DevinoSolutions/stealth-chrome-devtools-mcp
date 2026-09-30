@@ -28,7 +28,8 @@ import pytest
 import requests
 
 import fixture_routes as fr
-from release_gate_harness import serve_fixture_origin_pair
+from release_gate_harness import _bind_origin, serve_fixture_origin_pair
+from test_e2e_fleet import FLEET_SIZE
 
 TIMEOUT = 10
 
@@ -750,3 +751,48 @@ def test_the_slow_document_is_in_the_ledger_before_it_is_answered(origins, monke
     assert fr.NAV_SLOW_DOC_SENTINEL in captured[0].text
     answered = requests.get(f"{origin_a}/e2e/ledger", timeout=TIMEOUT).json()
     assert answered["nav_paths"] == [path], "the request was recorded twice"
+
+
+# ── F-934: one origin queues every connection a fleet opens at once ─────────
+#: Connections Chrome keeps open to one host, per browser.
+CHROME_CONNECTIONS_PER_HOST = 6
+
+#: How long one queued connect may take. A connect the backlog has room for
+#: completes in milliseconds; past it, Windows refuses after ~2 s of SYN retries
+#: and Linux drops the SYN, so the connect would otherwise hang.
+CONNECT_BUDGET_SECONDS = 3.0
+
+
+def test_a_stalled_origin_still_queues_the_whole_fleets_connections():
+    """An origin whose accept loop has not run yet takes a whole fleet's burst.
+
+    ``tests/test_e2e_fleet.py`` points ``FLEET_SIZE`` browsers at ONE fixture
+    origin, and each browser opens up to six connections to it. On a 2-vCPU
+    runner, six Chromes starting at once can stall the accept loop, and every
+    connection past the listen backlog is then refused. At the stdlib's
+    backlog of 5, the 6th connect here failed on Windows 11 with
+    ``ConnectionRefusedError`` after 2.03 s. Chrome shows that as its error
+    page, and the fleet node fails on it (F-934). A server that is bound and
+    not yet serving IS an accept loop stalled for as long as the test likes,
+    so this pin reproduces the stall with no load and no timing.
+    """
+    demand = FLEET_SIZE * CHROME_CONNECTIONS_PER_HOST
+    httpd, _ = _bind_origin(fr.new_origin_state("a"))
+    queued: list[socket.socket] = []
+    try:
+        for number in range(1, demand + 1):
+            try:
+                queued.append(
+                    socket.create_connection(
+                        httpd.server_address, timeout=CONNECT_BUDGET_SECONDS
+                    )
+                )
+            except OSError as exc:
+                pytest.fail(
+                    f"connection {number} of the fleet's {demand} was not "
+                    f"queued: {exc!r}"
+                )
+    finally:
+        for conn in queued:
+            conn.close()
+        httpd.server_close()

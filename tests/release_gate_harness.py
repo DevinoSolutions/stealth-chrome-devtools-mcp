@@ -235,6 +235,22 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
 
+#: How many connections the fixture server's listening socket queues before
+#: its accept loop takes them (F-934). The stdlib default is 5. A six-browser
+#: fleet opens up to 36 at once (Chrome's six per host, per browser), and when
+#: a busy runner stalls the accept loop the sixth is refused: Windows retries
+#: the SYN for ~2 s and then fails the connect, which Chrome reports as its
+#: error page. 128 is the largest backlog every CI kernel honours as asked
+#: (macOS clamps to ``kern.ipc.somaxconn``, 128 by default).
+FIXTURE_ACCEPT_BACKLOG = 128
+
+
+class _FixtureServer(ThreadingHTTPServer):
+    """The fixture origin's server: stdlib's, with a fleet-sized backlog."""
+
+    request_queue_size = FIXTURE_ACCEPT_BACKLOG
+
+
 def _bind_origin(origin_state: dict) -> tuple[ThreadingHTTPServer, str]:
     """Bind one ephemeral literal-IPv4 loopback origin (not yet serving).
 
@@ -245,7 +261,7 @@ def _bind_origin(origin_state: dict) -> tuple[ThreadingHTTPServer, str]:
     handler = functools.partial(
         _FixtureHandler, directory=str(FIXTURE_APP_DIR), origin_state=origin_state
     )
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd = _FixtureServer(("127.0.0.1", 0), handler)
     host, port = httpd.server_address
     return httpd, f"http://{host}:{port}"
 

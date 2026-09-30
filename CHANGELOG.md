@@ -28,6 +28,26 @@ hermetically in `tests/test_navigate_milestone.py` and
 `net::ERR_CONNECTION_TIMED_OUT` on macOS, whose kernel drops the SYN instead of
 refusing it. The `.invalid` host gives a `net::ERR_*` code.
 
+### Fixed — F-934: the fixture server queued five connections, and a six-browser fleet opens up to thirty-six
+
+`tests/test_e2e_fleet.py`'s six-browser node went red on the release gate's
+`integration (Windows/X64)` cell in 3 of the last 6 runs and passed on rerun:
+one `navigate` landed on Chrome's error page (runs 36268702476 and
+36280896091, attempt 1). The fixture origin it points all six browsers at was a
+stdlib `ThreadingHTTPServer`, whose listen backlog is 5, and six browsers can
+open up to 36 connections to one host. Measured on Windows 11: while the accept
+loop is not taking connections, the 6th connect is refused after 2.03 s. When
+36 arrive during a 2.5 s stall, 30 are refused. Stalls of 1 s or less refuse
+nothing, because the client retries the SYN for about 2 s. The fixture
+server now listens with a backlog of 128 (`FIXTURE_ACCEPT_BACKLOG`), which
+refuses none of those 36. A unit-lane pin binds an origin without serving it
+and requires the whole fleet's 36 connections to queue. It is RED at the old
+backlog, failing on connection 6 with `ConnectionRefusedError`. That the CI
+loop really stalled is not proven. F-933 makes the next failure, if any, name
+Chrome's own code. No product code changed.
+`audit/stage2/finding_F934_fixture_server_accept_backlog.md` carries the
+measurements.
+
 ## 2.1.15
 
 ### Added — agent onboarding: one sentence installs and registers the server
