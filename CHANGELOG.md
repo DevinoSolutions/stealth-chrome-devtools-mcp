@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.19
 
 ### Fixed — logins survive a close and a relaunch, by default (F-937)
 
