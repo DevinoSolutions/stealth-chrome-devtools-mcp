@@ -823,10 +823,14 @@ async def test_storage_and_cookies_survive_one_profile_and_no_other(
     third_id = await browsers.spawn(other)
     await navigate_and_settle(third_id, f"{base}/state/store.html")
     isolated = await _settled_json(third_id, "window.w16ReadStorage()")
-    assert isolated == {
+    # The cookie string is checked for THIS node's cookies, not for emptiness: a
+    # new named profile is seeded from the shared seed, which since F-937 also
+    # carries session cookies other nodes left on the fixture origin
+    # (CI saw ``nav_jsc_*``). What must not appear is anything from ``kept``.
+    assert "w16_" not in isolated["cookie"]
+    assert {k: v for k, v in isolated.items() if k != "cookie"} == {
         "local": None,
         "session": None,
-        "cookie": "",
         "localCount": 0,
         "dbs": None,
     }
