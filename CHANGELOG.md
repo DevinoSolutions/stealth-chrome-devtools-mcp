@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — logins survive a close and a relaunch, by default (F-937)
+
+Two things signed a persistent profile out on every relaunch, in the `default`
+session and in every session copied from it. Both were proven by hand on
+Chrome 154 / Windows 11 and are now built-in behavior, each with an opt-out.
+
+**Session cookies are kept.** Apple ID / App Store Connect, Xero, Walmart Seller
+and SaaSHub log in with session cookies (no expiry). Chrome writes those to the
+Cookies database only when the profile pref `session.restore_on_startup` is `1`
+("Continue where you left off"); the default, `5`, drops them at every close. The
+pref is MAC-protected, so editing `Preferences` is reverted; every spawn of a
+persistent profile (the `default` session and named sessions, not a disposable
+auto-clone) now sets it through the one door Chrome accepts, `chrome://settings`
+and `chrome.settingsPrivate.setPref`, reading first and writing only when it
+differs. The side effect, Chrome reopening the previous run's tabs (clones were
+inheriting about 30 of the master's), is removed at both ends: `Default/Sessions`
+and `Default/Sessions_Encrypted` are deleted before each launch, and joined
+`profile_copy.REGENERABLE_NAMES` so no clone or seed carries them. Session
+cookies do not depend on those files: measured, the cookie survives with the
+directory deleted, and a relaunch that kept it opened two tabs where the cleaned
+one opened one. Opt out with `STEALTH_MCP_NO_PERSIST_SESSION_COOKIES=true`.
+
+**Google stays signed in.** Device Bound Session Credentials bind
+`__Secure-1PSIDTS` / `__Secure-3PSIDTS` to a TPM key, and Chrome on Windows runs
+them by default although `chrome://flags` calls the legacy flag "Not available on
+your platform" and the standard flags, already disabled, did nothing. Chrome now
+launches with `--disable-features` naming `EnableBoundSessionCredentials`
+(`components/signin/public/base/signin_switches.cc`), `DeviceBoundSessions`,
+`DeviceBoundSessionsFederatedRegistration` and
+`DeviceBoundSessionsForRestrictedSites` (`net/base/features.cc`), the identifiers
+read from Chromium 154.0.8037.97 with `BASE_FEATURE`'s `k` prefix dropped. Chrome
+honors ONE such switch and nodriver already emits
+`--disable-features=IsolateOrigins,site-per-process`, so the values are folded
+into a single switch that keeps nodriver's, any the caller passed in
+`browser_args`, and ours, and is placed last because the last one wins. The start
+page is still the final argument (F-936). Opt out with
+`STEALTH_MCP_NO_DISABLE_DBSC=true`.
+
+New leaf module `embedded/login_persistence.py` is the one home for all of it;
+`tests/test_login_persistence.py` pins the merge, the pref setter against a mocked
+CDP surface, the saved-tabs removal and the opt-outs, and
+`tests/test_e2e_login_persistence.py` proves the switch reaches `chrome://version`,
+a session cookie survives a quit and a respawn, and the respawn opens on one
+`about:blank`. Both opt-outs were run against the end-to-end test and each makes it fail.
+
 ## 2.1.18
 
 2.1.17 was tagged but never reached PyPI: its publish gate went red on the
