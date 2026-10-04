@@ -22,7 +22,12 @@ and `Default/Sessions_Encrypted` are deleted before each launch, and joined
 `profile_copy.REGENERABLE_NAMES` so no clone or seed carries them. Session
 cookies do not depend on those files: measured, the cookie survives with the
 directory deleted, and a relaunch that kept it opened two tabs where the cleaned
-one opened one. Opt out with `STEALTH_MCP_NO_PERSIST_SESSION_COOKIES=true`.
+one opened one. The settings exchange is bounded to 8 seconds (a warning, never a
+failed spawn), and saved tabs are never deleted while a live process holds the
+profile (`profile_lock`). Opt out with `STEALTH_MCP_NO_PERSIST_SESSION_COOKIES=true`;
+the opt-out does not enable the pref, but a profile whose pref an earlier run
+already set to 1 still has its saved tabs removed, so the opt-out does not
+leave it reopening every old tab.
 
 **Google stays signed in.** Device Bound Session Credentials bind
 `__Secure-1PSIDTS` / `__Secure-3PSIDTS` to a TPM key, and Chrome on Windows runs
@@ -33,14 +38,15 @@ launches with `--disable-features` naming `EnableBoundSessionCredentials`
 `DeviceBoundSessionsFederatedRegistration` and
 `DeviceBoundSessionsForRestrictedSites` (`net/base/features.cc`), the identifiers
 read from Chromium 154.0.8037.97 with `BASE_FEATURE`'s `k` prefix dropped. Chrome
-honors ONE such switch and nodriver already emits
-`--disable-features=IsolateOrigins,site-per-process`, so the values are folded
-into a single switch that keeps nodriver's, any the caller passed in
-`browser_args`, and ours, and is placed last because the last one wins. The start
+keeps the LAST such switch and nodriver already emits
+`--disable-features=IsolateOrigins,site-per-process` first, so the final argv
+carries two. Ours goes last and is a superset (nodriver's names, any the caller
+passed in `browser_args`, and the DBSC ones), so it wins without dropping
+anything. The start
 page is still the final argument (F-936). Opt out with
 `STEALTH_MCP_NO_DISABLE_DBSC=true`.
 
-New leaf module `embedded/login_persistence.py` is the one home for all of it;
+New module `embedded/login_persistence.py` is the one home for all of it;
 `tests/test_login_persistence.py` pins the merge, the pref setter against a mocked
 CDP surface, the saved-tabs removal and the opt-outs, and
 `tests/test_e2e_login_persistence.py` proves the switch reaches `chrome://version`,
