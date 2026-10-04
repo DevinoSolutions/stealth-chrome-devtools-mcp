@@ -50,6 +50,7 @@ seeds or roles — every path and browser arrives as an argument.
 """
 
 import asyncio
+import contextlib
 import json
 import shutil
 from collections.abc import Sequence
@@ -68,6 +69,8 @@ class SettingsTab(Protocol):
     async def evaluate(
         self, expression: str, await_promise: bool = False
     ) -> object: ...
+
+    async def get(self, url: str) -> object: ...
 
     async def close(self) -> None: ...
 
@@ -105,6 +108,12 @@ PREF_TIMEOUT_SECONDS = 8.0
 
 #: Chrome's saved-tabs directories under a profile's ``Default``. Not a login.
 SAVED_TABS_DIRS = ("Sessions", "Sessions_Encrypted")
+
+#: True once the settings page's privileged bindings exist. They appear when the
+#: navigation commits, which can be after ``Tab.get`` returns on a slow runner
+#: (F-937 CI: ``chrome.settingsPrivate`` was undefined on Windows).
+_READY = "typeof chrome !== 'undefined' && !!chrome.settingsPrivate"
+_READY_POLL_SECONDS = 0.25
 
 _GET_PREF = (
     "new Promise(r => chrome.settingsPrivate.getPref("
@@ -190,18 +199,31 @@ def remove_saved_tabs(user_data_dir: str | None) -> list[str]:
     return removed
 
 
+async def _await_settings_bindings(tab: SettingsTab) -> None:
+    """Return once ``chrome.settingsPrivate`` exists in *tab*. Unbounded on its
+    own: the caller's timeout is the bound."""
+    while True:
+        # A context torn down by the navigation is "not ready yet", not a failure.
+        with contextlib.suppress(Exception):
+            if await tab.evaluate(_READY) is True:
+                return
+        await asyncio.sleep(_READY_POLL_SECONDS)
+
+
 async def _set_restore_pref(browser: PrefBrowser, tab_box: list[SettingsTab]) -> bool:
-    """The body of :func:`ensure_session_restore`. The opened tab goes into
-    *tab_box* the moment it exists, so the caller can close it even when this
-    coroutine is cancelled mid-await."""
-    tab = await browser.get("chrome://settings", new_tab=True)
+    """The body of :func:`ensure_session_restore`. The tab is opened on
+    ``about:blank`` and put into *tab_box* BEFORE it navigates, so the caller can
+    close it even when this coroutine is cancelled mid-await."""
+    tab = await browser.get("about:blank", new_tab=True)
     tab_box.append(tab)
+    await tab.get("chrome://settings")
+    await _await_settings_bindings(tab)
     current = await tab.evaluate(_GET_PREF, await_promise=True)
     if current == RESTORE_CONTINUE:
         return True
     accepted = await tab.evaluate(_SET_PREF, await_promise=True)
     current = await tab.evaluate(_GET_PREF, await_promise=True)
-    if accepted and current == RESTORE_CONTINUE:
+    if accepted is True and current == RESTORE_CONTINUE:
         return True
     debug_logger.log_warning(
         "login_persistence",

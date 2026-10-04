@@ -757,11 +757,12 @@ async def test_storage_and_cookies_survive_one_profile_and_no_other(
     """MQ-160. The documented same-profile lifecycle, stated as what does AND
     does not survive, plus isolation and real cleanup.
 
-    Local storage, IndexedDB, CacheStorage and a max-age cookie are expected to
-    survive a browser restart on the same named profile; ``sessionStorage`` and
-    a session cookie are expected NOT to. Asserting only the survivors would
-    make the node pass on a browser that persisted everything, which is a
-    different (and wrong) product.
+    Local storage, IndexedDB, CacheStorage, a max-age cookie and (F-937, the
+    login-persistence default ``session.restore_on_startup=1``) a session cookie
+    are expected to survive a browser restart on the same named profile;
+    ``sessionStorage`` is expected NOT to, and nothing may reach ``other``.
+    Asserting only the survivors would make the node pass on a browser that
+    persisted everything, which is a different (and wrong) product.
     """
     base = fixture_app_server
     kept = _profile("persist")
@@ -799,9 +800,10 @@ async def test_storage_and_cookies_survive_one_profile_and_no_other(
     restored = await _settled_json(second_id, "window.w16ReadStorage()")
     assert restored["local"] == fr.W16_LOCAL_VALUE
     assert restored["session"] is None, "sessionStorage must not survive a restart"
-    assert restored["cookie"] == (
-        f"{fr.W16_COOKIE_PERSISTENT}={fr.W16_COOKIE_PERSISTENT_VALUE}"
-    ), "exactly the max-age cookie survives; the session cookie must not"
+    assert set(restored["cookie"].split("; ")) == {
+        f"{fr.W16_COOKIE_PERSISTENT}={fr.W16_COOKIE_PERSISTENT_VALUE}",
+        f"{fr.W16_COOKIE_SESSION}={fr.W16_COOKIE_SESSION_VALUE}",
+    }, "the max-age cookie and, since F-937, the session cookie survive"
 
     await eval_js(second_id, "window.w16QueryIdb()")
     survived = await _settled_json(second_id, "window.w16State('idb')")
