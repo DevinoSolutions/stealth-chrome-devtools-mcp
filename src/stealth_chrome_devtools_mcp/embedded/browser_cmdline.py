@@ -117,7 +117,7 @@ def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None
 
     Adopting a child would be worse than declining even when its argv did carry
     the port: the pid is stamped onto ``Browser._process_pid``, so
-    ``BrowserManager._browser_process_is_alive`` would discard the instance the
+    ``process_exit.browser_is_alive`` would discard the instance the
     moment that renderer recycled, and ``close_instance`` would kill a renderer
     and leave the browser running.
 

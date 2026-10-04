@@ -2032,7 +2032,7 @@ class LaunchedBrowser:
 class FakeBrowser:
     """A fake nodriver browser for the ``list_instances`` liveness path (F-611).
 
-    ``_browser_process_is_alive`` inspects ``_process.poll()`` first, then falls
+    ``browser_is_alive`` inspects ``_process.poll()`` first, then falls
     back to ``_process_pid`` (psutil). Model the cases:
 
     * ``FakeBrowser(alive=True)``  → ``_process.poll()`` returns ``None`` (alive)

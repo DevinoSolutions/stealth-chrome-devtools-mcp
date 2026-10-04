@@ -28,7 +28,7 @@ from fakes import (
     pretend_display_context,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_manager as _bm
-from stealth_chrome_devtools_mcp.embedded import clone_storage
+from stealth_chrome_devtools_mcp.embedded import clone_storage, process_exit
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 
@@ -163,12 +163,10 @@ class TestFallbackProfileSelection:
 
 class TestListInstancesLiveness:
     def test_process_alive_is_alive(self):
-        assert BrowserManager._browser_process_is_alive(FakeBrowser(alive=True)) is True
+        assert process_exit.browser_is_alive(FakeBrowser(alive=True)) is True
 
     def test_process_exited_is_dead(self):
-        assert (
-            BrowserManager._browser_process_is_alive(FakeBrowser(alive=False)) is False
-        )
+        assert process_exit.browser_is_alive(FakeBrowser(alive=False)) is False
 
     @pytest.mark.characterization
     def test_no_process_no_pid_defaults_to_alive(self):
@@ -176,10 +174,7 @@ class TestListInstancesLiveness:
         standalone follow-up will add a CDP round-trip — update when it lands. A
         browser with neither a ``_process`` handle nor a ``_process_pid`` is
         assumed ALIVE (the liveness check has no CDP fallback to prove otherwise)."""
-        assert (
-            BrowserManager._browser_process_is_alive(FakeBrowser(alive=None, pid=None))
-            is True
-        )
+        assert process_exit.browser_is_alive(FakeBrowser(alive=None, pid=None)) is True
 
     @pytest.fixture()
     def isolated_manager(self, monkeypatch):
