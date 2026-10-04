@@ -83,7 +83,7 @@ async def attach(config: Config, pid: int | None = None) -> Browser:
 
     ``_process_pid`` is stamped when the caller knows it, because nodriver leaves
     it ``None`` on the attach path while teardown's ``os.kill(_process_pid, 15)``
-    fallback and ``BrowserManager._browser_process_is_alive`` both read it.
+    fallback and ``process_exit.browser_is_alive`` both read it.
     """
     import nodriver as uc
 

@@ -298,14 +298,14 @@ class TestExceptionSpecificity:
 
 
 # ---------------------------------------------------------------------------
-# BrowserManager — _browser_process_is_alive exception specificity
+# BrowserManager — process_exit.browser_is_alive exception specificity
 # ---------------------------------------------------------------------------
 
 
-class TestBrowserProcessIsAlive:
+class TestBrowserIsAlive:
     def test_oserror_on_poll_returns_fallback(self):
         """OSError during poll() should be caught, falling through to returncode check."""
-        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded import process_exit
 
         browser = MagicMock()
         mock_process = MagicMock()
@@ -313,12 +313,12 @@ class TestBrowserProcessIsAlive:
         mock_process.returncode = None  # means still running
         browser._process = mock_process
 
-        result = BrowserManager._browser_process_is_alive(browser)
+        result = process_exit.browser_is_alive(browser)
         assert result is True  # falls through to returncode check
 
     def test_unexpected_error_on_poll_propagates(self):
         """Non-OSError during poll() should NOT be caught — it's a bug."""
-        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded import process_exit
 
         browser = MagicMock()
         mock_process = MagicMock()
@@ -326,14 +326,14 @@ class TestBrowserProcessIsAlive:
         browser._process = mock_process
 
         with pytest.raises(TypeError):
-            BrowserManager._browser_process_is_alive(browser)
+            process_exit.browser_is_alive(browser)
 
     def test_no_process_no_pid_returns_true(self):
         """When browser has no _process and no _process_pid, assume alive."""
-        from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+        from stealth_chrome_devtools_mcp.embedded import process_exit
 
         browser = MagicMock(spec=[])  # no _process, no _process_pid attrs
-        result = BrowserManager._browser_process_is_alive(browser)
+        result = process_exit.browser_is_alive(browser)
         assert result is True
 
 
