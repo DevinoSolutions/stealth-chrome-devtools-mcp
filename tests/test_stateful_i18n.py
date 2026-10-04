@@ -800,10 +800,15 @@ async def test_storage_and_cookies_survive_one_profile_and_no_other(
     restored = await _settled_json(second_id, "window.w16ReadStorage()")
     assert restored["local"] == fr.W16_LOCAL_VALUE
     assert restored["session"] is None, "sessionStorage must not survive a restart"
-    assert set(restored["cookie"].split("; ")) == {
+    # A subset, not equality: with session cookies persisted, a session cookie
+    # that ANOTHER node left on this named profile's origin (CI saw
+    # ``nav_jsc_*``) now comes back too, where the old default dropped it.
+    assert {
         f"{fr.W16_COOKIE_PERSISTENT}={fr.W16_COOKIE_PERSISTENT_VALUE}",
         f"{fr.W16_COOKIE_SESSION}={fr.W16_COOKIE_SESSION_VALUE}",
-    }, "the max-age cookie and, since F-937, the session cookie survive"
+    } <= set(restored["cookie"].split("; ")), (
+        "the max-age cookie and, since F-937, the session cookie survive"
+    )
 
     await eval_js(second_id, "window.w16QueryIdb()")
     survived = await _settled_json(second_id, "window.w16State('idb')")
