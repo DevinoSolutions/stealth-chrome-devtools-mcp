@@ -3,11 +3,14 @@
 Two causes, one module (``embedded/login_persistence.py``): session cookies are
 dropped unless ``session.restore_on_startup`` is 1, and Google's Device Bound
 Session Credentials sign the account out at every relaunch. These tests pin the
-pieces that are decidable without Chrome — the single merged
+pieces that are decidable without Chrome — the merged last
 ``--disable-features`` switch, the pref setter against a mocked CDP surface, the
 saved-tabs removal and its exclusion from profile copies, and the opt-outs. The
 behavior against a real Chrome is ``tests/test_e2e_login_persistence.py``.
 """
+
+import asyncio
+import json
 
 import nodriver as uc
 import pytest
@@ -254,3 +257,95 @@ class TestSavedTabs:
             with pytest.raises(StopHereError):
                 await manager._launch_browser(options, "exe", [], object())
         assert seen == [str(tmp_path)]
+
+
+class TestFinalArgv:
+    def test_the_last_disable_features_is_the_one_chrome_keeps_and_loses_nothing(self):
+        config = uc.Config(
+            user_data_dir="x",
+            browser_args=login_persistence.disable_dbsc(
+                ["--disable-features=Translate", "about:blank"]
+            ),
+        )
+        switches = _disable_features(config())
+        effective = set(_tokens(switches[-1]))
+        assert set(login_persistence.DBSC_FEATURES) <= effective
+        assert set(login_persistence.NODRIVER_DISABLED_FEATURES) <= effective
+        assert "Translate" in effective
+
+
+class TestSessionRestoreBounded:
+    async def test_an_evaluate_that_never_resolves_times_out_and_closes_the_tab(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
+
+        class Hanging(FakeTab):
+            async def evaluate(self, script, await_promise=False):
+                await asyncio.Event().wait()
+
+        tab = Hanging(pref=5)
+        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is False
+        assert tab.closed
+
+    async def test_a_page_that_never_opens_times_out(self, monkeypatch):
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
+
+        class NeverOpens:
+            async def get(self, url, new_tab=False):
+                await asyncio.Event().wait()
+
+        assert await login_persistence.ensure_session_restore(NeverOpens()) is False
+
+    async def test_a_tab_that_never_closes_does_not_hang_the_spawn(self, monkeypatch):
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
+
+        class StuckClose(FakeTab):
+            async def close(self) -> None:
+                await asyncio.Event().wait()
+
+        assert (
+            await login_persistence.ensure_session_restore(
+                FakeBrowser(StuckClose(pref=1))
+            )
+            is True
+        )
+
+
+class TestSavedTabsGuards:
+    def test_a_profile_held_by_a_live_process_keeps_its_saved_tabs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            login_persistence.profile_lock,
+            "profile_hold",
+            lambda profile_dir, live_pids: login_persistence.profile_lock.Hold(
+                1234, "held"
+            ),
+        )
+        profile = _profile(tmp_path, "Sessions")
+        assert login_persistence.remove_saved_tabs(str(profile)) == []
+        assert (profile / "Default" / "Sessions").is_dir()
+
+    def test_the_opt_out_still_cleans_a_profile_whose_pref_is_already_one(
+        self, tmp_path, opt_out
+    ):
+        opt_out("STEALTH_MCP_NO_PERSIST_SESSION_COOKIES")
+        profile = _profile(tmp_path, "Sessions", "Sessions_Encrypted")
+        (profile / "Default" / "Preferences").write_text(
+            json.dumps({"session": {"restore_on_startup": 1}})
+        )
+        assert login_persistence.remove_saved_tabs(str(profile)) == [
+            "Sessions",
+            "Sessions_Encrypted",
+        ]
+
+    def test_the_opt_out_keeps_them_when_the_pref_is_not_one(self, tmp_path, opt_out):
+        opt_out("STEALTH_MCP_NO_PERSIST_SESSION_COOKIES")
+        profile = _profile(tmp_path, "Sessions")
+        (profile / "Default" / "Preferences").write_text(
+            json.dumps({"session": {"restore_on_startup": 5}})
+        )
+        assert login_persistence.remove_saved_tabs(str(profile)) == []
+        (profile / "Default" / "Preferences").write_text("not json")
+        assert login_persistence.remove_saved_tabs(str(profile)) == []

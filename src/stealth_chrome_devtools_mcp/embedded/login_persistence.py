@@ -38,20 +38,27 @@ feature identifiers with their ``k`` prefix dropped (``BASE_FEATURE`` does
   sessions through it, ``DeviceBoundSessionsFederatedRegistration`` and
   ``DeviceBoundSessionsForRestrictedSites``.
 
-Chrome honors ONE ``--disable-features`` switch, and nodriver already emits
-``--disable-features=IsolateOrigins,site-per-process``, so :func:`disable_dbsc`
-folds every value into a single switch instead of appending a second.
+Chrome keeps the LAST ``--disable-features`` switch, and nodriver already emits
+``--disable-features=IsolateOrigins,site-per-process`` FIRST, so the final argv
+carries two. :func:`disable_dbsc` therefore puts ours last and makes it a
+superset: nodriver's own names plus the DBSC ones, so the earlier switch is
+overridden without losing anything.
 
-A leaf: stdlib plus ``debug_logger`` and ``settings``. It knows nothing about
-sessions, seeds or roles — every path and browser arrives as an argument.
+Close to a leaf: stdlib plus ``debug_logger``, ``settings`` and the one home for
+"is this profile held" (``profile_lock``). It knows nothing about sessions,
+seeds or roles — every path and browser arrives as an argument.
 """
 
+import asyncio
+import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
+from stealth_chrome_devtools_mcp.embedded import profile_lock
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 
@@ -92,6 +99,10 @@ _DISABLE_FEATURES_PREFIX = "--disable-features="
 RESTORE_PREF = "session.restore_on_startup"
 RESTORE_CONTINUE = 1
 
+#: Upper bound on the whole settings-page exchange. ``chrome://settings`` is the
+#: slowest page a spawn touches; a hang here must cost seconds, not the spawn.
+PREF_TIMEOUT_SECONDS = 8.0
+
 #: Chrome's saved-tabs directories under a profile's ``Default``. Not a login.
 SAVED_TABS_DIRS = ("Sessions", "Sessions_Encrypted")
 
@@ -106,10 +117,12 @@ _SET_PREF = (
 
 
 def merge_disable_features(args: Sequence[str], extra: Sequence[str]) -> list[str]:
-    """*args* with every ``--disable-features=`` folded into ONE switch that also
-    names *extra*. Tokens keep their first-seen order and are not repeated, and
-    nodriver's own are first, so the merged switch is a superset of the two it
-    replaces. The switch goes last: that is the one Chrome keeps."""
+    """*args* with every ``--disable-features=`` in it folded into ONE switch that
+    also names *extra*. Tokens keep their first-seen order and are not repeated,
+    and nodriver's own are first, so the switch is a superset of every one it
+    replaces. It goes last: Chrome keeps the last such switch, which makes it
+    win over the one nodriver emits before caller args (the final argv still
+    carries both)."""
     tokens: list[str] = list(NODRIVER_DISABLED_FEATURES)
     rest: list[str] = []
     for arg in args:
@@ -130,12 +143,41 @@ def disable_dbsc(args: list[str]) -> list[str]:
     return merge_disable_features(args, DBSC_FEATURES)
 
 
+def _pref_is_continue(user_data_dir: str) -> bool:
+    """Whether the profile's own ``Preferences`` already says
+    ``session.restore_on_startup == 1``. False when it cannot be read."""
+    try:
+        prefs = json.loads(
+            (Path(user_data_dir) / "Default" / "Preferences").read_text(
+                encoding="utf-8"
+            )
+        )
+        return prefs["session"][RESTORE_PREF.split(".", 1)[1]] == RESTORE_CONTINUE
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def remove_saved_tabs(user_data_dir: str | None) -> list[str]:
     """Delete the saved-tabs directories of the profile at *user_data_dir*, so a
     launch with ``session.restore_on_startup=1`` opens on one page and not on
     every tab the last run left. Returns the names removed. Never raises: a tab
-    list that cannot be deleted is a cosmetic problem, not a failed spawn."""
-    if not user_data_dir or get_settings().no_persist_session_cookies:
+    list that cannot be deleted is a cosmetic problem, not a failed spawn.
+
+    Nothing is deleted while a live process holds the profile: the files are
+    that browser's open session. Under the opt-out, a profile whose pref is
+    ALREADY ``1`` (set by an earlier run) is still cleaned, because the opt-out
+    stops the library from enabling the pref, not from undoing its tab pile."""
+    if not user_data_dir:
+        return []
+    if get_settings().no_persist_session_cookies and not _pref_is_continue(
+        user_data_dir
+    ):
+        return []
+    hold = profile_lock.profile_hold(
+        Path(user_data_dir),
+        getattr(process_cleanup, "_get_browser_pids_for_profile", None),
+    )
+    if hold is not None:
         return []
     removed = []
     for name in SAVED_TABS_DIRS:
@@ -148,28 +190,47 @@ def remove_saved_tabs(user_data_dir: str | None) -> list[str]:
     return removed
 
 
+async def _set_restore_pref(browser: PrefBrowser, tab_box: list[SettingsTab]) -> bool:
+    """The body of :func:`ensure_session_restore`. The opened tab goes into
+    *tab_box* the moment it exists, so the caller can close it even when this
+    coroutine is cancelled mid-await."""
+    tab = await browser.get("chrome://settings", new_tab=True)
+    tab_box.append(tab)
+    current = await tab.evaluate(_GET_PREF, await_promise=True)
+    if current == RESTORE_CONTINUE:
+        return True
+    accepted = await tab.evaluate(_SET_PREF, await_promise=True)
+    current = await tab.evaluate(_GET_PREF, await_promise=True)
+    if accepted and current == RESTORE_CONTINUE:
+        return True
+    debug_logger.log_warning(
+        "login_persistence",
+        "ensure_session_restore",
+        f"{RESTORE_PREF} is {current!r} after setPref(accepted={accepted!r}); "
+        "session cookies will not survive a close",
+    )
+    return False
+
+
 async def ensure_session_restore(browser: PrefBrowser) -> bool:
     """Set ``session.restore_on_startup`` to ``1`` through ``chrome://settings``
     and report whether it is ``1`` afterwards. Idempotent: it reads first and
-    writes only when the value differs. Never raises, and always closes the
-    settings tab it opened."""
+    writes only when the value differs. Never raises, never takes longer than
+    ``PREF_TIMEOUT_SECONDS`` (a CDP await that never resolves is not an
+    exception), and always closes the settings tab it opened."""
     if get_settings().no_persist_session_cookies:
         return False
-    tab = None
+    tab_box: list[SettingsTab] = []
     try:
-        tab = await browser.get("chrome://settings", new_tab=True)
-        current = await tab.evaluate(_GET_PREF, await_promise=True)
-        if current == RESTORE_CONTINUE:
-            return True
-        accepted = await tab.evaluate(_SET_PREF, await_promise=True)
-        current = await tab.evaluate(_GET_PREF, await_promise=True)
-        if accepted and current == RESTORE_CONTINUE:
-            return True
+        return await asyncio.wait_for(
+            _set_restore_pref(browser, tab_box), PREF_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
         debug_logger.log_warning(
             "login_persistence",
             "ensure_session_restore",
-            f"{RESTORE_PREF} is {current!r} after setPref(accepted={accepted!r}); "
-            "session cookies will not survive a close",
+            f"setting {RESTORE_PREF} took over {PREF_TIMEOUT_SECONDS}s; "
+            "session cookies may not survive a close",
         )
     except Exception as err:  # noqa: BLE001  PERMANENT(F-937): any CDP failure is a warning, never a failed spawn
         debug_logger.log_warning(
@@ -178,13 +239,13 @@ async def ensure_session_restore(browser: PrefBrowser) -> bool:
             f"could not set {RESTORE_PREF}: {err}",
         )
     finally:
-        if tab is not None:
+        for tab in tab_box:
             try:
-                await tab.close()
+                await asyncio.wait_for(tab.close(), PREF_TIMEOUT_SECONDS)
             except Exception as err:  # noqa: BLE001  PERMANENT(F-937): a tab that will not close is a warning
                 debug_logger.log_warning(
                     "login_persistence",
                     "ensure_session_restore",
-                    f"could not close the settings tab: {err}",
+                    f"could not close the settings tab: {err!r}",
                 )
     return False
