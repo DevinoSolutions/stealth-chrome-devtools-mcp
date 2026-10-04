@@ -141,10 +141,14 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # into the shared `_apply_tab_overrides`, so there is one way, not two.
     # F-936 +2: the launch args name `about:blank` as the start page (the helper
     # lives in platform_utils; here, its import and its one call).
+    # F-937 RATCHETS DOWN 1476 -> 1460: the login-persistence calls (`login_persistence`
+    # import, the saved-tabs removal before launch, the pref setter after it) cost
+    # +5, and `_browser_process_is_alive` moved to `process_exit.browser_is_alive`
+    # (-21, its callers now name it there), which is the process-exit leaf's question.
     "embedded/browser_manager.py": (
-        1476,
+        1460,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936",
+        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

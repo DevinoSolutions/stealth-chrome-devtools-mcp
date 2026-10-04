@@ -17,3 +17,6 @@ close_kill_timeout  # plan_M7: pydantic Settings field read via get_settings()
 # ── FALSE-POSITIVE (pydantic Settings — vulture can't see pydantic field access) ─
 model_config  # FALSE-POSITIVE(pydantic SettingsConfigDict descriptor)
 _reject_unknown_prefixed_env  # FALSE-POSITIVE(pydantic model_validator)
+
+# ── F-937 (login_persistence Protocol) ─────────────────────────────────────
+await_promise  # FALSE-POSITIVE(F-937: parameter of a typing.Protocol signature)

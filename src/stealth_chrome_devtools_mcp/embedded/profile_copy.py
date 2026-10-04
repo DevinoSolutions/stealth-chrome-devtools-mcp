@@ -93,6 +93,11 @@ REGENERABLE_NAMES = frozenset(
         "SingletonLock",
         "SingletonSocket",
         "component_crx_cache",
+        # Saved tabs. With ``session.restore_on_startup=1`` (F-937) Chrome reopens
+        # them, so a copy that carried them would hand a new session the master's
+        # ~30 tabs. Session COOKIES live in the Cookies database, not here.
+        "Sessions",
+        "Sessions_Encrypted",
         # Heavy, regenerable caches and on-device AI models — typically ~98% of a
         # Chrome profile by size (the on-device model alone can be ~4 GB). Excluding
         # or trimming them leaves only real session state: cookies, logins, Web

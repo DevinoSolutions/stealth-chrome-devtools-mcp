@@ -19,11 +19,11 @@ header the fixture server reflects back. That is the only reading that cannot be
 satisfied by a jar entry Chrome declines to send.
 
 The control is the same spawn from a CLOSED source, and it earns its place by
-being the case the file copy already handled: it must NOT report a hand-off, and
-it must NOT have the SESSION cookie — which is never written to disk, so it is
-exactly what the copy provably cannot carry and the hand-off provably can. Two
-nodes that differ in one thing (is the source open) and disagree about one
-cookie is the whole finding, stated as an experiment.
+being the case the file copy already handled: it must NOT report a hand-off. Until
+F-937 it also had to lack the SESSION cookie, which Chrome never wrote to disk;
+a persistent profile now keeps it (``session.restore_on_startup=1``), so the
+copy carries it too and the hand-off's remaining job is the source that is still
+OPEN, whose live jar a file copy cannot read.
 
 Both nodes name their sessions with ``session=`` and their sources with
 ``seed_from=``, which is the vocabulary F-896/F-897 gave a caller — a path is
@@ -307,15 +307,17 @@ async def test_b_the_default_session_hands_its_jar_over_while_it_is_open(
         await released(tmp_empty_root["master"])
 
 
-async def test_c_a_closed_source_seeds_by_copy_and_loses_the_session_cookie(
+async def test_c_a_closed_source_seeds_by_copy_and_carries_the_session_cookie(
     fixture_app_server, tmp_empty_root
 ):
-    """The control, and the reason the hand-off exists.
+    """The control for the file copy, and the reason the hand-off exists.
 
     Same request, same two cookies, one difference: the source is CLOSED first,
     so F-897's file copy is the whole mechanism. It must report no hand-off at
-    all, and the cookie that was never on disk must be missing — which is what
-    makes node 1's pass a statement about the CDP path and not about copying.
+    all. Since F-937 a persistent profile keeps its session cookies on disk
+    (``session.restore_on_startup=1``), so the copy now carries the cookie that
+    used to be lost at close; node 1 remains the proof for a source that is
+    still OPEN, which a file copy cannot read.
     """
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
@@ -362,10 +364,11 @@ async def test_c_a_closed_source_seeds_by_copy_and_loses_the_session_cookie(
 
         await navigate_and_settle(target, f"{fixture_app_server}/index.html")
         header = await _cookie_header(target)
-        assert f"f898_session={session_value}" not in header, (
-            "a session cookie is never written to disk, so a file copy cannot "
-            f"carry it — this one did: {header!r}"
+        assert f"f898_session={session_value}" in header, (
+            "the source's session cookie was written to disk at close (F-937), "
+            f"so the file copy should carry it: {header!r}"
         )
+        assert f"f898_persist={persist_value}" in header, header
     finally:
         for iid in (target, source):
             if iid is not None:

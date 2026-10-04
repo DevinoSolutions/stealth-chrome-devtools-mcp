@@ -83,6 +83,17 @@ class Settings(BaseSettings):
     # logging setup must never be the reason the server won't boot.
     log_level: str = "INFO"
 
+    # -- Login persistence (F-937; default ON, namespaced opt-outs) ----------
+    # Two things sign a persistent profile out on every relaunch, and both are
+    # fixed by default (see ``embedded/login_persistence.py``). Negative-form
+    # flags, to match the house opt-out idiom above (``no_auto_recovery``).
+    # Keep session cookies (Apple ID, Xero, Walmart Seller, ...): sets the
+    # profile pref ``session.restore_on_startup`` to 1 on persistent profiles.
+    no_persist_session_cookies: bool = False
+    # Keep Google signed in: launches Chrome with Device Bound Session
+    # Credentials disabled.
+    no_disable_dbsc: bool = False
+
     # -- Client round trips (F-790) ------------------------------------------
     # Deadline for the ONE server->client request this product makes:
     # ``roots/list``, sent by clone_storage._client_session_seed() to name a

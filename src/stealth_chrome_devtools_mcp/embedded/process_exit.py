@@ -159,6 +159,30 @@ class Exited:
     reason: str
 
 
+def browser_is_alive(browser: object) -> bool:
+    """Is the process behind *browser* still running? Read off nodriver's own
+    process handle, else its recorded pid; a browser with neither is assumed up."""
+    process = getattr(browser, "_process", None)
+    if process is not None:
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            try:
+                return poll() is None
+            except OSError:
+                pass  # process handle invalid or already closed
+        return getattr(process, "returncode", None) is None
+
+    pid = getattr(browser, "_process_pid", None)
+    if pid:
+        try:
+            proc = psutil.Process(int(pid))
+            return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            return False
+
+    return True
+
+
 def browser_pid(process: object | None, fallback_pid: int | None) -> int | None:
     """The pid of the BROWSER itself, or None when we cannot say it is one.
 

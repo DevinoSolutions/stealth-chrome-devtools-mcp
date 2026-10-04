@@ -16,6 +16,7 @@ from nodriver import Browser, Tab
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
     desktop_launch,
+    login_persistence,
     navigation_milestone,
     page_storage,
     process_exit,
@@ -180,28 +181,6 @@ class BrowserManager:
         stop_result = browser.stop()
         if asyncio.iscoroutine(stop_result):
             await stop_result
-
-    @staticmethod
-    def _browser_process_is_alive(browser: Browser) -> bool:
-        process = getattr(browser, "_process", None)
-        if process is not None:
-            poll = getattr(process, "poll", None)
-            if callable(poll):
-                try:
-                    return poll() is None
-                except OSError:
-                    pass  # process handle invalid or already closed
-            return getattr(process, "returncode", None) is None
-
-        pid = getattr(browser, "_process_pid", None)
-        if pid:
-            try:
-                proc = psutil.Process(int(pid))
-                return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
-            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-                return False
-
-        return True
 
     def _discard_instance_unlocked(
         self, instance_id: str, data: dict, reason: str
@@ -480,6 +459,7 @@ class BrowserManager:
         # platform/user choice, not an accidental automation leak).
         if options.sandbox is False and "--no-sandbox" not in launch_args:
             launch_args.append("--no-sandbox")
+        launch_args = login_persistence.disable_dbsc(launch_args)
         launch_args = append_start_page(launch_args)
 
         return launch_args, browser_executable, stealth_warnings
@@ -503,6 +483,8 @@ class BrowserManager:
         it identifies the launched Chrome for is that await's (F-919); the
         delegated branch leaves it unstamped; its own kill is best-effort (F-924)."""
         browser_connect.install()
+        if not options.auto_clone:
+            login_persistence.remove_saved_tabs(options.user_data_dir)
         if desktop_launch.should_delegate(options.headless):
             browser, _pid = await desktop_launch.launch_and_attach(
                 browser_executable, launch_args, options.user_data_dir
@@ -556,6 +538,8 @@ class BrowserManager:
                 f"Browser {instance_id} has no process to track",
             )
 
+        if options.user_data_dir and not options.auto_clone:
+            await login_persistence.ensure_session_restore(browser)
         await reconcile_launched_browser_version(tab, browser_executable)
         applied_timezone_id = await self._apply_tab_overrides(tab, options)
         window_metrics = await window_sizing.apply_and_measure(tab, options)
@@ -680,7 +664,7 @@ class BrowserManager:
             await self._setup_dynamic_hooks(tab, instance_id)
 
             await asyncio.sleep(0.2)
-            if not self._browser_process_is_alive(browser):
+            if not process_exit.browser_is_alive(browser):
                 raise Exception("Browser process exited immediately after launch")  # noqa: TRY301  plan_M4ph1
 
             spawn_diagnostics = self._build_spawn_diagnostics(
@@ -799,7 +783,7 @@ class BrowserManager:
         """Instance data by id, or None; a browser whose process died is discarded."""
         async with self._lock:
             data = self._instances.get(instance_id)
-            if data and not self._browser_process_is_alive(data["browser"]):
+            if data and not process_exit.browser_is_alive(data["browser"]):
                 self._discard_instance_unlocked(
                     instance_id, data, "browser process is not running"
                 )
@@ -815,7 +799,7 @@ class BrowserManager:
         """
         async with self._lock:
             for instance_id, data in list(self._instances.items()):
-                if not self._browser_process_is_alive(data["browser"]):
+                if not process_exit.browser_is_alive(data["browser"]):
                     self._discard_instance_unlocked(
                         instance_id,
                         data,
