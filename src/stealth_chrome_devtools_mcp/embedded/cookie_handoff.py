@@ -150,7 +150,8 @@ def as_param(cookie: "Cookie") -> "CookieParam":
     omitting it is what makes the target treat the cookie as a session cookie
     too (measured — the target then reports ``session: true``). That is the one
     translation in the hand-off and it is the one shape a file copy can never
-    carry at all, because a session cookie is never written to the jar on disk.
+    carry at all unless the profile keeps session cookies on disk (F-937 makes
+    it, by default).
     """
     param = uc.cdp.network.CookieParam(
         **{name: getattr(cookie, name) for name in CARRIED_FIELDS}
