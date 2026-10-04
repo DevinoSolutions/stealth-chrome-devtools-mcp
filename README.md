@@ -426,6 +426,8 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 | `STEALTH_MCP_CLIENT_ROOTS_TIMEOUT_SECONDS` | `5` | Deadline for the `roots/list` request the auto-clone path sends to the MCP client to name a clone. MCP `roots` is optional, so a client may never answer; on expiry the clone name falls back to `CODEX_WORKSPACE`/`CLAUDE_PROJECT_DIR`/`PWD`/cwd (`0` = never ask). |
 | `STEALTH_BROWSER_DEBUG` | `false` | Enable debug logging |
 | `STEALTH_MCP_NO_ERROR_REPORTING` | `false` | Set to `true` to disable [error reporting](#error-reporting) |
+| `STEALTH_MCP_NO_PERSIST_SESSION_COOKIES` | `false` | Logins are kept by default (F-937). Persistent profiles (the `default` session and named sessions) get the Chrome pref `session.restore_on_startup=1` set through `chrome://settings`, which is the only thing that makes Chrome write **session cookies** (Apple ID, Xero, Walmart Seller, ...) to disk at close; the saved tabs it would then restore are deleted before each launch and never copied into a clone or seed, so a spawn still opens on one `about:blank`. Set to `true` to leave the pref and the saved tabs alone. |
+| `STEALTH_MCP_NO_DISABLE_DBSC` | `false` | Google stays signed in by default (F-937): Chrome launches with Device Bound Session Credentials disabled (`--disable-features=` `EnableBoundSessionCredentials`, `DeviceBoundSessions`, `DeviceBoundSessionsFederatedRegistration`, `DeviceBoundSessionsForRestrictedSites`, merged into the one `--disable-features` switch Chrome honors, next to nodriver's own). Their TPM-bound `__Secure-1PSIDTS` / `__Secure-3PSIDTS` cookies do not survive a relaunch, which signed the account out. Set to `true` to launch without the switch. |
 
 ## CLI
 
