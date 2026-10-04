@@ -117,8 +117,11 @@ class FakeTab:
         self.accepts = accepts
         self.scripts: list[str] = []
         self.closed = False
+        self.navigated: list[str] = []
 
     async def evaluate(self, script: str, await_promise: bool = False):
+        if script == login_persistence._READY:
+            return True
         assert await_promise, "both calls are promises"
         self.scripts.append(script)
         if "setPref" in script:
@@ -126,6 +129,9 @@ class FakeTab:
                 self.pref = login_persistence.RESTORE_CONTINUE
             return self.accepts
         return self.pref
+
+    async def get(self, url: str):
+        self.navigated.append(url)
 
     async def close(self) -> None:
         self.closed = True
@@ -146,7 +152,8 @@ class TestSessionRestorePref:
         tab = FakeTab(pref=5)
         browser = FakeBrowser(tab)
         assert await login_persistence.ensure_session_restore(browser) is True
-        assert browser.opened == [("chrome://settings", True)]
+        assert browser.opened == [("about:blank", True)]
+        assert tab.navigated == ["chrome://settings"]
         assert tab.pref == 1
         assert [("setPref" in s) for s in tab.scripts] == [False, True, False]
         assert "'session.restore_on_startup', 1, ''" in tab.scripts[1]
@@ -163,7 +170,10 @@ class TestSessionRestorePref:
         assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is False
         assert tab.closed
 
-    async def test_never_raises_and_still_closes_the_tab(self):
+    async def test_never_raises_and_still_closes_the_tab(self, monkeypatch):
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(login_persistence, "_READY_POLL_SECONDS", 0.01)
+
         class Exploding(FakeTab):
             async def evaluate(self, script, await_promise=False):
                 raise RuntimeError("settingsPrivate is not defined")
@@ -349,3 +359,24 @@ class TestSavedTabsGuards:
         assert login_persistence.remove_saved_tabs(str(profile)) == []
         (profile / "Default" / "Preferences").write_text("not json")
         assert login_persistence.remove_saved_tabs(str(profile)) == []
+
+
+class TestLateBindings:
+    async def test_waits_for_the_settings_bindings_instead_of_failing(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(login_persistence, "_READY_POLL_SECONDS", 0.01)
+
+        class Late(FakeTab):
+            polls = 0
+
+            async def evaluate(self, script, await_promise=False):
+                if script == login_persistence._READY:
+                    self.polls += 1
+                    return self.polls > 3
+                return await super().evaluate(script, await_promise)
+
+        tab = Late(pref=5)
+        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is True
+        assert tab.polls == 4
+        assert tab.pref == 1
