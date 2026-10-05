@@ -736,14 +736,14 @@ HANDED_OVER_KEY = "handed_over_from"
 
 
 def _live_seed_fields(seed: profile_source.SeedSource) -> dict[str, Any]:
-    """The two fields a seed with a LIVE source adds, or ``{}``. ONE home
-    because THREE branches stamp them — F-897's ``seed_from`` and F-914/F-915's
-    two held-target hand-overs — and a second spelling is how one of them would
-    come to name a source another does not."""
+    """The fields a seed with a LIVE source adds (plus F-939's debug port), or
+    ``{}``. ONE home because THREE branches stamp them — F-897's ``seed_from``
+    and F-914/F-915's two held-target hand-overs."""
     if seed.live is None:
         return {}
     return {
         LIVE_SEED_KEY: str(seed.live),
+        **({profile_target.LIVE_PORT_KEY: seed.live_port} if seed.live_port else {}),
         HANDED_OVER_KEY: profile_seed.seed_name(
             seed.live, master_profile_dir(), master_snapshot_dir()
         ),
@@ -759,8 +759,8 @@ def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, An
     It is also where an INTERNAL key stops being one (F-898): this function's
     whole job is the line between what the resolver decided and what a caller is
     told, so :data:`LIVE_SEED_KEY` is dropped HERE and nowhere else."""
-    public = dict(profile_selection)
-    public.pop(LIVE_SEED_KEY, None)
+    internal = (LIVE_SEED_KEY, profile_target.LIVE_PORT_KEY)
+    public = {k: v for k, v in profile_selection.items() if k not in internal}
     selected = public.get("user_data_dir")
     if isinstance(selected, str) and selected:
         public.update(profile_seed.provenance(Path(selected)))
@@ -893,10 +893,10 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
                 "clone_source": None,
                 **snapshot_result,
             }
-        shared_live = None
+        shared_live = live_port = None
     else:
-        shared_live = profile_target.hand_over_or_refuse(
-            master, shared_hold, _roots(), driven=driven
+        shared_live, live_port = profile_target.shared_live_source(
+            master, shared_hold, _roots(), driven
         )
 
     base_clone = await _clone_profile_dir_for_session(clone_root)
@@ -942,7 +942,7 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         # `SeedSource` carries `live` as a third fact and not a flag on `kind`
         # (F-898 review M1). A live shared session decided HERE outranks the one
         # `override` may have carried forward from a previous attempt.
-        seed = seed._replace(live=shared_live)
+        seed = seed._replace(live=shared_live, live_port=live_port)
 
     # Shield this clone from the storage-cap sweep BEFORE its marker is written.
     # The marker (written inside the copy below) makes the clone a reclaim target,

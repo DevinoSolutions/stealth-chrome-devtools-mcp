@@ -16,6 +16,7 @@ from nodriver import Browser, Tab
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
     desktop_launch,
+    google_rotation_guard,
     login_persistence,
     navigation_milestone,
     page_storage,
@@ -540,6 +541,8 @@ class BrowserManager:
 
         if options.user_data_dir and not options.auto_clone:
             await login_persistence.ensure_session_restore(browser)
+        if options.auto_clone and google_rotation_guard.enabled():
+            await google_rotation_guard.arm(browser)
         await reconcile_launched_browser_version(tab, browser_executable)
         applied_timezone_id = await self._apply_tab_overrides(tab, options)
         window_metrics = await window_sizing.apply_and_measure(tab, options)

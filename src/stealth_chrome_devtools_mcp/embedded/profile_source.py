@@ -77,6 +77,9 @@ class SeedSource(NamedTuple):
     path: Path
     kind: str
     live: Path | None = None
+    #: F-939: the loopback debug port to read ``live`` through when this backend
+    #: does not drive it (``profile_target.shared_live_source``), else ``None``.
+    live_port: int | None = None
 
 
 #: The kind recorded for a seed taken from a session whose browser is RUNNING

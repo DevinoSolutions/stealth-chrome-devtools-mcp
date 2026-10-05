@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     # a clone's Google cookies out server-side, which signs the master out too.
     # True stops passing ``--allow-browser-signin=false``.
     allow_browser_signin: bool = False
+    # Clones never rotate Google's session cookies (F-939): requests to the
+    # Google cookie-rotation endpoints are blocked on every target of a clone
+    # browser, so only the master rotates. True lets clones rotate (and fork the
+    # session's cookie chain, which Google's cookie-theft protection revokes).
+    allow_clone_google_rotation: bool = False
+    # A clone seeded while the master runs reads the master's LIVE cookies over
+    # its debug port even when another backend drives it (F-939). True restores
+    # the F-914 refusal for a master this backend does not drive.
+    no_live_master_seed: bool = False
 
     # -- Client round trips (F-790) ------------------------------------------
     # Deadline for the ONE server->client request this product makes:

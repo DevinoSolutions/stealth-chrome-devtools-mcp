@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — simultaneous clones can no longer kill the Google session (F-939)
+
+On 2026-10-05 about ten clones spawned within 30 s and each went to Google; within
+minutes the account was signed out everywhere, master included (Apple and every
+non-Google site stayed signed in). A clone is a copy of the master's jar, so N
+clones are N independent holders of one session, each rotating
+`__Secure-1PSIDTS` / `__Secure-3PSIDTS` from the same starting cookies (the seed
+was also hours stale, so those cookies were already rotated away). Google reads
+the forked chain as cookie theft and revokes the session.
+
+* **Clones never rotate Google cookies.** A new `google_rotation_guard` opens one
+  browser-level CDP connection per clone, sets `Target.setAutoAttach`
+  (`waitForDebuggerOnStart`, `flatten`) and, on every attached target, enables
+  `Fetch` for the rotation URLs and fails a match with `BlockedByClient` before
+  the target is resumed. Tabs, popups, out-of-process iframes, dedicated and
+  service workers are all attached the same way (measured: top frame, iframe,
+  popup, new tab and a service worker are all blocked, and all five reach the
+  server with the guard off). Blocked: `accounts.google.com` and
+  `accounts.youtube.com` `/RotateCookies*` (includes `RotateCookiesPage`) and
+  `/RotateBoundCookies*`, both path spellings. Only clones are guarded; the
+  master and named sessions rotate as before. Opt out with
+  `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION=true`.
+* **Clones seed LIVE cookies when the master runs.** When the shared session is
+  open in a browser this backend does not drive (the normal case), its jar is read
+  with `Storage.getCookies` over the master's own loopback
+  `--remote-debugging-port` (read off its command line and joined to the profile)
+  instead of the F-914 refusal or the stale `master-snapshot`. Falls back to the
+  old behaviour when no port is found. Opt out with
+  `STEALTH_MCP_NO_LIVE_MASTER_SEED=true`.
+* Not done, deliberately: spawn jitter. With the block and live seeding, N
+  simultaneous clones no longer fork anything, and a delay would tax every spawn.
+
 ## 2.1.20
 
 ### Fixed — Google no longer signs the master out within a minute of a fresh sign-in (F-938)

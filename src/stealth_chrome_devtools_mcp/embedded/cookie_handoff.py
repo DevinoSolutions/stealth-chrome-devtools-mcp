@@ -64,12 +64,16 @@ browsers and the manager arrive as arguments, and it decides nothing about which
 session may be seeded from — that is ``profile_source``'s.
 """
 
+import asyncio
 import dataclasses
+import json
+import urllib.request
 from collections.abc import Awaitable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import nodriver as uc
+import websockets.asyncio.client
 from nodriver.core.connection import Connection
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed
@@ -340,6 +344,104 @@ async def hand_off(source: "Browser", target: "Browser") -> Handoff:
             1 for cookie in jar if getattr(cookie, "partition_key", None) is not None
         ),
     )
+
+
+#: ``Network.CookieParam``'s wire names for the fields :data:`CARRIED_FIELDS`
+#: names, in the form a raw ``Storage.getCookies`` reply spells them.
+_WIRE_FIELDS = (
+    "name",
+    "value",
+    "domain",
+    "path",
+    "secure",
+    "httpOnly",
+    "sameSite",
+    "priority",
+    "sourceScheme",
+    "sourcePort",
+    "partitionKey",
+)
+
+#: Bounds for the one door that is not a connection of ours (F-939).
+PORT_CONNECT_SECONDS = 5.0
+
+
+def _port_ws_url(port: int) -> str:
+    """The browser-level websocket of the Chrome on loopback *port*."""
+    url = f"http://127.0.0.1:{port}/json/version"
+    with urllib.request.urlopen(url, timeout=PORT_CONNECT_SECONDS) as reply:  # noqa: S310  PERMANENT(F-939): a loopback http URL built here
+        return json.load(reply)["webSocketDebuggerUrl"]
+
+
+async def _read_raw_jar_over_port(port: int) -> list[dict[str, object]]:
+    """Every cookie of the browser listening on *port*, as raw wire dicts.
+
+    A browser THIS backend does not drive has no ``Browser`` object here, so this
+    is one short-lived connection of its own, closed when the read is done; it
+    sends exactly one command and never ``Browser.close``. Chrome's reply is
+    never quoted (see the PII paragraph of the module docstring)."""
+    ws_url = await asyncio.to_thread(_port_ws_url, port)
+    async with websockets.asyncio.client.connect(
+        ws_url,
+        max_size=None,
+        ping_interval=None,
+        open_timeout=PORT_CONNECT_SECONDS,
+    ) as ws:
+        await ws.send(json.dumps({"id": 1, "method": READ_METHOD}))
+        async for raw in ws:
+            message = json.loads(raw)
+            if message.get("id") != 1:
+                continue
+            if "error" in message:
+                raise HandoffError("Chrome refused the cookie read on its debug port")
+            return message["result"]["cookies"]
+    raise HandoffError("the debug port closed before it answered")
+
+
+def _raw_expiry(cookie: dict[str, object]) -> float:
+    """A raw cookie's expiry as a number; ``-1`` (a session cookie) or none is <= 0."""
+    expires = cookie.get("expires")
+    return float(expires) if isinstance(expires, int | float) else 0.0
+
+
+def raw_params(jar: Iterable[dict[str, object]]) -> list["CookieParam"]:
+    """:func:`params` for a jar read as raw wire dicts: the same carried fields,
+    and ``expires`` only when it is a real time (a session cookie reports ``-1``)."""
+    out = []
+    for cookie in jar:
+        wire = {key: cookie[key] for key in _WIRE_FIELDS if key in cookie}
+        if _raw_expiry(cookie) > 0:
+            wire["expires"] = cookie["expires"]
+        out.append(uc.cdp.network.CookieParam.from_json(wire))
+    return out
+
+
+async def hand_off_from_port(port: int, target: "Browser") -> Handoff:
+    """:func:`hand_off` for a SOURCE this backend does not drive: its jar is read
+    over the loopback debug port it was launched with (F-939). Same record, same
+    three round trips, same read-back."""
+    jar = await _step(READ_METHOD, _read_raw_jar_over_port(port))
+    outgoing = _translated_raw(jar)
+    await _step(WRITE_METHOD, write_jar(target, outgoing))
+    landed = await _step(READ_METHOD, read_jar(target))
+    return Handoff(
+        read=len(jar),
+        sent=len(outgoing),
+        jar_after=len(landed),
+        session_cookies=sum(1 for cookie in jar if _raw_expiry(cookie) <= 0),
+        partitioned=sum(1 for cookie in jar if cookie.get("partitionKey") is not None),
+    )
+
+
+def _translated_raw(jar: Sequence[dict[str, object]]) -> list["CookieParam"]:
+    """:func:`_translated` for raw wire dicts, under the same naming rule."""
+    failure_to_raise: HandoffError | None = None
+    try:
+        return raw_params(jar)
+    except Exception as error:  # noqa: BLE001  PERMANENT(F-939): every failure becomes one shape-only report
+        failure_to_raise = _failed(TRANSLATE_STEP, error)
+        del error
+    raise failure_to_raise from None
 
 
 def failure(error: BaseException) -> str:
