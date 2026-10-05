@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.20
 
 ### Fixed — Google no longer signs the master out within a minute of a fresh sign-in (F-938)
 
