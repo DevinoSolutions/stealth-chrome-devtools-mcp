@@ -380,3 +380,54 @@ class TestLateBindings:
         assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is True
         assert tab.polls == 4
         assert tab.pref == 1
+
+
+def _signin_switches(args: list[str]) -> list[str]:
+    return [a for a in args if a.lower().startswith("--allow-browser-signin")]
+
+
+class TestBrowserSigninOff:
+    def test_the_switch_is_on_by_default(self):
+        out = login_persistence.block_browser_signin(["--foo", "about:blank"])
+        assert _signin_switches(out) == ["--allow-browser-signin=false"]
+
+    def test_opt_out_leaves_the_args_alone(self, opt_out):
+        opt_out("STEALTH_MCP_ALLOW_BROWSER_SIGNIN")
+        args = ["--foo"]
+        assert login_persistence.block_browser_signin(args) == args
+
+    @pytest.mark.parametrize(
+        "given", ["--allow-browser-signin=true", "--allow-browser-signin=false"]
+    )
+    def test_a_callers_own_switch_wins_and_is_not_repeated(self, given):
+        out = login_persistence.block_browser_signin([given, "--foo"])
+        assert _signin_switches(out) == [given]
+
+    def test_protect_logins_applies_both_and_the_dbsc_opt_out_is_independent(
+        self, opt_out
+    ):
+        out = login_persistence.protect_logins(["about:blank"])
+        assert _signin_switches(out) and _disable_features(out)
+        opt_out("STEALTH_MCP_NO_DISABLE_DBSC")
+        out = login_persistence.protect_logins(["about:blank"])
+        assert _signin_switches(out) and not _disable_features(out)
+
+    def test_the_spawn_path_passes_it_and_keeps_the_start_page_last(self, monkeypatch):
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.browser_manager."
+            "check_browser_executable",
+            lambda: "/usr/bin/chromium",
+        )
+        launch_args, _exe, _warn = BrowserManager()._resolve_launch_args(
+            BrowserOptions(),
+            None,
+            {"system": "Linux", "is_root": False, "is_container": False},
+        )
+        assert _signin_switches(launch_args) == ["--allow-browser-signin=false"]
+        assert launch_args[-1] == "about:blank"
+
+    def test_the_gating_features_of_a_saved_bound_session_are_listed(self):
+        assert {
+            "EnableBoundSessionCredentialsContinuity",
+            "EnableChromeRefreshTokenBinding",
+        } <= set(login_persistence.DBSC_FEATURES)

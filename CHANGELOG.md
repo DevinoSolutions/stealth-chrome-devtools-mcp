@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — Google no longer signs the master out within a minute of a fresh sign-in (F-938)
+
+2.1.19 fixed the relaunch half, but Google still died about a minute after a
+sign-in. `chrome://signin-internals` showed why: every Chrome here runs Account
+Consistency `DICE`. A clone or seed carries the Google cookies but "No token in
+Token Service", so Chrome's account reconcilor logs the Gaia cookies out
+server-side, and that kills the SAME session in the master (measured: signed in
+06:37:25Z, a clone seeded from the running master at 06:37:40Z, master signed out
+by 06:39Z, cookies still on disk). Every spawn now launches with
+`--allow-browser-signin=false`, which gives Account Consistency `None` and an
+`Inactive` reconcilor on Chrome 154 (master, named sessions, auto-clones and the
+delegated desktop launch all share the one launch-arg resolver). Web sign-in to
+Google still works. A caller's own `--allow-browser-signin=...` wins and is never
+duplicated. Opt out with `STEALTH_MCP_ALLOW_BROWSER_SIGNIN=true`.
+
+The F-937 `--disable-features` list also names the features that keep an
+already-bound Google session alive, read from Chromium 154.0.8037.97 and present
+in the shipped `chrome.dll`: `EnableBoundSessionCredentialsContinuity` (on by
+default on Windows) rebuilds the legacy service and re-initialises a bound
+session saved in the profile's `Preferences` even with
+`EnableBoundSessionCredentials` off, which is how a master kept rotating
+`__Host-GAPS` through `RotateBoundGaps`; `EnableChromeRefreshTokenBinding`,
+`EnableChromeRefreshTokenBindingUpgrade` and `EnableCookieBindingCookieUpgrade`
+bind the DICE refresh token and the Gaia cookies minted from it. The existing
+`STEALTH_MCP_NO_DISABLE_DBSC` opt-out covers them.
+
 ## 2.1.19
 
 ### Fixed — logins survive a close and a relaunch, by default (F-937)

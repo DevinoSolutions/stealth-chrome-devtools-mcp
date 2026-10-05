@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     # Keep Google signed in: launches Chrome with Device Bound Session
     # Credentials disabled.
     no_disable_dbsc: bool = False
+    # Chrome's own sign-in is off by default (F-938): its account reconcilor logs
+    # a clone's Google cookies out server-side, which signs the master out too.
+    # True stops passing ``--allow-browser-signin=false``.
+    allow_browser_signin: bool = False
 
     # -- Client round trips (F-790) ------------------------------------------
     # Deadline for the ONE server->client request this product makes:

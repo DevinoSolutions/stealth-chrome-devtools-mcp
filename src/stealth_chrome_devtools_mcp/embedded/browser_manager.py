@@ -459,7 +459,7 @@ class BrowserManager:
         # platform/user choice, not an accidental automation leak).
         if options.sandbox is False and "--no-sandbox" not in launch_args:
             launch_args.append("--no-sandbox")
-        launch_args = login_persistence.disable_dbsc(launch_args)
+        launch_args = login_persistence.protect_logins(launch_args)
         launch_args = append_start_page(launch_args)
 
         return launch_args, browser_executable, stealth_warnings
