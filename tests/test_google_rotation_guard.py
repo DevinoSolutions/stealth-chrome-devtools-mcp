@@ -192,6 +192,7 @@ class TestTheGuardConversation:
         async with ScriptedChrome() as chrome:
             guard = google_rotation_guard.RotationGuard()
             await guard.start(chrome.url)
+            await _settle(chrome, "Fetch.enable", "page-1")
             await guard.close()
         enable = next(p for s, m, p in chrome.log if m == "Fetch.enable")
         assert [p["urlPattern"] for p in enable["patterns"]] == list(
