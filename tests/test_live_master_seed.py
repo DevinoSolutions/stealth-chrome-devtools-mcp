@@ -7,7 +7,7 @@ by the master). The shared session's browser now has a second door: the loopback
 ``--remote-debugging-port`` on its own command line. Pinned here without Chrome:
 the port discovery and its join to the profile, the opt-out, the resolver
 carrying the port, the raw jar read and its translation, and the fallbacks.
-The behavior against a real Chrome is ``tests/test_e2e_live_master_seed.py``.
+The behavior against a real Chrome is ``tests/test_e2e_google_rotation_guard.py``.
 """
 
 import json
@@ -205,3 +205,42 @@ class TestRawJarOverAPort:
             assert "size" not in wire
         assert persistent["name"] == "SID"
         assert persistent["httpOnly"] is True
+
+    def test_one_malformed_cookie_is_skipped_not_fatal(self):
+        bad = {"name": "x", "value": "y", "domain": "d", "path": "/", "sameSite": 7}
+        params = cookie_handoff.raw_params([bad, *WIRE_JAR])
+        assert [p.name for p in params] == ["SID", "sess"]
+
+
+class TestSeedingOverThePort:
+    async def test_a_port_in_the_selection_reads_the_jar_over_it(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+            browser_management,
+        )
+
+        calls = []
+
+        async def hand_off_from_port(port, target):
+            calls.append((port, target))
+            return cookie_handoff.Handoff(1, 1, 1, 0, 0)
+
+        async def driven_profiles(manager):
+            return SimpleNamespace(instance=lambda path: None)
+
+        async def get_browser(instance_id):
+            return "TARGET"
+
+        rt = browser_management.rt
+        monkeypatch.setattr(rt.cookie_handoff, "hand_off_from_port", hand_off_from_port)
+        monkeypatch.setattr(rt.cookie_handoff, "driven_profiles", driven_profiles)
+        monkeypatch.setattr(rt.browser_manager, "get_browser", get_browser)
+        selection = {
+            clone_storage.LIVE_SEED_KEY: str(MASTER),
+            profile_target.LIVE_PORT_KEY: 4242,
+        }
+        await browser_management._seed_cookies_over_cdp(
+            selection, SimpleNamespace(instance_id="iid")
+        )
+        assert calls == [(4242, "TARGET")]

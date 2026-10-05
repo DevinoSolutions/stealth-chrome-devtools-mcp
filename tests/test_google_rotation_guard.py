@@ -102,7 +102,11 @@ class ScriptedChrome:
     def url(self) -> str:
         return f"ws://127.0.0.1:{self.port}/devtools/browser/x"
 
+    async def send_raw(self, text):
+        await self._ws.send(text)
+
     async def _handle(self, ws):
+        self._ws = ws
         async for raw in ws:
             message = json.loads(raw)
             session = message.get("sessionId")
@@ -209,6 +213,49 @@ class TestTheGuardConversation:
                 break
             await asyncio.sleep(0.02)
         assert guard not in google_rotation_guard._LIVE
+
+
+class TestAMalformedFrame:
+    async def test_a_reader_failure_closes_the_socket(self, monkeypatch):
+        async with ScriptedChrome() as chrome:
+            guard = google_rotation_guard.RotationGuard()
+
+            async def boom(message):
+                raise RuntimeError("unexpected")
+
+            monkeypatch.setattr(guard, "_handle", boom)
+            await guard.start(chrome.url)
+            for _ in range(100):
+                if guard not in google_rotation_guard._LIVE:
+                    break
+                await asyncio.sleep(0.02)
+            assert guard not in google_rotation_guard._LIVE
+            await asyncio.wait_for(guard._ws.wait_closed(), 5)
+            assert guard._ws.close_code is not None, "the socket must be closed"
+
+    async def test_a_malformed_frame_does_not_end_the_reader(self):
+        async with ScriptedChrome() as chrome:
+            guard = google_rotation_guard.RotationGuard()
+            await guard.start(chrome.url)
+            await chrome.send_raw("not json")
+            await chrome.send_raw(
+                json.dumps({"method": "Fetch.requestPaused", "sessionId": "page-1"})
+            )
+            await chrome.send_raw(
+                json.dumps(
+                    {
+                        "method": "Target.attachedToTarget",
+                        "params": {
+                            "sessionId": "late",
+                            "targetInfo": {"type": "page"},
+                            "waitingForDebugger": True,
+                        },
+                    }
+                )
+            )
+            await _settle(chrome, "Runtime.runIfWaitingForDebugger", "late")
+            assert guard in google_rotation_guard._LIVE
+            await guard.close()
 
 
 class TestArm:
