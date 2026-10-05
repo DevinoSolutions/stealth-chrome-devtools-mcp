@@ -17,7 +17,6 @@ Google account and no Google request:
 import contextlib
 import uuid
 
-import nodriver as uc
 import pytest
 
 from e2e_helpers import (
@@ -139,12 +138,21 @@ async def test_a_jar_crosses_a_debug_port_to_a_spawned_browser(
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     value = uuid.uuid4().hex[:12]
-    source = await uc.start(
-        headless=True, sandbox=sandbox_kwargs().get("sandbox", True)
-    )
+    source_instance = None
+    source_dir = None
     target = None
     directory = None
     try:
+        source_instance = await spawn(
+            session=f"f939-src-{uuid.uuid4().hex[:8]}",
+            headless=True,
+            **sandbox_kwargs(),
+        )
+        source_dir = source_instance["spawn_diagnostics"]["profile_selection"][
+            "user_data_dir"
+        ]
+        manager = tool_runtime.browser_manager
+        source = await manager.get_browser(source_instance["instance_id"])
         tab = await source.get(f"{fixture_app_server}/index.html")
         await tab.evaluate(
             f"document.cookie = 'f939_live={value}; Path=/; Max-Age=3600'"
@@ -155,7 +163,6 @@ async def test_a_jar_crosses_a_debug_port_to_a_spawned_browser(
             session=f"f939-{uuid.uuid4().hex[:8]}", headless=True, **sandbox_kwargs()
         )
         directory = target["spawn_diagnostics"]["profile_selection"]["user_data_dir"]
-        manager = tool_runtime.browser_manager
         browser = await manager.get_browser(target["instance_id"])
         handoff = await cookie_handoff.hand_off_from_port(port, browser)
         assert handoff.sent >= 1 and handoff.jar_after >= 1
@@ -172,8 +179,11 @@ async def test_a_jar_crosses_a_debug_port_to_a_spawned_browser(
         )
         assert f"f939_live={value}" in header, header
     finally:
-        with contextlib.suppress(Exception):
-            source.stop()
+        if source_instance is not None:
+            with contextlib.suppress(Exception):
+                await close(instance_id=source_instance["instance_id"])
+        if source_dir is not None:
+            await released(source_dir)
         if target is not None:
             with contextlib.suppress(Exception):
                 await close(instance_id=target["instance_id"])
