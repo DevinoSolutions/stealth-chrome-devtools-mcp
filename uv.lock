@@ -1613,6 +1613,7 @@ dependencies = [
     { name = "strbuilder" },
     { name = "strinpy" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1660,6 +1661,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.56" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.35.0" },
     { name = "vulture", marker = "extra == 'dev'", specifier = "==2.16" },
+    { name = "websockets", specifier = "==16.0" },
 ]
 provides-extras = ["transpiler", "sentry", "test", "dev"]
 

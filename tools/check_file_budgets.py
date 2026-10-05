@@ -145,10 +145,13 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # import, the saved-tabs removal before launch, the pref setter after it) cost
     # +5, and `_browser_process_is_alive` moved to `process_exit.browser_is_alive`
     # (-21, its callers now name it there), which is the process-exit leaf's question.
+    # F-939 +3: the clone's Google-rotation guard is armed after launch (the
+    # `google_rotation_guard` import, the `auto_clone` test, the one call); the
+    # mechanism itself lives in its own leaf.
     "embedded/browser_manager.py": (
-        1460,
+        1463,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
-        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937",
+        " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

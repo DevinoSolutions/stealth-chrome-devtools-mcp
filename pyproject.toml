@@ -48,6 +48,7 @@ dependencies = [
     "mcp==1.27.1",
     "anyio==4.13.0",
     "starlette==1.0.0",
+    "websockets==16.0",
     "httpx==0.28.1",
 ]
 

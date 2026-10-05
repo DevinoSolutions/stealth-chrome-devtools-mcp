@@ -36,7 +36,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from stealth_chrome_devtools_mcp.embedded import tab_identity
+from stealth_chrome_devtools_mcp.embedded import profile_target, tab_identity
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
@@ -553,15 +553,19 @@ async def _seed_cookies_over_cdp(
     try:
         driven = await rt.cookie_handoff.driven_profiles(rt.browser_manager)
         source_id = driven.instance(Path(source_dir))
-        if source_id is None:
+        # F-939: a source another backend drives is read over its debug port.
+        port = profile_selection.get(profile_target.LIVE_PORT_KEY)
+        if source_id is None and not port:
             raise failed("the source browser is no longer driven by this backend")
-        source = await rt.browser_manager.get_browser(source_id)
+        source = await rt.browser_manager.get_browser(source_id) if source_id else None
         target = await rt.browser_manager.get_browser(instance.instance_id)
-        if source is None or target is None:
+        if target is None or (source is None and source_id is not None):
             raise failed("a browser for the hand-off could not be resolved")
         try:
             handoff = await rt._with_cdp_timeout(
-                rt.cookie_handoff.hand_off(source, target),
+                rt.cookie_handoff.hand_off(source, target)
+                if source is not None
+                else rt.cookie_handoff.hand_off_from_port(int(port), target),
                 instance_id=instance.instance_id,
             )
         except ToolError:

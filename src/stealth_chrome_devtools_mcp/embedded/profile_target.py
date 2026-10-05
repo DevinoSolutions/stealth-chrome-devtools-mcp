@@ -84,8 +84,13 @@ witness as a callable, so this module never learns where a session root is and
 from collections.abc import Callable
 from pathlib import Path
 
-from stealth_chrome_devtools_mcp.embedded import profile_lock, profile_seed
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    profile_lock,
+    profile_seed,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.settings import get_settings
 
 
 def hand_over_or_refuse(
@@ -115,6 +120,46 @@ def hand_over_or_refuse(
         "session=<a free name> (--session NAME from the CLI) for a NEW "
         f"session of your own — {_fresh_session_holds(name)}."
     )
+
+
+def live_master_port(master: Path, hold: profile_lock.Hold) -> int | None:
+    """The loopback debug port of the browser holding the SHARED session when this
+    backend does not drive it, or None (F-939).
+
+    The refusal above is the rule for a holder we have no connection to. The
+    SHARED session is the one holder whose jar every clone wants and whose
+    browser is usually another backend's, so it gets one door the named sessions
+    do not: its own ``--remote-debugging-port``, read off the holder's command
+    line and JOINED to the profile (``browser_cmdline.debug_port`` compares the
+    process's ``--user-data-dir`` with *master*, so a recycled pid is no source).
+    None when the holder has no pid, no port, or ``STEALTH_MCP_NO_LIVE_MASTER_SEED``
+    is set, and the caller then refuses exactly as before."""
+    if get_settings().no_live_master_seed or hold.pid is None:
+        return None
+    return browser_cmdline.debug_port(hold.pid, str(master))
+
+
+#: F-939: the selection key that carries :attr:`SeedSource.live_port`. Internal
+#: like ``clone_storage.LIVE_SEED_KEY``, and dropped beside it.
+LIVE_PORT_KEY = "seed_live_port"
+
+
+def shared_live_source(
+    master: Path,
+    hold: profile_lock.Hold,
+    roots: profile_seed.Roots,
+    driven: Callable[[Path], bool],
+) -> tuple[Path, int | None]:
+    """The shared session's live jar source and, when this backend does not drive
+    it, the debug port to read it through. Raises the refusal above only when
+    neither door is open."""
+    try:
+        return hand_over_or_refuse(master, hold, roots, driven=driven), None
+    except ToolError:
+        port = live_master_port(master, hold)
+        if port is None:
+            raise
+        return master, port
 
 
 def _fresh_session_holds(name: str) -> str:
