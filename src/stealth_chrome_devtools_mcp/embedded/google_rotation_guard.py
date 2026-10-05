@@ -58,6 +58,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 import websockets.asyncio.client
+import websockets.exceptions
 from websockets.asyncio.client import ClientConnection
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -204,9 +205,11 @@ class RotationGuard:
                     await self._configure(
                         params["sessionId"], bool(params.get("waitingForDebugger"))
                     )
-        except Exception as err:  # noqa: BLE001  PERMANENT(F-939): a dropped guard connection is logged, Chrome resumes every target
+        except websockets.exceptions.ConnectionClosed:
+            pass  # the browser closed: the normal end of a guard
+        except Exception as err:  # noqa: BLE001  PERMANENT(F-939): a broken guard connection is logged, Chrome resumes every target
             debug_logger.log_warning(
-                "google_rotation_guard", "_read", f"guard connection ended: {err!r}"
+                "google_rotation_guard", "_read", f"guard connection broke: {err!r}"
             )
         finally:
             _LIVE.discard(self)
