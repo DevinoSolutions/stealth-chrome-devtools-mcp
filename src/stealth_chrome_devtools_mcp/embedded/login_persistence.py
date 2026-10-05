@@ -36,7 +36,26 @@ feature identifiers with their ``k`` prefix dropped (``BASE_FEATURE`` does
 * ``DeviceBoundSessions`` — ``net/base/features.cc``, the standard implementation
   (enabled by default on Windows and Mac), with the two features that register
   sessions through it, ``DeviceBoundSessionsFederatedRegistration`` and
-  ``DeviceBoundSessionsForRestrictedSites``.
+  ``DeviceBoundSessionsForRestrictedSites``;
+* ``EnableBoundSessionCredentialsContinuity`` —
+  ``bound_session_cookie_refresh_service_impl.cc``, enabled by default on
+  Windows. It builds the legacy service and re-initialises a bound session
+  already saved in the profile's ``Preferences`` even with
+  ``EnableBoundSessionCredentials`` off, so a profile that once bound
+  ``__Host-GAPS`` keeps rotating it (``RotateBoundGaps``);
+* ``EnableChromeRefreshTokenBinding`` (Windows default on),
+  ``EnableChromeRefreshTokenBindingUpgrade`` and
+  ``EnableCookieBindingCookieUpgrade`` — ``signin_switches.cc``, the DICE-side
+  binding of refresh tokens and of the Gaia cookies minted from them.
+
+**Chrome's own sign-in is off** (F-938). Every browser here runs Account
+Consistency ``DICE``: the account reconcilor compares the Gaia cookies with the
+profile's token service and, finding cookies for an account that has no token
+(every clone and seed, and the master after a web sign-in), logs them out
+server-side. That kills the SAME session in the master. :func:`block_browser_signin`
+launches with ``--allow-browser-signin=false``, which makes Account Consistency
+``None`` and the reconcilor ``Inactive``; web sign-in to Google still works, it
+just is not mirrored into the browser.
 
 Chrome keeps the LAST ``--disable-features`` switch, and nodriver already emits
 ``--disable-features=IsolateOrigins,site-per-process`` FIRST, so the final argv
@@ -88,7 +107,14 @@ DBSC_FEATURES = (
     "DeviceBoundSessions",
     "DeviceBoundSessionsFederatedRegistration",
     "DeviceBoundSessionsForRestrictedSites",
+    "EnableBoundSessionCredentialsContinuity",
+    "EnableChromeRefreshTokenBinding",
+    "EnableChromeRefreshTokenBindingUpgrade",
+    "EnableCookieBindingCookieUpgrade",
 )
+
+#: The launch switch that turns Chrome's own sign-in off (see the docstring).
+BROWSER_SIGNIN_SWITCH = "--allow-browser-signin"
 
 #: What nodriver's ``Config.__call__`` puts in its own ``--disable-features``
 #: switch. It is emitted BEFORE caller args, and Chrome keeps the LAST such
@@ -150,6 +176,22 @@ def disable_dbsc(args: list[str]) -> list[str]:
     if get_settings().no_disable_dbsc:
         return args
     return merge_disable_features(args, DBSC_FEATURES)
+
+
+def block_browser_signin(args: list[str]) -> list[str]:
+    """Launch args with ``--allow-browser-signin=false`` added, unless
+    ``STEALTH_MCP_ALLOW_BROWSER_SIGNIN`` opts out or the caller already passed
+    the switch (the caller's value wins and it is never repeated)."""
+    if get_settings().allow_browser_signin:
+        return args
+    if any(arg.lower().startswith(BROWSER_SIGNIN_SWITCH) for arg in args):
+        return args
+    return [*args, f"{BROWSER_SIGNIN_SWITCH}=false"]
+
+
+def protect_logins(args: list[str]) -> list[str]:
+    """Every launch switch that keeps a Google login alive, in one call."""
+    return block_browser_signin(disable_dbsc(args))
 
 
 def _pref_is_continue(user_data_dir: str) -> bool:

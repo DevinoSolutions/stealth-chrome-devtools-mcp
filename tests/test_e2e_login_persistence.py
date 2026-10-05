@@ -121,3 +121,51 @@ async def test_session_cookie_and_dbsc_switch_survive_a_relaunch(
                 with contextlib.suppress(Exception):
                     await close(instance_id=live)
         await released(directory)
+
+
+_SIGNIN_INTERNALS_JS = (
+    "(async () => { for (let i = 0; i < 40; i++) {"
+    " if (document.body.innerText.includes('Account Consistency')) break;"
+    " await new Promise(r => setTimeout(r, 250)); }"
+    " return document.body.innerText; })()"
+)
+
+
+async def _signin_internals(iid: str) -> str:
+    await navigate_and_settle(iid, "chrome://signin-internals")
+    return str(await eval_js(iid, _SIGNIN_INTERNALS_JS))
+
+
+@pytest.mark.parametrize("opt_out", [False, True], ids=["default-none", "opt-out-dice"])
+async def test_browser_signin_is_off_by_default_and_dice_with_the_opt_out(
+    tmp_empty_root, monkeypatch, opt_out
+):
+    """F-938: ``--allow-browser-signin=false`` gives Account Consistency ``None``
+    and an inactive reconcilor; the opt-out gives stock ``DICE``. Read from
+    ``chrome://signin-internals`` of a throwaway root; nothing is signed in."""
+    if opt_out:
+        monkeypatch.setenv("STEALTH_MCP_ALLOW_BROWSER_SIGNIN", "true")
+    get_settings.cache_clear()
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    name = f"f938-{uuid.uuid4().hex[:8]}"
+    result = await spawn(session=name, headless=True, **sandbox_kwargs())
+    directory = result["spawn_diagnostics"]["profile_selection"]["user_data_dir"]
+    iid = result["instance_id"]
+    try:
+        text = await _signin_internals(iid)
+        line = next((ln for ln in text.splitlines() if "Account Consistency" in ln), "")
+        assert line, text[:400]
+        if opt_out:
+            assert "DICE" in text and "None" not in line, line
+        else:
+            assert "None" in line and "DICE" not in line, line
+            reconcilor = next(
+                (ln for ln in text.splitlines() if "Reconcilor State" in ln), ""
+            )
+            assert not reconcilor or "Inactive" in reconcilor, reconcilor
+    finally:
+        with contextlib.suppress(Exception):
+            await close(instance_id=iid)
+        await released(directory)
+        get_settings.cache_clear()
