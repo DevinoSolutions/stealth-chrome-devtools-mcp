@@ -77,6 +77,7 @@ import websockets.asyncio.client
 from nodriver.core.connection import Connection
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 #: What one CDP round trip in the hand-off answers with. A type variable rather
 #: than ``Any`` so ``_step`` is transparent to its caller's types.
@@ -369,7 +370,9 @@ PORT_CONNECT_SECONDS = 5.0
 def _port_ws_url(port: int) -> str:
     """The browser-level websocket of the Chrome on loopback *port*."""
     url = f"http://127.0.0.1:{port}/json/version"
-    with urllib.request.urlopen(url, timeout=PORT_CONNECT_SECONDS) as reply:  # noqa: S310  PERMANENT(F-939): a loopback http URL built here
+    # No proxy: a system proxy on Windows would otherwise swallow a loopback URL.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(url, timeout=PORT_CONNECT_SECONDS) as reply:
         return json.load(reply)["webSocketDebuggerUrl"]
 
 
@@ -386,6 +389,7 @@ async def _read_raw_jar_over_port(port: int) -> list[dict[str, object]]:
         max_size=None,
         ping_interval=None,
         open_timeout=PORT_CONNECT_SECONDS,
+        proxy=None,
     ) as ws:
         await ws.send(json.dumps({"id": 1, "method": READ_METHOD}))
         async for raw in ws:
@@ -412,7 +416,16 @@ def raw_params(jar: Iterable[dict[str, object]]) -> list["CookieParam"]:
         wire = {key: cookie[key] for key in _WIRE_FIELDS if key in cookie}
         if _raw_expiry(cookie) > 0:
             wire["expires"] = cookie["expires"]
-        out.append(uc.cdp.network.CookieParam.from_json(wire))
+        try:
+            out.append(uc.cdp.network.CookieParam.from_json(wire))
+        except (KeyError, TypeError, ValueError) as err:
+            # One malformed cookie must not abort the whole live seed; name the
+            # error type only, never the cookie.
+            debug_logger.log_debug(
+                "cookie_handoff",
+                "raw_params",
+                f"skipped one cookie: {type(err).__name__}",
+            )
     return out
 
 

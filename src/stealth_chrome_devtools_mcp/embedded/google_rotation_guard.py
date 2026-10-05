@@ -42,7 +42,10 @@ connection nothing) plus its own ``setAutoAttach`` — which is how the
 out-of-process iframes (``accounts.google.com`` is one on every Google page) and
 dedicated workers beneath it are reached. The session is resumed only after that
 session is configured, so there is no window in which a target runs unguarded.
-A same-process iframe's requests go through its parent page's session. If this
+A same-process iframe's requests go through its parent page's session.
+Auto-clones are never re-adopted after a backend restart (the adoption rule only
+takes persistent profiles, ``auto_clone`` false), so a re-attached browser is a
+master or a named session, which is meant to rotate: no re-arm site exists. If this
 connection dies Chrome resumes every paused target, so a dead guard can never
 hang a tab.
 
@@ -110,6 +113,8 @@ class RotationGuard:
         self._ws: ClientConnection | None = None
         self._reader: asyncio.Task[None] | None = None
         self._pending: set[int] = set()
+        self._pending_by_session: dict[object, set[int]] = {}
+        self._fetch_enable_ids: set[int] = set()
         self._settled = asyncio.Event()
         self.sessions = 0
 
@@ -122,6 +127,7 @@ class RotationGuard:
             max_size=None,
             ping_interval=None,
             open_timeout=_OPEN_TIMEOUT_SECONDS,
+            proxy=None,  # a system proxy must never sit between us and loopback
         )
         self._ws = ws
         _LIVE.add(self)
@@ -152,6 +158,9 @@ class RotationGuard:
         if session_id:
             message["sessionId"] = session_id
         self._pending.add(message["id"])
+        self._pending_by_session.setdefault(session_id, set()).add(message["id"])
+        if method == "Fetch.enable":
+            self._fetch_enable_ids.add(message["id"])
         self._settled.clear()
         if self._ws is not None:
             await self._ws.send(json.dumps(message))
@@ -186,24 +195,13 @@ class RotationGuard:
     async def _read(self, ws: ClientConnection) -> None:
         try:
             async for raw in ws:
-                message = json.loads(raw)
-                if "id" in message:
-                    self._pending.discard(message["id"])
-                    if not self._pending:
-                        self._settled.set()
-                elif message.get("method") == "Fetch.requestPaused":
-                    await self._send(
-                        "Fetch.failRequest",
-                        {
-                            "requestId": message["params"]["requestId"],
-                            "errorReason": "BlockedByClient",
-                        },
-                        message["sessionId"],
-                    )
-                elif message.get("method") == "Target.attachedToTarget":
-                    params = message["params"]
-                    await self._configure(
-                        params["sessionId"], bool(params.get("waitingForDebugger"))
+                try:
+                    await self._handle(json.loads(raw))
+                except (ValueError, KeyError, TypeError) as err:
+                    debug_logger.log_warning(
+                        "google_rotation_guard",
+                        "_read",
+                        f"skipped a malformed CDP frame: {type(err).__name__}",
                     )
         except websockets.exceptions.ConnectionClosed:
             pass  # the browser closed: the normal end of a guard
@@ -213,6 +211,51 @@ class RotationGuard:
             )
         finally:
             _LIVE.discard(self)
+            self._settled.set()
+            # Closing is what makes Chrome resume the targets it holds paused
+            # under waitForDebuggerOnStart; an open socket with no reader would
+            # leave every new target frozen.
+            with contextlib.suppress(Exception):
+                await ws.close()
+
+    async def _handle(self, message: dict[str, object]) -> None:
+        method = message.get("method")
+        params = message.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        if "id" in message:
+            self._settle(message)
+        elif method == "Fetch.requestPaused":
+            await self._send(
+                "Fetch.failRequest",
+                {"requestId": params["requestId"], "errorReason": "BlockedByClient"},
+                str(message["sessionId"]),
+            )
+        elif method == "Target.attachedToTarget":
+            await self._configure(
+                str(params["sessionId"]), bool(params.get("waitingForDebugger"))
+            )
+        elif method == "Target.detachedFromTarget":
+            gone = params.get("sessionId")
+            self._pending -= self._pending_by_session.pop(gone, set())
+            self._release_if_idle()
+
+    def _settle(self, message: dict[str, object]) -> None:
+        """Account one reply; a refused ``Fetch.enable`` is a clone left unguarded
+        on that target, which is worth a warning (shape only, never Chrome's text)."""
+        reply_id = message["id"]
+        self._pending.discard(reply_id)
+        if "error" in message and reply_id in self._fetch_enable_ids:
+            debug_logger.log_warning(
+                "google_rotation_guard",
+                "_settle",
+                "Chrome refused Fetch.enable on a target; it is not guarded",
+            )
+        self._fetch_enable_ids.discard(reply_id)
+        self._release_if_idle()
+
+    def _release_if_idle(self) -> None:
+        if not self._pending:
             self._settled.set()
 
     async def _wait_settled(self) -> None:
