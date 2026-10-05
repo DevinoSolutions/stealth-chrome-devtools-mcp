@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.21
 
 ### Fixed — simultaneous clones can no longer kill the Google session (F-939)
 
