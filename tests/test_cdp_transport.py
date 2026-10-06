@@ -26,6 +26,7 @@ same cancellation kills the listener's own code path.
 
 import ast
 import asyncio
+import gc
 import traceback
 from pathlib import Path
 
@@ -258,6 +259,57 @@ async def test_a_protocol_error_still_reaches_the_caller():
     with pytest.raises(Exception, match="nope"):
         await _send(mapper)
     await failing
+
+
+async def test_an_abandoned_reply_that_fails_is_never_logged_as_unretrieved():
+    """F-941 (Sentry STEALTH-CHROME-DEVTOOLS-MCP-8W). A caller abandons a
+    ``Runtime.evaluate`` (the CDP budget cancelled it), the page then navigates,
+    and Chrome answers the pending reply with an error. Nobody is left to read
+    it, so when the ``Transaction`` is collected asyncio logs "Transaction
+    exception was never retrieved" at ERROR — straight to Sentry.
+
+    ``asyncio.shield`` does NOT retrieve it: its ``_outer_done_callback``
+    removes the inner callback that would have, the moment the outer future is
+    cancelled while the reply is still pending (CPython 3.12, read off the
+    source). The loop's exception handler is the witness, because that is the
+    exact path the 8W events took.
+    """
+    cdp_transport.install()
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(
+        lambda _loop, context: reported.append(context["message"])
+    )
+    try:
+        mapper: dict[int, Transaction] = {}
+        task = asyncio.ensure_future(_send(mapper))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (tx,) = mapper.values()
+        _listener_delivers(
+            mapper,
+            {
+                "id": tx.id,
+                "error": {
+                    "code": -32000,
+                    "message": "Inspected target navigated or closed",
+                },
+            },
+        )
+        assert tx.done() and not tx.cancelled()
+        del tx, task
+        mapper.clear()
+        await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert not [m for m in reported if "never retrieved" in m], reported
 
 
 # ---------------------------------------------------------------------------

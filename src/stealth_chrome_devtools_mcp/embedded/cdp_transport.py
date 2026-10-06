@@ -132,16 +132,25 @@ What this deliberately does NOT do:
 * It adds no deadline. ``tool_runtime._clamp_timeout`` + ``_with_cdp_timeout``
   remain the one bound, and that wrapper cancels the operation again.
 
-What it costs, named rather than hidden: an abandoned reply keeps FOUR things
-alive until Chrome answers — the ``mapper`` entry, the pending ``Transaction``,
-the shield's own outer future, and the done-callback ``shield`` left on the
-inner one — or keeps them for the life of the connection, for a command that is
-never answered (a Promise that never settles). No TASK is leaked: shielding a
+What it costs, named rather than hidden: an abandoned reply keeps TWO things
+alive until Chrome answers — the ``mapper`` entry and the pending
+``Transaction``, whose one remaining callback is ``_retrieve`` (a module
+function, so it holds nothing) — or keeps them for the life of the connection,
+for a command that is never answered (a Promise that never settles). The
+shield's outer future is NOT kept: cancelling it removes ``shield``'s callback
+from the reply, and nothing else refers to it (measured, F-941; this paragraph
+said four things until then). No TASK is leaked: shielding a
 future creates no task, which is the other reason this layer is cheaper than
 wrapping ``send``. That is the residue 2.1.8 already left behind, minus the dead
-listener. The answer itself is discarded, and ``asyncio.shield`` retrieves the
-abandoned outcome itself when the outer future was cancelled, so nothing reaches
-the loop as "exception was never retrieved".
+listener. The answer itself is discarded, and **this module retrieves it, not
+``shield``** (F-941). ``shield``'s own "mark inner's result as retrieved" branch
+never runs for an abandoned reply: its ``_outer_done_callback`` REMOVES that
+callback the moment the outer future is cancelled while the reply is still
+pending (CPython 3.12). So a late ERROR reply — Chrome answering an abandoned
+``Runtime.evaluate`` with "Inspected target navigated or closed" once the page
+moved on — was logged by the loop as "Transaction exception was never retrieved"
+at ERROR, which is Sentry STEALTH-CHROME-DEVTOOLS-MCP-8W. ``_retrieve`` is added
+to every reply this patch shields; on a reply someone does read it is a no-op.
 
 Delete half 1 on a nodriver release whose ``send()`` removes its registration in
 a ``finally``, or whose ``_listener`` stops calling ``set_result`` on a future
@@ -265,6 +274,12 @@ _RESULT_MARKER = "__stealth_cdp_result_guard__"
 _COOKIE_MARKER = "__stealth_cdp_cookie_compat__"
 
 
+def _retrieve(reply: Transaction) -> None:
+    """Mark *reply*'s outcome read, so an abandoned one is never logged (F-941)."""
+    if not reply.cancelled():
+        reply.exception()
+
+
 def _protect(original: Callable) -> Callable:
     def __await__(self: Transaction) -> Generator:  # noqa: N807 - PERMANENT(the name IS the dunder we are replacing)
         """Await this CDP reply without being able to cancel it (F-883 B1)."""
@@ -275,6 +290,7 @@ def _protect(original: Callable) -> Callable:
             # reply cannot be cancelled anyway: there is nothing left to
             # protect, so it takes nodriver's own ``__await__`` unchanged.
             return original(self)
+        self.add_done_callback(_retrieve)
         return asyncio.shield(self).__await__()
 
     setattr(__await__, _MARKER, original)

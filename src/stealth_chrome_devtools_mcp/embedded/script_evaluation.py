@@ -73,8 +73,10 @@ NOT sent without ``Runtime.enable``, so it cannot be the witness.) What that sti
 does not close is a page that constructs a ``SyntaxError`` and overwrites its
 ``.stack`` to a bare message — measured, it passes — and the finding's §6 says so.
 
-A leaf: ``nodriver`` + ``tool_errors``, tab as an argument; it imports no other
-embedded module. It is THE seam for ``execute_script``. ``cdp_function_executor``
+Nearly a leaf: ``nodriver`` + ``tool_errors``, tab as an argument, plus
+``navigation_milestone.document_swapped`` — THE one test for "the document went
+away under this command" (F-942), imported rather than re-keyed here. It is THE
+seam for ``execute_script``. ``cdp_function_executor``
 still evaluates caller-authored source through its own KEEP-contract path
 (``inject_and_execute_script``, ``call_discovered_function``) — fixed for the same
 defect in its own home, deliberately not re-routed here, because it carries a
@@ -85,6 +87,7 @@ import json
 
 from nodriver import Tab, cdp
 
+from stealth_chrome_devtools_mcp.embedded.navigation_milestone import document_swapped
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
     _require_js_value,
@@ -114,6 +117,18 @@ _COMPILE_CLASS = "SyntaxError"
 #: The start of a stack frame inside an Error's ``description`` (Chrome puts
 #: ``error.stack`` there). A compile complaint has none: nothing ran.
 _STACK_FRAME = "\n    at "
+
+#: What a caller is told when the page navigated or closed under its script
+#: (F-942). "May have run" rather than "ran": a navigation already under way
+#: when the script was sent can take the document before the script starts.
+NAVIGATED_UNDER_SCRIPT = (
+    "The page navigated or its tab closed while the script was running, so the "
+    "script's result was lost (Chrome: Inspected target navigated or closed). "
+    "The script may have run before that, so anything it does (a click, a form "
+    "submit, a location change) may already have happened: check the page "
+    "before running it again. To act and then read, run the action in one call "
+    "and read the new page in the next."
+)
 
 #: "the CDP result carried no ``value`` field at all", which is NOT the same
 #: thing as a ``value`` that IS ``None`` (an explicit JS ``null``). Reading an
@@ -216,6 +231,16 @@ async def evaluate(tab: Tab, expression: str) -> tuple[object, object]:
     Reading the pair is :func:`script_value`'s job; a transport failure (a dead
     connection, an unserializable argument) is this function's, and is reported
     as operational rather than as the script's own.
+
+    **One transport failure is not ours either (F-942).** When the page navigates
+    or its tab closes while the script is in flight — the script submitted a form,
+    set ``location``, or the page redirected on its own — Chrome answers
+    ``navigation_milestone.document_swapped``'s error and the result is gone.
+    "Failed to execute script" told the caller the script did not run, which
+    invites running a side-effecting script twice; :data:`NAVIGATED_UNDER_SCRIPT`
+    says what happened instead. Raised ``from None``: the outcome is recognised by
+    its code AND message and explained to the caller, so the chain is ours alone
+    and Sentry's ``error-convention`` class drops it (it was -8J and -AY).
     """
     try:
         return await tab.send(
@@ -228,6 +253,8 @@ async def evaluate(tab: Tab, expression: str) -> tuple[object, object]:
             )
         )
     except Exception as e:
+        if document_swapped(e):
+            raise ToolError(NAVIGATED_UNDER_SCRIPT) from None
         # Deliberately open: nodriver raises ProtocolException, the websocket
         # layer raises OSError / ConnectionResetError and asyncio raises its own
         # on a closed loop. What this branch decides is not WHICH failure it was
