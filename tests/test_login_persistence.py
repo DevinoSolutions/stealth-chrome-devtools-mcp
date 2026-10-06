@@ -15,6 +15,7 @@ import json
 import nodriver as uc
 import pytest
 
+from fakes import FakeBrowser, fake_target
 from stealth_chrome_devtools_mcp.embedded import login_persistence, profile_copy
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -118,6 +119,9 @@ class FakeTab:
         self.scripts: list[str] = []
         self.closed = False
         self.navigated: list[str] = []
+        # What ``Target.createTarget`` answers with: the harness browser opens
+        # this tab through the same ``tab_open`` path a real one does (F-940).
+        self.target = fake_target(target_id="T-settings", url="about:blank")
 
     async def evaluate(self, script: str, await_promise: bool = False):
         if script == login_persistence._READY:
@@ -137,22 +141,12 @@ class FakeTab:
         self.closed = True
 
 
-class FakeBrowser:
-    def __init__(self, tab: FakeTab) -> None:
-        self.tab = tab
-        self.opened: list[tuple[str, bool]] = []
-
-    async def get(self, url: str, new_tab: bool = False):
-        self.opened.append((url, new_tab))
-        return self.tab
-
-
 class TestSessionRestorePref:
     async def test_sets_the_pref_and_closes_the_settings_tab(self):
         tab = FakeTab(pref=5)
-        browser = FakeBrowser(tab)
+        browser = FakeBrowser(opened_tab=tab)
         assert await login_persistence.ensure_session_restore(browser) is True
-        assert browser.opened == [("about:blank", True)]
+        assert browser.opened == ["about:blank"]
         assert tab.navigated == ["chrome://settings"]
         assert tab.pref == 1
         assert [("setPref" in s) for s in tab.scripts] == [False, True, False]
@@ -161,13 +155,19 @@ class TestSessionRestorePref:
 
     async def test_is_idempotent_when_the_pref_is_already_set(self):
         tab = FakeTab(pref=1)
-        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is True
+        assert (
+            await login_persistence.ensure_session_restore(FakeBrowser(opened_tab=tab))
+            is True
+        )
         assert not any("setPref" in s for s in tab.scripts)
         assert tab.closed
 
     async def test_reports_false_when_chrome_refuses_the_write(self):
         tab = FakeTab(pref=5, accepts=False)
-        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is False
+        assert (
+            await login_persistence.ensure_session_restore(FakeBrowser(opened_tab=tab))
+            is False
+        )
         assert tab.closed
 
     async def test_never_raises_and_still_closes_the_tab(self, monkeypatch):
@@ -179,19 +179,19 @@ class TestSessionRestorePref:
                 raise RuntimeError("settingsPrivate is not defined")
 
         tab = Exploding(pref=5)
-        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is False
+        assert (
+            await login_persistence.ensure_session_restore(FakeBrowser(opened_tab=tab))
+            is False
+        )
         assert tab.closed
 
     async def test_a_settings_page_that_will_not_open_is_not_fatal(self):
-        class NoTab:
-            async def get(self, url, new_tab=False):
-                raise ConnectionError("no target")
-
-        assert await login_persistence.ensure_session_restore(NoTab()) is False
+        refusing = FakeBrowser(create_target_error=ConnectionError("no target"))
+        assert await login_persistence.ensure_session_restore(refusing) is False
 
     async def test_opt_out_touches_nothing(self, opt_out):
         opt_out("STEALTH_MCP_NO_PERSIST_SESSION_COOKIES")
-        browser = FakeBrowser(FakeTab(pref=5))
+        browser = FakeBrowser(opened_tab=FakeTab(pref=5))
         assert await login_persistence.ensure_session_restore(browser) is False
         assert browser.opened == []
 
@@ -295,17 +295,21 @@ class TestSessionRestoreBounded:
                 await asyncio.Event().wait()
 
         tab = Hanging(pref=5)
-        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is False
+        assert (
+            await login_persistence.ensure_session_restore(FakeBrowser(opened_tab=tab))
+            is False
+        )
         assert tab.closed
 
     async def test_a_page_that_never_opens_times_out(self, monkeypatch):
         monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
 
-        class NeverOpens:
-            async def get(self, url, new_tab=False):
-                await asyncio.Event().wait()
-
-        assert await login_persistence.ensure_session_restore(NeverOpens()) is False
+        # The open's closing ``update_targets`` is a CDP round trip that a wedged
+        # browser never answers.
+        never_opens = FakeBrowser(
+            opened_tab=FakeTab(pref=5), update_targets_stalls=True
+        )
+        assert await login_persistence.ensure_session_restore(never_opens) is False
 
     async def test_a_tab_that_never_closes_does_not_hang_the_spawn(self, monkeypatch):
         monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
@@ -316,7 +320,7 @@ class TestSessionRestoreBounded:
 
         assert (
             await login_persistence.ensure_session_restore(
-                FakeBrowser(StuckClose(pref=1))
+                FakeBrowser(opened_tab=StuckClose(pref=1))
             )
             is True
         )
@@ -377,7 +381,10 @@ class TestLateBindings:
                 return await super().evaluate(script, await_promise)
 
         tab = Late(pref=5)
-        assert await login_persistence.ensure_session_restore(FakeBrowser(tab)) is True
+        assert (
+            await login_persistence.ensure_session_restore(FakeBrowser(opened_tab=tab))
+            is True
+        )
         assert tab.polls == 4
         assert tab.pref == 1
 

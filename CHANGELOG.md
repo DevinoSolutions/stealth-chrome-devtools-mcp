@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — tabs open again after the browser connection reconnects (F-940)
+
+Once the backend's browser-level websocket had dropped and reconnected, no tab could
+be opened for the rest of the instance's life: `new_tab` failed with "Failed to
+create new tab: coroutine raised StopIteration", and `navigate` failed with
+"Browser has no usable page target (it may be shutting down or its last tab was
+closed)" whenever its tab went stale and on the 25th navigation — and, because the
+counter resets only when the tab is replaced, on every navigation after that
+(Sentry -B4, -B5, -B0, and -2K before the message was reworded). The browser was healthy; the advice
+to spawn a new instance was wrong.
+
+nodriver's `Browser.get(url, new_tab=True)` finds the tab it opened in a list only
+the `Target.targetCreated` event fills, and nodriver asks Chrome for that event once,
+at start. A reconnected session never asks again. Measured on Chrome 154: 0 of 40
+opens failed on a fresh browser, 3 of 3 after one forced reconnect.
+
+* **One home for opening a tab.** `new_tab`, the navigation tab recycle and the
+  session-restore settings tab all open through a new `tab_open.open_tab`. It sends
+  the same `Target.createTarget` and uses the tab the event registered when there is
+  one; otherwise it asks Chrome with `Target.getTargetInfo` and builds the tab the
+  way nodriver does. It always returns a real tab, and never lists a tab twice.
+* The "no usable page target" message is gone. Any other failure to create a tab now
+  keeps its own error.
+* Not done, deliberately: asking Chrome for target events again after a reconnect.
+  Chrome answers with an event for every open tab and nodriver would list each one
+  twice.
+
 ## 2.1.21
 
 ### Fixed — simultaneous clones can no longer kill the Google session (F-939)

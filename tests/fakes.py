@@ -362,7 +362,7 @@ class FakeTab:
         self.closed = False
         # OUR websocket, not the page: see :meth:`disconnect`.
         self.disconnected = False
-        # Set by :meth:`FakeBrowser.get` for a tab it opened, so ``close()`` can
+        # Set by the :class:`FakeBrowser` that opened this tab, so ``close()`` can
         # drop it from that browser's listing the way a real close does.
         self.opened_by: Any = None
         self.evaluate_calls: list[str] = []
@@ -2049,9 +2049,14 @@ class FakeBrowser:
     over. It is a :class:`FakeTab`, so ``connection.send_calls`` /
     ``connection.cdp_frames`` record the command name AND its arguments.
 
-    ``get(url, new_tab=True)`` appends the tab it creates to ``tabs`` and records
-    the call in ``get_calls``, so a test can assert that a code path opened NO
-    extra tab (the F-775a leak).
+    ``Target.createTarget`` over that connection opens a tab (F-940): the URL is
+    recorded in ``opened``, so a test can assert that a code path opened NO extra
+    tab (the F-775a leak), and the tab is registered in ``targets`` BEFORE the
+    reply, the way nodriver's ``targetCreated`` handler registers it on a healthy
+    session. ``discovers_targets=False`` is the session that lost discovery to a
+    reconnect, where nothing registers it and only ``Target.getTargetInfo``
+    still knows the target. ``create_target_error`` is a ``createTarget`` that
+    Chrome refuses.
 
     ``main_tab`` is what an ATTACH hands back (F-888) — nodriver's
     ``Browser.main_tab``, which the adoption path reads to decide whether a
@@ -2066,6 +2071,8 @@ class FakeBrowser:
         opened_tab: Any = None,
         update_targets_stalls: bool = False,
         main_tab: Any = None,
+        discovers_targets: bool = True,
+        create_target_error: BaseException | None = None,
     ) -> None:
         if alive is None:
             self._process = None
@@ -2076,9 +2083,20 @@ class FakeBrowser:
         self.target = SimpleNamespace(url="https://fake.test/page")
         self.tabs = list(tabs or [])
         self.update_targets_calls = 0
-        self.connection = FakeTab(url="ws://fake.test/devtools/browser")
-        self.get_calls: list[tuple[str, bool]] = []
+        # nodriver's ``Browser.config`` — the host/port its tab URLs are built on.
+        self.config = SimpleNamespace(host="127.0.0.1", port=9222)
+        self.connection = FakeTab(
+            url="ws://fake.test/devtools/browser",
+            cdp_responses={
+                "create_target": self._create_target,
+                "get_target_info": self._get_target_info,
+            },
+        )
+        self.opened: list[str] = []
+        self._created: dict[str, Any] = {}
         self._opened_tab = opened_tab
+        self._discovers_targets = discovers_targets
+        self._create_target_error = create_target_error
         self._update_targets_stalls = update_targets_stalls
         # nodriver's ``Browser.main_tab`` — the tab an ATTACH hands back (F-888).
         # ``None`` unless a test seeds it, because a browser we connected to and
@@ -2086,23 +2104,48 @@ class FakeBrowser:
         # than register half an instance for.
         self.main_tab = main_tab
 
-    async def get(self, url: str, new_tab: bool = False) -> FakeTab:
-        """nodriver's ``Browser.get``.
+    @property
+    def targets(self) -> list[Any]:
+        """nodriver's ``Browser.targets``. The fake holds pages only, so it is
+        the very list ``tabs`` is — a tab registered in one is in the other."""
+        return self.tabs
+
+    def _create_target(self, _name: str) -> Any:
+        """``Target.createTarget``.
 
         Seed ``opened_tab`` to say what the opened tab answers (e.g. a landing
-        on a ``chrome-error://`` page); otherwise a plain tab at *url* is made.
-        Either way the tab is stamped with its opener, so closing it removes it
-        from ``tabs`` — the difference between "the failure path closed the tab"
-        and "the failure path leaked it".
+        on a ``chrome-error://`` page); otherwise a plain tab at the requested
+        URL is made. Either way the tab is stamped with its opener, so closing
+        it removes it from ``tabs`` — the difference between "the failure path
+        closed the tab" and "the failure path leaked it".
         """
-        self.get_calls.append((url, new_tab))
+        if self._create_target_error is not None:
+            raise self._create_target_error
+        url = self.connection.cdp_frames[-1]["params"]["url"]
+        self.opened.append(url)
         tab = self._opened_tab or FakeTab(
-            url=url, target_id=f"T-opened-{len(self.get_calls)}"
+            url=url, target_id=f"T-opened-{len(self.opened)}"
         )
-        if new_tab:
-            tab.opened_by = self
+        tab.opened_by = self
+        self._created[tab.target.target_id] = tab
+        if self._discovers_targets:
             self.tabs.append(tab)
-        return tab
+        return tab.target.target_id
+
+    def _get_target_info(self, _name: str) -> Any:
+        """``Target.getTargetInfo`` — Chrome's own answer, discovery or not,
+        as the real ``TargetInfo`` nodriver parses it into."""
+        target = self._created[
+            self.connection.cdp_frames[-1]["params"]["targetId"]
+        ].target
+        return cdp_target.TargetInfo(
+            target_id=target.target_id,
+            type_=target.type_,
+            title=target.title,
+            url=target.url,
+            attached=False,
+            can_access_opener=False,
+        )
 
     async def update_targets(self) -> None:
         """nodriver's target refresh. The real one rewrites every known

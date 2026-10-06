@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fakes import FakeBrowserManager, FakeTab
+from fakes import FakeBrowser, FakeBrowserManager, FakeTab
 from stealth_chrome_devtools_mcp.embedded import server
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
@@ -125,13 +125,6 @@ class TestInstanceNotFoundCluster:
             await server.get_browser_state_resource.fn("missing")
 
 
-class _BrowserRaisingOnGet:
-    """browser stand-in whose tab creation fails (drives new_tab's G2 wrap)."""
-
-    async def get(self, url, new_tab=False):
-        raise RuntimeError("cdp boom")
-
-
 class _DomHandler:
     """dom_handler stand-in: returns a result, or raises to drive the error path."""
 
@@ -159,10 +152,13 @@ class TestG2GenericRewrap:
     the group's hermetic pin (spawn_browser:437 is converted identically)."""
 
     async def test_new_tab_wraps_failure_as_tool_error(self, call_tool, patched_server):
+        # A browser whose tab creation fails, so the wrap is driven by Chrome's
+        # own refusal rather than by whatever a thinner stand-in lacks.
+        refusing = FakeBrowser(create_target_error=RuntimeError("cdp boom"))
         srv = patched_server(
-            browser_manager=FakeBrowserManager(browsers={"i1": _BrowserRaisingOnGet()})
+            browser_manager=FakeBrowserManager(browsers={"i1": refusing})
         )
-        with pytest.raises(ToolError, match=r"Failed to create new tab"):
+        with pytest.raises(ToolError, match=r"Failed to create new tab: cdp boom"):
             await call_tool(srv, "new_tab", instance_id="i1")
 
 
