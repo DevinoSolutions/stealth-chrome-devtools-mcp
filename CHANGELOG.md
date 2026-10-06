@@ -29,6 +29,35 @@ opens failed on a fresh browser, 3 of 3 after one forced reconnect.
   Chrome answers with an event for every open tab and nodriver would list each one
   twice.
 
+### Fixed — `execute_script` now says when the page navigated under the script (F-942)
+
+When the page navigated or its tab closed while a script was running (the script
+submitted a form or set `location`, or the page redirected on its own), Chrome
+answered "Inspected target navigated or closed" and `execute_script` reported
+"Failed to execute script". That reads as "the script did not run", so a caller
+would run a side-effecting script a second time. It was the most frequent live
+Sentry issue (-8J, 100 events from 2.1.9 to 2.1.21; -AY).
+
+* The tool now says that the page navigated or closed, that the script's result
+  was lost, that the script may have run (so its click or submit may already have
+  happened), and to check the page before running it again. It recognises the
+  error with the same code-and-message test navigation already uses
+  (`navigation_milestone.document_swapped`). Every other failure still reads
+  "Failed to execute script".
+* This outcome is explained to the caller and no longer reaches Sentry. Every
+  other CDP failure under a script still does.
+
+### Fixed — an abandoned CDP reply that fails is no longer logged as an error (F-941)
+
+When a CDP command outlived its time budget, the caller moved on and the reply was
+left for the connection to finish (F-883). If Chrome then answered it with an
+error, usually "Inspected target navigated or closed" for a `Runtime.evaluate`
+after the page moved on, asyncio logged "Transaction exception was never
+retrieved" at ERROR, and every one reached Sentry (-8W, 14 events from 2.1.12 to
+2.1.21). `asyncio.shield` does not read the abandoned outcome, contrary to what
+our docstring claimed: cancelling the outer future removes the callback that
+would have. Every reply we shield now reads its own outcome when it arrives.
+
 ## 2.1.21
 
 ### Fixed — simultaneous clones can no longer kill the Google session (F-939)
