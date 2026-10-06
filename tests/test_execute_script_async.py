@@ -30,8 +30,10 @@ Hermetic: a ``FakeTab`` and real ``nodriver`` CDP records, no browser.
 """
 
 import pytest
+from nodriver.core.connection import ProtocolException
 
 from fakes import (
+    TARGET_SWAPPED_ERROR,
     FakeBrowserManager,
     FakeTab,
     call_tool,
@@ -389,6 +391,57 @@ async def test_the_tool_raises_for_a_rejection_rather_than_reporting_success(
         )
 
     assert "es-rejected" in str(raised.value)
+
+
+class _RefusingTab(FakeTab):
+    """A tab whose every send is answered with Chrome's *error* object, through
+    nodriver's own ``ProtocolException`` constructor."""
+
+    def __init__(self, error: dict) -> None:
+        super().__init__()
+        self._error = error
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        raise ProtocolException(self._error)
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_navigates_under_the_script_is_named_as_that(patched_server):
+    """F-942 (Sentry -8J / -AY): the script submitted a form, the page moved on,
+    and Chrome answered the in-flight evaluate with "Inspected target navigated
+    or closed". "Failed to execute script" said the script did not run, which
+    invites running a side-effecting script twice."""
+    patched_server(
+        browser_manager=FakeBrowserManager(
+            tabs={"i1": _RefusingTab(TARGET_SWAPPED_ERROR)}
+        )
+    )
+
+    with pytest.raises(ToolError) as raised:
+        await call_tool(
+            server,
+            "execute_script",
+            instance_id="i1",
+            script="document.forms[0].submit()",
+        )
+
+    message = str(raised.value)
+    assert "navigated or its tab closed while the script was running" in message
+    assert "may already have happened" in message
+    assert "Failed to execute script" not in message
+
+
+@pytest.mark.asyncio
+async def test_any_other_protocol_error_is_still_a_failed_execution(patched_server):
+    """The same CODE with another message is not a swap: the key is closed,
+    on ``navigation_milestone.document_swapped``'s precedent."""
+    other = {"code": -32000, "message": "Cannot find context with specified id"}
+    patched_server(browser_manager=FakeBrowserManager(tabs={"i1": _RefusingTab(other)}))
+
+    with pytest.raises(
+        ToolError, match="Failed to execute script: Cannot find context"
+    ):
+        await call_tool(server, "execute_script", instance_id="i1", script="1")
 
 
 @pytest.mark.asyncio

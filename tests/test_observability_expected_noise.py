@@ -228,6 +228,38 @@ def navigate_budget_chain():
     return asyncio.run(run())
 
 
+def script_chain(patched_server, error):
+    """``execute_script``'s own chain when Chrome answers its evaluate with *error*.
+
+    Through the real tool body and the real ``script_evaluation`` send, over a
+    ``ProtocolException`` built by nodriver's own constructor: the tool's
+    ``except Exception: raise ToolError(str(e))`` is a link Sentry serializes,
+    so it is run rather than reproduced by hand.
+    """
+    import asyncio
+
+    from nodriver.core.connection import ProtocolException
+
+    from fakes import FakeBrowserManager, FakeTab, call_tool
+
+    class RefusingTab(FakeTab):
+        async def send(self, cdp_obj, *args, **kwargs):
+            raise ProtocolException(error)
+
+    server = patched_server(
+        browser_manager=FakeBrowserManager(tabs={"i1": RefusingTab()})
+    )
+
+    async def run():
+        try:
+            await call_tool(server, "execute_script", instance_id="i1", script="1")
+        except BaseException:
+            return sys.exc_info()
+        return None
+
+    return asyncio.run(run())
+
+
 def tool_manager_event(exc_info, logger_name=TOOL_MANAGER_LOGGER, tool="navigate"):
     """An exception event on a tool logger, the way ``_emit`` assembles one."""
     event, hint = event_from_exception(
@@ -538,6 +570,30 @@ class TestTheBudgetIsTheProductAnswering:
 
         assert not dropped(tool_manager_event(chain()))
         assert not dropped(payload_only(tool_manager_event(chain())))
+
+    def test_a_script_whose_page_navigated_is_dropped(self, patched_server):
+        """F-942 (Sentry -8J / -AY). The page navigated under an in-flight
+        ``execute_script``; that is recognised by name and explained to the
+        caller, so the tool's real chain is ours alone."""
+        from fakes import TARGET_SWAPPED_ERROR
+
+        pair = tool_manager_event(
+            script_chain(patched_server, TARGET_SWAPPED_ERROR), tool="execute_script"
+        )
+
+        assert dropped(pair)
+        assert dropped(payload_only(pair))
+
+    def test_any_other_protocol_error_under_a_script_still_ships(self, patched_server):
+        """The control: the same code with another message keeps nodriver's
+        exception in the chain, and ships."""
+        other = {"code": -32000, "message": "Cannot find context with specified id"}
+        pair = tool_manager_event(
+            script_chain(patched_server, other), tool="execute_script"
+        )
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
 
 
 # ===========================================================================
