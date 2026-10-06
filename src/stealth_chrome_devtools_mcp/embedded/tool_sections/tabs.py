@@ -16,7 +16,7 @@ signatures are byte-identical — FastMCP surfaces them and
 
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded import tab_identity
+from stealth_chrome_devtools_mcp.embedded import tab_identity, tab_open
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
@@ -118,7 +118,7 @@ async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
     browser = await _require_browser(rt.browser_manager, instance_id)
     try:
         tab = await rt._with_cdp_timeout(
-            browser.get(url, new_tab=True), instance_id=instance_id
+            tab_open.open_tab(browser, url), instance_id=instance_id
         )
         await _require_landing_ok(
             tab, url, rt.CDP_OPERATION_TIMEOUT, close_on_error=True

@@ -76,7 +76,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from stealth_chrome_devtools_mcp.embedded import profile_lock
+from nodriver import Browser
+
+from stealth_chrome_devtools_mcp.embedded import profile_lock, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -92,12 +94,6 @@ class SettingsTab(Protocol):
     async def get(self, url: str) -> object: ...
 
     async def close(self) -> None: ...
-
-
-class PrefBrowser(Protocol):
-    """The slice of a nodriver ``Browser`` the pref setter drives."""
-
-    async def get(self, url: str, new_tab: bool = False) -> SettingsTab: ...
 
 
 #: The features that bind Google's session cookies to the device. See the module
@@ -252,11 +248,11 @@ async def _await_settings_bindings(tab: SettingsTab) -> None:
         await asyncio.sleep(_READY_POLL_SECONDS)
 
 
-async def _set_restore_pref(browser: PrefBrowser, tab_box: list[SettingsTab]) -> bool:
+async def _set_restore_pref(browser: Browser, tab_box: list[SettingsTab]) -> bool:
     """The body of :func:`ensure_session_restore`. The tab is opened on
     ``about:blank`` and put into *tab_box* BEFORE it navigates, so the caller can
     close it even when this coroutine is cancelled mid-await."""
-    tab = await browser.get("about:blank", new_tab=True)
+    tab = await tab_open.open_tab(browser, "about:blank")
     tab_box.append(tab)
     await tab.get("chrome://settings")
     await _await_settings_bindings(tab)
@@ -276,7 +272,7 @@ async def _set_restore_pref(browser: PrefBrowser, tab_box: list[SettingsTab]) ->
     return False
 
 
-async def ensure_session_restore(browser: PrefBrowser) -> bool:
+async def ensure_session_restore(browser: Browser) -> bool:
     """Set ``session.restore_on_startup`` to ``1`` through ``chrome://settings``
     and report whether it is ``1`` afterwards. Idempotent: it reads first and
     writes only when the value differs. Never raises, never takes longer than

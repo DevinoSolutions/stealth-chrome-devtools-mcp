@@ -25,6 +25,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     spawn_exhaustion,
     spawn_leak,
     tab_identity,
+    tab_open,
     tool_errors,
     window_sizing,
 )
@@ -1017,17 +1018,7 @@ class BrowserManager:
 
         browser = data["browser"]
         previous_tab = data.get("tab")
-        try:
-            new_tab = await browser.get("about:blank", new_tab=True)
-        except RuntimeError as e:
-            # nodriver picks the new target with a bare next(filter(...)) over
-            # browser.targets; PEP 479 turns that StopIteration into this.
-            if not isinstance(e.__cause__, StopIteration):
-                raise
-            raise tool_errors.ToolError(
-                "Browser has no usable page target (it may be shutting down or "
-                "its last tab was closed); spawn a new instance or retry."
-            ) from e
+        new_tab = await tab_open.open_tab(browser, "about:blank")
         await new_tab
         await self._arm_tracked_tab(instance_id, new_tab)
 

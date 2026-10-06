@@ -69,7 +69,7 @@ def server_landing_on(patched_server: Any, url: str) -> tuple[Any, FakeTab, Any]
     """A patched ``server`` whose one instance's tab lands on *url*.
 
     The SAME tab is both the instance's main tab (what ``go_back`` moves) and the
-    tab ``browser.get(..., new_tab=True)`` hands back (what ``new_tab`` opens), so
+    tab ``tab_open.open_tab`` hands back (what ``new_tab`` opens), so
     one seeding drives all four tools.
     """
     tab = landing_on(url)

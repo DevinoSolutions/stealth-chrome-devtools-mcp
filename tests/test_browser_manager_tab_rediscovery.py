@@ -120,7 +120,7 @@ async def test_navigation_after_rediscovery_leaks_no_tab(manager_and_browser):
 
     await manager.get_navigation_tab(INSTANCE_ID)
 
-    assert browser.get_calls == []
+    assert browser.opened == []
     assert len(browser.tabs) == 2
     assert manager._instances[INSTANCE_ID]["tab"] is tracked
 
@@ -165,7 +165,7 @@ async def test_navigation_never_adopts_a_browser_tabs_entry_as_main_tab(
 
     assert navigation_tab is not survivor
     assert manager._instances[INSTANCE_ID]["tab"] is not survivor
-    assert browser.get_calls == [("about:blank", True)]
+    assert browser.opened == ["about:blank"]
     assert manager._instances[INSTANCE_ID]["tab"] is navigation_tab
 
 
@@ -315,76 +315,55 @@ async def test_switch_to_tab_reports_an_unknown_tab_id_unchanged(manager_and_bro
 
 
 # ---------------------------------------------------------------------------
-# F-816 — _replace_main_tab: nodriver's bare StopIteration escapes as RuntimeError
+# F-818 → F-940 — _replace_main_tab opens its tab through tab_open
 # ---------------------------------------------------------------------------
+#
+# F-818 caught nodriver's ``RuntimeError: coroutine raised StopIteration`` here
+# and re-raised it as "Browser has no usable page target (it may be shutting
+# down or its last tab was closed)". F-940 measured what it really was: a LIVE
+# browser whose websocket had reconnected without target discovery, so the
+# StopIteration came from a lookup no event would ever satisfy. ``tab_open``
+# no longer depends on that event, the StopIteration cannot occur, and the
+# message that sent operators to restart a healthy browser is gone with it.
+# ``tests/test_tab_open.py`` pins the opener; these pin the caller.
 
 
-async def _get_with_no_page_target(*_args, **_kwargs):
-    """``nodriver.Browser.get``'s failure mode, reproduced line-for-line.
-
-    ``get(new_tab=True)`` locates the freshly created target with
-    ``next(filter(lambda item: item.type_ == "page", self.targets))``
-    (``core/browser.py:256-261``). When nothing in ``targets`` is a page — the
-    browser is tearing down, the last tab was closed, or the entries degraded to
-    raw ``Connection`` objects after a rediscovery — that bare ``next`` raises
-    ``StopIteration`` *inside a coroutine*, which PEP 479 converts to
-    ``RuntimeError("coroutine raised StopIteration")`` with the ``StopIteration``
-    as its ``__cause__``.
-
-    Built from the real construct rather than a hand-written
-    ``RuntimeError(...)`` so the double cannot encode a ``__cause__``/message
-    shape the interpreter would never produce.
-    """
-    return next(filter(lambda item: item.type_ == "page", []))
-
-
-async def test_replace_main_tab_reports_a_browser_with_no_page_target(
+async def test_replace_main_tab_opens_its_tab_through_create_target(
     manager_and_browser,
 ):
-    """THE pin: the RuntimeError becomes an actionable ``ToolError``.
-
-    Sentry STEALTH-CHROME-DEVTOOLS-MCP-2K: ``navigate`` retries through
-    ``_replace_main_tab``, whose ``browser.get`` blew up with the bare
-    ``RuntimeError: coroutine raised StopIteration`` — a message that names
-    neither the browser nor anything the operator can act on.
-    """
     manager, browser, _tracked = manager_and_browser
-    browser.get = _get_with_no_page_target
 
-    with pytest.raises(ToolError) as excinfo:
-        await manager._replace_main_tab(INSTANCE_ID, reason="test")
+    # ``close_existing=False`` as ``get_navigation_tab`` calls it: the fixture's
+    # tracked tab models a ``Tab`` only as far as awaiting it.
+    new_tab = await manager._replace_main_tab(
+        INSTANCE_ID, reason="test", close_existing=False
+    )
 
-    message = str(excinfo.value)
-    assert "page target" in message
-    assert "StopIteration" not in message
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert browser.opened == ["about:blank"]
+    assert browser.connection.cdp_frames[0]["method"] == "Target.createTarget"
+    assert manager._instances[INSTANCE_ID]["tab"] is new_tab
+    assert new_tab.awaited == 1
 
 
-async def test_replace_main_tab_lets_an_unrelated_runtime_error_through(
+async def test_replace_main_tab_lets_a_refused_create_target_through(
     manager_and_browser,
 ):
-    """The guard is scoped to the StopIteration cause, not to ``RuntimeError``.
-
-    A transport-level ``RuntimeError`` (a closed event loop, a dead websocket)
-    is NOT "no usable page target" and must keep its own type and message so it
-    still reaches Sentry as the unexpected failure it is.
-    """
-    manager, browser, _tracked = manager_and_browser
-
-    async def _boom(*_args, **_kwargs):
-        raise RuntimeError("Event loop is closed")
-
-    browser.get = _boom
+    """A browser that refuses ``createTarget`` (a closed event loop, a dead
+    websocket) keeps its own type and message, so it still reaches Sentry as
+    the unexpected failure it is — never a reworded ``ToolError``."""
+    manager, browser, tracked = manager_and_browser
+    browser._create_target_error = RuntimeError("Event loop is closed")
 
     with pytest.raises(RuntimeError) as excinfo:
         await manager._replace_main_tab(INSTANCE_ID, reason="test")
 
     assert not isinstance(excinfo.value, ToolError)
     assert str(excinfo.value) == "Event loop is closed"
+    assert manager._instances[INSTANCE_ID]["tab"] is tracked
 
 
 # ---------------------------------------------------------------------------
-# F-816 — navigate: the instance-not-found shape is typed, not a bare Exception
+# F-818 — navigate: the instance-not-found shape is typed, not a bare Exception
 # ---------------------------------------------------------------------------
 
 

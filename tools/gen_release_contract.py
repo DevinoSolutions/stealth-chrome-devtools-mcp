@@ -203,16 +203,6 @@ LIMITATIONS: tuple[Limitation, ...] = (
         "no independent evidence — declared, not claimed.",
     ),
     Limitation(
-        "`_replace_main_tab` residual",
-        "tabs / instance main-tab identity",
-        "open",
-        "`browser_manager.py` awaits `browser.get(..., new_tab=True)`, which "
-        "returns whatever `browser.targets` holds for that id — a `Connection` "
-        "if `update_targets()` won the race. Same family as F-775, lower "
-        "severity, outside FIX-F's four sites.",
-        "routed, not fixed.",
-    ),
-    Limitation(
         "F-776",
         "evidence / per-tool transport coverage",
         "open (opened by W5)",
