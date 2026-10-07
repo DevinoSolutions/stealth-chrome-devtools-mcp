@@ -477,3 +477,27 @@ def fixture_origin_pair():
 
     with serve_fixture_origin_pair() as origins:
         yield origins
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """F-944: a failed node that ran on an isolated gate workspace carries that
+    workspace's proxy warnings and backend logs in its own failure report.
+
+    The workspace is deleted at module teardown, so on CI these logs were gone
+    by the time anyone looked: S1 failed on "the backend on port N died" and
+    nothing could say whether the watchdog condemned it or only the bridge broke.
+    Report sections rather than a teardown print, because pytest shows the CALL
+    report's sections for a failure and a teardown print lands nowhere.
+    """
+    outcome = yield
+    report = outcome.get_result()
+    space = getattr(item, "funcargs", {}).get("space")
+    if report.when != "call" or not report.failed or not isinstance(space, dict):
+        return
+    if "log_dir" not in space or "home_dir" not in space:
+        return
+    from release_gate_harness import workspace_backend_logs, workspace_proxy_warnings
+
+    report.sections.append(("proxy warnings", workspace_proxy_warnings(space)))
+    report.sections.append(("backend logs", workspace_backend_logs(space)))

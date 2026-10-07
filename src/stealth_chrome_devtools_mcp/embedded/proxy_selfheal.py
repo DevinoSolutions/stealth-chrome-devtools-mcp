@@ -263,11 +263,24 @@ class PendingCalls:
         if isinstance(answered, str | int):
             self._inflight.pop(answered, None)
 
-    async def fail_all(self, client_write: _MessageSink, port: int) -> None:
-        """Answer everything still in flight with a clear error, once."""
+    async def fail_all(
+        self, client_write: _MessageSink, port: int, cause: str | None
+    ) -> None:
+        """Answer everything still in flight with a clear error, once.
+
+        The words say only what ``cause`` already knows (F-944). This runs
+        BEFORE ``_confirm_bridge_verdict`` asks whether the backend survived,
+        so a bridge that merely ended may be a backend that is still serving —
+        the error used to say "died" either way, and an operator reading it
+        went looking for a crash that never happened.
+        """
         from mcp.shared.message import SessionMessage
         from mcp.types import ErrorData, JSONRPCError, JSONRPCMessage
 
+        if cause == WATCHDOG_CAUSE:
+            what = f"the backend on port {port} stopped answering and was condemned"
+        else:
+            what = f"the connection to the backend on port {port} broke"
         inflight, self._inflight = self._inflight, {}
         for request_id, method in inflight.items():
             error = JSONRPCError(
@@ -276,9 +289,8 @@ class PendingCalls:
                 error=ErrorData(
                     code=_BACKEND_DIED_CODE,
                     message=(
-                        f"the backend on port {port} died while '{method}' was "
-                        "in flight; the call was NOT retried against its "
-                        "replacement — reissue it if it is safe to repeat"
+                        f"{what} while '{method}' was in flight; the call was "
+                        "NOT retried — reissue it if it is safe to repeat"
                     ),
                 ),
             )
@@ -447,7 +459,7 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
     # Unconditional and FIRST: whatever the verdict turns out to be, the calls
     # this backend was holding are already unanswerable, and the client is owed
     # its errors before anything slower than that runs.
-    await pending.fail_all(client_write, port)
+    await pending.fail_all(client_write, port, verdict["cause"])
     if verdict["cause"] == _BRIDGE_ENDED:
         return await _confirm_bridge_verdict(port, confirm_alive=confirm_alive)
     return verdict["cause"]
