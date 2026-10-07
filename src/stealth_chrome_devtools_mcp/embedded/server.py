@@ -10,6 +10,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
+from stealth_chrome_devtools_mcp.embedded.backend_probe import MCP_PATH
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     backend_uvicorn_config,
     bootstrap_backend_process_logging,
@@ -546,6 +547,7 @@ if __name__ == "__main__":
             transport="http",
             host=args.host,
             port=args.port,
+            path=MCP_PATH,
             uvicorn_config=backend_uvicorn_config(),
         )
     else:

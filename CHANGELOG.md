@@ -27,6 +27,12 @@ repository's manifests.
   fails every spawn, would have reached neither the log file nor Sentry. The tool
   wrapper now reports it the way fastmcp 2.11 did. A caller's mistyped argument is
   still answered to the caller and not reported.
+* **The backend still serves MCP at `/mcp/`.** fastmcp 2.14 moved its default
+  path from `/mcp/` to `/mcp` and redirects the old spelling. The proxy's readiness
+  probe does not follow redirects, so on the bumped stack every proxy timed out
+  ("backend did not become ready within 120s") against a backend that was up. The
+  path is now set explicitly in one place and used by both ends, so a proxy and a
+  backend from either side of the bump still agree.
 * fastmcp's loggers are now named `fastmcp.*` rather than `FastMCP.fastmcp.*`; the
   Sentry noise filter follows.
 * Tool errors read exactly as before on the wire: `Error calling tool '<name>': …`.

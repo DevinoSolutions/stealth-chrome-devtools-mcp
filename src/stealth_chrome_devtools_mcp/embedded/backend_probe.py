@@ -53,6 +53,15 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("stealth.proxy")
 
+#: THE path the backend serves MCP on, passed to ``mcp.run(path=…)`` by the
+#: backend and used in every URL the proxy builds (F-943). Explicit because the
+#: library's DEFAULT moved under us: fastmcp 2.11 served ``/mcp/`` and
+#: redirected ``/mcp``, 2.14 serves ``/mcp`` and 307s ``/mcp/`` — and a probe
+#: that does not follow redirects then never sees its 200, so every proxy timed
+#: out on a backend that was up. Pinned to the 2.11 spelling so a proxy and a
+#: backend from either side of the bump still agree.
+MCP_PATH = "/mcp/"
+
 #: The only answer that proves the MCP layer will accept a client's session. A
 #: freshly bound uvicorn socket answers 4xx while FastMCP's session manager is
 #: still starting, so "any HTTP response" is not the test.
