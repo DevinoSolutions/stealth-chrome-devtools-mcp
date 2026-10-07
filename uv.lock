@@ -1876,7 +1876,7 @@ wheels = [
 
 [[package]]
 name = "stealth-chrome-devtools-mcp"
-version = "2.1.22"
+version = "2.1.23"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

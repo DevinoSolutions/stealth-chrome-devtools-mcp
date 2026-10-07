@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.23
 
 ### Security — the pinned dependencies no longer carry 63 known advisories (F-943)
 
