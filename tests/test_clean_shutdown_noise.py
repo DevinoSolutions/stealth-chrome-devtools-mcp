@@ -10,7 +10,7 @@ Sentry issues ``-1J`` / ``-1H``: on POSIX every graceful stop
   the handler's ``sys.exit(0)`` unwound ``run_forever`` from inside ``select()``
   (``"Exception in 'lifespan' protocol"`` / ``"Application shutdown failed."`` /
   ``"Session … crashed"``); and
-* FastMCP 2.11.2 hard-codes ``timeout_graceful_shutdown: 0``, and
+* FastMCP hard-codes ``timeout_graceful_shutdown: 0`` (2.11.2 and 2.14.7), and
   ``asyncio.wait_for(coro, 0)`` always raises on CPython 3.12, so uvicorn logged
   ``"Cancel N running task(s), timeout graceful shutdown exceeded"`` at ERROR on
   every graceful HTTP stop.

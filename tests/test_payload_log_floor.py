@@ -921,11 +921,11 @@ class TestTheFamiliesDeliberatelyLeftOut:
             )
 
     def test_the_fastmcp_argument_line_is_unreachable_from_root(self):
-        """``fastmcp/server/server.py``:672 DEBUG-logs a tool call's ARGUMENTS
-        — a real payload line, and the reason this family is OUT is that the
-        library already closes it: its loggers hang under a ``FastMCP`` root
-        carrying its own level and ``propagate = False``, so a caller's root
-        DEBUG never reaches them.
+        """``fastmcp/server/server.py``:1537 (2.14.7; :672 in 2.11.2) DEBUG-logs
+        a tool call's ARGUMENTS — a real payload line, and the reason this family
+        is OUT is that the library already closes it: its loggers hang under a
+        ``fastmcp`` root (``FastMCP`` until 2.14) carrying its own level and
+        ``propagate = False``, so a caller's root DEBUG never reaches them.
 
         Pinned as a PREMISE: an upstream change that drops either half makes
         this RED, which is the signal to re-open the family question.
@@ -935,15 +935,22 @@ class TestTheFamiliesDeliberatelyLeftOut:
         configurator rather than asserting against the wreckage. That call is
         the premise: what is being tested is that fastmcp still shields its own
         family, not that some particular process happened to be configured.
+
+        Since 2.14 the call sits under ``if settings.log_enabled:``, default
+        ``True``. Only ``FASTMCP_LOG_ENABLED`` could turn it off, and the backend
+        never sees one: ``backend_env`` removes every inherited ``FASTMCP_*``
+        before fastmcp is imported, on both of its paths (F-943).
         """
         import fastmcp.server.server as fastmcp_server
+        from fastmcp.settings import Settings
         from fastmcp.utilities.logging import configure_logging as fastmcp_configure
 
         # Keyed on the module-body CALL, never on the substring: `__init__`
         # imports the function under an ALIAS, so `"configure_logging" in
         # source` is satisfied by the import line alone and stays green for
         # exactly the bump this pin warns about (F-908 review S1, measured —
-        # deleting the call left a substring assertion passing).
+        # deleting the call left a substring assertion passing). A call inside
+        # a top-level `if` counts only when that `if` is the `log_enabled` gate.
         tree = ast.parse(Path(fastmcp.__file__).read_text(encoding="utf-8"))
         aliases = {
             alias.asname or alias.name
@@ -952,9 +959,17 @@ class TestTheFamiliesDeliberatelyLeftOut:
             for alias in node.names
             if alias.name == "configure_logging"
         }
+        statements = list(tree.body)
+        for node in tree.body:
+            if (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Attribute)
+                and node.test.attr == "log_enabled"
+            ):
+                statements.extend(node.body)
         called = {
             node.value.func.id
-            for node in tree.body
+            for node in statements
             if isinstance(node, ast.Expr)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
@@ -963,24 +978,25 @@ class TestTheFamiliesDeliberatelyLeftOut:
             "fastmcp no longer CALLS configure_logging in its module body; the "
             "fastmcp family may now need the floor"
         )
+        assert Settings.model_fields["log_enabled"].default is True
         fastmcp_configure()
 
         logger = fastmcp_server.logger
-        assert logger.name.startswith("FastMCP."), logger.name
-        family = logging.getLogger("FastMCP")
+        assert logger.name.startswith("fastmcp."), logger.name
+        family = logging.getLogger("fastmcp")
         assert family.level != logging.NOTSET
         assert family.propagate is False
 
         logging.basicConfig(level=logging.DEBUG, force=True)
         assert not logger.isEnabledFor(logging.DEBUG), (
-            "FastMCP's own level no longer shields its tool-argument line; "
+            "fastmcp's own level no longer shields its tool-argument line; "
             "the fastmcp family now needs the floor"
         )
 
     def test_the_mcp_server_incoming_line_renders_no_payload_for_a_request(self):
-        """``mcp/server/lowlevel/server.py``:676 logs the whole incoming
-        message and IS admitted at DEBUG — so it looks like the argument-side
-        twin of F-908 and, **for a request**, is not.
+        """``mcp/server/lowlevel/server.py``:682 (mcp 1.28.1; :676 in 1.27.1)
+        logs the whole incoming message and IS admitted at DEBUG — so it looks
+        like the argument-side twin of F-908 and, **for a request**, is not.
 
         ``incoming_messages`` is typed ``RequestResponder |
         ReceiveNotificationT | Exception``, and only the first arm is silent: a

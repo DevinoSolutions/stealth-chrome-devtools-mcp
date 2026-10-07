@@ -59,10 +59,12 @@ EventHandler = pytest.importorskip("sentry_sdk.integrations.logging").EventHandl
 # --- the real production loggers, verbatim from the triage ------------------
 STREAMABLE_HTTP_LOGGER = "mcp.server.streamable_http"
 LOWLEVEL_LOGGER = "mcp.server.lowlevel.server"
-TOOL_MANAGER_LOGGER = "FastMCP.fastmcp.tools.tool_manager"
+# The triage saw `FastMCP.fastmcp.tools.tool_manager`; fastmcp 2.14 dropped the
+# prefix (F-943), and this is the name events carry now.
+TOOL_MANAGER_LOGGER = "fastmcp.tools.tool_manager"
 ASYNCIO_LOGGER = "asyncio"
 
-#: `mcp/server/lowlevel/server.py:707` (mcp 1.27.1):
+#: `mcp/server/lowlevel/server.py:713` (mcp 1.28.1; :707 in 1.27.1):
 #: ``logger.error(f"Received exception from stream: {message}")``, a
 #: ``case Exception():`` catch-all with no ``exc_info``. The empty tail means
 #: ``str(exc) == ""`` and NOT "it was a ``ClientDisconnect``" — that class is
@@ -290,12 +292,15 @@ def client_disconnect():
 def _through_tool_run(body, arguments):
     """Run ``body`` the way ``tool_manager`` does and hand back its exc_info.
 
-    `fastmcp/tools/tool_manager.py`:220-229 wraps `await tool.run(arguments)` —
-    and `tool.py`:295's `type_adapter.validate_python(arguments)` is INSIDE that
-    `run` — in ONE `try`, logging both with the same call on the same logger. So
-    a caller's bad kwarg and a `ValidationError` our own body raised are
-    indistinguishable by logger, message and chain, and only the FRAMES tell
-    them apart. This helper is the real `Tool.run`, so the frames are real.
+    In fastmcp 2.11.2, `fastmcp/tools/tool_manager.py`:220-229 wrapped
+    `await tool.run(arguments)` — and `tool.py`'s
+    `type_adapter.validate_python(arguments)` (:295 then, :381 in 2.14.7) is
+    INSIDE that `run` — in ONE `try`, logging both with the same call on the
+    same logger. So a caller's bad kwarg and a `ValidationError` our own body
+    raised are indistinguishable by logger, message and chain, and only the
+    FRAMES tell them apart. Since 2.14 neither is logged by fastmcp, and ours is
+    logged by `tool_failure._report_own_validation_error` (F-943). This helper
+    is the real `Tool.run`, so the frames are real.
     """
     import asyncio
 

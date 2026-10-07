@@ -7,12 +7,12 @@ Code — not to us, and everything in it reaches the backend, including names th
 belong to a THIRD party.
 
 **The incident.** ``embedded/server.py`` imports ``fastmcp`` at module scope, and
-``fastmcp`` (2.11.2) builds a ``pydantic_settings.BaseSettings`` AT IMPORT whose
-``env_prefixes`` are ``["FASTMCP_", "FASTMCP_SERVER_"]``. An inherited
-``FASTMCP_PORT`` is therefore parsed into ``port: int`` before one line of our
-code runs — before ``build_arg_parser``, before ``--port`` exists as a concept.
-An empty value is not "unset" to pydantic: it is the string ``""``, and
-``int("")`` fails validation. Measured on the installed stack::
+``fastmcp`` builds a ``pydantic_settings.BaseSettings`` AT IMPORT whose ``env_prefix``
+is ``"FASTMCP_"`` (2.14.7; 2.11.2 also read ``FASTMCP_SERVER_``). An inherited
+``FASTMCP_PORT`` is therefore parsed into ``port: int`` before one line of our code runs
+— before ``build_arg_parser``, before ``--port`` exists as a concept. An empty value is
+not "unset" to pydantic: it is the string ``""``, and ``int("")`` fails validation.
+Measured on the installed stack::
 
     FASTMCP_PORT=""  ->  ValidationError: port — Input should be a valid
                          integer, unable to parse string as an integer
@@ -43,8 +43,9 @@ worse: it requires importing ``fastmcp`` to compute, and **the stdio proxy must
 never import** ``fastmcp`` — it reaches ``backend_launch`` today without touching
 the MCP server stack at all (``desktop_launch`` carries the same paragraph about
 why its nodriver import is lazy: ≈175 ms warm to reach a seam, down from ≈470).
-One prefix also covers all of ``FASTMCP_``, ``FASTMCP_SERVER_`` and the nested
-``FASTMCP_EXPERIMENTAL…`` block, so there is one constant and not three. The
+One prefix also covers all of ``FASTMCP_``, the nested ``FASTMCP_EXPERIMENTAL…``
+and ``FASTMCP_DOCKET…`` blocks, and the ``FASTMCP_SERVER_`` spelling 2.11.2 also
+read, so there is one constant and not four. The
 constant is ours; that it still COVERS the installed library is pinned against
 the library's own ``model_config`` in ``tests/test_backend_env_scrub.py``.
 

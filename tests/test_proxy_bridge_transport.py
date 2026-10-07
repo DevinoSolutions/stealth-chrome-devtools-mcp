@@ -3,7 +3,7 @@ ONE transport seam, under a read policy a standing event stream can survive.
 
 Two things were wrong with ``async with streamablehttp_client(url)``.
 
-The visible one: at the pinned ``mcp`` 1.27.1 that function is
+The visible one: at the pinned ``mcp`` (1.27.1, and 1.28.1) that function is
 ``@deprecated("Use `streamable_http_client` instead.")``, so every proxy start
 raised a ``DeprecationWarning`` from our own call site. It is a MIGRATION and not
 a bug fix — measured, the deprecated function does honour its two timeout
@@ -96,7 +96,7 @@ class FakeBackend:
             # handshake; the stream itself is measured against a real socket
             # below. Deliberately not described as what our backend does — it
             # answers a valid GET with 200 + SSE and registers GET_STREAM_KEY
-            # (mcp/server/streamable_http.py:659-728), which is this file's
+            # (mcp/server/streamable_http.py:660-752 in mcp 1.28.1), this file's
             # whole subject — nor as something the SDK reads as "no stream":
             # `handle_get_stream`'s `raise_for_status` raises on a 405 and
             # burns both reconnection attempts. The branch is not reached today
@@ -309,7 +309,7 @@ class TestTheBridgeUsesTheCurrentClient:
                 if used:
                     offenders.append(f"{path.relative_to(SRC_ROOT)}:{node.lineno}")
         assert offenders == [], (
-            f"`{deprecated}` is @deprecated at mcp 1.27.1; reach the SDK's "
+            f"`{deprecated}` is @deprecated at the pinned mcp; reach the SDK's "
             f"current client through backend_client instead: {offenders}"
         )
 

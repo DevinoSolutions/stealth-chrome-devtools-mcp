@@ -1529,7 +1529,7 @@ class TestSessionHygiene:
 
     def test_the_sdk_still_names_the_replacement_this_module_uses(self):
         """F-891 review S2. `streamablehttp_client` is `@deprecated` at the
-        pinned mcp 1.27.1 and `streamable_http_client` is what it says to use;
+        pinned mcp (1.27.1, and 1.28.1) and `streamable_http_client` is what it says to use;
         this module uses the latter, and the latter takes a client rather than
         the two timeout numbers — which is why `http_client` exists. If a bump
         renames or re-signatures it, that is a decision to make deliberately."""

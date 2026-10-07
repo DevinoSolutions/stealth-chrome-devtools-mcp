@@ -11,7 +11,7 @@ The fix is at the ONE wrapper every registered tool passes through
 the spawn site — so the property under test here is general: **any** tool's
 failure lands. The spawn case is the reported one, and it leads.
 
-Four things this file refuses to let regress, in the order they matter:
+Five things this file refuses to let regress, in the order they matter:
 
 1. the failure is IN the ring, named by tool and message (and reachable through
    the real ``get_debug_view`` tool, not just the logger object);
@@ -21,19 +21,26 @@ Four things this file refuses to let regress, in the order they matter:
    (F-782's redaction condition — see the scope test below);
 3. a SUCCEEDING call records nothing (the ring stays a signal, not a log);
 4. the recording can never break a tool call — a debug ring that throws is a
-   debug-ring problem, and the tool's own error is what reaches the client.
+   debug-ring problem, and the tool's own error is what reaches the client;
+5. a pydantic ``ValidationError`` our BODY raised still reaches fastmcp's tool
+   logger, and so Sentry, exactly once — fastmcp 2.14 stopped logging it
+   (F-943) — while a caller's bad argument still reaches nothing.
 
-Hermetic: no Chrome, no disk profile, no transport. The ring is a process-wide
-singleton, so every test runs against an emptied one.
+Hermetic: no Chrome, no disk profile, no network. Section 5 alone goes through
+fastmcp's in-memory ``Client``, because its subject is what the library logs
+around our wrapper. The ring is a process-wide singleton, so every test runs
+against an emptied one.
 """
 
 from __future__ import annotations
 
 import logging
 
+import pydantic
 import pytest
 
 from fakes import FakeBrowserManager, FakeTab, call_tool
+from stealth_chrome_devtools_mcp import expected_events
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     desktop_launch,
@@ -292,3 +299,96 @@ async def test_cancellation_is_not_recorded_as_an_error():
     with pytest.raises(asyncio.CancelledError):
         await cancelled_tool()
     assert debug_logger.get_debug_view()["summary"]["total_errors"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. a ValidationError OUR body raised still reaches Sentry (F-943)
+# ---------------------------------------------------------------------------
+class _Port(pydantic.BaseModel):
+    port: int
+
+
+async def broken_settings_tool() -> str:
+    """Raises a REAL pydantic ``ValidationError`` from inside the body — the
+    shape of an unknown ``STEALTH_MCP_*`` key failing ``Settings()``."""
+    _Port.model_validate({"port": "not-a-port"})
+    return "unreachable"
+
+
+async def crashing_tool() -> str:
+    raise RuntimeError("boom")
+
+
+async def counting_tool(count: int) -> int:
+    return count
+
+
+async def _tool_manager_records(tool: str, arguments: dict) -> list[logging.LogRecord]:
+    """Call ``tool`` through fastmcp's REAL ``Client`` → ``ToolManager`` →
+    ``FunctionTool.run`` path and return what reached fastmcp's tool logger.
+
+    A real FastMCP server and not ``call_tool``'s ``.fn`` seam, because the
+    subject is what the LIBRARY logs around our wrapper; the seam skips it. The
+    handler sits on the logger itself because the ``fastmcp`` family does not
+    propagate to root (Sentry still sees it: it patches ``callHandlers``).
+    """
+    import fastmcp
+
+    app = fastmcp.FastMCP("f943")
+    for fn in (broken_settings_tool, crashing_tool, counting_tool):
+        app.tool(with_correlation_id(fn))
+
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Collect(level=logging.DEBUG)
+    logger = logging.getLogger(expected_events.TOOL_MANAGER_LOGGER)
+    logger.addHandler(handler)
+    try:
+        async with fastmcp.Client(app) as client:
+            with pytest.raises(Exception):  # noqa: B017, PT011  PERMANENT(the client's error type is fastmcp's; this test is about the log, not it)
+                await client.call_tool(tool, arguments)
+    finally:
+        logger.removeHandler(handler)
+    return [r for r in records if r.levelno >= logging.ERROR]
+
+
+def test_the_tool_manager_logger_is_the_installed_librarys():
+    """``expected_events`` keys ``caller-input`` on this name and the report
+    below logs on it. fastmcp 2.14 renamed it from ``FastMCP.fastmcp.tools.
+    tool_manager``; read off the library so the next rename fails HERE."""
+    from fastmcp.tools import tool_manager
+
+    assert tool_manager.logger.name == expected_events.TOOL_MANAGER_LOGGER
+
+
+async def test_a_validation_error_our_body_raised_is_reported():
+    """fastmcp 2.14 re-raises a ``ValidationError`` out of a tool WITHOUT
+    logging it, so ours — which fails every call, as F-887 measured — would
+    reach no log and no Sentry. It must be reported exactly once, with the
+    exception attached, the way fastmcp 2.11.2 reported it."""
+    records = await _tool_manager_records("broken_settings_tool", {})
+
+    assert len(records) == 1
+    (record,) = records
+    assert record.getMessage() == "Error calling tool 'broken_settings_tool'"
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], pydantic.ValidationError)
+
+
+async def test_any_other_failure_is_reported_once_not_twice():
+    """fastmcp still logs every other exception itself; adding a second
+    report for those would double every Sentry event."""
+    records = await _tool_manager_records("crashing_tool", {})
+
+    assert len(records) == 1
+    assert isinstance(records[0].exc_info[1], RuntimeError)
+
+
+async def test_a_callers_bad_argument_is_not_reported():
+    """The caller's own typo fails fastmcp's argument validation BEFORE our
+    wrapper runs, and the caller already got the message. Nothing ships."""
+    assert await _tool_manager_records("counting_tool", {"count": "abc"}) == []

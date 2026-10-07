@@ -7,15 +7,12 @@
         "args": {
           "default": null,
           "items": {},
-          "title": "Args",
           "type": "array"
         },
         "function_path": {
-          "title": "Function Path",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -38,7 +35,6 @@
       "properties": {
         "max_age_hours": {
           "default": 24,
-          "title": "Max Age Hours",
           "type": "integer"
         }
       },
@@ -71,7 +67,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "url": {
@@ -83,8 +78,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Url"
+          "default": null
         }
       },
       "required": [
@@ -95,14 +89,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -118,14 +110,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -137,7 +127,6 @@
     "input_schema": {
       "properties": {
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         }
       },
@@ -158,11 +147,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "text_match": {
@@ -174,12 +161,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Text Match"
+          "default": null
         },
         "timeout": {
           "default": 10000,
-          "title": "Timeout",
           "type": "integer"
         }
       },
@@ -209,15 +194,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Extraction Options"
+          "default": null
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -240,15 +222,12 @@
       "properties": {
         "include_children": {
           "default": true,
-          "title": "Include Children",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -278,15 +257,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Extraction Options"
+          "default": null
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -308,7 +284,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -341,11 +316,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "tab_id": {
-          "title": "Tab Id",
           "type": "string"
         }
       },
@@ -358,14 +331,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -377,7 +348,6 @@
     "input_schema": {
       "properties": {
         "function_code": {
-          "title": "Function Code",
           "type": "string"
         },
         "instance_ids": {
@@ -392,21 +362,17 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Instance Ids"
+          "default": null
         },
         "name": {
-          "title": "Name",
           "type": "string"
         },
         "priority": {
           "default": 100,
-          "title": "Priority",
           "type": "integer"
         },
         "requirements": {
           "additionalProperties": true,
-          "title": "Requirements",
           "type": "object"
         }
       },
@@ -429,15 +395,12 @@
     "input_schema": {
       "properties": {
         "function_code": {
-          "title": "Function Code",
           "type": "string"
         },
         "function_name": {
-          "title": "Function Name",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -460,15 +423,12 @@
     "input_schema": {
       "properties": {
         "binding_name": {
-          "title": "Binding Name",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "python_code": {
-          "title": "Python Code",
           "type": "string"
         }
       },
@@ -491,7 +451,6 @@
     "input_schema": {
       "properties": {
         "action": {
-          "title": "Action",
           "type": "string"
         },
         "custom_headers": {
@@ -506,8 +465,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Custom Headers"
+          "default": null
         },
         "instance_ids": {
           "anyOf": [
@@ -521,11 +479,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Instance Ids"
+          "default": null
         },
         "name": {
-          "title": "Name",
           "type": "string"
         },
         "target_url": {
@@ -537,11 +493,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Target Url"
+          "default": null
         },
         "url_pattern": {
-          "title": "Url Pattern",
           "type": "string"
         }
       },
@@ -565,11 +519,9 @@
       "properties": {
         "context_id": {
           "default": null,
-          "title": "Context Id",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -585,14 +537,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -604,11 +554,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "object_path": {
-          "title": "Object Path",
           "type": "string"
         }
       },
@@ -625,14 +573,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -644,17 +590,14 @@
     "input_schema": {
       "properties": {
         "command": {
-          "title": "Command",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "params": {
           "additionalProperties": true,
           "default": null,
-          "title": "Params",
           "type": "object"
         }
       },
@@ -680,11 +623,9 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Function Calls",
           "type": "array"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -701,14 +642,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -720,11 +659,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "python_code": {
-          "title": "Python Code",
           "type": "string"
         }
       },
@@ -755,15 +692,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Args"
+          "default": null
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "script": {
-          "title": "Script",
           "type": "string"
         },
         "timeout_ms": {
@@ -775,8 +709,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Timeout Ms"
+          "default": null
         }
       },
       "required": [
@@ -797,7 +730,6 @@
     "input_schema": {
       "properties": {
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         }
       },
@@ -827,11 +759,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Depth Range"
+          "default": null
         },
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         },
         "max_count": {
@@ -841,8 +771,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Max Count"
+          "default": null
         }
       },
       "required": [
@@ -862,7 +791,6 @@
     "input_schema": {
       "properties": {
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         },
         "source_types": {
@@ -877,8 +805,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Source Types"
+          "default": null
         }
       },
       "required": [
@@ -898,7 +825,6 @@
     "input_schema": {
       "properties": {
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         },
         "event_types": {
@@ -913,8 +839,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Event Types"
+          "default": null
         }
       },
       "required": [
@@ -934,7 +859,6 @@
     "input_schema": {
       "properties": {
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         }
       },
@@ -966,11 +890,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Categories"
+          "default": null
         },
         "element_id": {
-          "title": "Element Id",
           "type": "string"
         },
         "properties": {
@@ -985,8 +907,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Properties"
+          "default": null
         }
       },
       "required": [
@@ -1007,32 +928,26 @@
       "properties": {
         "filename": {
           "default": "debug_log.json",
-          "title": "Filename",
           "type": "string"
         },
         "format": {
           "default": "auto",
-          "title": "Format",
           "type": "string"
         },
         "include_all": {
           "default": false,
-          "title": "Include All",
           "type": "boolean"
         },
         "max_errors": {
           "default": 100,
-          "title": "Max Errors",
           "type": "integer"
         },
         "max_info": {
           "default": 100,
-          "title": "Max Info",
           "type": "integer"
         },
         "max_warnings": {
           "default": 100,
-          "title": "Max Warnings",
           "type": "integer"
         }
       },
@@ -1041,14 +956,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "string"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -1060,11 +973,9 @@
     "input_schema": {
       "properties": {
         "filepath": {
-          "title": "Filepath",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -1087,15 +998,12 @@
       "properties": {
         "include_children": {
           "default": true,
-          "title": "Include Children",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1118,15 +1026,12 @@
       "properties": {
         "include_children": {
           "default": true,
-          "title": "Include Children",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1149,20 +1054,16 @@
       "properties": {
         "include_subtree": {
           "default": true,
-          "title": "Include Subtree",
           "type": "boolean"
         },
         "include_waapi": {
           "default": true,
-          "title": "Include Waapi",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1185,20 +1086,16 @@
       "properties": {
         "include_subtree": {
           "default": true,
-          "title": "Include Subtree",
           "type": "boolean"
         },
         "include_waapi": {
           "default": true,
-          "title": "Include Waapi",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1221,30 +1118,24 @@
       "properties": {
         "fetch_external": {
           "default": false,
-          "title": "Fetch External",
           "type": "boolean"
         },
         "include_backgrounds": {
           "default": true,
-          "title": "Include Backgrounds",
           "type": "boolean"
         },
         "include_fonts": {
           "default": true,
-          "title": "Include Fonts",
           "type": "boolean"
         },
         "include_images": {
           "default": true,
-          "title": "Include Images",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1267,30 +1158,24 @@
       "properties": {
         "fetch_external": {
           "default": false,
-          "title": "Fetch External",
           "type": "boolean"
         },
         "include_backgrounds": {
           "default": true,
-          "title": "Include Backgrounds",
           "type": "boolean"
         },
         "include_fonts": {
           "default": true,
-          "title": "Include Fonts",
           "type": "boolean"
         },
         "include_images": {
           "default": true,
-          "title": "Include Images",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1313,30 +1198,24 @@
       "properties": {
         "analyze_handlers": {
           "default": false,
-          "title": "Analyze Handlers",
           "type": "boolean"
         },
         "include_framework": {
           "default": true,
-          "title": "Include Framework",
           "type": "boolean"
         },
         "include_inline": {
           "default": true,
-          "title": "Include Inline",
           "type": "boolean"
         },
         "include_listeners": {
           "default": true,
-          "title": "Include Listeners",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1359,30 +1238,24 @@
       "properties": {
         "analyze_handlers": {
           "default": true,
-          "title": "Analyze Handlers",
           "type": "boolean"
         },
         "include_framework": {
           "default": true,
-          "title": "Include Framework",
           "type": "boolean"
         },
         "include_inline": {
           "default": true,
-          "title": "Include Inline",
           "type": "boolean"
         },
         "include_listeners": {
           "default": true,
-          "title": "Include Listeners",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1405,30 +1278,24 @@
       "properties": {
         "include_attributes": {
           "default": true,
-          "title": "Include Attributes",
           "type": "boolean"
         },
         "include_children": {
           "default": false,
-          "title": "Include Children",
           "type": "boolean"
         },
         "include_data_attributes": {
           "default": true,
-          "title": "Include Data Attributes",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "max_depth": {
           "default": 3,
-          "title": "Max Depth",
           "type": "integer"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1451,30 +1318,24 @@
       "properties": {
         "include_attributes": {
           "default": true,
-          "title": "Include Attributes",
           "type": "boolean"
         },
         "include_children": {
           "default": false,
-          "title": "Include Children",
           "type": "boolean"
         },
         "include_data_attributes": {
           "default": true,
-          "title": "Include Data Attributes",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "max_depth": {
           "default": 3,
-          "title": "Max Depth",
           "type": "integer"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1497,30 +1358,24 @@
       "properties": {
         "include_computed": {
           "default": true,
-          "title": "Include Computed",
           "type": "boolean"
         },
         "include_css_rules": {
           "default": true,
-          "title": "Include Css Rules",
           "type": "boolean"
         },
         "include_inheritance": {
           "default": false,
-          "title": "Include Inheritance",
           "type": "boolean"
         },
         "include_pseudo": {
           "default": true,
-          "title": "Include Pseudo",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1543,30 +1398,24 @@
       "properties": {
         "include_computed": {
           "default": true,
-          "title": "Include Computed",
           "type": "boolean"
         },
         "include_css_rules": {
           "default": true,
-          "title": "Include Css Rules",
           "type": "boolean"
         },
         "include_inheritance": {
           "default": false,
-          "title": "Include Inheritance",
           "type": "boolean"
         },
         "include_pseudo": {
           "default": true,
-          "title": "Include Pseudo",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1589,30 +1438,24 @@
       "properties": {
         "include_computed": {
           "default": true,
-          "title": "Include Computed",
           "type": "boolean"
         },
         "include_css_rules": {
           "default": true,
-          "title": "Include Css Rules",
           "type": "boolean"
         },
         "include_inheritance": {
           "default": false,
-          "title": "Include Inheritance",
           "type": "boolean"
         },
         "include_pseudo": {
           "default": true,
-          "title": "Include Pseudo",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1635,26 +1478,21 @@
       "properties": {
         "analyze_css": {
           "default": true,
-          "title": "Analyze Css",
           "type": "boolean"
         },
         "analyze_js": {
           "default": true,
-          "title": "Analyze Js",
           "type": "boolean"
         },
         "follow_imports": {
           "default": false,
-          "title": "Follow Imports",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "max_depth": {
           "default": 2,
-          "title": "Max Depth",
           "type": "integer"
         }
       },
@@ -1675,7 +1513,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -1696,7 +1533,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "urls": {
@@ -1711,8 +1547,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Urls"
+          "default": null
         }
       },
       "required": [
@@ -1727,14 +1562,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -1760,22 +1593,18 @@
       "properties": {
         "include_all": {
           "default": false,
-          "title": "Include All",
           "type": "boolean"
         },
         "max_errors": {
           "default": 50,
-          "title": "Max Errors",
           "type": "integer"
         },
         "max_info": {
           "default": 50,
-          "title": "Max Info",
           "type": "integer"
         },
         "max_warnings": {
           "default": 50,
-          "title": "Max Warnings",
           "type": "integer"
         }
       },
@@ -1793,7 +1622,6 @@
     "input_schema": {
       "properties": {
         "hook_id": {
-          "title": "Hook Id",
           "type": "string"
         }
       },
@@ -1814,11 +1642,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         }
       },
@@ -1840,7 +1666,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -1856,14 +1681,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -1876,7 +1699,6 @@
       "properties": {
         "instance_id": {
           "default": null,
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -1946,7 +1768,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -1966,14 +1787,12 @@
             {
               "type": "null"
             }
-          ],
-          "title": "Result"
+          ]
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -1985,7 +1804,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2007,11 +1825,9 @@
       "properties": {
         "include_frames": {
           "default": false,
-          "title": "Include Frames",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2032,7 +1848,6 @@
     "input_schema": {
       "properties": {
         "request_id": {
-          "title": "Request Id",
           "type": "string"
         }
       },
@@ -2052,14 +1867,12 @@
             {
               "type": "null"
             }
-          ],
-          "title": "Result"
+          ]
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2071,11 +1884,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "request_id": {
-          "title": "Request Id",
           "type": "string"
         }
       },
@@ -2095,14 +1906,12 @@
             {
               "type": "null"
             }
-          ],
-          "title": "Result"
+          ]
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2114,7 +1923,6 @@
     "input_schema": {
       "properties": {
         "request_id": {
-          "title": "Request Id",
           "type": "string"
         }
       },
@@ -2134,14 +1942,12 @@
             {
               "type": "null"
             }
-          ],
-          "title": "Result"
+          ]
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2153,7 +1959,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2165,14 +1970,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2184,7 +1987,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2196,14 +1998,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2215,11 +2015,9 @@
     "input_schema": {
       "properties": {
         "filepath": {
-          "title": "Filepath",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2232,14 +2030,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2252,15 +2048,12 @@
       "properties": {
         "context_id": {
           "default": null,
-          "title": "Context Id",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "script_code": {
-          "title": "Script Code",
           "type": "string"
         }
       },
@@ -2282,11 +2075,9 @@
     "input_schema": {
       "properties": {
         "function_path": {
-          "title": "Function Path",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2315,14 +2106,12 @@
           "items": {
             "type": "string"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2342,14 +2131,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2369,8 +2156,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Instance Id"
+          "default": null
         }
       },
       "type": "object"
@@ -2395,14 +2181,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2422,11 +2206,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Filter Type"
+          "default": null
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2450,14 +2232,12 @@
               "additionalProperties": true,
               "type": "object"
             }
-          ],
-          "title": "Result"
+          ]
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2482,7 +2262,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2500,14 +2279,12 @@
             },
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2522,11 +2299,9 @@
           "additionalProperties": {
             "type": "string"
           },
-          "title": "Headers",
           "type": "object"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2539,14 +2314,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2558,7 +2331,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "referrer": {
@@ -2570,21 +2342,17 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Referrer"
+          "default": null
         },
         "timeout": {
           "default": 30000,
-          "title": "Timeout",
           "type": "integer"
         },
         "url": {
-          "title": "Url",
           "type": "string"
         },
         "wait_until": {
           "default": "load",
-          "title": "Wait Until",
           "type": "string"
         }
       },
@@ -2606,12 +2374,10 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "url": {
           "default": "about:blank",
-          "title": "Url",
           "type": "string"
         }
       },
@@ -2633,19 +2399,15 @@
       "properties": {
         "clear_first": {
           "default": true,
-          "title": "Clear First",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "text": {
-          "title": "Text",
           "type": "string"
         }
       },
@@ -2659,14 +2421,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2678,7 +2438,6 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "limit": {
@@ -2688,11 +2447,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Limit"
+          "default": null
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "text_filter": {
@@ -2704,12 +2461,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Text Filter"
+          "default": null
         },
         "visible_only": {
           "default": true,
-          "title": "Visible Only",
           "type": "boolean"
         }
       },
@@ -2726,14 +2481,12 @@
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Result",
           "type": "array"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2746,11 +2499,9 @@
       "properties": {
         "ignore_cache": {
           "default": false,
-          "title": "Ignore Cache",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -2762,14 +2513,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -2781,7 +2530,6 @@
     "input_schema": {
       "properties": {
         "hook_id": {
-          "title": "Hook Id",
           "type": "string"
         }
       },
@@ -2803,21 +2551,17 @@
       "properties": {
         "amount": {
           "default": 500,
-          "title": "Amount",
           "type": "integer"
         },
         "direction": {
           "default": "down",
-          "title": "Direction",
           "type": "string"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "smooth": {
           "default": true,
-          "title": "Smooth",
           "type": "boolean"
         }
       },
@@ -2838,12 +2582,10 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "limit": {
           "default": 100,
-          "title": "Limit",
           "type": "integer"
         },
         "method": {
@@ -2855,12 +2597,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Method"
+          "default": null
         },
         "offset": {
           "default": 0,
-          "title": "Offset",
           "type": "integer"
         },
         "payload_contains": {
@@ -2872,8 +2612,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Payload Contains"
+          "default": null
         },
         "resource_type": {
           "anyOf": [
@@ -2884,8 +2623,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Resource Type"
+          "default": null
         },
         "response_contains": {
           "anyOf": [
@@ -2896,8 +2634,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Response Contains"
+          "default": null
         },
         "status_code": {
           "anyOf": [
@@ -2908,8 +2645,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Status Code"
+          "default": null
         },
         "url_pattern": {
           "anyOf": [
@@ -2920,8 +2656,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Url Pattern"
+          "default": null
         }
       },
       "required": [
@@ -2947,15 +2682,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Index"
+          "default": null
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "text": {
@@ -2967,8 +2699,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Text"
+          "default": null
         },
         "value": {
           "anyOf": [
@@ -2979,8 +2710,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Value"
+          "default": null
         }
       },
       "required": [
@@ -3009,25 +2739,20 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Domain"
+          "default": null
         },
         "http_only": {
           "default": false,
-          "title": "Http Only",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "name": {
-          "title": "Name",
           "type": "string"
         },
         "path": {
           "default": "/",
-          "title": "Path",
           "type": "string"
         },
         "same_site": {
@@ -3039,12 +2764,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Same Site"
+          "default": null
         },
         "secure": {
           "default": false,
-          "title": "Secure",
           "type": "boolean"
         },
         "url": {
@@ -3056,11 +2779,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Url"
+          "default": null
         },
         "value": {
-          "title": "Value",
           "type": "string"
         }
       },
@@ -3074,14 +2795,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -3101,8 +2820,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Capture Bodies"
+          "default": null
         },
         "capture_internal_urls": {
           "anyOf": [
@@ -3113,8 +2831,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Capture Internal Urls"
+          "default": null
         },
         "exclude_types": {
           "anyOf": [
@@ -3128,8 +2845,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Exclude Types"
+          "default": null
         },
         "include_types": {
           "anyOf": [
@@ -3143,11 +2859,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Include Types"
+          "default": null
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -3159,14 +2873,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -3182,7 +2894,6 @@
           "items": {
             "type": "string"
           },
-          "title": "Block Resources",
           "type": "array"
         },
         "browser_args": {
@@ -3190,7 +2901,6 @@
           "items": {
             "type": "string"
           },
-          "title": "Browser Args",
           "type": "array"
         },
         "extra_headers": {
@@ -3198,12 +2908,10 @@
             "type": "string"
           },
           "default": null,
-          "title": "Extra Headers",
           "type": "object"
         },
         "headless": {
           "default": false,
-          "title": "Headless",
           "type": "boolean"
         },
         "idle_timeout_seconds": {
@@ -3215,8 +2923,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Idle Timeout Seconds"
+          "default": null
         },
         "proxy": {
           "anyOf": [
@@ -3227,8 +2934,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Proxy"
+          "default": null
         },
         "sandbox": {
           "anyOf": [
@@ -3237,8 +2943,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Sandbox"
+          "default": null
         },
         "seed_from": {
           "anyOf": [
@@ -3249,8 +2954,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Seed From"
+          "default": null
         },
         "session": {
           "anyOf": [
@@ -3261,8 +2965,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Session"
+          "default": null
         },
         "timezone_id": {
           "anyOf": [
@@ -3273,8 +2976,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Timezone Id"
+          "default": null
         },
         "user_agent": {
           "anyOf": [
@@ -3285,8 +2987,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "User Agent"
+          "default": null
         },
         "user_data_dir": {
           "anyOf": [
@@ -3297,17 +2998,14 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "User Data Dir"
+          "default": null
         },
         "viewport_height": {
           "default": 1080,
-          "title": "Viewport Height",
           "type": "integer"
         },
         "viewport_width": {
           "default": 1920,
-          "title": "Viewport Width",
           "type": "integer"
         }
       },
@@ -3325,11 +3023,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "tab_id": {
-          "title": "Tab Id",
           "type": "string"
         }
       },
@@ -3342,14 +3038,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -3369,21 +3063,17 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "File Path"
+          "default": null
         },
         "format": {
           "default": "png",
-          "title": "Format",
           "type": "string"
         },
         "full_page": {
           "default": false,
-          "title": "Full Page",
           "type": "boolean"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         }
       },
@@ -3403,14 +3093,12 @@
               "additionalProperties": true,
               "type": "object"
             }
-          ],
-          "title": "Result"
+          ]
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -3423,34 +3111,27 @@
       "properties": {
         "clear_first": {
           "default": true,
-          "title": "Clear First",
           "type": "boolean"
         },
         "delay_ms": {
           "default": 50,
-          "title": "Delay Ms",
           "type": "integer"
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "parse_newlines": {
           "default": false,
-          "title": "Parse Newlines",
           "type": "boolean"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "shift_enter": {
           "default": false,
-          "title": "Shift Enter",
           "type": "boolean"
         },
         "text": {
-          "title": "Text",
           "type": "string"
         }
       },
@@ -3464,14 +3145,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
@@ -3493,20 +3172,16 @@
               },
               "type": "array"
             }
-          ],
-          "title": "File Paths"
+          ]
         },
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "timeout": {
           "default": 10000,
-          "title": "Timeout",
           "type": "integer"
         }
       },
@@ -3542,7 +3217,6 @@
     "input_schema": {
       "properties": {
         "function_code": {
-          "title": "Function Code",
           "type": "string"
         }
       },
@@ -3563,11 +3237,9 @@
     "input_schema": {
       "properties": {
         "instance_id": {
-          "title": "Instance Id",
           "type": "string"
         },
         "selector": {
-          "title": "Selector",
           "type": "string"
         },
         "text_content": {
@@ -3579,17 +3251,14 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Text Content"
+          "default": null
         },
         "timeout": {
           "default": 30000,
-          "title": "Timeout",
           "type": "integer"
         },
         "visible": {
           "default": true,
-          "title": "Visible",
           "type": "boolean"
         }
       },
@@ -3602,14 +3271,12 @@
     "output_schema": {
       "properties": {
         "result": {
-          "title": "Result",
           "type": "boolean"
         }
       },
       "required": [
         "result"
       ],
-      "title": "_WrappedResult",
       "type": "object",
       "x-fastmcp-wrap-result": true
     },
