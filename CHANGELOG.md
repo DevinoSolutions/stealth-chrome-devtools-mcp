@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.22
 
 ### Fixed — tabs open again after the browser connection reconnects (F-940)
 
