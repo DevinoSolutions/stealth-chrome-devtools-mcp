@@ -463,7 +463,7 @@ def _wait_for_server(port: int, timeout: int = STARTUP_TIMEOUT) -> bool:
 
 
 def _backend_http_url(port: int) -> str:
-    return f"http://127.0.0.1:{port}/mcp/"
+    return f"http://127.0.0.1:{port}{backend_probe.MCP_PATH}"
 
 
 def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -> bool:
