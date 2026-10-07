@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### A call cut off by a broken connection no longer says the backend died (F-944)
+
+When the proxy's connection to the backend ends, every call still in flight is
+answered with an error at once, before the proxy has checked whether the backend
+survived. That error always said "the backend on port N died", including when the
+backend was alive and only the connection had broken. It now says which: "the
+backend on port N stopped answering and was condemned" when the watchdog concluded
+it, otherwise "the connection to the backend on port N broke". The call is still
+not retried, and the error code is unchanged.
+
+A failing end-to-end test that runs its own isolated backend now prints that
+backend's and its proxies' logs in the failure report. Before, they were deleted
+with the test's workspace, so a CI failure like this one could not be explained.
+
 ## 2.1.23
 
 ### Security — the pinned dependencies no longer carry 63 known advisories (F-943)

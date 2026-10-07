@@ -545,7 +545,7 @@ class TestPendingCalls:
         pending.track(_request(1, "tools/list").message.root)
         pending.settle(_response(1, {}).message.root)
 
-        await pending.fail_all(sink, PORT_A)
+        await pending.fail_all(sink, PORT_A, proxy_selfheal.WATCHDOG_CAUSE)
 
         assert sink.sent == []
 
@@ -554,10 +554,34 @@ class TestPendingCalls:
         pending = proxy_selfheal.PendingCalls()
         pending.track(_request(1, "tools/list").message.root)
 
-        await pending.fail_all(sink, PORT_A)
-        await pending.fail_all(sink, PORT_A)
+        await pending.fail_all(sink, PORT_A, proxy_selfheal.WATCHDOG_CAUSE)
+        await pending.fail_all(sink, PORT_A, proxy_selfheal.WATCHDOG_CAUSE)
 
         assert len(sink.sent) == 1
+
+    @pytest.mark.parametrize(
+        ("cause", "says", "never"),
+        [
+            (proxy_selfheal.WATCHDOG_CAUSE, "was condemned", "connection"),
+            (proxy_selfheal._BRIDGE_ENDED, "connection to the backend", "died"),
+            (None, "connection to the backend", "died"),
+        ],
+    )
+    async def test_the_error_says_only_what_the_cause_knows(self, cause, says, never):
+        """F-944: a bridge that ended is answered BEFORE anyone has asked whether
+        the backend survived, so it must not be called a death. CI saw "the
+        backend on port N died" from a backend that went on serving."""
+        sink = _Sink()
+        pending = proxy_selfheal.PendingCalls()
+        pending.track(_request(9, "tools/call").message.root)
+
+        await pending.fail_all(sink, PORT_A, cause)
+
+        message = sink.sent[0].message.root.error.message
+        assert says in message
+        assert never not in message
+        assert "'tools/call'" in message
+        assert "NOT retried" in message
 
 
 # --------------------------------------------------------------------------
