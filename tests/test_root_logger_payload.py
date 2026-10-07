@@ -15,8 +15,9 @@ itself**. So the record's ``name`` is ``root``:
 * the payload is **pre-interpolated by an f-string**, so ``record.args`` is
   empty and F-907's argument rule sees nothing.
 
-MEASURED against the installed mcp 1.27.1 (``uv.lock``), by driving the real
-``BaseSession._receive_loop`` over memory streams — no socket, no Chrome:
+MEASURED against mcp 1.27.1 and again on 1.28.1 (``uv.lock``, F-943), by
+driving the real ``BaseSession._receive_loop`` over memory streams — no socket,
+no Chrome:
 
 * ``:383`` ``logging.warning(f"Failed to validate request: {e}")`` — pydantic's
   middle-truncated ``input_value=`` echo of the caller's own arguments, at

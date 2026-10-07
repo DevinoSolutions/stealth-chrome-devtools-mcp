@@ -212,7 +212,7 @@ async def opened(
     in a dependency bump without anything here failing.
 
     **``streamable_http_client``, not ``streamablehttp_client``** (F-891
-    review S2). At the pinned ``mcp`` 1.27.1 the latter is
+    review S2). At the pinned ``mcp`` (1.27.1, and 1.28.1) the latter is
     ``@deprecated("Use `streamable_http_client` instead.")``; measured, it still
     honours ``timeout``/``sse_read_timeout`` — it builds
     ``httpx.Timeout(timeout, read=sse_read_timeout)`` and hands the client down

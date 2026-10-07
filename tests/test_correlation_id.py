@@ -42,26 +42,33 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
 # same reason: a new session may be copied from an existing one. Again nothing
 # else in this snapshot moves, and again it is the same single property that
 # moved in the HARD golden.
+#
+# F-943 drops every ``"title"`` key. fastmcp 2.14 prunes the per-parameter titles
+# pydantic generates from the parameter name ("Block Resources" for
+# ``block_resources``), so this is the dependency bump, not the wrapper. Names,
+# types, defaults and ``required`` are unchanged here and in the HARD golden,
+# which lost exactly its 333 titles and nothing else (measured: both sides
+# compared with string-valued ``title`` keys removed, 94 tools, zero diffs).
 _GOLDEN_SCHEMA_JSON = r"""
 {
   "browser-management": {
     "name": "spawn_browser",
     "inputSchema": {
       "properties": {
-        "block_resources": {"default": null, "items": {"type": "string"}, "title": "Block Resources", "type": "array"},
-        "browser_args": {"default": null, "items": {"type": "string"}, "title": "Browser Args", "type": "array"},
-        "extra_headers": {"additionalProperties": {"type": "string"}, "default": null, "title": "Extra Headers", "type": "object"},
-        "headless": {"default": false, "title": "Headless", "type": "boolean"},
-        "idle_timeout_seconds": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Idle Timeout Seconds"},
-        "proxy": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Proxy"},
-        "sandbox": {"anyOf": [{}, {"type": "null"}], "default": null, "title": "Sandbox"},
-        "seed_from": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Seed From"},
-        "session": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Session"},
-        "timezone_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Timezone Id"},
-        "user_agent": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "User Agent"},
-        "user_data_dir": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "User Data Dir"},
-        "viewport_height": {"default": 1080, "title": "Viewport Height", "type": "integer"},
-        "viewport_width": {"default": 1920, "title": "Viewport Width", "type": "integer"}
+        "block_resources": {"default": null, "items": {"type": "string"}, "type": "array"},
+        "browser_args": {"default": null, "items": {"type": "string"}, "type": "array"},
+        "extra_headers": {"additionalProperties": {"type": "string"}, "default": null, "type": "object"},
+        "headless": {"default": false, "type": "boolean"},
+        "idle_timeout_seconds": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null},
+        "proxy": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "sandbox": {"anyOf": [{}, {"type": "null"}], "default": null},
+        "seed_from": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "session": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "timezone_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "user_agent": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "user_data_dir": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "viewport_height": {"default": 1080, "type": "integer"},
+        "viewport_width": {"default": 1920, "type": "integer"}
       },
       "type": "object"
     }
@@ -74,8 +81,8 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "get_cookies",
     "inputSchema": {
       "properties": {
-        "instance_id": {"title": "Instance Id", "type": "string"},
-        "urls": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Urls"}
+        "instance_id": {"type": "string"},
+        "urls": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null}
       },
       "required": ["instance_id"],
       "type": "object"
@@ -85,10 +92,10 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "get_debug_view",
     "inputSchema": {
       "properties": {
-        "include_all": {"default": false, "title": "Include All", "type": "boolean"},
-        "max_errors": {"default": 50, "title": "Max Errors", "type": "integer"},
-        "max_info": {"default": 50, "title": "Max Info", "type": "integer"},
-        "max_warnings": {"default": 50, "title": "Max Warnings", "type": "integer"}
+        "include_all": {"default": false, "type": "boolean"},
+        "max_errors": {"default": 50, "type": "integer"},
+        "max_info": {"default": 50, "type": "integer"},
+        "max_warnings": {"default": 50, "type": "integer"}
       },
       "type": "object"
     }
@@ -97,11 +104,11 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "create_dynamic_hook",
     "inputSchema": {
       "properties": {
-        "function_code": {"title": "Function Code", "type": "string"},
-        "instance_ids": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Instance Ids"},
-        "name": {"title": "Name", "type": "string"},
-        "priority": {"default": 100, "title": "Priority", "type": "integer"},
-        "requirements": {"additionalProperties": true, "title": "Requirements", "type": "object"}
+        "function_code": {"type": "string"},
+        "instance_ids": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null},
+        "name": {"type": "string"},
+        "priority": {"default": 100, "type": "integer"},
+        "requirements": {"additionalProperties": true, "type": "object"}
       },
       "required": ["name", "requirements", "function_code"],
       "type": "object"
@@ -111,12 +118,12 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "extract_element_styles",
     "inputSchema": {
       "properties": {
-        "include_computed": {"default": true, "title": "Include Computed", "type": "boolean"},
-        "include_css_rules": {"default": true, "title": "Include Css Rules", "type": "boolean"},
-        "include_inheritance": {"default": false, "title": "Include Inheritance", "type": "boolean"},
-        "include_pseudo": {"default": true, "title": "Include Pseudo", "type": "boolean"},
-        "instance_id": {"title": "Instance Id", "type": "string"},
-        "selector": {"title": "Selector", "type": "string"}
+        "include_computed": {"default": true, "type": "boolean"},
+        "include_css_rules": {"default": true, "type": "boolean"},
+        "include_inheritance": {"default": false, "type": "boolean"},
+        "include_pseudo": {"default": true, "type": "boolean"},
+        "instance_id": {"type": "string"},
+        "selector": {"type": "string"}
       },
       "required": ["instance_id", "selector"],
       "type": "object"
@@ -126,11 +133,11 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "query_elements",
     "inputSchema": {
       "properties": {
-        "instance_id": {"title": "Instance Id", "type": "string"},
-        "limit": {"anyOf": [{}, {"type": "null"}], "default": null, "title": "Limit"},
-        "selector": {"title": "Selector", "type": "string"},
-        "text_filter": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Text Filter"},
-        "visible_only": {"default": true, "title": "Visible Only", "type": "boolean"}
+        "instance_id": {"type": "string"},
+        "limit": {"anyOf": [{}, {"type": "null"}], "default": null},
+        "selector": {"type": "string"},
+        "text_filter": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "visible_only": {"default": true, "type": "boolean"}
       },
       "required": ["instance_id", "selector"],
       "type": "object"
@@ -140,9 +147,9 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "clone_element_to_file",
     "inputSchema": {
       "properties": {
-        "extraction_options": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Extraction Options"},
-        "instance_id": {"title": "Instance Id", "type": "string"},
-        "selector": {"title": "Selector", "type": "string"}
+        "extraction_options": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "instance_id": {"type": "string"},
+        "selector": {"type": "string"}
       },
       "required": ["instance_id", "selector"],
       "type": "object"
@@ -152,8 +159,8 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "list_network_requests",
     "inputSchema": {
       "properties": {
-        "filter_type": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Filter Type"},
-        "instance_id": {"title": "Instance Id", "type": "string"}
+        "filter_type": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "instance_id": {"type": "string"}
       },
       "required": ["instance_id"],
       "type": "object"
@@ -163,9 +170,9 @@ _GOLDEN_SCHEMA_JSON = r"""
     "name": "clone_element_progressive",
     "inputSchema": {
       "properties": {
-        "include_children": {"default": true, "title": "Include Children", "type": "boolean"},
-        "instance_id": {"title": "Instance Id", "type": "string"},
-        "selector": {"title": "Selector", "type": "string"}
+        "include_children": {"default": true, "type": "boolean"},
+        "instance_id": {"type": "string"},
+        "selector": {"type": "string"}
       },
       "required": ["instance_id", "selector"],
       "type": "object"
@@ -174,7 +181,7 @@ _GOLDEN_SCHEMA_JSON = r"""
   "tabs": {
     "name": "list_tabs",
     "inputSchema": {
-      "properties": {"instance_id": {"title": "Instance Id", "type": "string"}},
+      "properties": {"instance_id": {"type": "string"}},
       "required": ["instance_id"],
       "type": "object"
     }

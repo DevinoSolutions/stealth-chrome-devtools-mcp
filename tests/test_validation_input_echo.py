@@ -17,9 +17,10 @@ construction:
   static ``"Error parsing SSE message"``. Withholding it deletes the one thing
   that is safe and leaves the payload exactly where it was.
 
-MEASURED against the installed mcp 1.27.1 / pydantic 2.11.7, by driving the
-real ``StreamableHTTPTransport._handle_sse_event`` over a memory stream — no
-socket, no backend, no Chrome. On the proxy leg the SSE data IS the serialised
+MEASURED against mcp 1.27.1 / pydantic 2.11.7 and again on 1.28.1 / 2.12.5
+(F-943), by driving the real ``StreamableHTTPTransport._handle_sse_event`` over
+a memory stream — no socket, no backend, no Chrome. On the proxy leg the SSE
+data IS the serialised
 answer to a ``tools/call``, so what ``input_value=`` quotes is a tool RESULT.
 
 **How much it quotes was measured rather than taken from the finding, and the
@@ -120,8 +121,9 @@ LEAF_FRAME = json.dumps(
     {"jsonrpc": "2.0", "id": {"tok": LEAF_MARK}, "result": {"cookies": "y" * 200}}
 )
 
-#: pydantic 2.11.7's middle truncation, MEASURED rather than taken from the
-#: finding: when the RENDERING of an input exceeds 50 characters it becomes the
+#: pydantic's middle truncation (2.11.7, unchanged in 2.12.5), MEASURED rather
+#: than taken from the finding: when the RENDERING of an input exceeds 50
+#: characters it becomes the
 #: first 25 characters, ``...``, and the last 24 — :data:`ECHO_RENDERED_CHARS`
 #: in all, and that is the rule for every input type, because it is applied to
 #: the rendering. A ``dict`` input renders as its ``repr`` and keeps 25 + 24 of

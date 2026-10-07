@@ -411,7 +411,8 @@ def _is_expected_tool_failure(
     this filter must never be the reason nobody saw it. That is also why a logger
     name alone is never the test — the ``AttributeError`` in ``navigate`` that
     this project actually shipped arrived through
-    ``FastMCP.fastmcp.tools.tool_manager``, the very logger the noise arrives on,
+    ``FastMCP.fastmcp.tools.tool_manager`` (``fastmcp.tools.tool_manager`` since
+    fastmcp 2.14), the very logger the noise arrives on,
     so ``ignore_logger`` on it would have hidden a real bug. Where a rule DOES
     name a logger it names an exception kind beside it, never the logger alone —
     and ``caller-input``, whose logger carries our own bugs as well as callers'

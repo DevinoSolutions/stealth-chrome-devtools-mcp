@@ -54,7 +54,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import payload_log_sites
+from stealth_chrome_devtools_mcp.embedded import payload_log_sites, tool_failure
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:
@@ -153,24 +153,26 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #:
 #: The line between IN and OUT inside ``mcp`` is SERVER versus CLIENT, and it
 #: was measured on both sides rather than inferred from one. The SERVER tree
-#: renders nothing for a request: ``server/lowlevel/server.py``:676 logs the
-#: whole incoming message and IS admitted at DEBUG, but for a REQUEST that
-#: object is a ``RequestResponder``, which defines neither ``__repr__`` nor
-#: ``__str__``, so ``%s`` yields ``<… object at 0x…>``. (The qualifier is
-#: load-bearing: the same line's NOTIFICATION arm renders its pydantic model in
-#: full. It is still out, because every notification a client may send is
-#: enumerated from the SDK's own union and none carries a tool result or tool
-#: arguments — pinned, so an SDK that adds one goes RED.) The CLIENT transport
-#: renders the whole message and is capped, above. Capping ``mcp`` entire would
-#: therefore silence the server SDK's own INFO diagnostics and close no door
-#: that ``mcp.client`` does not already close.
+#: renders nothing for a request: ``server/lowlevel/server.py``:682 (mcp 1.28.1;
+#: :676 in 1.27.1) logs the whole incoming message and IS admitted at DEBUG,
+#: but for a REQUEST that object is a ``RequestResponder``, which defines
+#: neither ``__repr__`` nor ``__str__``, so ``%s`` yields ``<… object at 0x…>``.
+#: (The qualifier is load-bearing: the same line's NOTIFICATION arm renders its
+#: pydantic model in full. It is still out, because every notification a client
+#: may send is enumerated from the SDK's own union and none carries a tool
+#: result or tool arguments — pinned, so an SDK that adds one goes RED.) The
+#: CLIENT transport renders the whole message and is capped, above. Capping
+#: ``mcp`` entire would therefore silence the server SDK's own INFO diagnostics
+#: and close no door that ``mcp.client`` does not already close.
 #:
-#: ``fastmcp``'s tool-ARGUMENT line (``server/server.py``:672) is real, and the
-#: library already shields it: its loggers hang under a ``FastMCP`` root
-#: carrying its own level and ``propagate = False``, so a caller's root DEBUG
-#: never reaches them — and the bare ``fastmcp`` family, which DOES inherit
-#: root, holds no payload line, so capping it would be the ``uc`` mistake
-#: spelled differently.
+#: ``fastmcp``'s tool-ARGUMENT line (``server/server.py``:1537 in fastmcp
+#: 2.14.7; :672 in 2.11.2) is real, and the library already shields it: every
+#: one of its loggers hangs under a ``fastmcp`` root that carries its own level
+#: and ``propagate = False``, so a caller's root DEBUG never reaches them.
+#: (Until 2.14 that root was spelled ``FastMCP``, and the bare ``fastmcp``
+#: family beside it inherited root but held no payload line; F-943.) Capping
+#: ``fastmcp`` would close no door the library has not closed, which is the
+#: ``uc`` mistake spelled differently.
 #:
 #: Two SITES are RECORDED and not fixed, because no family cap can reach either
 #: however this tuple grows: ``mcp/shared/session.py``:383-384 and :430-432 use
@@ -670,40 +672,6 @@ class CorrelationIdFilter(logging.Filter):
 _tool_call_logger = logging.getLogger("stealth.backend")
 
 
-def _record_tool_failure(tool_name: str, error: Exception) -> None:
-    """Put a failed tool call into the in-memory debug ring (F-835).
-
-    Called from the ONE wrapper every registered tool passes through, so a
-    failure is visible in the product's own debug surface no matter which tool
-    it came from — before this, a total ``spawn_browser`` outage (24 consecutive
-    failures) left ``get_debug_view`` reporting ``total_errors: 0``.
-
-    Two properties this helper exists to guarantee:
-
-    * it **never raises**. It sits on the failure path of all 94 tools, and a
-      debug-ring problem must not replace (or mask) the error the client is
-      owed. The recording is the only thing that can be lost here.
-    * it **never touches** ``error``. The exception continues to the client
-      byte-identical — same type, same args, no attributes added (a pinned
-      contract: ``test_observability`` asserts ``vars(exc) == {}``).
-
-    Note what it does NOT do: write the failure to the backend log. That is
-    ``log_tool_failure``'s deliberate split (F-782's redaction condition), not
-    an oversight — the ring is process-local, the log file is durable and
-    Sentry-bridged, and a failure message echoes the caller's arguments.
-
-    ``debug_logger`` is imported here rather than at module scope because it
-    imports ``correlation_id_var`` from THIS module; a top-level import would
-    close the cycle. Deferred, function-local imports are the established fix
-    for exactly this shape here (see the module docstring and pyproject's
-    PLC0415 rationale) — and on the failure path the cost is a dict lookup.
-    """
-    with contextlib.suppress(Exception):
-        from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
-
-        debug_logger.log_tool_failure(tool_name, error)
-
-
 def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
     """Wrap a registered tool function (the ``section_tool`` chokepoint, F-308)
     so every call gets a fresh correlation id — stamped by
@@ -714,7 +682,7 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
     that this holds for a representative tool per section.
 
     It is also where a FAILED call is recorded (F-835,
-    :func:`_record_tool_failure`): the same chokepoint argument that makes this
+    :func:`tool_failure.record`): the same chokepoint argument that makes this
     the home of the correlation id makes it the home of "this call failed" —
     one place, all 94 tools, instead of a per-tool ``except`` nobody adds. The
     exception is recorded and re-raised unchanged.
@@ -740,7 +708,7 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
             except Exception as error:
                 # Record and re-raise, unchanged (F-835). Only Exception:
                 # CancelledError is a shutdown signal, not a tool failure.
-                _record_tool_failure(tool_name, error)
+                tool_failure.record(tool_name, error)
                 raise
             finally:
                 elapsed_ms = (time.monotonic() - start) * 1000
@@ -757,7 +725,7 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
         try:
             return func(*args, **kwargs)
         except Exception as error:
-            _record_tool_failure(tool_name, error)  # F-835, as above
+            tool_failure.record(tool_name, error)  # F-835, as above
             raise
         finally:
             elapsed_ms = (time.monotonic() - start) * 1000

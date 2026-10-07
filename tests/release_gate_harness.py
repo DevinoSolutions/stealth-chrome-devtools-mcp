@@ -1,7 +1,7 @@
 """plan_RELEASE W1 — the ONE reusable real-stdio release-gate journey.
 
 This module is the single home for the canonical transport E2E: it resolves the
-**absolute installed console launcher**, proves ``fastmcp==2.11.2`` can spawn it
+**absolute installed console launcher**, proves the pinned ``fastmcp`` can spawn it
 over stdio, and drives one real headless-Chrome journey ENTIRELY through
 ``tools/call`` against the local fixture app. ``tests/test_e2e_transport.py`` (W1)
 and ``tools/install_smoke.py`` (W3) both import this unchanged — there is no

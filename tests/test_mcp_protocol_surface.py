@@ -4,9 +4,9 @@ Drives tools through the FastMCP layer (schema validation + serialization) using
 the in-memory ``fastmcp.Client(server.mcp)`` transport, with the M6 fakes patched
 in so the tier stays hermetic. This is the seam nothing else covers: everywhere
 else calls the raw ``.fn`` coroutine directly, bypassing the protocol boundary
-that validates arguments and serializes results. Verified against the installed
-fastmcp 2.11.2 (``CallToolResult.data`` holds the deserialized return value;
-missing/mistyped params raise a validation ``ToolError``).
+that validates arguments and serializes results. Verified against fastmcp 2.11.2
+and again on 2.14.7 (F-943): ``CallToolResult.data`` holds the deserialized
+return value; missing/mistyped params raise a validation ``ToolError``.
 
 NOT integration-marked: runs in the unit job.
 """

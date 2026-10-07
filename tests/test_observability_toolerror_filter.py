@@ -50,7 +50,8 @@ event_from_exception = pytest.importorskip("sentry_sdk.utils").event_from_except
 ILLEGAL_RETURN = "Script raised an exception: SyntaxError: Illegal return statement"
 
 #: The logger the noise AND the real bug both arrive on. Load-bearing: see above.
-TOOL_MANAGER_LOGGER = "FastMCP.fastmcp.tools.tool_manager"
+# `FastMCP.`-prefixed before fastmcp 2.14 (F-943).
+TOOL_MANAGER_LOGGER = "fastmcp.tools.tool_manager"
 
 #: A planted home path, so every "this event survived" assertion can also prove
 #: the survivor was still scrubbed. Never a real username.

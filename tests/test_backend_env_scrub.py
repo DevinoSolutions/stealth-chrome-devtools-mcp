@@ -381,13 +381,28 @@ class TestTheConstantStillCoversTheInstalledLibrary:
     def test_every_fastmcp_env_prefix_starts_with_ours(self):
         """The constant is ours and the pin is the library's. If ``fastmcp``
         ever reads a prefix outside ``FASTMCP_``, this fails on the day we
-        upgrade rather than the day a backend will not start."""
+        upgrade rather than the day a backend will not start.
+
+        Read from EVERY settings class the module defines, under both spellings:
+        2.11.2 declared a plural ``env_prefixes`` on ``Settings`` alone, and
+        2.14.7 declares a singular ``env_prefix`` on ``Settings`` and on each of
+        its nested ``FASTMCP_DOCKET_`` / ``FASTMCP_EXPERIMENTAL_`` blocks (F-943,
+        the bump that turned the old reading into ``None``)."""
         import importlib
 
-        settings_module = importlib.import_module("fastmcp.settings")
-        prefixes = settings_module.Settings.model_config.get("env_prefixes")
+        from pydantic_settings import BaseSettings
 
-        assert prefixes, "fastmcp's Settings must declare env_prefixes"
+        settings_module = importlib.import_module("fastmcp.settings")
+        prefixes: set[str] = set()
+        for value in vars(settings_module).values():
+            if not (isinstance(value, type) and issubclass(value, BaseSettings)):
+                continue
+            config = value.model_config
+            prefixes.update(config.get("env_prefixes") or ())
+            if config.get("env_prefix"):
+                prefixes.add(config["env_prefix"])
+
+        assert "FASTMCP_" in prefixes, f"fastmcp's settings declare {prefixes}"
         assert all(p.startswith(backend_env.FASTMCP_PREFIX) for p in prefixes), (
             f"fastmcp reads {prefixes}, which backend_env.FASTMCP_PREFIX "
             f"({backend_env.FASTMCP_PREFIX!r}) no longer covers"

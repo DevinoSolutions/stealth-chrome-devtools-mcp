@@ -61,8 +61,9 @@ event can arrive in (see "one rule, two paths" below):
     event is the message-only form the session loop logs. **That second arm
     matches "an exception with NO TEXT at ``mcp.server.lowlevel.server``", not
     "a ``ClientDisconnect``"** — and it cannot be narrower.
-    ``mcp/server/lowlevel/server.py``:707 (mcp 1.27.1) is a ``case Exception():``
-    catch-all doing ``logger.error(f"Received exception from stream: {message}")``
+    ``mcp/server/lowlevel/server.py``:713 (mcp 1.28.1; :707 in 1.27.1) is a
+    ``case Exception():`` catch-all doing
+    ``logger.error(f"Received exception from stream: {message}")``
     with no ``exc_info``, so the event carries no exception values, no frames and
     no extra: the empty tail is ``str(exc) == ""`` and there is genuinely nothing
     else in the event to read. A ``ClientDisconnect`` is what fills it 6 500
@@ -94,25 +95,34 @@ event can arrive in (see "one rule, two paths" below):
     shipping.
 
 ``caller-input``
-    Logger ``FastMCP.fastmcp.tools.tool_manager``, chain entirely a pydantic
+    Logger ``fastmcp.tools.tool_manager``, chain entirely a pydantic
     ``ValidationError``, **and** the outermost link's frames carry
     :data:`ARG_VALIDATION_FRAMES` adjacently. That third condition is not
     decoration and it is the whole rule: the logger does NOT tell a caller's
     typo from a ``ValidationError`` our own code raised.
-    ``fastmcp/tools/tool_manager.py``:220-229 wraps ``await tool.run(arguments)``
-    in ONE ``try`` and logs everything out of it with the same
-    ``logger.exception(f"Error calling tool {key!r}")`` — and
-    ``fastmcp/tools/tool.py``:295's ``type_adapter.validate_python(arguments)``
-    is INSIDE that ``run``. So logger, message and chain are byte-identical for
-    the two, and dropping on them dropped our own bugs: measured, an unknown
-    ``STEALTH_MCP_*`` key (which makes ``Settings()`` raise and fails EVERY
-    spawn, since ``get_settings()`` is on the spawn path) and
-    ``browser_manager.py``:429's ``BrowserInstance(...)`` with a wrong field type
-    both vanished under the label "the caller already knows". The FRAMES do tell
-    them apart, identically on both paths (measured): FastMCP's own validation
-    always has ``fastmcp.tools.tool`` ``run`` immediately above
+    In fastmcp 2.11.2, ``fastmcp/tools/tool_manager.py``:220-229 wrapped
+    ``await tool.run(arguments)`` in ONE ``try`` and logged everything out of
+    it with the same ``logger.exception(f"Error calling tool {key!r}")`` — and
+    ``fastmcp/tools/tool.py``'s ``type_adapter.validate_python(arguments)``
+    (:295 then, :381 in 2.14.7) is INSIDE that ``run``. So logger, message and
+    chain were byte-identical for the two, and dropping on them dropped our own
+    bugs: measured, an unknown ``STEALTH_MCP_*`` key (which makes ``Settings()``
+    raise and fails EVERY spawn, since ``get_settings()`` is on the spawn path)
+    and ``browser_manager.py``:429's ``BrowserInstance(...)`` with a wrong field
+    type both vanished under the label "the caller already knows". The FRAMES
+    do tell them apart, identically on both paths (measured): FastMCP's own
+    validation always has ``fastmcp.tools.tool`` ``run`` immediately above
     ``pydantic.type_adapter`` ``validate_python``, and ours never does — a body
     of ours sits between them.
+
+    **Since fastmcp 2.14 (F-943) the caller's half never arrives.**
+    ``ToolManager.call_tool`` now re-raises a ``ValidationError`` WITHOUT
+    logging it, for ours and the caller's alike, so the only such event left
+    is the one ``tool_failure._report_own_validation_error`` makes for OURS,
+    under the same logger and message. This class must keep NOT matching it,
+    and the frame test is what guarantees that. It is kept rather than deleted
+    because the rule is still the right answer if a release logs these again;
+    the fastmcp 3 migration is where to decide.
 
 One rule, two paths
 -------------------
@@ -301,8 +311,8 @@ CALLER_VALIDATION = Kind(
 #: the only thing that tells a caller's bad kwarg from a ``ValidationError`` our
 #: code raised under the same logger with the same message and the same chain.
 #: ``tool.run`` calls ``validate_python`` directly (``fastmcp/tools/tool.py``
-#: :295); a body of ours always sits between them. Measured on both paths,
-#: fastmcp 2.11.2 / pydantic 2.11.7.
+#: :295 in 2.11.2, :381 in 2.14.7); a body of ours always sits between them.
+#: Measured on both paths, fastmcp 2.11.2 / pydantic 2.11.7.
 ARG_VALIDATION_FRAMES = (
     Frame("fastmcp.tools.tool", "run"),
     Frame("pydantic.type_adapter", "validate_python"),
@@ -311,9 +321,11 @@ ARG_VALIDATION_FRAMES = (
 #: The loggers the four logger-gated classes name, verbatim.
 ASYNCIO_LOGGER = "asyncio"
 MCP_SESSION_LOGGER = "mcp.server.lowlevel.server"
-TOOL_MANAGER_LOGGER = "FastMCP.fastmcp.tools.tool_manager"
+#: fastmcp 2.14 dropped the ``FastMCP.`` prefix its 2.11 loggers carried
+#: (F-943); ``tests/test_tool_failure_visibility.py`` reads it off the library.
+TOOL_MANAGER_LOGGER = "fastmcp.tools.tool_manager"
 
-#: ``mcp/server/lowlevel/server.py``:707's whole message when the exception it
+#: ``mcp/server/lowlevel/server.py``:713's whole message when the exception it
 #: formatted had no text. Compared with ``==`` on purpose: a prefix match would
 #: also swallow the protocol faults that line reports, which are real.
 STREAM_EXCEPTION_MESSAGE = "Received exception from stream: "

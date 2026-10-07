@@ -39,7 +39,8 @@ degree from F-906/F-908, it is a different door:
   the same shape which made a filter impossible at ``connection.py``:451 in
   F-906, arriving at the one mechanism F-906 chose instead.
 
-MEASURED against the installed mcp 1.27.1, by driving the real
+MEASURED against the installed mcp 1.27.1 (the same three lines in 1.28.1, F-943),
+by driving the real
 ``BaseSession._receive_loop`` over memory streams — no socket, no Chrome:
 
 * ``:383`` ``f"Failed to validate request: {e}"`` at **WARNING** — pydantic's
@@ -107,14 +108,16 @@ if TYPE_CHECKING:
 #: the same way, so one spelling serves both platforms.
 #:
 #: Deliberately NOT the whole ``mcp`` package, and each exclusion is measured
-#: (an AST census of all 206 logging calls in mcp 1.27.1, 11 of them on root):
+#: (an AST census of all 208 logging calls in mcp 1.28.1, 11 of them on root;
+#: 1.27.1 had 206, and the two 1.28.1 added are session-credential WARNINGs on
+#: named loggers, carrying a session ID and no payload — F-943):
 #:
 #: * ``mcp/client/session_group.py``:383/:393/:404 are root-logger WARNINGs
 #:   rendering an exception from ``list_tools``/``list_prompts``/
 #:   ``list_resources``. Nothing in this tree constructs a
 #:   ``ClientSessionGroup``, so naming it would be a claim about a door this
 #:   product does not have — F-906's "no ``uc`` entry" reasoning exactly;
-#: * ``mcp/server/sse.py``:193 is a root-logger DEBUG carrying a session ID,
+#: * ``mcp/server/sse.py``:203 is a root-logger DEBUG carrying a session ID,
 #:   which is not payload;
 #: * every other module in ``mcp`` logs through a NAMED logger, so it is
 #:   ``PAYLOAD_LOG_FAMILIES``' question and not this one.
@@ -271,7 +274,8 @@ def withheld(site: str, record: logging.LogRecord) -> str:
 #: coherent. The rules are applied independently in ``logging_setup``'s one
 #: factory for that reason.
 #:
-#: MEASURED against mcp 1.27.1. Three sites in this file, all
+#: MEASURED against mcp 1.27.1; the file is byte-identical in 1.28.1 (F-943).
+#: Three sites in this file, all
 #: ``logger.exception(<static literal>)`` at **ERROR**, on the legs that read
 #: the backend's answer back:
 #:
@@ -307,11 +311,12 @@ _EXCEPTION_SITE_FILENAMES = frozenset(
 #: needs ``import pydantic``, and this module is loaded in the stdio proxy,
 #: whose whole cost argument is that it imports nothing.
 #:
-#: MEASURED, pydantic 2.11.7: ``str(ValidationError)`` renders
-#: ``input_value=`` for every failing arm, capped at **50 characters of the
-#: input** (24 + ``...`` + 23) — so a whole JSON-RPC frame leaks its last 23
-#: characters, and **any value shorter than the cap leaks WHOLE**, once per
-#: union arm that tripped over it (9 errors for one frame, measured).
+#: MEASURED, pydantic 2.11.7 and again on 2.12.5 (F-943):
+#: ``str(ValidationError)`` renders ``input_value=`` for every failing arm,
+#: capped at **50 characters of the input** (24 + ``...`` + 23) — so a whole
+#: JSON-RPC frame leaks its last 23 characters, and **any value shorter than
+#: the cap leaks WHOLE**, once per union arm that tripped over it (9 errors for
+#: one frame, measured).
 #:
 #: ``expected_events.CALLER_VALIDATION`` names the same class for a different
 #: question. The two spellings are pinned against each other rather than shared,
