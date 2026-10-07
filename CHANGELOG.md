@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Security — the pinned dependencies no longer carry 63 known advisories (F-943)
+
+`pip-audit` over the locked dependency set found 63 published advisories in 12
+packages, among them `fastmcp`, `mcp`, `starlette`, `anyio`, `pillow`,
+`python-dotenv`, `cryptography`, `pyjwt` and `urllib3`. The package pins its MCP
+stack EXACTLY, so every install got those versions and no resolver could lift them.
+GitHub showed no alerts only because its dependency graph does not parse this
+repository's manifests.
+
+* **Bumped pins:** `fastmcp` 2.11.2 → 2.14.7, `mcp` 1.27.1 → 1.28.1, `starlette`
+  1.0.0 → 1.3.1, `anyio` 4.13.0 → 4.14.2, `pillow` 11.3.0 → 12.3.0, `python-dotenv`
+  1.1.1 → 1.2.4, `pydantic` 2.11.7 → 2.12.5 (which `mcp` 1.28.1 needs). The lock was
+  regenerated, so `cryptography`, `joserfc`, `pyjwt`, `python-multipart` and
+  `urllib3` moved to fixed releases too.
+* **What is left, 3 advisories, none reachable here:** two in `fastmcp` that are
+  fixed only in 3.x (command injection through `fastmcp install` on Windows, and a
+  consent check in its GitHub OAuth proxy), and one in `diskcache`, which has no
+  fixed release and is loaded only by fastmcp's OAuth token store. This package
+  never runs `fastmcp install` and configures no auth provider. Moving to fastmcp
+  3.x clears them and is the follow-up.
+* **A crash in a tool is still reported.** fastmcp 2.14 stopped logging a pydantic
+  `ValidationError` raised inside a tool, so a bad `STEALTH_MCP_*` setting, which
+  fails every spawn, would have reached neither the log file nor Sentry. The tool
+  wrapper now reports it the way fastmcp 2.11 did. A caller's mistyped argument is
+  still answered to the caller and not reported.
+* fastmcp's loggers are now named `fastmcp.*` rather than `FastMCP.fastmcp.*`; the
+  Sentry noise filter follows.
+* Tool errors read exactly as before on the wire: `Error calling tool '<name>': …`.
+  The one visible change in `tools/list` is that the parameter schemas no longer
+  carry a `title` (the parameter name in title case, which fastmcp 2.14 prunes).
+  Names, types, defaults and descriptions are unchanged.
+
 ## 2.1.22
 
 ### Fixed — tabs open again after the browser connection reconnects (F-940)
