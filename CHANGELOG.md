@@ -42,17 +42,18 @@ with the test's workspace, so a CI failure like this one could not be explained.
   `uvicorn` are unchanged. The lock drops `diskcache`, `pydocket`, `redis`, `typer`
   and 14 other packages that fastmcp 2 pulled in, and adds `aiofile`, `caio` and
   `griffelib`.
-* **What changes in `tools/list`:** three things, and nothing else moves.
-  * Each parameter now carries a `description`: its line from the tool's `Args:`
-    section, which the tool description still contains too.
+* **What changes in `tools/list`:** two things, and nothing else moves.
   * Each tool's input schema now says `"additionalProperties": false`. An unknown
     argument was already refused on every call; the schema now says so.
   * fastmcp's own metadata key on each tool and resource template is renamed from
     `_meta._fastmcp` to `_meta.fastmcp`.
 
-  Tool descriptions are unchanged word for word, and so are names, types, defaults,
-  required parameters and output schemas. Left alone, fastmcp 3 would have cut every
-  description down to its first paragraph; the full docstring is still used.
+  The answer grows from 89,263 to 91,895 bytes (+2.9%). Tool descriptions are
+  unchanged word for word, and so are names, types, defaults, required parameters
+  and output schemas. Left alone, fastmcp 3 would have cut every description down
+  to its first paragraph and also copied each `Args:` line into its parameter's
+  schema, so every client would load that text twice (+28%). The full docstring is
+  still the description, and only the description.
 * **Unchanged:** errors read as before on the wire (`Error calling tool '<name>':
   …`). A caller's mistyped argument is answered and not reported, a crash in a tool
   is still reported, and MCP is still served at `/mcp/`. There are still 94 tools.

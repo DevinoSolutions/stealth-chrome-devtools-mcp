@@ -189,12 +189,17 @@ class TestExecuteScriptReturnBoundary:
         self, patched_server
     ):
         """``functools.wraps`` all the way down: an extra return-path wrapper
-        must not cost the tool its name, docstring or signature."""
+        must not cost the tool its name, docstring or signature.
+
+        The docstring is checked where a client reads it, the description.
+        ``section_tool`` hands fastmcp 3 a wrapper with no ``__doc__`` (F-946),
+        and the function underneath keeps its own."""
         srv = patched_server()
         fn = srv.execute_script.fn
 
         assert fn.__name__ == "execute_script"
-        assert "Execute JavaScript source" in fn.__doc__
+        assert "Execute JavaScript source" in srv.execute_script.description
+        assert "Execute JavaScript source" in inspect.unwrap(fn).__doc__
         assert list(inspect.signature(fn).parameters) == [
             "instance_id",
             "script",
