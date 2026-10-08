@@ -62,6 +62,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
+    profile_source,
     reap_guard,
     tab_identity,
     tool_errors,
@@ -401,17 +402,13 @@ def held_by(
     for instance_id, entry in entries.items():
         if entry.get("pid") != holder:
             continue
-        # The SAME ownership rule `run` applies, inverted: not reapable means a
-        # live backend of ours still owns this browser, and two backends driving
-        # one Chrome is F-886's harm. Asked through `is_reapable` rather than
-        # re-read here, so the two entry points cannot come to disagree.
-        #
-        # RAISED, not returned as None, and it is the same `Refused` the claim
-        # raises one step later: this is the case an operator has to be TOLD
-        # about — their browser is still there and the remedy is to stop that
-        # backend — while a None here means "an ordinary spawn, nothing to say",
-        # and the caller's diagnostics could not tell the two apart.
-        if not browser_pid_registry.is_reapable(entry, owner_alive):
+        # The SAME ownership rule `run` applies, inverted: a live backend of ours
+        # still owns this browser, and two backends driving one Chrome is
+        # F-886's harm. THIS process is no second backend (F-950): a re-attach
+        # re-stamps the owner. RAISED, not returned as None, and the same
+        # `Refused` the claim raises one step later: an operator has to be TOLD
+        # (stop that backend); None means "an ordinary spawn, nothing to say".
+        if browser_pid_registry.held_by_sibling(entry, owner_alive):
             raise Refused(
                 f"a live backend of ours already owns the browser holding that "
                 f"directory (pid {holder}); two backends driving one Chrome is "
@@ -937,6 +934,8 @@ async def _attach_one(
             auto_clone=False,
             cdp_port=candidate.port,
         )
+        from stealth_chrome_devtools_mcp.embedded import clone_storage  # lazy: cycle
+
         diagnostics: dict[str, object] = {
             "reattached": True,
             "reattached_pid": candidate.pid,
@@ -948,13 +947,14 @@ async def _attach_one(
             # browser. `block_resources` and dynamic hooks are NOT here — both are
             # re-established above and at the tool body.
             "not_restored": ["extra_headers", "timezone_id", "user_agent", "proxy"],
-            # The role the close path reads: "explicit" is what this profile IS,
-            # and it is what keeps close_instance from releasing a clone
-            # reservation that was never taken or refreshing the master snapshot
-            # from a named profile.
+            # The role the close path reads: "explicit" keeps close_instance from
+            # refreshing the master snapshot from a named profile; the SHARED
+            # profile is `default` (F-950), so closing it refreshes the seed.
             "profile_selection": {
                 "user_data_dir": candidate.user_data_dir,
-                "profile_role": "explicit",
+                "profile_role": profile_source.adopted_role(
+                    candidate.user_data_dir, clone_storage.master_profile_dir()
+                ),
                 "clone_source": None,
             },
         }

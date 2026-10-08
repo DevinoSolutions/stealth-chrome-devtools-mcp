@@ -227,6 +227,20 @@ def require_new_session(
         )
 
 
+def adopted_role(user_data_dir: str, master: Path) -> str:
+    """The ``profile_role`` of a browser a backend re-attached to (F-950).
+
+    ``default`` when it is on the shared profile, else ``explicit``. The role is
+    what ``close_instance`` reads to decide whether closing refreshes the seed,
+    and every adopted browser used to be ``explicit``, the shared one included.
+    *master* is passed in: ``clone_storage`` stays the only thing that knows
+    where the shared profile lives.
+    """
+    if profile_seed.same_dir(Path(user_data_dir), master):
+        return profile_seed.DEFAULT_SESSION
+    return "explicit"
+
+
 def _default_source(
     roots: profile_seed.Roots,
     *,
