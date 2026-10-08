@@ -210,6 +210,22 @@ pydantic error answered with its own text; 94 tools in 11 sections; MCP served a
 - **No parameter descriptions:** mutation by runtime rebinding (a pytest plugin that
   puts the docstring back on the wrapper before `Tool.from_function`, no file
   modified) fails `test_the_served_tool_surface_matches_the_golden` and the SOFT
-  snapshot, 2 failed / 76 passed. The control gives 78 passed.
+  snapshot, 2 failed / 76 passed. The control gives 78 passed. The dedicated pin is
+  `TestTheDocstringIsServedOnce` in `tests/test_tool_registry.py`. It checks one real
+  `Tool` built from a documented function, and the live 94: no input-schema property
+  carries a `description`, and each description equals `inspect.getdoc` of the
+  unwrapped original. The same mutant fails both tests (2 failed / 9 passed). A second
+  mutant keeps the docstring withheld and drops `description=`; that fails both on the
+  description equality.
+- **Who reads a tool's docstring** (census of `__doc__`, `getdoc`, `.description` and
+  `__wrapped__` across `src/`, `tests/`, `tools/` and the docs):
+  - nothing reads the wrapper's `__doc__` except the two tests moved to `.description`;
+  - `dump_tool_surface` and `backend_client` read `tool.description`;
+  - `--list-sections` prints hard-coded section labels;
+  - `test_execute_script_async` reads the section module's own function, which is the
+    unwrapped original, with its docstring intact;
+  - no README or NAVMAP table is generated from docstrings.
+- **Size in the golden's on-disk form** (CRLF): 120 635 bytes on 2.14.7, 150 270
+  (+24.6%) with the parameter descriptions, 124 207 (+3.0%) as shipped.
 - **Context7 was not reachable from this session.** The API facts above were read from
   the installed fastmcp 3.4.8 source and measured against it, not taken from its docs.

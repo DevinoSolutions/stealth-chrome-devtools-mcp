@@ -8,6 +8,8 @@ app:
   (F-308) — the registered function is wrapped with ``with_correlation_id``
   (pinned through a fake FastMCP app, independent of the live registry);
 * section membership is recorded in ``SECTION_TOOLS``;
+* a docstring reaches ``tools/list`` ONCE, as the whole description, and never
+  as per-parameter schema text (F-946);
 * ``apply_disabled_sections`` unregisters exactly the disabled sections' tools
   via ``mcp.local_provider.remove_tool`` (and swallows an already-removed tool);
 * ``is_section_enabled`` reflects ``DISABLED_SECTIONS``;
@@ -18,6 +20,7 @@ The end-to-end correlation-id + ``tools/list`` schema-snapshot pins live in
 ``test_correlation_id.py`` (unchanged by the move — they drive ``server.mcp``).
 """
 
+import inspect
 from collections import defaultdict
 from types import SimpleNamespace
 
@@ -96,6 +99,52 @@ class TestSectionToolDecorator:
         registry.section_tool("tabs")(dup_tool)
 
         assert tool_registry.SECTION_TOOLS["tabs"] == ["dup_tool"]
+
+
+class TestTheDocstringIsServedOnce:
+    """F-946: fastmcp 3 copies each ``Args:`` line into that parameter's schema,
+    so every client loaded that text twice (+28% on ``tools/list``), and cuts
+    the description to the docstring's first paragraph. ``section_tool`` makes
+    the WHOLE docstring the description and the only place it appears."""
+
+    def test_a_documented_parameter_gets_no_schema_description(self, monkeypatch):
+        monkeypatch.setattr(tool_registry, "SECTION_TOOLS", defaultdict(list))
+        fake = _FakeMcp()
+
+        @ToolRegistry(fake).section_tool("tabs")
+        async def documented(tab_id: str, timeout: int = 5) -> dict:
+            """Do a thing to a tab.
+
+            Args:
+                tab_id: Which tab.
+                timeout: How long to wait.
+
+            Returns:
+                What happened.
+            """
+            return {}
+
+        tool = fake.registered["documented"]
+        # A real fastmcp Tool, built by the real Tool.from_function.
+        assert tool.parameters["properties"]["tab_id"] == {"type": "string"}
+        assert "description" not in tool.parameters["properties"]["timeout"]
+        assert tool.description == inspect.getdoc(inspect.unwrap(tool.fn))
+        assert "Returns:" in tool.description
+
+    async def test_no_live_tool_repeats_its_docstring_in_its_schema(self):
+        tools = await live_tools(server.mcp)
+        assert len(tools) == sum(len(v) for v in server.SECTION_TOOLS.values())
+        carrying = {
+            f"{name}.{param}"
+            for name, tool in tools.items()
+            for param, schema in tool.parameters.get("properties", {}).items()
+            if "description" in schema
+        }
+        assert carrying == set(), f"per-parameter descriptions came back: {carrying}"
+        for name, tool in tools.items():
+            original = inspect.unwrap(tool.fn)
+            assert tool.description == inspect.getdoc(original), name
+            assert original.__doc__, f"{name}: the tool's own docstring was lost"
 
 
 class TestApplyDisabledSections:
