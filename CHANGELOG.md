@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.24
 
 ### A call cut off by a broken connection no longer says the backend died (F-944)
 
