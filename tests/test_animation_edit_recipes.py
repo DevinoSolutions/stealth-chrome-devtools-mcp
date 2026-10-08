@@ -559,7 +559,11 @@ class TestTheToolDocstringDoesNotOversell:
             "extract_element_animations",
             "extract_element_animations_to_file",
         ):
-            doc = getattr(_server, tool).fn.__doc__ or ""
+            # The description, which is the docstring a model is served. Not
+            # ``.fn.__doc__``: section_tool leaves that empty (F-946), and an
+            # empty doc would make this assertion pass without reading anything.
+            doc = getattr(_server, tool).description
+            assert "Returns:" in doc, f"{tool}: no docstring reached the client"
             claim = re.search(r"verified unique", doc)
             assert claim is None or "find_unique_in_rule" in doc, (
                 f"{tool} promises uniqueness without naming the field that reports it"

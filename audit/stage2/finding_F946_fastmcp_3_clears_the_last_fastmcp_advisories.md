@@ -27,7 +27,9 @@ pre-existing test:
 
 1. **Descriptions.** fastmcp 3 parses the docstring with griffe and keeps only its
    first text section as the tool description. Every `Returns:` section and every note
-   after `Args:` vanished from `tools/list`. The HARD golden caught it.
+   after `Args:` vanished from `tools/list`. It also copies each `Args:` line into that
+   parameter's schema `description`: 264 of them, repeating text the tool description
+   carries, which grew the `tools/list` answer by 28%. The HARD golden caught both.
 2. **The session sweep (F-862) stopped being built.** fastmcp 3 constructs
    `FastMCPStreamableHTTPSessionManager`, not the SDK's `StreamableHTTPSessionManager`.
    `install()` still bound the old name, so the backend ran the stock manager, and
@@ -55,10 +57,21 @@ pre-existing test:
 ## 2. Fix
 
 - `section_tool` registers through `mcp.add_tool(Tool.from_function(wrapped,
-  description=inspect.getdoc(wrapped)))`. That is the one registration path, so the
-  description is the WHOLE docstring again, as fastmcp 2 made it, and `server.<tool>`
-  is still the `FunctionTool` the `.fn` seam reads. `apply_disabled_sections` calls
-  `mcp.local_provider.remove_tool`.
+  description=...))`, passing `inspect.getdoc(wrapped)`. That is the one registration
+  path, so the description is the WHOLE docstring again, as fastmcp 2 made it, and
+  `server.<tool>` is still the `FunctionTool` the `.fn` seam reads.
+  `apply_disabled_sections` calls `mcp.local_provider.remove_tool`.
+- Before that call, the wrapper's `__doc__` is set to `None`. fastmcp 3.4.8 has no
+  switch for the per-parameter copy: `ParsedFunction.from_function` always runs
+  `parse_docstring(fn)`, which reads `inspect.getdoc(fn)` and injects every `Args:`
+  entry. No `Tool.from_function` argument, setting or environment variable turns it
+  off. The function it is handed is OUR wrapper, built one line earlier, so the
+  docstring is withheld at the source rather than stripped from the schema afterwards.
+  That would have been a second schema-shaping pass beside fastmcp's own. The tool's
+  own function keeps its docstring one `__wrapped__` down. Two tests that read
+  `.fn.__doc__` now read the served `description`. One of them,
+  `test_animation_edit_recipes`, would otherwise have passed while reading an empty
+  string, so it also asserts the docstring arrived.
 - `HygienicSessionManager` now extends `FastMCPStreamableHTTPSessionManager`, so it
   keeps fastmcp's per-session event-store scoping. `install()` binds that name. The pin
   matches the whole name on a word boundary.
@@ -89,16 +102,13 @@ pre-existing test:
 
 ### What a client sees in `tools/list`, deliberately
 
-Two additive keys, both fastmcp 3's, and nothing else:
+One additive key, fastmcp 3's, and nothing else in the input schema: the top level
+says `"additionalProperties": false` (94 tools). pydantic already rejected an
+unexpected argument on every call (measured: the answer is `Unexpected keyword
+argument`), so the schema now states a rule that was always enforced. It is emitted
+by fastmcp's own schema compression, and there is no argument to turn it off.
 
-- each parameter's `description` is its line from the docstring's `Args:` section
-  (264 across 94 tools). The same text is still in the tool description.
-- the top-level input schema says `"additionalProperties": false` (94 tools). pydantic
-  already rejected an unexpected argument on every call (measured: the answer is
-  `Unexpected keyword argument`), so the schema now states a rule that was always
-  enforced.
-
-A third change is outside the input schema and outside the golden. fastmcp renamed
+A second change is outside the input schema and outside the golden. fastmcp renamed
 its own metadata key, so every tool and resource template in `tools/list` and
 `resources/templates/list` carries `"_meta": {"fastmcp": {"tags": []}}` where 2.14
 sent `{"_fastmcp": {"tags": []}}`. This was measured on the wire with both versions.
@@ -106,13 +116,20 @@ Nothing in this repo reads it. The four resource templates are otherwise identic
 full-docstring descriptions included: fastmcp 3 still uses `inspect.getdoc` for
 those.
 
-Stripping the two input-schema keys gives the old golden exactly. The comparison covers all 94
-tools: descriptions byte-identical, names, types, defaults, `required`, output schemas,
-tags and `enabled`. `tools/list` grows from 120 635 to 150 270 bytes in the golden's
-form. Stripping the keys instead of accepting them would have been a schema-rewriting
-pass beside fastmcp's own, a second way. Both the HARD golden and the SOFT per-section
-snapshot in `test_correlation_id.py` were regenerated, with this justification beside
-them.
+Removing `additionalProperties` gives the old golden exactly. The comparison covers
+all 94 tools: descriptions byte-identical, names, types, defaults, `required`, output
+schemas, tags and `enabled`. The `tools/list` answer, measured on the wire as compact
+JSON through an in-memory client:
+
+| | bytes | vs 2.14.7 |
+|---|---|---|
+| fastmcp 2.14.7 (main) | 89 263 | |
+| 3.4.8, parameter descriptions left in (the first commit of this branch) | 114 526 | +28.3% |
+| 3.4.8, as shipped | 91 895 | +2.9% |
+
+The remaining 2.9% is the `additionalProperties` flag and the `_meta` rename. Both the
+HARD golden and the SOFT per-section snapshot in `test_correlation_id.py` were
+regenerated, with this justification beside them.
 
 Unchanged on the wire, measured: `Error calling tool '<name>': …` for a failing tool;
 a caller's bad argument answered `1 validation error for call[<tool>] …`; a body's own
@@ -121,12 +138,40 @@ pydantic error answered with its own text; 94 tools in 11 sections; MCP served a
 
 ### Behaviour that changed and is not visible to a client
 
-- **The lifespan runs at process start.** fastmcp 2 entered `app_lifespan` on the
-  first MCP session; fastmcp 3 enters it once around the whole HTTP serve, before
-  uvicorn binds. `_LIFESPAN_STARTED` still guards it, its HTTP teardown is still a
-  no-op, and its slow work is still in the background (F-856). The consequence: a
-  backend that no client ever reaches now still arms `process_cleanup` and its
-  heartbeat.
+- **The lifespan's timing is NOT a change.** An earlier draft of this finding said
+  fastmcp 3 moved `app_lifespan` from the first MCP session to process start. That was
+  wrong, and so were the comments it led to. On 2.14.7, `run_http_async` already entered
+  `_lifespan_manager()` before `uvicorn.Server.serve()`. Measured with a bare FastMCP
+  serve on both versions:
+  - **Normal serve:** the lifespan is entered before the port is bound (2.14.7: 0.016 s
+    vs bind at 1.047 s; 3.4.8: 0.013 s vs 0.538 s).
+  - **Bind failure:** both enter it and then exit with `SystemExit(1)`.
+
+  The real backend on a port another process holds, in a throwaway `HOME`, leaves the
+  same residue on both versions: rc 1, a `heartbeat-<port>.json` sidecar naming the
+  dead pid, and no `server.json` entry. The entry is the proxy's write, made before
+  the spawn, on both. The "first MCP session" sentences in `serve_startup.py` and
+  `server.py`'s B1 comment predate this and were already untrue on 2.14.7. They now
+  say what was measured.
+
+  Why the early lifespan cannot make a proxy think a backend is alive or adoptable:
+  - **Adoption and reuse** (`adoption_candidates` → `probe_port`, and
+    `_same_identity_backend_ready`) ask the port for a real MCP `initialize`.
+  - **The cold-start lock** is held until that `initialize` answers (F-807).
+  - **The heartbeat's one reader** is `backend_liveness.self_report`, used by the
+    watchdog of a proxy that has ALREADY bridged after `await_ready`. It needs a
+    `server.json` entry on that port whose pid equals the stamp's. It can only defer
+    a condemnation, and only while the stamp is under `HEARTBEAT_STALE_SECONDS` (30 s).
+  - **Eviction's `protected`** reads the entry's pid and the browser-pid registry, and
+    the lifespan writes neither.
+
+  So the failed-bind sidecar is pre-existing residue. At worst it is a 30 s
+  "still alive" witness, and only if the proxy recorded exactly that pid; a stamp
+  without a matching entry is ignored. It is not changed here.
+- **The lifespan is re-entered per in-memory client** on 3.4.8 (2 entries over 2
+  sequential `Client(mcp)` connections; 2.14.7 entered once). No production path uses
+  an in-memory client: stdio and http each hold the lifespan for the whole process.
+  `_LIFESPAN_STARTED` keeps startup to once per process either way.
 - **The 5 synchronous tools** (the `dynamic-hooks` documentation tools) now run in a
   worker thread. They are pure and keep their correlation id.
 - **Host/Origin guard.** fastmcp 3 refuses a non-loopback `Host` with 421 and a
@@ -160,7 +205,11 @@ pydantic error answered with its own text; 94 tools in 11 sections; MCP served a
   the marker. Mutation: rebinding `apply_payload_log_floor` to the families-only body
   fails `test_the_floor_withholds_it_and_keeps_the_error`, 1 failed / 2 passed; the
   control gives 3 passed. A third test pins the AST census.
-- **Golden:** the stripped comparison above. The script compared the two JSON files
-  key by key: 264 descriptions, 94 flags, zero other differences.
+- **Golden:** the comparison above. The script compared the two JSON files key by key:
+  94 `additionalProperties` flags and zero other differences.
+- **No parameter descriptions:** mutation by runtime rebinding (a pytest plugin that
+  puts the docstring back on the wrapper before `Tool.from_function`, no file
+  modified) fails `test_the_served_tool_surface_matches_the_golden` and the SOFT
+  snapshot, 2 failed / 76 passed. The control gives 78 passed.
 - **Context7 was not reachable from this session.** The API facts above were read from
   the installed fastmcp 3.4.8 source and measured against it, not taken from its docs.

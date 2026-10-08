@@ -110,11 +110,13 @@ def _install_nodriver_cookie_compat() -> None:
 
 DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().debug
 
-# B1 (RELEASE-FIX-B): FastMCP runs the server ``lifespan`` once PER MCP SESSION
-# over streamable HTTP, not once per process. Startup must therefore be guarded
-# to the first entry per process, and the destructive teardown must be bound to
-# *process* end (stdio standalone), never *session* end — otherwise every probe
-# session's exit tears down all live browsers. ``_SERVE_TRANSPORT`` is stamped by
+# B1 (RELEASE-FIX-B): FastMCP re-enters the server ``lifespan`` whenever its last
+# holder has left it. B1 found that once per MCP session; on fastmcp 2.14.7 and
+# 3.4.8 an http serve holds it from before uvicorn binds to process end, and on
+# 3.4.8 an in-memory client enters it once per connection (measured, F-946). Startup
+# must therefore be guarded to the first entry per process, and the destructive
+# teardown must be bound to *process* end (stdio standalone), never a holder's
+# exit — otherwise one session's exit tears down all live browsers. ``_SERVE_TRANSPORT`` is stamped by
 # the ``__main__`` entrypoint from the parsed ``--transport``; the default keeps
 # the standalone-stdio contract. A boolean guard (not a refcount) is deliberate:
 # an idle HTTP backend crossing back to zero sessions must NOT re-arm startup.
@@ -532,9 +534,8 @@ if __name__ == "__main__":
     # Ship errors to Sentry (on by default; opt out: STEALTH_MCP_NO_ERROR_REPORTING).
     sentry_init()
 
-    # B1: bind app_lifespan's teardown policy to the serve transport. fastmcp 2
-    # ran the lifespan per MCP session and fastmcp 3 runs it once around the
-    # whole HTTP serve (F-946); either way its HTTP teardown must be a no-op.
+    # B1: bind app_lifespan's teardown policy to the serve transport. HTTP must
+    # never run the lifespan's teardown, whenever FastMCP leaves it (see B1 above).
     _SERVE_TRANSPORT = args.transport
     _SERVE_PORT = args.port  # F-889 (b): which server.json entry we may stamp
 

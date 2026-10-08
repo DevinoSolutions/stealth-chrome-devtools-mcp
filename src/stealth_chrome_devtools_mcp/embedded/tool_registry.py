@@ -115,8 +115,16 @@ class ToolRegistry:
             # The WHOLE docstring is the description, as fastmcp 2 made it.
             # fastmcp 3 left alone keeps only its first paragraph, dropping
             # every ``Returns:`` section and any note after ``Args:`` (F-946).
+            description = inspect.getdoc(wrapped)
+            # And fastmcp 3 copies each ``Args:`` line into that parameter's
+            # schema too, which repeats text the description already carries
+            # and grows ``tools/list`` by a quarter. It has no switch for that;
+            # it parses whatever docstring the function it is handed carries,
+            # so the wrapper (OUR object, built just above) carries none. The
+            # tool's own function keeps its docstring, one ``__wrapped__`` down.
+            wrapped.__doc__ = None
             return self._mcp.add_tool(
-                Tool.from_function(wrapped, description=inspect.getdoc(wrapped))
+                Tool.from_function(wrapped, description=description)
             )
 
         return decorator

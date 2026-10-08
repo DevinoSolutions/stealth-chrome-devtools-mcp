@@ -7,16 +7,13 @@
       "properties": {
         "args": {
           "default": null,
-          "description": "List of arguments to pass to the function.",
           "items": {},
           "type": "array"
         },
         "function_path": {
-          "description": "Full path to the function (e.g., 'document.getElementById').",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -40,7 +37,6 @@
       "properties": {
         "max_age_hours": {
           "default": 24,
-          "description": "Maximum age in hours for files to keep.",
           "type": "integer"
         }
       },
@@ -75,7 +71,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "url": {
@@ -87,8 +82,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Optional URL to clear cookies for (clears all if not specified)."
+          "default": null
         }
       },
       "required": [
@@ -139,7 +133,6 @@
       "additionalProperties": false,
       "properties": {
         "element_id": {
-          "description": "Element ID to clear.",
           "type": "string"
         }
       },
@@ -161,11 +154,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector or XPath.",
           "type": "string"
         },
         "text_match": {
@@ -177,12 +168,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Click element with matching text."
+          "default": null
         },
         "timeout": {
           "default": 10000,
-          "description": "Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.",
           "type": "integer"
         }
       },
@@ -213,15 +202,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Dict specifying what to extract and options for each.\nExample: {\n    'styles': {'include_computed': True, 'include_pseudo': True},\n    'structure': {'include_children': True, 'max_depth': 2},\n    'events': {'include_framework': True, 'analyze_handlers': False},\n    'animations': {'analyze_keyframes': True},\n    'assets': {'fetch_external': False},\n    'related_files': {'follow_imports': True, 'max_depth': 1}\n}"
+          "default": null
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -245,15 +231,12 @@
       "properties": {
         "include_children": {
           "default": true,
-          "description": "Whether to extract child elements.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -284,15 +267,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "JSON string with extraction options."
+          "default": null
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -315,7 +295,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -349,11 +328,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "tab_id": {
-          "description": "Tab ID to close.",
           "type": "string"
         }
       },
@@ -384,7 +361,6 @@
       "additionalProperties": false,
       "properties": {
         "function_code": {
-          "description": "Python function code that processes requests (must define process_request(request))",
           "type": "string"
         },
         "instance_ids": {
@@ -399,21 +375,17 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Browser instances to apply hook to (all if None)"
+          "default": null
         },
         "name": {
-          "description": "Human-readable hook name",
           "type": "string"
         },
         "priority": {
           "default": 100,
-          "description": "Hook priority (lower = higher priority)",
           "type": "integer"
         },
         "requirements": {
           "additionalProperties": true,
-          "description": "Matching criteria (url_pattern, method, resource_type, custom_condition)",
           "type": "object"
         }
       },
@@ -437,15 +409,12 @@
       "additionalProperties": false,
       "properties": {
         "function_code": {
-          "description": "JavaScript function code.",
           "type": "string"
         },
         "function_name": {
-          "description": "Name for the function.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -469,15 +438,12 @@
       "additionalProperties": false,
       "properties": {
         "binding_name": {
-          "description": "Name for the binding.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "python_code": {
-          "description": "Python function code (as string).",
           "type": "string"
         }
       },
@@ -501,7 +467,6 @@
       "additionalProperties": false,
       "properties": {
         "action": {
-          "description": "Action type - 'block', 'redirect', 'add_headers', or 'log'",
           "type": "string"
         },
         "custom_headers": {
@@ -516,8 +481,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Headers to add for add_headers action"
+          "default": null
         },
         "instance_ids": {
           "anyOf": [
@@ -531,11 +495,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Browser instances to apply hook to"
+          "default": null
         },
         "name": {
-          "description": "Hook name",
           "type": "string"
         },
         "target_url": {
@@ -547,11 +509,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Target URL for redirect action"
+          "default": null
         },
         "url_pattern": {
-          "description": "URL pattern to match",
           "type": "string"
         }
       },
@@ -576,11 +536,9 @@
       "properties": {
         "context_id": {
           "default": null,
-          "description": "Optional execution context ID.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -614,11 +572,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "object_path": {
-          "description": "Path to the object (e.g., 'document', 'window.localStorage').",
           "type": "string"
         }
       },
@@ -653,17 +609,14 @@
       "additionalProperties": false,
       "properties": {
         "command": {
-          "description": "CDP command, either domain-qualified ('Page.reload',\n    'Emulation.setDeviceMetricsOverride') or a bare Runtime method\n    ('evaluate'). Wire casing and snake_case both resolve.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "params": {
           "additionalProperties": true,
           "default": null,
-          "description": "Command parameters. Wire casing and\n    snake_case both resolve, per parameter ('returnByValue' and\n    'return_by_value' are the same argument), so the CDP docs' own\n    spelling works.",
           "type": "object"
         }
       },
@@ -686,7 +639,6 @@
       "additionalProperties": false,
       "properties": {
         "function_calls": {
-          "description": "List of function calls, each with 'function_path', 'args', and optional 'context_id'.",
           "items": {
             "additionalProperties": true,
             "type": "object"
@@ -694,7 +646,6 @@
           "type": "array"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -729,11 +680,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "python_code": {
-          "description": "Python code to translate and execute.",
           "type": "string"
         }
       },
@@ -765,15 +714,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Arguments passed to the script body."
+          "default": null
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "script": {
-          "description": "JavaScript to execute; non-blocking. Top-level 'return' and\ntop-level 'await' are both OK.",
           "type": "string"
         },
         "timeout_ms": {
@@ -785,8 +731,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Max run time in ms (default 10000, max 60000).\nA blocking script — or a Promise that never settles — is killed at\nthis limit instead of hanging the tab."
+          "default": null
         }
       },
       "required": [
@@ -808,7 +753,6 @@
       "additionalProperties": false,
       "properties": {
         "element_id": {
-          "description": "Element ID from clone_element_progressive().",
           "type": "string"
         }
       },
@@ -839,11 +783,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "[min_depth, max_depth] range to include."
+          "default": null
         },
         "element_id": {
-          "description": "Element ID from clone_element_progressive().",
           "type": "string"
         },
         "max_count": {
@@ -853,8 +795,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Maximum number of children to return."
+          "default": null
         }
       },
       "required": [
@@ -875,7 +816,6 @@
       "additionalProperties": false,
       "properties": {
         "element_id": {
-          "description": "Element ID from clone_element_progressive().",
           "type": "string"
         },
         "source_types": {
@@ -890,8 +830,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "CSS rule sources to include (inline, external stylesheet URLs)."
+          "default": null
         }
       },
       "required": [
@@ -912,7 +851,6 @@
       "additionalProperties": false,
       "properties": {
         "element_id": {
-          "description": "Element ID from clone_element_progressive().",
           "type": "string"
         },
         "event_types": {
@@ -927,8 +865,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Event types or sources to include (click, react, inline, addEventListener)."
+          "default": null
         }
       },
       "required": [
@@ -949,7 +886,6 @@
       "additionalProperties": false,
       "properties": {
         "element_id": {
-          "description": "Element ID from clone_element_progressive().",
           "type": "string"
         }
       },
@@ -982,11 +918,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Style categories to include (layout, typography, colors, spacing, borders, backgrounds, effects, animation)."
+          "default": null
         },
         "element_id": {
-          "description": "Element ID from clone_element_progressive().",
           "type": "string"
         },
         "properties": {
@@ -1001,8 +935,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Specific CSS property names to include."
+          "default": null
         }
       },
       "required": [
@@ -1024,32 +957,26 @@
       "properties": {
         "filename": {
           "default": "debug_log.json",
-          "description": "Name of the file to export to.",
           "type": "string"
         },
         "format": {
           "default": "auto",
-          "description": "Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n         'auto' chooses fastest format based on data size:\n         - Small data (<100 items): JSON (human readable)\n         - Medium data (100-1000 items): Pickle (fast binary)\n         - Large data (>1000 items): Gzip-Pickle (fastest, compressed)",
           "type": "string"
         },
         "include_all": {
           "default": false,
-          "description": "Include all logs regardless of limits (default: False).",
           "type": "boolean"
         },
         "max_errors": {
           "default": 100,
-          "description": "Maximum number of errors to export (default: 100).",
           "type": "integer"
         },
         "max_info": {
           "default": 100,
-          "description": "Maximum number of info logs to export (default: 100).",
           "type": "integer"
         },
         "max_warnings": {
           "default": 100,
-          "description": "Maximum number of warnings to export (default: 100).",
           "type": "integer"
         }
       },
@@ -1076,11 +1003,9 @@
       "additionalProperties": false,
       "properties": {
         "filepath": {
-          "description": "Path to save JSON file.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -1104,15 +1029,12 @@
       "properties": {
         "include_children": {
           "default": true,
-          "description": "Whether to include child elements.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1136,15 +1058,12 @@
       "properties": {
         "include_children": {
           "default": true,
-          "description": "Whether to include child elements.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1168,20 +1087,16 @@
       "properties": {
         "include_subtree": {
           "default": true,
-          "description": "Include descendant and pseudo-element animations.",
           "type": "boolean"
         },
         "include_waapi": {
           "default": true,
-          "description": "Include live getAnimations() records (element.animate).",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1205,20 +1120,16 @@
       "properties": {
         "include_subtree": {
           "default": true,
-          "description": "Include descendant and pseudo-element animations.",
           "type": "boolean"
         },
         "include_waapi": {
           "default": true,
-          "description": "Include live getAnimations() records.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1242,30 +1153,24 @@
       "properties": {
         "fetch_external": {
           "default": false,
-          "description": "Whether to fetch external assets for analysis.",
           "type": "boolean"
         },
         "include_backgrounds": {
           "default": true,
-          "description": "Include background images.",
           "type": "boolean"
         },
         "include_fonts": {
           "default": true,
-          "description": "Include font information.",
           "type": "boolean"
         },
         "include_images": {
           "default": true,
-          "description": "Include img src and related images.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1289,30 +1194,24 @@
       "properties": {
         "fetch_external": {
           "default": false,
-          "description": "Fetch external assets.",
           "type": "boolean"
         },
         "include_backgrounds": {
           "default": true,
-          "description": "Include background images.",
           "type": "boolean"
         },
         "include_fonts": {
           "default": true,
-          "description": "Include font information.",
           "type": "boolean"
         },
         "include_images": {
           "default": true,
-          "description": "Include images.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1336,30 +1235,24 @@
       "properties": {
         "analyze_handlers": {
           "default": false,
-          "description": "Analyze handler functions for full details (can be large).",
           "type": "boolean"
         },
         "include_framework": {
           "default": true,
-          "description": "Include framework-specific handlers (React, Vue, etc.).",
           "type": "boolean"
         },
         "include_inline": {
           "default": true,
-          "description": "Include inline event handlers (onclick, etc.).",
           "type": "boolean"
         },
         "include_listeners": {
           "default": true,
-          "description": "Include addEventListener attached handlers.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1383,30 +1276,24 @@
       "properties": {
         "analyze_handlers": {
           "default": true,
-          "description": "Analyze handler functions.",
           "type": "boolean"
         },
         "include_framework": {
           "default": true,
-          "description": "Include framework-specific handlers.",
           "type": "boolean"
         },
         "include_inline": {
           "default": true,
-          "description": "Include inline event handlers.",
           "type": "boolean"
         },
         "include_listeners": {
           "default": true,
-          "description": "Include addEventListener handlers.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1430,30 +1317,24 @@
       "properties": {
         "include_attributes": {
           "default": true,
-          "description": "Include all attributes.",
           "type": "boolean"
         },
         "include_children": {
           "default": false,
-          "description": "Include child elements.",
           "type": "boolean"
         },
         "include_data_attributes": {
           "default": true,
-          "description": "Include data-* attributes specifically.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "max_depth": {
           "default": 3,
-          "description": "Maximum depth for children extraction.",
           "type": "integer"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1477,30 +1358,24 @@
       "properties": {
         "include_attributes": {
           "default": true,
-          "description": "Include all attributes.",
           "type": "boolean"
         },
         "include_children": {
           "default": false,
-          "description": "Include child elements.",
           "type": "boolean"
         },
         "include_data_attributes": {
           "default": true,
-          "description": "Include data-* attributes.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "max_depth": {
           "default": 3,
-          "description": "Maximum depth for children extraction.",
           "type": "integer"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1524,30 +1399,24 @@
       "properties": {
         "include_computed": {
           "default": true,
-          "description": "Include computed styles.",
           "type": "boolean"
         },
         "include_css_rules": {
           "default": true,
-          "description": "Include matching CSS rules.",
           "type": "boolean"
         },
         "include_inheritance": {
           "default": false,
-          "description": "Include style inheritance chain.",
           "type": "boolean"
         },
         "include_pseudo": {
           "default": true,
-          "description": "Include pseudo-element styles (::before, ::after).",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1571,30 +1440,24 @@
       "properties": {
         "include_computed": {
           "default": true,
-          "description": "Include computed styles",
           "type": "boolean"
         },
         "include_css_rules": {
           "default": true,
-          "description": "Include matching CSS rules",
           "type": "boolean"
         },
         "include_inheritance": {
           "default": false,
-          "description": "Include style inheritance chain",
           "type": "boolean"
         },
         "include_pseudo": {
           "default": true,
-          "description": "Include pseudo-element styles",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element",
           "type": "string"
         }
       },
@@ -1618,30 +1481,24 @@
       "properties": {
         "include_computed": {
           "default": true,
-          "description": "Include computed styles.",
           "type": "boolean"
         },
         "include_css_rules": {
           "default": true,
-          "description": "Include matching CSS rules.",
           "type": "boolean"
         },
         "include_inheritance": {
           "default": false,
-          "description": "Include style inheritance chain.",
           "type": "boolean"
         },
         "include_pseudo": {
           "default": true,
-          "description": "Include pseudo-element styles.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the element.",
           "type": "string"
         }
       },
@@ -1665,26 +1522,21 @@
       "properties": {
         "analyze_css": {
           "default": true,
-          "description": "Analyze linked CSS files.",
           "type": "boolean"
         },
         "analyze_js": {
           "default": true,
-          "description": "Analyze linked JS files.",
           "type": "boolean"
         },
         "follow_imports": {
           "default": false,
-          "description": "Follow @import and module imports (uses network).",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "max_depth": {
           "default": 2,
-          "description": "Maximum depth for following imports.",
           "type": "integer"
         }
       },
@@ -1706,7 +1558,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -1728,7 +1579,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "urls": {
@@ -1743,8 +1593,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Optional list of URLs to get cookies for."
+          "default": null
         }
       },
       "required": [
@@ -1792,22 +1641,18 @@
       "properties": {
         "include_all": {
           "default": false,
-          "description": "Include all logs regardless of limits (default: False).",
           "type": "boolean"
         },
         "max_errors": {
           "default": 50,
-          "description": "Maximum number of errors to include (default: 50).",
           "type": "integer"
         },
         "max_info": {
           "default": 50,
-          "description": "Maximum number of info logs to include (default: 50).",
           "type": "integer"
         },
         "max_warnings": {
           "default": 50,
-          "description": "Maximum number of warnings to include (default: 50).",
           "type": "integer"
         }
       },
@@ -1826,7 +1671,6 @@
       "additionalProperties": false,
       "properties": {
         "hook_id": {
-          "description": "Hook identifier",
           "type": "string"
         }
       },
@@ -1848,11 +1692,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector or XPath.",
           "type": "string"
         }
       },
@@ -1875,7 +1717,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -1910,7 +1751,6 @@
       "properties": {
         "instance_id": {
           "default": null,
-          "description": "Optional browser instance ID for specific info.",
           "type": "string"
         }
       },
@@ -1985,7 +1825,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2023,7 +1862,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2046,11 +1884,9 @@
       "properties": {
         "include_frames": {
           "default": false,
-          "description": "Include iframe information.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2072,7 +1908,6 @@
       "additionalProperties": false,
       "properties": {
         "request_id": {
-          "description": "Network request ID.",
           "type": "string"
         }
       },
@@ -2110,11 +1945,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "request_id": {
-          "description": "Network request ID.",
           "type": "string"
         }
       },
@@ -2152,7 +1985,6 @@
       "additionalProperties": false,
       "properties": {
         "request_id": {
-          "description": "Network request ID.",
           "type": "string"
         }
       },
@@ -2190,7 +2022,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2220,7 +2051,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2250,11 +2080,9 @@
       "additionalProperties": false,
       "properties": {
         "filepath": {
-          "description": "Path to JSON file.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2286,15 +2114,12 @@
       "properties": {
         "context_id": {
           "default": null,
-          "description": "Optional execution context ID.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "script_code": {
-          "description": "JavaScript code to execute.",
           "type": "string"
         }
       },
@@ -2317,11 +2142,9 @@
       "additionalProperties": false,
       "properties": {
         "function_path": {
-          "description": "Full path to the function.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2403,8 +2226,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Optional filter by browser instance"
+          "default": null
         }
       },
       "type": "object"
@@ -2456,11 +2278,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Filter by CDP resource type, matched\ncase-insensitively (e.g., 'document', 'image', 'script', 'xhr')."
+          "default": null
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2516,7 +2336,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2555,11 +2374,9 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Headers to add/modify.",
           "type": "object"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2590,7 +2407,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "referrer": {
@@ -2602,21 +2418,17 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Referrer URL."
+          "default": null
         },
         "timeout": {
           "default": 30000,
-          "description": "Navigation timeout in ms (default 30000, max 60000). Most pages load in under 10s — only increase if you have evidence the page is slow. Values above 60000 are capped.",
           "type": "integer"
         },
         "url": {
-          "description": "URL to navigate to.",
           "type": "string"
         },
         "wait_until": {
           "default": "load",
-          "description": "Wait condition - 'load', 'domcontentloaded', or 'networkidle'.",
           "type": "string"
         }
       },
@@ -2639,12 +2451,10 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "url": {
           "default": "about:blank",
-          "description": "URL to open in the new tab.",
           "type": "string"
         }
       },
@@ -2667,19 +2477,15 @@
       "properties": {
         "clear_first": {
           "default": true,
-          "description": "Clear field before pasting.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector or XPath.",
           "type": "string"
         },
         "text": {
-          "description": "Text to paste.",
           "type": "string"
         }
       },
@@ -2711,7 +2517,6 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "limit": {
@@ -2721,11 +2526,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Maximum number of elements to return."
+          "default": null
         },
         "selector": {
-          "description": "CSS selector or XPath (starts with '//').",
           "type": "string"
         },
         "text_filter": {
@@ -2737,12 +2540,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Filter by text content."
+          "default": null
         },
         "visible_only": {
           "default": true,
-          "description": "Only return visible elements.",
           "type": "boolean"
         }
       },
@@ -2778,11 +2579,9 @@
       "properties": {
         "ignore_cache": {
           "default": false,
-          "description": "Whether to ignore cache when reloading.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -2812,7 +2611,6 @@
       "additionalProperties": false,
       "properties": {
         "hook_id": {
-          "description": "Hook identifier to remove",
           "type": "string"
         }
       },
@@ -2835,21 +2633,17 @@
       "properties": {
         "amount": {
           "default": 500,
-          "description": "Pixels to scroll (ignored for 'top' and 'bottom'). A\ndistance, never negative — the direction carries the sign.",
           "type": "integer"
         },
         "direction": {
           "default": "down",
-          "description": "'down', 'up', 'left', 'right', 'top', or 'bottom'.",
           "type": "string"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "smooth": {
           "default": true,
-          "description": "Use smooth scrolling.",
           "type": "boolean"
         }
       },
@@ -2871,12 +2665,10 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "limit": {
           "default": 100,
-          "description": "Max results per page.",
           "type": "integer"
         },
         "method": {
@@ -2888,12 +2680,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "HTTP method, matched whole, case-insensitively."
+          "default": null
         },
         "offset": {
           "default": 0,
-          "description": "Starting index for pagination.",
           "type": "integer"
         },
         "payload_contains": {
@@ -2905,8 +2695,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Case-insensitive substring of the payload."
+          "default": null
         },
         "resource_type": {
           "anyOf": [
@@ -2917,8 +2706,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Case-insensitive substring of the CDP type."
+          "default": null
         },
         "response_contains": {
           "anyOf": [
@@ -2929,8 +2717,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Case-insensitive substring of the body."
+          "default": null
         },
         "status_code": {
           "anyOf": [
@@ -2941,8 +2728,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Exact response status code."
+          "default": null
         },
         "url_pattern": {
           "anyOf": [
@@ -2953,8 +2739,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "URL filter — case-insensitive substring."
+          "default": null
         }
       },
       "required": [
@@ -2981,15 +2766,12 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Option index (0-based). Can be string or int."
+          "default": null
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector for the select element.",
           "type": "string"
         },
         "text": {
@@ -3001,8 +2783,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Option text or label. Matched exactly first, then\nas a case-insensitive prefix; a disabled option is never matched."
+          "default": null
         },
         "value": {
           "anyOf": [
@@ -3013,8 +2794,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Option value attribute (exact match)."
+          "default": null
         }
       },
       "required": [
@@ -3044,25 +2824,20 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Cookie domain."
+          "default": null
         },
         "http_only": {
           "default": false,
-          "description": "HttpOnly flag.",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "name": {
-          "description": "Cookie name.",
           "type": "string"
         },
         "path": {
           "default": "/",
-          "description": "Cookie path.",
           "type": "string"
         },
         "same_site": {
@@ -3074,12 +2849,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "SameSite — 'Strict', 'Lax' or 'None' (any case)."
+          "default": null
         },
         "secure": {
           "default": false,
-          "description": "Secure flag.",
           "type": "boolean"
         },
         "url": {
@@ -3091,11 +2864,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "The request-URI to associate with the cookie."
+          "default": null
         },
         "value": {
-          "description": "Cookie value.",
           "type": "string"
         }
       },
@@ -3135,8 +2906,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Enable/disable response-body capture for this\ninstance (default off; overrides STEALTH_MCP_NETWORK_CAPTURE_BODIES). Each\nargument is merged — passing only capture_bodies keeps include/exclude."
+          "default": null
         },
         "capture_internal_urls": {
           "anyOf": [
@@ -3147,8 +2917,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Capture Chrome's own traffic —\nchrome://, chrome-extension://, chrome-error://, devtools://, about: —\nwhich is EXCLUDED by default so the page's requests are not drowned out\n(overrides STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS)."
+          "default": null
         },
         "exclude_types": {
           "anyOf": [
@@ -3162,8 +2931,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Exclude these types (e.g., ['Image', 'Stylesheet', 'Font', 'Script'])."
+          "default": null
         },
         "include_types": {
           "anyOf": [
@@ -3177,11 +2945,9 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Only capture these types (e.g., ['XHR', 'Fetch', 'Document'])."
+          "default": null
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -3212,7 +2978,6 @@
       "properties": {
         "block_resources": {
           "default": null,
-          "description": "List of resource types to block (e.g., ['image', 'font', 'stylesheet']).",
           "items": {
             "type": "string"
           },
@@ -3220,7 +2985,6 @@
         },
         "browser_args": {
           "default": null,
-          "description": "Additional browser launch args.",
           "items": {
             "type": "string"
           },
@@ -3231,12 +2995,10 @@
             "type": "string"
           },
           "default": null,
-          "description": "Additional HTTP headers.",
           "type": "object"
         },
         "headless": {
           "default": false,
-          "description": "Run in headless mode.",
           "type": "boolean"
         },
         "idle_timeout_seconds": {
@@ -3248,8 +3010,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Idle timeout override in seconds for automatic instance cleanup."
+          "default": null
         },
         "proxy": {
           "anyOf": [
@@ -3260,8 +3021,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Proxy server URL."
+          "default": null
         },
         "sandbox": {
           "anyOf": [
@@ -3270,8 +3030,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect."
+          "default": null
         },
         "seed_from": {
           "anyOf": [
@@ -3282,8 +3041,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "The NAME of an existing session to copy when\n``session`` names one that does not exist yet — so a new session\nstarts with that session's cookies and logins instead of the\nshared ``default`` session's. Leave UNSET for normal use; unset\nmeans ``default``, which is exactly what every session has always\nbeen seeded from.\nIt applies ONLY at creation: passing it with a ``session`` that\nalready exists is an ERROR naming where that session was actually\nseeded from, never a silent no-op and never a re-seed — opening a\nsession keeps what it holds, and overwriting a login a human typed\nby hand is not something a flag should be able to do by accident.\nIt needs a ``session`` of its own, so it is also an error with no\n``session`` or with ``session=\"default\"``.\nThe source must EXIST. It MAY be open in a browser, but only one\nTHIS backend drives — a session you spawned through this tool, the\ncommon case after ``spawn --session work --headed`` and a hand\nlogin. Then its COOKIES are read out of the running browser over\nCDP and written into the new session, and the answer says so:\n``seeded_via: \"cdp-cookies\"`` plus counts. A source held by a\nbrowser this backend does not drive (another backend's, or a Chrome\nnobody here launched) is refused BY NAME, because there is no\nconnection of ours to ask for its cookies and a file copy of a live\nprofile carries none at all — the jar is held open and skipped, and\nnothing can say afterwards what was lost.\n``default`` — the value an UNSET ``seed_from`` means — has its own\nthree outcomes, because it is the session a human logs in to and\nits window is normally still open. The copy always comes from the\nseed, a separate closed copy of it, and never from the live\ndirectory. If this backend is driving that window, the live jar is\nhanded over on top of that copy, exactly as for a named source\n(``seeded_via: \"cdp-cookies\"``) — which matters because the seed is\nNOT refreshed while ``default`` is open, so the copy alone can be\ndays old. If a Chrome we do not drive holds it, the copy happens\nanyway and nothing is refused; the answer's ``seed_changed_since``\nsays the seed is behind. The only refusal is a machine with no seed\nyet AND ``default`` open, where the only available copy would be of\nthe live directory: nothing is created, and closing that window\nonce writes the seed.\nWHAT A HAND-OFF CARRIES IS COOKIES AND NOTHING ELSE: every kind\n(session, persistent, HttpOnly, Secure, SameSite=None and\nPartitioned), and the WHOLE jar — every site that session is logged\ninto, not just the one you had in mind. It does NOT carry\n``localStorage``, ``sessionStorage``, IndexedDB, Cache Storage, any\nservice-worker registration, or saved passwords/autofill. A site\nthat keeps its token in ``localStorage`` will NOT be logged in.\nThose stores come across only from a source that is CLOSED, where\nthe file copy can read them — with the one exception that a session\ncookie is never on disk at all and so only ever arrives this way.\nIf the hand-off fails the session is still created and still works;\nthe answer then says ``seeded_via: \"copy\"`` with\n``cookie_handoff_error``.\nThe other exception is ``default`` itself, whose copyable form the\nproduct maintains separately, so seeding from it works whether or\nnot it is open (that copy can be as old as the last time ``default``\nwas closed, which the answer reports as ``seed_changed_since``).\nWhat the new session records is the source's NAME:\n``spawn_diagnostics[\"profile_selection\"][\"seeded_from\"]``, a word\nyou can pass straight back as ``session=``."
+          "default": null
         },
         "session": {
           "anyOf": [
@@ -3294,8 +3052,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "The NAME of a persistent browser session — THE\none documented way to ask for a profile, and the only one to use.\nLeave UNSET for normal use: an unnamed spawn gets a disposable copy\nof the shared ``default`` session and deletes it as soon as the\nbrowser closes, so you never manage or clean up sessions. Set it\nonly when the user has EXPLICITLY asked to keep a login: a named\nsession is NOT auto-cleaned and persists on disk indefinitely, so\ntreat creating one as a deliberate, space-consuming action, and do\nnot invent names. ``session=\"default\"`` opens the SHARED session\nitself — the profile every new session is seeded from and the one a\nhuman logs in to; it is reserved and is never a session of your own.\nA session is a NAME, not a path: pass ``user_data_dir`` to open a\ndirectory by path.\nA named session is never deleted by close_instance, by the clone GC,\nby `cleanup --apply` or by `kill-orphans`, and since F-888 its\nBROWSER survives the backend too: a\nbackend that stops, restarts, heals or crashes leaves such a browser\nRUNNING, and it is RE-ATTACHED to over CDP rather than replaced, so a\nhuman's logged-in session is not lost. Two paths reach it and you need\nneither by name: a new backend adopts the browsers it finds recorded\nat its own startup (same instance_id as before), and spawning with a\nsession a live browser still holds re-attaches to THAT browser\ninstead of walking to a sibling directory — and since F-931 so does a\nspawn naming NOTHING, which lands on ``default``. Either way the answer\ncarries ``spawn_diagnostics[\"reattached\"]: true`` plus the holder's\npid, and the page is the one that was already open — not a fresh tab\non the same cookies. A spawn naming nothing is never handed a browser\nTHIS backend already drives, though: it asked for a browser of its\nown, so it gets a new session copied from the seed, with that\nbrowser's live cookies handed over. So to recover a logged-in browser whose backend\ndied, just spawn with the same session. On that path the\narguments that describe a LAUNCH cannot apply to a browser already\nrunning: headless, user_agent, viewport, proxy, browser_args,\ntimezone_id and extra_headers are IGNORED rather than refused, and the\nones you passed are listed in\n``spawn_diagnostics[\"ignored_spawn_args\"]`` — refusing over a viewport\nwould send the spawn to a different directory and lose the login.\n``block_resources`` IS applied. What the dead backend held and nobody\ncan read back off a running browser is named in\n``spawn_diagnostics[\"not_restored\"]``. The one case that refuses is a\nbrowser this backend does not DRIVE — another backend's Chrome, or\nthe human's own — because its cookies can only come over a CDP\nconnection of ours and there is none: a copy of a profile Chrome is\nwriting to carries none of them. Since F-915 that REFUSES the whole\nspawn rather than starting a new browser beside it. Nothing is\ncreated, that browser is left running and untouched, and the error\nnames the holder and both ways on — close it (``stealthy close``, or\nstop the backend that owns it: RUNBOOK, \"Recover a stranded login\")\nand spawn again, or pass a free ``session`` name for a new session\nof your own."
+          "default": null
         },
         "timezone_id": {
           "anyOf": [
@@ -3306,8 +3063,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "IANA timezone ID applied via CDP timezone override."
+          "default": null
         },
         "user_agent": {
           "anyOf": [
@@ -3318,8 +3074,7 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Custom user agent string."
+          "default": null
         },
         "user_data_dir": {
           "anyOf": [
@@ -3330,17 +3085,14 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "DEPRECATED, and the ONE thing it still\nbuys you is an absolute PATH, which ``session`` refuses. For a name\nit resolves to exactly the same profile ``session`` does — it is the\nsame argument under the older word, not a second one — so passing\nboth with DIFFERENT values is an error rather than a precedence you\ncannot see. Everything said about ``session`` above applies to it."
+          "default": null
         },
         "viewport_height": {
           "default": 1080,
-          "description": "Requested browser WINDOW height in pixels, same\nbest-effort clamping as viewport_width.",
           "type": "integer"
         },
         "viewport_width": {
           "default": 1920,
-          "description": "Requested browser WINDOW width in pixels (outer, not\nthe CSS viewport). Best-effort: a headed window is clamped to the work\narea of the LAUNCHING context's desktop — the user's monitor only when\nthe backend runs on it (F-808), not the caller's screen — so a request\nlarger than that desktop lands smaller.",
           "type": "integer"
         }
       },
@@ -3359,11 +3111,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "tab_id": {
-          "description": "Target tab ID to switch to.",
           "type": "string"
         }
       },
@@ -3402,21 +3152,17 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Optional file path to save screenshot to."
+          "default": null
         },
         "format": {
           "default": "png",
-          "description": "Image format ('png' or 'jpeg').",
           "type": "string"
         },
         "full_page": {
           "default": false,
-          "description": "Capture full page (not just viewport).",
           "type": "boolean"
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         }
       },
@@ -3517,20 +3263,16 @@
               },
               "type": "array"
             }
-          ],
-          "description": "Absolute path, or list of paths, to attach.\nFor multiple files the input must have the `multiple` attribute."
+          ]
         },
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector or XPath for the <input type=\"file\"> element.",
           "type": "string"
         },
         "timeout": {
           "default": 10000,
-          "description": "Element lookup timeout in ms (default 10000, max 60000).",
           "type": "integer"
         }
       },
@@ -3568,7 +3310,6 @@
       "additionalProperties": false,
       "properties": {
         "function_code": {
-          "description": "Python function code to validate",
           "type": "string"
         }
       },
@@ -3590,11 +3331,9 @@
       "additionalProperties": false,
       "properties": {
         "instance_id": {
-          "description": "Browser instance ID.",
           "type": "string"
         },
         "selector": {
-          "description": "CSS selector or XPath.",
           "type": "string"
         },
         "text_content": {
@@ -3606,17 +3345,14 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Wait for specific text content."
+          "default": null
         },
         "timeout": {
           "default": 30000,
-          "description": "Timeout in ms (default 30000, max 60000). Most elements appear within 5-10s — only increase for very slow async content. Values above 60000 are capped.",
           "type": "integer"
         },
         "visible": {
           "default": true,
-          "description": "Wait for element to be visible.",
           "type": "boolean"
         }
       },
