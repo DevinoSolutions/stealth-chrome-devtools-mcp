@@ -15,7 +15,6 @@ package is not safe. The proxy serves no MCP server, so its Sentry setup now ask
 no auto-enabled integrations, which also makes it cheaper. The backend and the ops
 CLI are unchanged.
 
-
 ### Security — fastmcp 3 clears the last three advisories (F-946)
 
 `pip-audit` over the locked set now finds no known vulnerabilities. The three that
