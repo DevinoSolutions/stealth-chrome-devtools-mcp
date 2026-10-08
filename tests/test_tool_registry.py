@@ -9,7 +9,7 @@ app:
   (pinned through a fake FastMCP app, independent of the live registry);
 * section membership is recorded in ``SECTION_TOOLS``;
 * ``apply_disabled_sections`` unregisters exactly the disabled sections' tools
-  via ``mcp.remove_tool`` (and swallows an already-removed tool);
+  via ``mcp.local_provider.remove_tool`` (and swallows an already-removed tool);
 * ``is_section_enabled`` reflects ``DISABLED_SECTIONS``;
 * a count-94 tripwire mirroring M6's ``test_tool_dispatch`` (the live registry
   and the section map agree at 94).
@@ -19,7 +19,9 @@ The end-to-end correlation-id + ``tools/list`` schema-snapshot pins live in
 """
 
 from collections import defaultdict
+from types import SimpleNamespace
 
+from fakes import live_tools
 from stealth_chrome_devtools_mcp.embedded import server, tool_registry
 from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
@@ -30,15 +32,17 @@ from stealth_chrome_devtools_mcp.embedded.tool_registry import (
 
 class _FakeMcp:
     """Drives the registry without a real FastMCP app: the decorator calls
-    ``tool``; gating calls ``remove_tool``."""
+    ``add_tool`` with the ``Tool`` it built, and gets it back, as fastmcp 3's
+    does (F-946); gating calls ``local_provider.remove_tool``."""
 
     def __init__(self):
         self.registered = {}
         self.removed = []
+        self.local_provider = SimpleNamespace(remove_tool=self.remove_tool)
 
-    def tool(self, func):
-        self.registered[func.__name__] = func
-        return func
+    def add_tool(self, tool):
+        self.registered[tool.name] = tool
+        return tool
 
     def remove_tool(self, name):
         self.removed.append(name)
@@ -56,12 +60,12 @@ class TestSectionToolDecorator:
         async def sample_tool():
             return correlation_id_var.get()
 
-        # Section membership recorded, and the wrapped func reached mcp.tool.
+        # Section membership recorded, and the wrapped func reached add_tool.
         assert tool_registry.SECTION_TOOLS["browser-management"] == ["sample_tool"]
         assert "sample_tool" in fake.registered
         # M3 stamp preserved: a real (non-default) id inside the call, reset after.
         assert correlation_id_var.get() == "-"
-        result = await sample_tool()
+        result = await sample_tool.fn()
         assert result != "-"
         assert correlation_id_var.get() == "-"
 
@@ -74,7 +78,7 @@ class TestSectionToolDecorator:
         def plain_tool():
             return None
 
-        assert fake.registered["plain_tool"].__name__ == "plain_tool"
+        assert fake.registered["plain_tool"].fn.__name__ == "plain_tool"
 
     def test_reregistration_is_idempotent(self, monkeypatch):
         # embedded/server.py's body runs more than once per process (canonical
@@ -84,11 +88,11 @@ class TestSectionToolDecorator:
         fake = _FakeMcp()
         registry = ToolRegistry(fake)
 
-        @registry.section_tool("tabs")
         def dup_tool():
             return None
 
-        # A second module-body execution re-registers the same name.
+        # Each module-body execution decorates its own plain function.
+        registry.section_tool("tabs")(dup_tool)
         registry.section_tool("tabs")(dup_tool)
 
         assert tool_registry.SECTION_TOOLS["tabs"] == ["dup_tool"]
@@ -119,7 +123,7 @@ class TestApplyDisabledSections:
 
         class _RaisingMcp(_FakeMcp):
             def remove_tool(self, name):
-                raise KeyError(name)
+                raise KeyError(name)  # what LocalProvider.remove_tool raises
 
         # A tool already removed by another section policy must not propagate.
         ToolRegistry(_RaisingMcp()).apply_disabled_sections()
@@ -139,7 +143,7 @@ class TestCountTripwire:
     EXPECTED_TOOL_COUNT = 94
 
     async def test_live_count_and_section_sum_are_94(self):
-        tools = await server.mcp.get_tools()
+        tools = await live_tools(server.mcp)
         section_sum = sum(len(v) for v in server.SECTION_TOOLS.values())
         assert len(tools) == section_sum == self.EXPECTED_TOOL_COUNT
 

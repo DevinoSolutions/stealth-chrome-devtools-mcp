@@ -51,6 +51,7 @@ from pathlib import Path
 
 import pytest
 
+from fakes import live_tools
 from stealth_chrome_devtools_mcp.embedded import server as canonical
 from stealth_chrome_devtools_mcp.embedded import tool_registry
 
@@ -143,7 +144,7 @@ def test_section_tools_does_not_accumulate_across_loads(three_identities):
 
 async def test_every_loaded_identity_owns_a_full_app(three_identities):
     for module in three_identities:
-        tools = await module.mcp.get_tools()
+        tools = await live_tools(module.mcp)
         _assert_full_app(module.__name__, len(tools))
 
 

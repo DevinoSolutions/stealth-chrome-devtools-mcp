@@ -290,8 +290,9 @@ def withheld(site: str, record: logging.LogRecord) -> str:
 #:
 #: **Deliberately NOT keyed on the exception ALONE**, and this is the one
 #: decision a reader is most likely to want to undo. A type-only rule would
-#: also fire for ``fastmcp/tools/tool_manager.py``'s
-#: ``logger.exception(f"Error calling tool {key!r}")``, whose ``exc_info`` is a
+#: also fire for fastmcp's ``Error calling tool`` record
+#: (``fastmcp/tools/tool_manager.py`` in 2.11, ``tool_failure``'s restored
+#: report since fastmcp 2.14), whose ``exc_info`` is a
 #: pydantic ``ValidationError`` too — and ``expected_events.CALLER_VALIDATION``
 #: recognises that event by the exception's type NAME and MODULE. Substituting
 #: it would stop ``caller-input`` classifying and re-open the class that was

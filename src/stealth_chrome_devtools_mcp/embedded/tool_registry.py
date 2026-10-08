@@ -31,6 +31,8 @@ import functools
 import inspect
 from collections import defaultdict
 
+from fastmcp.tools import Tool
+
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.logging_setup import with_correlation_id
 from stealth_chrome_devtools_mcp.embedded.response_handler import surrogate_safe
@@ -85,10 +87,12 @@ class ToolRegistry:
 
     Constructed with the ``mcp`` instance (passed in, not imported — this keeps
     the module free of a ``server.py`` import cycle). The decorator registers
-    each tool through ``mcp.tool`` after wrapping it with M3's correlation-id
-    stamp over F-823's return-payload repair;
+    each tool through ``mcp.add_tool`` after wrapping it with M3's correlation-id
+    stamp over F-823's return-payload repair, and returns the ``FunctionTool``
+    it built, so ``server.<tool>.fn`` is the wrapped function. (fastmcp 3's
+    ``mcp.tool`` returns the bare function instead, F-946.)
     ``apply_disabled_sections`` removes whole sections via
-    ``mcp.remove_tool``.
+    ``mcp.local_provider.remove_tool``.
     """
 
     def __init__(self, mcp) -> None:
@@ -107,7 +111,13 @@ class ToolRegistry:
             names = SECTION_TOOLS[section]
             if func.__name__ not in names:
                 names.append(func.__name__)
-            return self._mcp.tool(with_correlation_id(_surrogate_safe_returns(func)))
+            wrapped = with_correlation_id(_surrogate_safe_returns(func))
+            # The WHOLE docstring is the description, as fastmcp 2 made it.
+            # fastmcp 3 left alone keeps only its first paragraph, dropping
+            # every ``Returns:`` section and any note after ``Args:`` (F-946).
+            return self._mcp.add_tool(
+                Tool.from_function(wrapped, description=inspect.getdoc(wrapped))
+            )
 
         return decorator
 
@@ -116,7 +126,7 @@ class ToolRegistry:
         for section in sorted(DISABLED_SECTIONS):
             for tool_name in SECTION_TOOLS.get(section, []):
                 try:
-                    self._mcp.remove_tool(tool_name)
+                    self._mcp.local_provider.remove_tool(tool_name)
                 except Exception as e:
                     # Tool may already be removed by another section policy.
                     debug_logger.log_debug("server", "apply_disabled_sections", str(e))

@@ -532,8 +532,9 @@ if __name__ == "__main__":
     # Ship errors to Sentry (on by default; opt out: STEALTH_MCP_NO_ERROR_REPORTING).
     sentry_init()
 
-    # B1: bind app_lifespan's teardown policy to the serve transport. HTTP runs
-    # the lifespan per MCP session, so session-exit teardown must be a no-op.
+    # B1: bind app_lifespan's teardown policy to the serve transport. fastmcp 2
+    # ran the lifespan per MCP session and fastmcp 3 runs it once around the
+    # whole HTTP serve (F-946); either way its HTTP teardown must be a no-op.
     _SERVE_TRANSPORT = args.transport
     _SERVE_PORT = args.port  # F-889 (b): which server.json entry we may stamp
 

@@ -28,10 +28,13 @@ on purpose (a probe session lives milliseconds) so nothing a real client does
 can look abandoned.
 
 :func:`install` is the seam: FastMCP builds the manager as
-``fastmcp.server.http.StreamableHTTPSessionManager(...)`` inside
+``fastmcp.server.http.FastMCPStreamableHTTPSessionManager(...)`` inside
 ``create_streamable_http_app``, by module attribute, so binding this class to that
 name before ``mcp.run(transport="http")`` is the ONE place the substitution
-happens. ``tests/test_session_hygiene.py`` pins that FastMCP still constructs it
+happens. fastmcp 2 built the SDK's ``StreamableHTTPSessionManager`` there; under
+fastmcp 3 binding that old name left the sweep silently unbuilt (F-946), so this
+class now extends FastMCP's subclass and keeps its per-session event-store
+scoping. ``tests/test_session_hygiene.py`` pins that FastMCP still constructs it
 that way. Called from ``embedded/server.py``'s http branch as
 ``rt.session_hygiene.install()``. A leaf: imports no other embedded module.
 """
@@ -45,8 +48,8 @@ import weakref
 from typing import TYPE_CHECKING
 
 import anyio
+from fastmcp.server.http import FastMCPStreamableHTTPSessionManager
 from mcp.server.streamable_http import GET_STREAM_KEY
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -64,7 +67,7 @@ _logger = logging.getLogger("stealth.backend")
 _managers: list[weakref.ref[HygienicSessionManager]] = []
 
 
-class HygienicSessionManager(StreamableHTTPSessionManager):
+class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
     """The MCP session manager, plus the sweep that reaps abandoned sessions."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -149,7 +152,7 @@ def install() -> type[HygienicSessionManager]:
     """Bind the hygienic manager to the name FastMCP constructs. Idempotent."""
     from fastmcp.server import http
 
-    http.StreamableHTTPSessionManager = HygienicSessionManager
+    http.FastMCPStreamableHTTPSessionManager = HygienicSessionManager
     return HygienicSessionManager
 
 

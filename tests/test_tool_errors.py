@@ -120,9 +120,10 @@ class TestInstanceNotFoundCluster:
 
     async def test_g1prime_resource_raises_instead_of_json(self, patched_server):
         # G1': was ``return json.dumps({"error": "Instance not found"})``.
+        # fastmcp 3's ``@mcp.resource`` hands back the bare function (F-946).
         patched_server(browser_manager=_NoInstances())
         with pytest.raises(InstanceNotFoundError, match=r"Instance not found: missing"):
-            await server.get_browser_state_resource.fn("missing")
+            await server.get_browser_state_resource("missing")
 
 
 class _DomHandler:

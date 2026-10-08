@@ -95,7 +95,7 @@ event can arrive in (see "one rule, two paths" below):
     shipping.
 
 ``caller-input``
-    Logger ``fastmcp.tools.tool_manager``, chain entirely a pydantic
+    Logger :data:`TOOL_CALL_LOGGER`, chain entirely a pydantic
     ``ValidationError``, **and** the outermost link's frames carry
     :data:`ARG_VALIDATION_FRAMES` adjacently. That third condition is not
     decoration and it is the whole rule: the logger does NOT tell a caller's
@@ -111,18 +111,23 @@ event can arrive in (see "one rule, two paths" below):
     and ``browser_manager.py``:429's ``BrowserInstance(...)`` with a wrong field
     type both vanished under the label "the caller already knows". The FRAMES
     do tell them apart, identically on both paths (measured): FastMCP's own
-    validation always has ``fastmcp.tools.tool`` ``run`` immediately above
-    ``pydantic.type_adapter`` ``validate_python``, and ours never does — a body
-    of ours sits between them.
+    validation always has its validating frame (``fastmcp.tools.tool`` ``run``
+    through 2.14, ``fastmcp.tools.function_tool`` ``_execute`` in 3.x)
+    immediately above ``pydantic.type_adapter`` ``validate_python``, and ours
+    never does — a body of ours sits between them.
 
-    **Since fastmcp 2.14 (F-943) the caller's half never arrives.**
-    ``ToolManager.call_tool`` now re-raises a ``ValidationError`` WITHOUT
-    logging it, for ours and the caller's alike, so the only such event left
-    is the one ``tool_failure._report_own_validation_error`` makes for OURS,
-    under the same logger and message. This class must keep NOT matching it,
-    and the frame test is what guarantees that. It is kept rather than deleted
-    because the rule is still the right answer if a release logs these again;
-    the fastmcp 3 migration is where to decide.
+    **Since fastmcp 2.14 (F-943) the caller's half never arrives as an
+    event.** 2.14 re-raised a ``ValidationError`` without logging it. fastmcp 3
+    (F-946) tells the two apart itself: the caller's becomes a fastmcp
+    ``ValidationError`` logged at WARNING with no ``exc_info``, which
+    ``logging_setup.PAYLOAD_WARNING_LOGGERS`` holds back because it quotes the
+    input whole. Ours is re-raised as itself and also gets only that WARNING,
+    so the only such EVENT left is the one
+    ``tool_failure._report_own_validation_error`` makes for OURS, under the
+    same logger and message. This class must keep NOT matching it, and the
+    frame test is what guarantees that. It is kept, decided at the fastmcp 3
+    migration, because it costs one row and is still the right answer if a
+    release logs a caller's typo with its exception again.
 
 One rule, two paths
 -------------------
@@ -285,7 +290,7 @@ class Kind:
 #: from our package" because this decides what is never seen again, and the
 #: module is checked because ``fastmcp.exceptions.ToolError`` is a DIFFERENT
 #: class with the same name and is what wraps a genuine crash on its way out of
-#: ``tool_manager``.
+#: ``FastMCP.call_tool``.
 OURS = Kind(
     frozenset({"ToolError", "InstanceNotFoundError"}),
     frozenset({"stealth_chrome_devtools_mcp"}),
@@ -310,20 +315,25 @@ CALLER_VALIDATION = Kind(
 #: The two frames FastMCP's OWN argument validation always puts adjacent, and
 #: the only thing that tells a caller's bad kwarg from a ``ValidationError`` our
 #: code raised under the same logger with the same message and the same chain.
-#: ``tool.run`` calls ``validate_python`` directly (``fastmcp/tools/tool.py``
-#: :295 in 2.11.2, :381 in 2.14.7); a body of ours always sits between them.
-#: Measured on both paths, fastmcp 2.11.2 / pydantic 2.11.7.
+#: ``FunctionTool._execute`` calls ``validate_python`` directly
+#: (``fastmcp/tools/function_tool.py`` in 3.4.8; ``tool.run`` in
+#: ``fastmcp/tools/tool.py`` through 2.14.7); a body of ours always sits
+#: between them. Measured on both paths, fastmcp 2.11.2 / pydantic 2.11.7, and
+#: re-measured on the live path for an async tool on fastmcp 3.4.8 (F-946).
 ARG_VALIDATION_FRAMES = (
-    Frame("fastmcp.tools.tool", "run"),
+    Frame("fastmcp.tools.function_tool", "_execute"),
     Frame("pydantic.type_adapter", "validate_python"),
 )
 
 #: The loggers the four logger-gated classes name, verbatim.
 ASYNCIO_LOGGER = "asyncio"
 MCP_SESSION_LOGGER = "mcp.server.lowlevel.server"
-#: fastmcp 2.14 dropped the ``FastMCP.`` prefix its 2.11 loggers carried
-#: (F-943); ``tests/test_tool_failure_visibility.py`` reads it off the library.
-TOOL_MANAGER_LOGGER = "fastmcp.tools.tool_manager"
+#: The logger fastmcp reports a failed tool call on: ``FastMCP.fastmcp.tools.
+#: tool_manager`` in 2.11, ``fastmcp.tools.tool_manager`` in 2.14 (F-943), and
+#: ``FastMCP.call_tool``'s own module since fastmcp 3 removed the
+#: ``ToolManager`` (F-946). ``tests/test_tool_failure_visibility.py`` reads it
+#: off the library.
+TOOL_CALL_LOGGER = "fastmcp.server.server"
 
 #: ``mcp/server/lowlevel/server.py``:713's whole message when the exception it
 #: formatted had no text. Compared with ``==`` on purpose: a prefix match would
@@ -439,7 +449,7 @@ def _caller_input(facts: EventFacts) -> bool:
     ``caller-input`` in the module docstring for the measurement.
     """
     return (
-        facts.logger == TOOL_MANAGER_LOGGER
+        facts.logger == TOOL_CALL_LOGGER
         and _all_are(facts.links, CALLER_VALIDATION)
         and _has_adjacent(facts.links[0].frames, ARG_VALIDATION_FRAMES)
     )
@@ -487,10 +497,10 @@ def _all_are(links: "tuple[Link, ...]", kind: Kind) -> bool:
 def _has_adjacent(frames: "tuple[Frame, ...]", pair: "tuple[Frame, Frame]") -> bool:
     """Do these two frames appear next to each other, in this order?
 
-    Adjacency and not mere presence: ``fastmcp.tools.tool`` ``run`` is in the
-    traceback of EVERY tool failure, our own bugs included. It is only directly
-    above ``pydantic.type_adapter`` ``validate_python`` when FastMCP itself was
-    the thing validating.
+    Adjacency and not mere presence: ``fastmcp.tools.function_tool`` frames
+    are in the traceback of EVERY tool failure, our own bugs included. The
+    validating one is only directly above ``pydantic.type_adapter``
+    ``validate_python`` when FastMCP itself was the thing validating.
     """
     first, second = pair
     return any(

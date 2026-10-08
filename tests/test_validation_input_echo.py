@@ -972,8 +972,8 @@ class TestExpectedEventsIsUnaffected:
             Args(viewport_width="F913_CALLER_ARGUMENT")
         except pydantic.ValidationError as exc:
             caught = exc
-        return logging.getLogger(expected_events.TOOL_MANAGER_LOGGER).makeRecord(
-            expected_events.TOOL_MANAGER_LOGGER,
+        return logging.getLogger(expected_events.TOOL_CALL_LOGGER).makeRecord(
+            expected_events.TOOL_CALL_LOGGER,
             logging.ERROR,
             "/venv/lib/site-packages/fastmcp/tools/tool_manager.py",
             220,

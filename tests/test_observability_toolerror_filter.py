@@ -50,8 +50,9 @@ event_from_exception = pytest.importorskip("sentry_sdk.utils").event_from_except
 ILLEGAL_RETURN = "Script raised an exception: SyntaxError: Illegal return statement"
 
 #: The logger the noise AND the real bug both arrive on. Load-bearing: see above.
-# `FastMCP.`-prefixed before fastmcp 2.14 (F-943).
-TOOL_MANAGER_LOGGER = "fastmcp.tools.tool_manager"
+# `FastMCP.fastmcp.tools.tool_manager` before fastmcp 2.14 (F-943), and
+# `fastmcp.tools.tool_manager` before fastmcp 3 (F-946).
+TOOL_CALL_LOGGER = "fastmcp.server.server"
 
 #: A planted home path, so every "this event survived" assertion can also prove
 #: the survivor was still scrubbed. Never a real username.
@@ -69,7 +70,7 @@ def _raise(exc: BaseException) -> tuple[type, BaseException, object]:
         return sys.exc_info()  # type: ignore[return-value]
 
 
-def _logging_event(exc: BaseException, logger: str = TOOL_MANAGER_LOGGER):
+def _logging_event(exc: BaseException, logger: str = TOOL_CALL_LOGGER):
     """The (event, hint) pair `LoggingIntegration._emit` produces for ``exc``.
 
     Mirrors `sentry_sdk/integrations/logging.py:275-303` exactly: build from
@@ -95,7 +96,7 @@ def _logging_event(exc: BaseException, logger: str = TOOL_MANAGER_LOGGER):
     return event, hint
 
 
-def _payload_only(exc: BaseException, logger: str = TOOL_MANAGER_LOGGER):
+def _payload_only(exc: BaseException, logger: str = TOOL_CALL_LOGGER):
     """The same event with the hint stripped — the name-matching path.
 
     `hint["exc_info"]` is present in production today. This proves the decision

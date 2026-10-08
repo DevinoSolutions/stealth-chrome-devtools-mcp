@@ -21,7 +21,9 @@ is also the one place third-party logger LEVELS are set:
 because they interpolate a raw CDP message into DEBUG/INFO text, cookie names
 and values included, and ``sse_starlette`` and ``mcp.client`` because they do
 the same to the two ENDS of one tool answer (the SSE frame the backend sends,
-and the message the stdio proxy parses back out of it). One caller-side
+and the message the stdio proxy parses back out of it) — and holds
+:data:`PAYLOAD_WARNING_LOGGERS` at ERROR, for fastmcp 3's WARNING that quotes a
+caller's arguments (F-946). One caller-side
 ``logging.basicConfig(level=DEBUG)`` is enough to route any of them to our
 stderr and to a Sentry breadcrumb. It belongs HERE and not at the seam that
 patches nodriver
@@ -87,7 +89,8 @@ _FAULT_LOG_KEEP_DAYS = 14
 # (``boot`` is not a pid): it is shared across backends, not one's post-mortem.
 _BACKEND_LOG_RE = re.compile(r"^backend-(\d+)(?:-fault)?\.log")
 
-# F-809: FastMCP hard-codes uvicorn's timeout_graceful_shutdown to 0, and a
+# F-809: FastMCP 2 hard-coded uvicorn's timeout_graceful_shutdown to 0 (fastmcp
+# 3 defaults it to 2; ours overrides either, F-946), and a
 # zero-second asyncio timeout always fires — so every clean HTTP stop ERROR-logs
 # "timeout graceful shutdown exceeded" (and Sentry ships it). Sized against
 # singleton._terminate_backend's 5 s wait; never None, uvicorn's "wait forever".
@@ -165,14 +168,16 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #: ``mcp`` entire would therefore silence the server SDK's own INFO diagnostics
 #: and close no door that ``mcp.client`` does not already close.
 #:
-#: ``fastmcp``'s tool-ARGUMENT line (``server/server.py``:1537 in fastmcp
-#: 2.14.7; :672 in 2.11.2) is real, and the library already shields it: every
+#: ``fastmcp``'s tool-ARGUMENT DEBUG line (``server/server.py``:1537 in fastmcp
+#: 2.14.7; :672 in 2.11.2; gone in 3.4.8) was real, and the library already
+#: shields its DEBUG: every
 #: one of its loggers hangs under a ``fastmcp`` root that carries its own level
 #: and ``propagate = False``, so a caller's root DEBUG never reaches them.
 #: (Until 2.14 that root was spelled ``FastMCP``, and the bare ``fastmcp``
 #: family beside it inherited root but held no payload line; F-943.) Capping
 #: ``fastmcp`` would close no door the library has not closed, which is the
-#: ``uc`` mistake spelled differently.
+#: ``uc`` mistake spelled differently. Its WARNING is another matter, and
+#: :data:`PAYLOAD_WARNING_LOGGERS` answers it.
 #:
 #: Two SITES are RECORDED and not fixed, because no family cap can reach either
 #: however this tuple grows: ``mcp/shared/session.py``:383-384 and :430-432 use
@@ -194,6 +199,18 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #: message is the trace NAME alone — response HEADERS can appear, a tool result
 #: cannot).
 PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets", "sse_starlette", "mcp.client")
+
+#: Loggers whose payload line sits AT WARNING, so they are held at ERROR (F-946).
+#: fastmcp 3's ``FastMCP.call_tool`` logs ``"Invalid arguments for tool %r: %s"``
+#: with pydantic's ``errors()``, whose ``input`` is the caller's value WHOLE and
+#: untruncated (measured on 3.4.8: a missing ``instance_id`` renders the entire
+#: ``script``). fastmcp 2.14 logged nothing there. The census of this logger's
+#: other calls below ERROR is the reason the floor costs nothing. They log a
+#: ``FastMCPError`` at its own level, and no tool or ``browser://`` resource
+#: here raises one; or they are the prompt, mount and import lines, and we
+#: serve no prompt and mount nothing. Its ERRORs, ``Error calling tool``,
+#: ``Error reading resource`` and ``tool_failure``'s report, pass as before.
+PAYLOAD_WARNING_LOGGERS = ("fastmcp.server.server",)
 
 #: The floor those families are held at. WARNING is not a new policy — it is
 #: the effective level every shipped configuration of this product already had
@@ -267,6 +284,8 @@ def apply_payload_log_floor() -> None:
     """
     for family in PAYLOAD_LOG_FAMILIES:
         logging.getLogger(family).setLevel(PAYLOAD_LOG_FLOOR)
+    for name in PAYLOAD_WARNING_LOGGERS:
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 #: F-907. The package whose INSTANCES render page content out of their own
