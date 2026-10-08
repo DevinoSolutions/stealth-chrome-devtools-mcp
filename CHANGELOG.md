@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### A browser this backend re-attached to is no longer refused as another backend's (F-950)
+
+After a restart, the backend re-attaches to the shared `default` browser and stamps
+itself as the record's owner. The rule that stops two backends driving one Chrome then
+read that live owner as a sibling and refused the backend its own browser ("stop that
+backend first"), so a spawn naming the shared session got a copy instead of the browser
+already open. The check now asks whose the live owner is: this process is not a second
+backend, and a genuinely different live backend is still refused. A re-attached shared
+browser is also reported as the `default` session, so closing it refreshes the seed (it
+reported `explicit` and skipped the refresh).
+
 ### The stdio proxy no longer crashes at startup on an import race (F-949)
 
 Intermittently a session failed to start: Claude Code reported CONNECTION_CLOSED, and

@@ -388,6 +388,29 @@ def is_reapable(entry: Entry, owner_alive: Callable[[int, float | None], bool]) 
     return not owner_alive(owner_pid, recorded_time(entry, OWNER_CREATE_TIME))
 
 
+def held_by_sibling(
+    entry: Entry, owner_alive: Callable[[int, float | None], bool]
+) -> bool:
+    """True when a live backend OTHER than this process owns *entry* (F-950).
+
+    F-886's rule is "never two backends driving one Chrome", and the word that
+    matters is TWO. :func:`is_reapable` alone cannot say it: a re-attach
+    re-stamps the entry's owner to the adopting backend, so after a restart the
+    live owner of the shared browser is THIS process, and "not reapable" read
+    that as a sibling's. Every question about the browser then refused it — a
+    refusal telling the caller to stop the backend they were talking to.
+
+    The pid is compared first and *owner_alive* still decides identity, so a pid
+    recycled onto this process from a dead owner is not mistaken for us.
+    """
+    if is_reapable(entry, owner_alive):
+        return False
+    owner_pid = entry.get(OWNER_PID)
+    if not isinstance(owner_pid, int) or owner_pid != os.getpid():
+        return True
+    return not owner_alive(owner_pid, recorded_time(entry, OWNER_CREATE_TIME))
+
+
 def on_persistent_profile(entry: Entry) -> bool:
     """True when *entry*'s profile directory OUTLIVES its browser.
 
