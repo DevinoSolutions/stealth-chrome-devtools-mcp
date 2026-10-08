@@ -15,26 +15,11 @@ package is not safe. The proxy serves no MCP server, so its Sentry setup now ask
 no auto-enabled integrations, which also makes it cheaper. The backend and the ops
 CLI are unchanged.
 
-## 2.1.24
-
-### A call cut off by a broken connection no longer says the backend died (F-944)
-
-When the proxy's connection to the backend ends, every call still in flight is
-answered with an error at once, before the proxy has checked whether the backend
-survived. That error always said "the backend on port N died", including when the
-backend was alive and only the connection had broken. It now says which: "the
-backend on port N stopped answering and was condemned" when the watchdog concluded
-it, otherwise "the connection to the backend on port N broke". The call is still
-not retried, and the error code is unchanged.
-
-A failing end-to-end test that runs its own isolated backend now prints that
-backend's and its proxies' logs in the failure report. Before, they were deleted
-with the test's workspace, so a CI failure like this one could not be explained.
 
 ### Security — fastmcp 3 clears the last three advisories (F-946)
 
 `pip-audit` over the locked set now finds no known vulnerabilities. The three that
-2.1.23 left are gone: two in `fastmcp` that were fixed only in 3.x, and one in
+2.1.24 still carried are gone: two in `fastmcp` that were fixed only in 3.x, and one in
 `diskcache`, which no longer installs.
 
 * **Pins:** `fastmcp` 2.14.7 → 3.4.8, plus `fastmcp-slim` 3.4.8, which is where
@@ -64,6 +49,22 @@ with the test's workspace, so a CI failure like this one could not be explained.
   quotes a bad call's arguments in full. Left alone, it would reach the backend's
   boot log and Sentry breadcrumbs. It is held back, so the logs say exactly what
   they did under 2.14.
+
+## 2.1.24
+
+### A call cut off by a broken connection no longer says the backend died (F-944)
+
+When the proxy's connection to the backend ends, every call still in flight is
+answered with an error at once, before the proxy has checked whether the backend
+survived. That error always said "the backend on port N died", including when the
+backend was alive and only the connection had broken. It now says which: "the
+backend on port N stopped answering and was condemned" when the watchdog concluded
+it, otherwise "the connection to the backend on port N broke". The call is still
+not retried, and the error code is unchanged.
+
+A failing end-to-end test that runs its own isolated backend now prints that
+backend's and its proxies' logs in the failure report. Before, they were deleted
+with the test's workspace, so a CI failure like this one could not be explained.
 
 ## 2.1.23
 
