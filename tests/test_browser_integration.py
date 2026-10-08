@@ -229,7 +229,7 @@ class TestClosePerformance:
     DATA_URL = "data:text/html,<h1 id='t'>close-perf</h1>"
 
     @pytest.mark.asyncio
-    async def test_close_is_fast(self):
+    async def test_close_is_fast(self, capsys):
         spawn = _get_fn("spawn_browser")
         navigate = _get_fn("navigate")
         close = _get_fn("close_instance")
@@ -242,10 +242,15 @@ class TestClosePerformance:
         await close(instance_id=iid)
         elapsed = time.monotonic() - t0
 
+        with capsys.disabled():  # so the close time lands in the CI log on PASS too
+            print(f"\n[close-perf] close_instance took {elapsed:.2f}s")
+
         # The old hang made this 6-8s (it blocked the entire 5s wait_for plus
         # forced cleanup). A correct close sends Browser.close on the live
-        # connection (~1ms) and never reconnects.
-        assert elapsed < 3.0, f"close took {elapsed:.2f}s — teardown hang regressed"
+        # connection (~1ms) and never reconnects. The bound was 3.0s until a
+        # loaded Windows runner closed in 4.62s on a healthy tree (F-948); 5.0s
+        # still fails the hang, which cannot finish under its own 5s wait_for.
+        assert elapsed < 5.0, f"close took {elapsed:.2f}s — teardown hang regressed"
 
 
 class TestCloseKillsProcessTree:
