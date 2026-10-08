@@ -1,9 +1,10 @@
 """THE one home for "startup work that must not delay the backend's first
 serve" (F-856).
 
-FastMCP runs ``app_lifespan`` on the first MCP session, not at process start,
-so anything that lifespan does synchronously is time the very first
-``initialize`` spends unanswered. ``process_cleanup.activate()`` did its orphan
+FastMCP 2 ran ``app_lifespan`` on the first MCP session, and fastmcp 3 runs it
+at process start before uvicorn binds (F-946); either way, anything that
+lifespan does synchronously is time the very first ``initialize`` spends
+unanswered. ``process_cleanup.activate()`` did its orphan
 reap there: killing the browsers a dead backend left behind, removing their
 profiles, and paying a 5s force-kill wait for each stubborn one. On 2026-09-02
 that cost ~90 seconds, and the backend that had been cold-started to REPLACE a

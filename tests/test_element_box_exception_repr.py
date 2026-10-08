@@ -455,7 +455,7 @@ class TestNoPageContentInTheException:
         from stealth_chrome_devtools_mcp import observability
         from stealth_chrome_devtools_mcp.embedded import dom_handler as dom_handler_mod
 
-        logger_name = "fastmcp.tools.tool_manager"
+        logger_name = "fastmcp.server.server"
         element = make_element(QuadlessTab(quads=[]))
 
         async def _resolve(_tab, _selector, **_kwargs):

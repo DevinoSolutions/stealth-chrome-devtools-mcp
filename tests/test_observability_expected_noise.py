@@ -60,8 +60,9 @@ EventHandler = pytest.importorskip("sentry_sdk.integrations.logging").EventHandl
 STREAMABLE_HTTP_LOGGER = "mcp.server.streamable_http"
 LOWLEVEL_LOGGER = "mcp.server.lowlevel.server"
 # The triage saw `FastMCP.fastmcp.tools.tool_manager`; fastmcp 2.14 dropped the
-# prefix (F-943), and this is the name events carry now.
-TOOL_MANAGER_LOGGER = "fastmcp.tools.tool_manager"
+# prefix (F-943), and fastmcp 3 reports from `FastMCP.call_tool`'s own module
+# (F-946). This is the name events carry now.
+TOOL_CALL_LOGGER = "fastmcp.server.server"
 ASYNCIO_LOGGER = "asyncio"
 
 #: `mcp/server/lowlevel/server.py:713` (mcp 1.28.1; :707 in 1.27.1):
@@ -262,7 +263,7 @@ def script_chain(patched_server, error):
     return asyncio.run(run())
 
 
-def tool_manager_event(exc_info, logger_name=TOOL_MANAGER_LOGGER, tool="navigate"):
+def tool_manager_event(exc_info, logger_name=TOOL_CALL_LOGGER, tool="navigate"):
     """An exception event on a tool logger, the way ``_emit`` assembles one."""
     event, hint = event_from_exception(
         exc_info, mechanism={"type": "logging", "handled": True}
@@ -301,15 +302,24 @@ def _through_tool_run(body, arguments):
     FRAMES tell them apart. Since 2.14 neither is logged by fastmcp, and ours is
     logged by `tool_failure._report_own_validation_error` (F-943). This helper
     is the real `Tool.run`, so the frames are real.
+
+    fastmcp 3 raises a caller's bad kwarg as its own `ValidationError`, chained
+    from the pydantic one (F-946). The pydantic cause is handed back, with its
+    own traceback: it is the error the rule is written for, and its frames run
+    `run` -> `_execute` -> `validate_python`, which is the measurement.
     """
     import asyncio
 
     Tool = pytest.importorskip("fastmcp.tools").Tool
+    FastMCPValidationError = pytest.importorskip("fastmcp.exceptions").ValidationError
 
     async def run():
         tool = Tool.from_function(body)
         try:
             await tool.run(arguments)
+        except FastMCPValidationError as converted:
+            cause = converted.__cause__
+            return type(cause), cause, cause.__traceback__
         except BaseException:  # noqa: BLE001  PERMANENT(the fixture catches whatever the tool raised)
             return sys.exc_info()
         return None
@@ -323,8 +333,8 @@ def fastmcp_validation_info():
     """FastMCP validating a CALLER's arguments — the 466-event shape.
 
     `spawn_browser(window_width=…)` at a tool whose parameters are
-    `viewport_*`. Frames end `fastmcp.tools.tool run` ->
-    `pydantic.type_adapter validate_python` (measured).
+    `viewport_*`. Frames end `fastmcp.tools.function_tool _execute` ->
+    `pydantic.type_adapter validate_python` (measured on fastmcp 3.4.8).
     """
 
     async def spawn_browser(viewport_width: int = 1280, viewport_height: int = 720):

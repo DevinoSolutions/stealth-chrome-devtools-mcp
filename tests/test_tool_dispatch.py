@@ -23,6 +23,7 @@ from fakes import (
     FakeStorage,
     FakeTab,
     fake_instance,
+    live_tools,
 )
 from stealth_chrome_devtools_mcp.embedded import server, tool_registry
 
@@ -44,7 +45,7 @@ SYNC_TOOL_NAMES = {
 
 async def _live_tools():
     """The live FastMCP registry: {name: FunctionTool}."""
-    return await server.mcp.get_tools()
+    return await live_tools(server.mcp)
 
 
 # ===========================================================================
@@ -153,7 +154,7 @@ class TestSectionGating:
     async def test_apply_disabled_sections_removes_only_named_section(
         self, monkeypatch
     ):
-        before = dict(await server.mcp.get_tools())
+        before = await _live_tools()
         tabs_tools = set(server.SECTION_TOOLS["tabs"])
         keep_section = set(server.SECTION_TOOLS["cookies-storage"])
         try:

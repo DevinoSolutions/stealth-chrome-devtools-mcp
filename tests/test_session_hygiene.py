@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import socket
 
 import httpx
@@ -146,9 +147,13 @@ def test_install_is_what_fastmcp_constructs():
 
     session_hygiene.install()
 
-    assert http.StreamableHTTPSessionManager is HygienicSessionManager
-    assert "StreamableHTTPSessionManager(" in inspect.getsource(
-        http.create_streamable_http_app
+    # The whole name, not a substring: "StreamableHTTPSessionManager(" is IN
+    # "FastMCPStreamableHTTPSessionManager(", so the fastmcp 2 pin stayed green
+    # while fastmcp 3 built a manager this module had not replaced (F-946).
+    assert http.FastMCPStreamableHTTPSessionManager is HygienicSessionManager
+    assert re.search(
+        r"(?<!\w)FastMCPStreamableHTTPSessionManager\(",
+        inspect.getsource(http.create_streamable_http_app),
     )
 
 

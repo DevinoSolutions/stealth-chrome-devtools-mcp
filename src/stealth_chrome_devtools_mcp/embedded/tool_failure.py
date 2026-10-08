@@ -62,16 +62,19 @@ def _into_debug_ring(tool_name: str, error: Exception) -> None:
 def _report_own_validation_error(tool_name: str, error: Exception) -> None:
     """Report a pydantic ``ValidationError`` that a tool BODY raised (F-943).
 
-    fastmcp 2.14's ``ToolManager.call_tool`` re-raises a ``ValidationError``
-    without logging it, treating it as the caller's bad argument. One that
-    reaches the wrapper is never that: ``FunctionTool.run`` validates the
-    arguments before it calls the tool, so a caller's typo fails before the
-    wrapper runs. What is left is ours (an unknown ``STEALTH_MCP_*`` key failing
-    ``Settings()`` on every spawn, a model built with a wrong field type), and
-    unlogged it would reach the caller and nothing else: no log, no Sentry.
+    fastmcp 2.14's ``ToolManager.call_tool`` re-raised a ``ValidationError``
+    without logging it, treating it as the caller's bad argument. fastmcp 3's
+    ``FastMCP.call_tool`` still does not report it: it logs "Invalid arguments
+    for tool" at WARNING, with no exception, and ``logging_setup`` holds that
+    line back because it quotes the input whole (F-946). One that reaches the
+    wrapper is never the caller's: ``FunctionTool`` validates the arguments
+    before it calls the tool, so a caller's typo fails before the wrapper runs.
+    What is left is ours (an unknown ``STEALTH_MCP_*`` key failing ``Settings()``
+    on every spawn, a model built with a wrong field type), and unreported it
+    would reach the caller and nothing else.
 
     So it is logged where and as fastmcp 2.11.2 logged it: on fastmcp's own
-    tool logger, ``Error calling tool '<name>'``, exception attached. Its sinks
+    tool-call logger, ``Error calling tool '<name>'``, exception attached. Its sinks
     are the ones these reports always had (fastmcp's handlers, and Sentry, which
     hooks ``Logger.callHandlers`` and so sees a non-propagating logger too), and
     ``expected_events`` judges it by the rule written for it: the frames say it
@@ -84,9 +87,9 @@ def _report_own_validation_error(tool_name: str, error: Exception) -> None:
     with contextlib.suppress(Exception):
         import pydantic
 
-        from stealth_chrome_devtools_mcp.expected_events import TOOL_MANAGER_LOGGER
+        from stealth_chrome_devtools_mcp.expected_events import TOOL_CALL_LOGGER
 
         if isinstance(error, pydantic.ValidationError):
-            logging.getLogger(TOOL_MANAGER_LOGGER).error(
+            logging.getLogger(TOOL_CALL_LOGGER).error(
                 "Error calling tool %r", tool_name, exc_info=error
             )

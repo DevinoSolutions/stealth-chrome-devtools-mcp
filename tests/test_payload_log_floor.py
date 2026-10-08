@@ -921,7 +921,9 @@ class TestTheFamiliesDeliberatelyLeftOut:
             )
 
     def test_the_fastmcp_argument_line_is_unreachable_from_root(self):
-        """``fastmcp/server/server.py``:1537 (2.14.7; :672 in 2.11.2) DEBUG-logs
+        """``fastmcp/server/server.py``:1537 (2.14.7; :672 in 2.11.2; gone in
+        3.4.8, whose argument line is a WARNING and
+        :class:`TestTheFastmcpWarningLine`'s) DEBUG-logs
         a tool call's ARGUMENTS — a real payload line, and the reason this family
         is OUT is that the library already closes it: its loggers hang under a
         ``fastmcp`` root (``FastMCP`` until 2.14) carrying its own level and
@@ -1072,3 +1074,105 @@ class TestTheFamiliesDeliberatelyLeftOut:
         source = Path(session.__file__).read_text(encoding="utf-8")
         assert 'logging.warning(f"Failed to validate request:' in source
         assert 'logging.debug(f"Message that failed validation:' in source
+
+
+#: F-946. What a caller's argument carries into fastmcp 3's WARNING.
+CALLER_ARG_MARK = "F946_CALLER_ARGUMENT_PAYLOAD"
+
+
+def _drive_fastmcp_call_tool() -> list[logging.LogRecord]:
+    """Drive the REAL ``FastMCP.call_tool`` twice and keep what its logger let out.
+
+    Once with ``instance_id`` missing, which is fastmcp 3's ``Invalid arguments``
+    WARNING carrying the WHOLE ``script``; once with a body that raises, which
+    is the ``Error calling tool`` ERROR that must still pass. The handler sits
+    on the logger itself, so only the level stands between the two.
+    """
+    from fastmcp import FastMCP
+
+    records: list[logging.LogRecord] = []
+    capture = logging.Handler()
+    capture.emit = records.append  # type: ignore[method-assign]
+    logger = logging.getLogger(logging_setup.PAYLOAD_WARNING_LOGGERS[0])
+    logger.addHandler(capture)
+    app = FastMCP("f946")
+
+    @app.tool
+    async def execute_script(instance_id: str, script: str) -> str:
+        raise RuntimeError("boom")
+
+    async def run() -> None:
+        for arguments in (
+            {"script": CALLER_ARG_MARK},
+            {"instance_id": "i", "script": "s"},
+        ):
+            with contextlib.suppress(Exception):
+                await app.call_tool("execute_script", arguments)
+
+    try:
+        asyncio.run(run())
+    finally:
+        logger.removeHandler(capture)
+    return records
+
+
+class TestTheFastmcpWarningLine:
+    """``fastmcp/server/server.py``'s ``Invalid arguments for tool`` WARNING
+    (F-946): new in fastmcp 3, at WARNING, and quoting the caller's value
+    whole. The tool-call logger is held at ERROR, which restores fastmcp
+    2.14's output exactly."""
+
+    def test_the_line_is_real_and_carries_the_argument(self):
+        """The premise, so the pin below cannot pass on a line that never fires."""
+        messages = [record.getMessage() for record in _drive_fastmcp_call_tool()]
+
+        assert any(
+            "Invalid arguments" in m and CALLER_ARG_MARK in m for m in messages
+        ), messages
+
+    def test_the_floor_withholds_it_and_keeps_the_error(self):
+        logging_setup.apply_payload_log_floor()
+        records = _drive_fastmcp_call_tool()
+
+        assert not [r for r in records if CALLER_ARG_MARK in r.getMessage()]
+        assert [
+            r
+            for r in records
+            if r.levelno == logging.ERROR
+            and r.getMessage() == "Error calling tool 'execute_script'"
+        ], [r.getMessage() for r in records]
+
+    def test_every_call_below_error_on_that_logger_is_censused(self):
+        """The census behind the floor costing nothing, read off the installed
+        source by AST. A new call below ERROR anywhere in the module goes RED,
+        which is the signal to re-measure what the floor now holds back."""
+        import fastmcp.server.server as fastmcp_server
+
+        tree = ast.parse(Path(fastmcp_server.__file__).read_text(encoding="utf-8"))
+        below_error = set()
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "logger"
+                    and node.func.attr not in {"error", "exception", "critical"}
+                ):
+                    below_error.add((function.name, node.func.attr))
+
+        assert below_error == {
+            # The payload lines, and ``FastMCPError.log_level``, which no tool
+            # here raises.
+            ("call_tool", "warning"),
+            ("call_tool", "log"),
+            # ``FastMCPError.log_level`` again: the four ``browser://``
+            # templates raise none. This backend serves no prompt, and mounts
+            # and imports no server.
+            ("read_resource", "log"),
+            ("render_prompt", "log"),
+            ("mount", "warning"),
+            ("import_server", "debug"),
+        }

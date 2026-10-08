@@ -28,9 +28,14 @@ GOLDEN = (
 
 
 async def _surface() -> dict[str, object]:
+    from fastmcp.server.transforms import is_enabled
+
     from stealth_chrome_devtools_mcp.embedded import server
 
-    tools = await server.mcp.get_tools()
+    # Every REGISTERED tool, disabled ones included: what fastmcp 2's
+    # ``get_tools()`` returned, and fastmcp 3's ``list_tools()`` does not (it
+    # drops what visibility has turned off, F-946).
+    tools = {tool.name: tool for tool in await server.mcp.local_provider.list_tools()}
     # ``parameters`` is the input JSON schema FastMCP derives from the signature,
     # which is exactly what a docstring or an annotation lost in a copy-paste
     # would change. ``enabled`` catches a section gate that closed too early.
@@ -40,7 +45,7 @@ async def _surface() -> dict[str, object]:
             "input_schema": tool.parameters,
             "output_schema": tool.output_schema,
             "tags": sorted(tool.tags or ()),
-            "enabled": tool.enabled,
+            "enabled": is_enabled(tool),
         }
         for name, tool in sorted(tools.items())
     }

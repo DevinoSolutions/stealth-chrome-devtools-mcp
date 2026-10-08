@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "fastmcp==2.14.7",
+    "fastmcp==3.4.8",
     "nodriver==0.47.0",
     "pydantic==2.12.5",
     "pydantic-settings==2.14.2",
@@ -44,7 +44,9 @@ dependencies = [
     # Imported by the source but reached only transitively (mcp through fastmcp,
     # anyio/starlette/httpx through mcp). Pinned at the locked versions so the
     # wheel installs what the gate tested; tools/check_pinned_imports.py enforces
-    # it (F-865).
+    # it (F-865). Since fastmcp 3.3 the `fastmcp` package is a metapackage and
+    # the `fastmcp` module ships in `fastmcp-slim` (F-946).
+    "fastmcp-slim==3.4.8",
     "mcp==1.28.1",
     "anyio==4.14.2",
     "starlette==1.3.1",
@@ -90,7 +92,7 @@ test = [
     # launcher with the OFFICIAL `mcp` SDK client (MQ-138) — a client library
     # independent of the `fastmcp` one W1 uses, which is the whole point of an
     # interoperability claim. TEST-ONLY: `mcp` is already installed as a
-    # transitive dependency of the pinned `fastmcp==2.14.7` (and `src/` imports
+    # transitive dependency of the pinned `fastmcp==3.4.8` (and `src/` imports
     # `mcp.client.streamable_http` through it), so this adds NO runtime
     # dependency — it declares the pin so the interoperability client cannot
     # vanish silently if fastmcp's own dependency changes.

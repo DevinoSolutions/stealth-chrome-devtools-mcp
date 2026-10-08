@@ -31,6 +31,39 @@ A failing end-to-end test that runs its own isolated backend now prints that
 backend's and its proxies' logs in the failure report. Before, they were deleted
 with the test's workspace, so a CI failure like this one could not be explained.
 
+### Security — fastmcp 3 clears the last three advisories (F-946)
+
+`pip-audit` over the locked set now finds no known vulnerabilities. The three that
+2.1.23 left are gone: two in `fastmcp` that were fixed only in 3.x, and one in
+`diskcache`, which no longer installs.
+
+* **Pins:** `fastmcp` 2.14.7 → 3.4.8, plus `fastmcp-slim` 3.4.8, which is where
+  the `fastmcp` module now ships. `mcp`, `starlette`, `anyio`, `pydantic` and
+  `uvicorn` are unchanged. The lock drops `diskcache`, `pydocket`, `redis`, `typer`
+  and 14 other packages that fastmcp 2 pulled in, and adds `aiofile`, `caio` and
+  `griffelib`.
+* **What changes in `tools/list`:** three things, and nothing else moves.
+  * Each parameter now carries a `description`: its line from the tool's `Args:`
+    section, which the tool description still contains too.
+  * Each tool's input schema now says `"additionalProperties": false`. An unknown
+    argument was already refused on every call; the schema now says so.
+  * fastmcp's own metadata key on each tool and resource template is renamed from
+    `_meta._fastmcp` to `_meta.fastmcp`.
+
+  Tool descriptions are unchanged word for word, and so are names, types, defaults,
+  required parameters and output schemas. Left alone, fastmcp 3 would have cut every
+  description down to its first paragraph; the full docstring is still used.
+* **Unchanged:** errors read as before on the wire (`Error calling tool '<name>':
+  …`). A caller's mistyped argument is answered and not reported, a crash in a tool
+  is still reported, and MCP is still served at `/mcp/`. There are still 94 tools.
+* **Idle MCP sessions are still cleaned up.** fastmcp 3 builds a different session
+  manager class, so the backend's sweep for sessions a client abandoned (F-862)
+  would have silently stopped running. It now extends fastmcp 3's class.
+* **A caller's arguments stay out of the logs.** fastmcp 3 adds a WARNING that
+  quotes a bad call's arguments in full. Left alone, it would reach the backend's
+  boot log and Sentry breadcrumbs. It is held back, so the logs say exactly what
+  they did under 2.14.
+
 ## 2.1.23
 
 ### Security — the pinned dependencies no longer carry 63 known advisories (F-943)

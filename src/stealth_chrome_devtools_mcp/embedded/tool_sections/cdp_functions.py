@@ -5,7 +5,7 @@ plan_SERVERSPLIT slice 9, and the one section a runtime GATE can switch off.
 ``server.py`` disables ``cdp-functions`` in two places — at module scope when
 ``settings.xpool_safe_mode`` is on, and in the ``__main__`` block for
 ``--xpool-safe`` / ``--disable-cdp-functions`` — because these thirteen tools
-are the ones that trigger ``Runtime.enable``. Both paths run ``mcp.remove_tool``
+are the ones that trigger ``Runtime.enable``. Both paths remove the tools
 through ``apply_disabled_sections``, i.e. they act on tools that are ALREADY
 registered, which is why the plan places the binding loop well before the
 module-scope gate (plan_SERVERSPLIT R6). A loop that ran after it would register

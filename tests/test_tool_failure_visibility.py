@@ -24,7 +24,8 @@ Five things this file refuses to let regress, in the order they matter:
    debug-ring problem, and the tool's own error is what reaches the client;
 5. a pydantic ``ValidationError`` our BODY raised still reaches fastmcp's tool
    logger, and so Sentry, exactly once — fastmcp 2.14 stopped logging it
-   (F-943) — while a caller's bad argument still reaches nothing.
+   (F-943) and fastmcp 3 logs it only as a WARNING (F-946) — while a caller's
+   bad argument still reaches nothing at ERROR.
 
 Hermetic: no Chrome, no disk profile, no network. Section 5 alone goes through
 fastmcp's in-memory ``Client``, because its subject is what the library logs
@@ -323,9 +324,10 @@ async def counting_tool(count: int) -> int:
     return count
 
 
-async def _tool_manager_records(tool: str, arguments: dict) -> list[logging.LogRecord]:
-    """Call ``tool`` through fastmcp's REAL ``Client`` → ``ToolManager`` →
-    ``FunctionTool.run`` path and return what reached fastmcp's tool logger.
+async def _tool_call_records(tool: str, arguments: dict) -> list[logging.LogRecord]:
+    """Call ``tool`` through fastmcp's REAL ``Client`` → ``FastMCP.call_tool``
+    → ``FunctionTool.run`` path and return what reached fastmcp's tool logger
+    at ERROR (the level ``LoggingIntegration`` turns into an event).
 
     A real FastMCP server and not ``call_tool``'s ``.fn`` seam, because the
     subject is what the LIBRARY logs around our wrapper; the seam skips it. The
@@ -345,7 +347,7 @@ async def _tool_manager_records(tool: str, arguments: dict) -> list[logging.LogR
             records.append(record)
 
     handler = _Collect(level=logging.DEBUG)
-    logger = logging.getLogger(expected_events.TOOL_MANAGER_LOGGER)
+    logger = logging.getLogger(expected_events.TOOL_CALL_LOGGER)
     logger.addHandler(handler)
     try:
         async with fastmcp.Client(app) as client:
@@ -356,21 +358,24 @@ async def _tool_manager_records(tool: str, arguments: dict) -> list[logging.LogR
     return [r for r in records if r.levelno >= logging.ERROR]
 
 
-def test_the_tool_manager_logger_is_the_installed_librarys():
+def test_the_tool_call_logger_is_the_installed_librarys():
     """``expected_events`` keys ``caller-input`` on this name and the report
     below logs on it. fastmcp 2.14 renamed it from ``FastMCP.fastmcp.tools.
-    tool_manager``; read off the library so the next rename fails HERE."""
-    from fastmcp.tools import tool_manager
+    tool_manager``, and fastmcp 3 moved it to ``FastMCP.call_tool``'s module
+    when it removed the ``ToolManager`` (F-946); read off the library so the
+    next move fails HERE."""
+    from fastmcp.server import server
 
-    assert tool_manager.logger.name == expected_events.TOOL_MANAGER_LOGGER
+    assert server.logger.name == expected_events.TOOL_CALL_LOGGER
 
 
 async def test_a_validation_error_our_body_raised_is_reported():
-    """fastmcp 2.14 re-raises a ``ValidationError`` out of a tool WITHOUT
-    logging it, so ours — which fails every call, as F-887 measured — would
-    reach no log and no Sentry. It must be reported exactly once, with the
-    exception attached, the way fastmcp 2.11.2 reported it."""
-    records = await _tool_manager_records("broken_settings_tool", {})
+    """fastmcp 2.14 re-raised a ``ValidationError`` out of a tool WITHOUT
+    logging it, and fastmcp 3 logs it only at WARNING with no exception, so
+    ours — which fails every call, as F-887 measured — would reach no Sentry
+    event. It must be reported exactly once, with the exception attached, the
+    way fastmcp 2.11.2 reported it."""
+    records = await _tool_call_records("broken_settings_tool", {})
 
     assert len(records) == 1
     (record,) = records
@@ -382,7 +387,7 @@ async def test_a_validation_error_our_body_raised_is_reported():
 async def test_any_other_failure_is_reported_once_not_twice():
     """fastmcp still logs every other exception itself; adding a second
     report for those would double every Sentry event."""
-    records = await _tool_manager_records("crashing_tool", {})
+    records = await _tool_call_records("crashing_tool", {})
 
     assert len(records) == 1
     assert isinstance(records[0].exc_info[1], RuntimeError)
@@ -391,4 +396,4 @@ async def test_any_other_failure_is_reported_once_not_twice():
 async def test_a_callers_bad_argument_is_not_reported():
     """The caller's own typo fails fastmcp's argument validation BEFORE our
     wrapper runs, and the caller already got the message. Nothing ships."""
-    assert await _tool_manager_records("counting_tool", {"count": "abc"}) == []
+    assert await _tool_call_records("counting_tool", {"count": "abc"}) == []

@@ -174,6 +174,15 @@ async def call_tool(server_mod: Any, name: str, /, **kwargs: Any) -> Any:
     return result
 
 
+async def live_tools(mcp: Any) -> dict[str, Any]:
+    """The tools ``mcp`` serves on ``tools/list``, by name.
+
+    What fastmcp 2's ``mcp.get_tools()`` answered; fastmcp 3 removed it and
+    ``list_tools()`` returns a sequence instead (F-946).
+    """
+    return {tool.name: tool for tool in await mcp.list_tools()}
+
+
 def pretend_display_context(monkeypatch: Any, token: str) -> None:
     """State a test's display premise instead of inheriting the runner's desktop.
 
