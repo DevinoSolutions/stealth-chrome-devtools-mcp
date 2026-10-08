@@ -542,18 +542,28 @@ def _install_write_guard() -> None:
         setattr(os, name, _guard_paths(getattr(os, name), f"os.{name}", writing=False))
 
 
-def recorded_backend_pids() -> frozenset[int]:
-    """The pids the operator's REAL record names, read once at install.
+# The exact bytes of the operator's REAL ``server.json`` that ``install`` read
+# (``None``: absent or unreadable). Kept so the pids the kill guard was armed
+# with can be re-derived from the SAME read later; re-reading the live file
+# races every other Claude Code session on the machine (F-945).
+REGISTRY_BYTES_AT_INSTALL: bytes | None = None
 
-    Read through ``json`` directly rather than through ``backend_registry``:
-    this runs while the fence is being installed, so the module's own reader may
-    already point at the fence root.
-    """
+
+def _read_registry_bytes() -> bytes | None:
+    try:
+        return (REAL_STATE_DIR / "server.json").read_bytes()
+    # No record, or one we cannot read, names nobody to protect.
+    except Exception:
+        return None
+
+
+def _pids_named_by(raw_bytes: bytes | None) -> frozenset[int]:
     import json
 
+    if raw_bytes is None:
+        return frozenset()
     try:
-        raw = json.loads((REAL_STATE_DIR / "server.json").read_text(encoding="utf-8"))
-    # No record, or one we cannot read, names nobody to protect.
+        raw = json.loads(raw_bytes.decode("utf-8"))
     except Exception:
         return frozenset()
     entries = raw.get("backends") if isinstance(raw, dict) else None
@@ -566,6 +576,16 @@ def recorded_backend_pids() -> frozenset[int]:
         if isinstance(entry, dict) and isinstance(entry.get("pid"), int):
             pids.add(entry["pid"])
     return frozenset(pids)
+
+
+def recorded_backend_pids() -> frozenset[int]:
+    """The pids the operator's REAL record names, as of this read.
+
+    Read through ``json`` directly rather than through ``backend_registry``:
+    this runs while the fence is being installed, so the module's own reader may
+    already point at the fence root.
+    """
+    return _pids_named_by(_read_registry_bytes())
 
 
 def _install_kill_guard(live: frozenset[int]) -> None:
@@ -678,9 +698,10 @@ def install(root: Path, *, session_root: Path, env: dict[str, str]) -> frozenset
     root during module setup; and the filesystem guard is armed LAST, after both
     redirects, so the fence's own ``mkdir`` is not the first thing it stops.
     """
-    global REAL_SESSION_ROOTS
+    global REAL_SESSION_ROOTS, REGISTRY_BYTES_AT_INSTALL
 
-    live = recorded_backend_pids()
+    REGISTRY_BYTES_AT_INSTALL = _read_registry_bytes()
+    live = _pids_named_by(REGISTRY_BYTES_AT_INSTALL)
     REAL_SESSION_ROOTS = _fence_session_root(env, session_root)
     _fence_root(root)
     _install_kill_guard(live)

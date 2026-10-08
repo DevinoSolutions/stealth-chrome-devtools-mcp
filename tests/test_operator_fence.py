@@ -206,11 +206,26 @@ class TestTheFenceReportsWhatItIsProtecting:
         monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", state)
         assert operator_fence.recorded_backend_pids() == frozenset({4242, 4243})
 
-    def test_the_conftest_holds_what_the_fence_protects(self):
+    def test_the_conftest_holds_what_the_fence_protects(self, tmp_path, monkeypatch):
+        """F-945: both sides come from ONE read of the registry.
+
+        The reader is run over the exact bytes ``install`` read at conftest
+        import, replayed into a decoy state dir. Re-reading the live
+        ``~/.stealth-mcp/server.json`` here raced every other session on the
+        machine starting or stopping a backend during the lane.
+        """
         import conftest
 
-        live = operator_fence.recorded_backend_pids()
-        assert live == conftest._FENCED_LIVE_BACKEND_PIDS
+        seen = operator_fence.REGISTRY_BYTES_AT_INSTALL
+        state = tmp_path / ".stealth-mcp"
+        state.mkdir()
+        if seen is not None:
+            (state / "server.json").write_bytes(seen)
+        monkeypatch.setattr(operator_fence, "REAL_STATE_DIR", state)
+
+        assert operator_fence.recorded_backend_pids() == (
+            conftest._FENCED_LIVE_BACKEND_PIDS
+        )
 
 
 class TestEveryTripwireIsUnswallowable:
