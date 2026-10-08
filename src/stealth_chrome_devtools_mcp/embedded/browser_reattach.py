@@ -62,6 +62,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
+    fleet_session,
     profile_source,
     reap_guard,
     tab_identity,
@@ -500,6 +501,8 @@ class Held:
     """
 
     instance_id: str | None = None
+    # True when instance_id is a browser THIS backend was already driving.
+    running: bool = False
     # Why the re-attach was NOT taken; None when it was, when nothing held the
     # directory, and when the holder is ours (F-931: left to the resolver).
     declined: str | None = None
@@ -580,7 +583,7 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
         async with manager._lock:
             running = candidate.instance_id in manager._instances
         if running:
-            return Held(instance_id=candidate.instance_id)
+            return Held(instance_id=candidate.instance_id, running=True)
         try:
             adopted_id = await asyncio.wait_for(
                 _adopt_one(
@@ -693,11 +696,10 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
     to US, so any later classification finds nothing.
 
     Never raises, and it reaps on ONE class of failure only: evidence about the
-    BROWSER — the attach was refused, it reports no tab, it is wedged — logged at
-    WARNING and reaped exactly as 2.1.9's startup recovery would have reaped it.
-    A ``Refused`` (a sibling backend claimed it first, or the claim could not be
-    written at all) is the opposite instruction and is handled above the blanket
-    handler: the entry and the browser are left exactly as they are.
+    BROWSER — refused, no tab, wedged — logged at WARNING and reaped as 2.1.9's
+    startup recovery would have. A ``Refused`` (a sibling claimed it first, or the
+    claim could not be written) is the opposite: entry and browser are left as
+    they are. So is the fleet session (F-952): restored FIRST, never reaped.
     """
     async with _pass_lock:
         # ONE read, threaded into both halves: a second read could disagree
@@ -712,7 +714,7 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
         candidate_pids = reap_guard.spared_pids(entries, classified.spare)
         adopted: list[str] = []
         failed: set[str] = set()
-        for instance_id, candidate in classified.adoptable.items():
+        for instance_id, candidate in fleet_session.restore_first(classified.adoptable):
             # Under the manager's own lock, because a spawn on another task may
             # be publishing into `_instances` while this pass reads it, and the
             # answer decides whether we open a second connection to one Chrome.
@@ -732,24 +734,21 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
                 # first, or the claim could not be written at all. Neither is
                 # evidence about the BROWSER.
                 #
-                # Reaping here was strictly worse than the race it was added to
-                # fix. Backends B and C start together and both classify entry E
-                # adoptable from their own snapshot; C claims first and adopts;
-                # B's claim is refused, and B would then kill every browser on
-                # that profile predating its own `_init_time` — which C's adopted
-                # browser does — and drop the entry C has just re-stamped. The
-                # login dies, C holds a handle to a corpse, and nothing on disk
-                # names it. A lost claim is the rule WORKING; it leaves the entry
-                # and the browser exactly as they are.
+                # Reaping here was worse than the race it was added to fix: B and
+                # C start together and both classify entry E adoptable; C claims
+                # and adopts, and B (refused) would then kill every browser on
+                # that profile predating its own `_init_time` -- C's adopted one
+                # included -- and drop the entry C re-stamped. A lost claim is the
+                # rule WORKING; the entry and the browser stay as they are.
                 report("reattach", f"Left to its owner: {exc}")
                 continue
             except Exception as exc:  # noqa: BLE001  PERMANENT(a startup background pass must never raise; every failure that is evidence about the BROWSER has the one remedy below)
-                # Blind on purpose BELOW the refusal above: this pass runs on a
-                # background task at startup and MUST never raise. What is left
-                # after `Refused` is evidence about the browser — a refused
-                # connect, no tab, a wedged Chrome, a nodriver change — and all
-                # of it has the same remedy, the reap, so narrowing further would
-                # only turn an unforeseen one into an unhandled task exception.
+                # Blind on purpose BELOW the refusal above: this background
+                # startup pass MUST never raise. What is left after `Refused` is
+                # evidence about the browser (refused connect, no tab, wedged
+                # Chrome, a nodriver change), all with the same remedy, the reap.
+                if fleet_session.spare_on_failed_attach(instance_id, candidate, exc):
+                    continue
                 failed.add(instance_id)
                 # Shape only in the message — a profile path names the operating
                 # user and this line reaches the durable log and a Sentry

@@ -29,7 +29,7 @@ from stealth_chrome_devtools_mcp.embedded import server, tool_registry
 
 # The true post-M2 tool count (F-108 tripwire). If M4-Ph1 changes the tool set,
 # it updates this one number with intent.
-EXPECTED_TOOL_COUNT = 94
+EXPECTED_TOOL_COUNT = 97
 
 # The 5 tools registered as plain ``def`` (all hook documentation/validation);
 # every other tool is ``async def``. ``with_correlation_id`` preserves this

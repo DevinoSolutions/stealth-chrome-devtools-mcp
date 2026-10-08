@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     # the F-914 refusal for a master this backend does not drive.
     no_live_master_seed: bool = False
 
+    # The session every NEW clone and every NEW named session is copied from,
+    # instead of the master-snapshot (F-952). Empty keeps the snapshot. Name a
+    # session that exists (the shared "fleet" one); its LIVE cookies are handed
+    # over when this backend drives it.
+    seed_session: str = ""
+
     # -- Client round trips (F-790) ------------------------------------------
     # Deadline for the ONE server->client request this product makes:
     # ``roots/list``, sent by clone_storage._client_session_seed() to name a

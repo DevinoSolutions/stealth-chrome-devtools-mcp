@@ -44,8 +44,10 @@ from stealth_chrome_devtools_mcp.embedded import (
     cookie_handoff,
     display_context,
     element_box,
+    fleet_session,
     profile_seed,
     session_hygiene,
+    session_lease,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
@@ -95,6 +97,7 @@ __all__ = [
     "dynamic_hook_ai",
     "dynamic_hook_system",
     "file_based_element_cloner",
+    "fleet_session",
     "in_memory_storage",
     "network_interceptor",
     "process_cleanup",
@@ -102,6 +105,7 @@ __all__ = [
     "progressive_element_cloner",
     "response_handler",
     "session_hygiene",
+    "session_lease",
 ]
 
 CDP_OPERATION_TIMEOUT = get_settings().cdp_operation_timeout_seconds

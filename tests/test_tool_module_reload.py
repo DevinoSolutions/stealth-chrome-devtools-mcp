@@ -60,7 +60,7 @@ from stealth_chrome_devtools_mcp.embedded import tool_registry
 #: at 94 while two apps are empty), so an expectation derived from it would move
 #: with the bug. ``tests/test_tool_registry.py::TestCountTripwire`` is the home for
 #: the derived count; this is the independent witness.
-EXPECTED_TOOL_COUNT = 94
+EXPECTED_TOOL_COUNT = 97
 
 _PROBE_ALIASES = ("server", "_split_reload_probe")
 

@@ -189,7 +189,7 @@ class TestCountTripwire:
     """Mirror of M6's F-108 tripwire from the registry's vantage: the live
     FastMCP registry and the section map agree at 94."""
 
-    EXPECTED_TOOL_COUNT = 94
+    EXPECTED_TOOL_COUNT = 97
 
     async def test_live_count_and_section_sum_are_94(self):
         tools = await live_tools(server.mcp)
