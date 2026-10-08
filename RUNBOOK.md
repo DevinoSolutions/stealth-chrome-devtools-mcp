@@ -559,6 +559,24 @@ binding its socket is not dead either, which is why the pid is the second witnes
 `doctor` names the same records and marks them `(dead record)`, but never writes: it is
 a read-only verb.
 
+### Share one signed-in browser between agents (F-952)
+
+Create it once, from a running browser you are logged in to or from the default seed:
+
+```text
+spawn_browser(session="fleet", seed_from="<running session name>")   # adopt a running browser's login
+spawn_browser(session="fleet")                                        # or: start it from the default seed
+```
+
+`seed_from` takes the NAME (the `<name>-<n>` of a walked clone works) and needs this backend to
+drive the source; a source another process holds is refused by name. Only cookies cross a running
+source. After that, every `spawn_browser(session="fleet")` returns the running instance with
+`already_running: true`. Agents take turns with `acquire_session_lock` / `release_session_lock`
+(advisory; leases expire, and a backend restart clears them). A restart re-attaches `fleet` first
+under its recorded `instance_id`; if the re-attach fails the browser is left running and recorded
+(look for `Could not re-attach the fleet session` in the log) rather than reaped. To make `fleet`
+the source for every new clone, set `STEALTH_MCP_SEED_SESSION=fleet` in `~/.stealth-mcp/.env`.
+
 ### Code edit didn't take effect
 There is no live reload. A source edit changes the **source fingerprint**, so the next
 client connection gets a fresh backend automatically. If you want it now: `restart`.
