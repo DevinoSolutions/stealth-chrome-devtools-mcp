@@ -400,15 +400,15 @@ def held_by_sibling(
     that as a sibling's. Every question about the browser then refused it — a
     refusal telling the caller to stop the backend they were talking to.
 
-    The pid is compared first and *owner_alive* still decides identity, so a pid
-    recycled onto this process from a dead owner is not mistaken for us.
+    *owner_alive* decides identity first (pid AND create time), so a pid recycled
+    onto this process from a dead owner is reapable, not ours.
     """
     if is_reapable(entry, owner_alive):
         return False
-    owner_pid = entry.get(OWNER_PID)
-    if not isinstance(owner_pid, int) or owner_pid != os.getpid():
-        return True
-    return not owner_alive(owner_pid, recorded_time(entry, OWNER_CREATE_TIME))
+    # `is_reapable` already asked `owner_alive` about THIS owner and its
+    # recorded create time, so a recycled pid is decided there; only the pid
+    # comparison is left.
+    return entry.get(OWNER_PID) != os.getpid()
 
 
 def on_persistent_profile(entry: Entry) -> bool:

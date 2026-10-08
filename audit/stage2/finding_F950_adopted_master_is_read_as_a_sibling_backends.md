@@ -124,14 +124,29 @@ trustworthy) with `sourceScheme: NonSecure`, and then refuses to accept that sam
 through `Storage.setCookies`. The other two were valid. So the translation did not mangle
 anything: it is a verbatim pass-through of what Chrome reported. The defect is that
 `Storage.setCookies` is all or nothing, so one cookie Chrome will not re-accept dropped the
-entire jar, and the clone silently got only the stale seed.
+entire jar and the clone got only the stale seed. It was reported (`seeded_via: "copy"`
+plus `cookie_handoff_error`), but a caller reading only the session it got back did not notice.
 
 `write_jar` now writes the clean case as one call (unchanged), and on a refused batch bisects
 until the refused cookies stand alone, carrying every other cookie. It reports
 `cookies_rejected` as a count next to the existing counts, with `seeded_via: "cdp-cookies"`.
-It still raises, as before, when nothing was accepted or more than `MAX_REFUSED` (32) were
-refused, since that is a dead connection or a bad command and not a few bad cookies (a dead
-connection costs at most about `3 * MAX_REFUSED` calls, pinned).
+Only Chrome's refusal is bisected: a `ProtocolException` with code -32602 (the code is matched,
+not the text). Anything else (`TimeoutError`, a closed connection, another protocol code) is
+re-raised at once and reported through `cookie_handoff_error` as before, never counted as
+`cookies_rejected`. A single cookie is a leaf and is never split, and an empty jar writes nothing
+(a failing send of `[]` used to split into `[]` and `[]` forever; found in review, pinned under
+`asyncio.wait_for`). The bound is on CALLS, not refusals: bisecting n cookies costs at most
+`2n - 1` writes, so `MAX_WRITES = 4096` finishes any jar up to 2048 cookies and a dev master
+with many Secure-from-localhost cookies still carries every accepted one. It also raises when
+nothing was accepted.
+
+The claim path (`browser_pid_registry.claim_browser`) was reviewed for the same self-refusal as
+`held_by` and deliberately left on `is_reapable`. The claim is the in-process arbiter of two
+concurrent spawns onto one browser: the first stamps THIS pid and the second must lose
+(`test_the_second_claimant_loses_because_the_first_is_now_the_owner` goes red if it used
+`held_by_sibling`, since both claimants share a pid). So its refusal text now covers the
+owner-is-us case ("if it is THIS backend, retry once that spawn has finished") instead of only
+"stop that backend". Both are pinned.
 
 Deliberate deviation from the brief: the refused cookies are counted, not named. The module's
 PII rule (a cookie NAME identifies the sites a person uses; pinned by

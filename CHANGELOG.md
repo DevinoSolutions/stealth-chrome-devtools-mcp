@@ -18,10 +18,13 @@ backend is still refused. A re-attached shared browser is also reported as the
 `default` session, so closing it refreshes the seed that new sessions are copied from
 (it used to be reported as `explicit` and skipped the refresh).
 
-Separately, a copy made from a running browser could silently lose the whole cookie jar
-if Chrome refused any single cookie in it (`Storage.setCookies` accepts all of them or
-none). One refused cookie now costs only that cookie: the rest are carried, and the
-answer reports `cookies_rejected` as a count (never names or values).
+Separately, a copy made from a running browser lost the whole cookie jar if Chrome
+refused any single cookie in it (`Storage.setCookies` accepts all of them or none). The
+spawn answer did say so (`seeded_via: "copy"` plus `cookie_handoff_error`), but nothing
+else did, so a caller reading only the session it got back would not notice. One refused
+cookie now costs only that cookie: the rest are carried, and the answer reports
+`cookies_rejected` as a count (never names or values). Only Chrome's own refusal is
+treated this way; a timeout or a closed connection still fails the hand-off as before.
 
 ### The stdio proxy no longer crashes at startup on an import race (F-949)
 

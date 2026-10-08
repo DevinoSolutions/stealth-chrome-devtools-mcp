@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import nodriver as uc
 import websockets.asyncio.client
-from nodriver.core.connection import Connection
+from nodriver.core.connection import Connection, ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -208,9 +208,23 @@ async def read_jar(browser: "Browser") -> list["Cookie"]:
     return await _connection(browser).send(uc.cdp.storage.get_cookies()) or []
 
 
-#: How many cookies Chrome may refuse before the failure is read as SYSTEMIC
-#: (a dead connection, a bad command) rather than as a few unacceptable cookies.
-MAX_REFUSED = 32
+#: Chrome's answer to a batch holding a cookie it will not store: JSON-RPC
+#: "invalid params", spelled ``Invalid cookie fields``. The CODE is what is
+#: matched, never the text — anything else (a timeout, a closed connection,
+#: another protocol error) is a fact about the LINK or the command and must
+#: surface as the failure it is rather than be counted as a refused cookie.
+REFUSAL_CODE = -32602
+
+#: A bound on CALLS and not on refusals. Bisecting a jar of n cookies costs at
+#: most ``2n - 1`` writes however many are refused, so 4096 finishes any jar up
+#: to 2048 cookies (the owner's is ~1500) and a dev master with hundreds of
+#: Secure-from-http cookies still carries every accepted one.
+MAX_WRITES = 4096
+
+
+def _refused(error: BaseException) -> bool:
+    """True when *error* is Chrome saying a cookie in the batch is unacceptable."""
+    return isinstance(error, ProtocolException) and error.code == REFUSAL_CODE
 
 
 async def write_jar(browser: "Browser", cookies: Sequence["CookieParam"]) -> int:
@@ -221,31 +235,38 @@ async def write_jar(browser: "Browser", cookies: Sequence["CookieParam"]) -> int
     them (F-950, measured on Chrome 153). A ``Secure`` cookie Chrome itself
     stored from a loopback ``http`` page carries ``sourceScheme: NonSecure``,
     and is one Chrome will not take back. So the clean case is still ONE call;
-    a refused batch is bisected until the refused cookies stand alone, and
-    every other cookie is carried.
+    a batch refused with :data:`REFUSAL_CODE` is bisected until the refused
+    cookies stand alone, and every other cookie is carried. A single cookie is
+    a leaf and is never split.
 
-    It raises, as a whole-jar failure always did, when the failure is not about
-    a few cookies: more than :data:`MAX_REFUSED` were refused (a dead connection
-    refuses everything, and must not cost a call per cookie) or none were
-    accepted (a clone that carried nothing must not say it was seeded). The
-    refused cookies are COUNTED and never named: see the PII paragraph above.
+    Any OTHER failure is re-raised at once and nothing is counted: a flaky link
+    must not read as a jar of bad cookies. It also raises when none were
+    accepted (a clone that carried nothing must not say it was seeded) or when
+    :data:`MAX_WRITES` is spent. The refused cookies are COUNTED and never
+    named: see the PII paragraph above.
     """
+    if not cookies:
+        return 0
     connection = _connection(browser)
     pending = [list(cookies)]
     refused = 0
+    writes = 0
     first: Exception | None = None
-    while pending and refused <= MAX_REFUSED:
+    while pending and writes < MAX_WRITES:
         batch = pending.pop()
+        writes += 1
         try:
             await connection.send(uc.cdp.storage.set_cookies(cookies=batch))
-        except Exception as error:  # noqa: BLE001  PERMANENT(F-950): Chrome's refusal of a batch is an answer, not a crash
+        except Exception as error:
+            if not _refused(error):
+                raise
             first = first or error
-            if len(batch) == 1:
+            if len(batch) <= 1:
                 refused += 1
             else:
                 middle = len(batch) // 2
                 pending += [batch[middle:], batch[:middle]]
-    if first is not None and (refused > MAX_REFUSED or refused >= len(cookies)):
+    if first is not None and (pending or refused >= len(cookies)):
         raise first
     return refused
 
@@ -278,7 +299,8 @@ async def _step(method: str, awaitable: Awaitable[_T]) -> _T:
     """One CDP round trip, with a failure that names WHICH one.
 
     The method is read off the step that actually failed and never set ahead of
-    time by the caller: a hand-off is three round trips, and a caller stamping
+    time by the caller: a hand-off is a read, a write and a read-back, and a
+    caller stamping
     a method before the call attributed a failed READ to ``Storage.setCookies``
     (caught by ``tests/test_cookie_handoff.py``) — a diagnostic pointing at the
     wrong half of the mechanism is worse than none.
@@ -361,9 +383,10 @@ class Handoff(NamedTuple):
 async def hand_off(source: "Browser", target: "Browser") -> Handoff:
     """Read the running SOURCE's jar and write it into the TARGET.
 
-    Three round trips and no deadline of its own: the caller's
+    A read, a write (more only if Chrome refuses a cookie) and a read-back, with
+    no deadline of its own: the caller's
     ``rt._with_cdp_timeout`` is the bound, on ``script_evaluation``'s rule that
-    a second deadline is a second answer to one question. The third trip is the
+    a second deadline is a second answer to one question. The last trip is the
     read-back, which is what makes the record a count of something observed
     rather than of something sent.
     """
@@ -468,7 +491,7 @@ def raw_params(jar: Iterable[dict[str, object]]) -> list["CookieParam"]:
 async def hand_off_from_port(port: int, target: "Browser") -> Handoff:
     """:func:`hand_off` for a SOURCE this backend does not drive: its jar is read
     over the loopback debug port it was launched with (F-939). Same record, same
-    three round trips, same read-back."""
+    same steps, same read-back."""
     jar = await _step(READ_METHOD, _read_raw_jar_over_port(port))
     outgoing = _translated_raw(jar)
     rejected = await _step(WRITE_METHOD, write_jar(target, outgoing))

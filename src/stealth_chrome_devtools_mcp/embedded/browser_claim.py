@@ -138,13 +138,20 @@ async def held(
 def _decided(
     claimed: browser_pid_registry.Claimed | None, pid: int
 ) -> browser_pid_registry.Claimed:
-    """The claim, or the refusal that says a sibling backend won the race."""
+    """The claim, or the refusal that says another claimant won the race.
+
+    The claim is deliberately NOT asked through ``held_by_sibling`` (F-950): the
+    owner it finds is often THIS process, stamped by a concurrent spawn that is
+    adopting the same browser, and refusing the second one is the whole point.
+    """
     if claimed is None:
         raise Refused(
             f"a live backend of ours already owns the browser holding that "
             f"directory (pid {pid}); two backends driving one Chrome is the "
-            f"defect F-886 fixed, so it was left alone. Stop that backend "
-            f"first — see RUNBOOK, 'Recover a stranded login'"
+            f"defect F-886 fixed, so it was left alone. If that is another "
+            f"backend, stop it first — see RUNBOOK, 'Recover a stranded login'; "
+            f"if it is THIS backend (a concurrent spawn already adopting the "
+            f"same browser), retry once that spawn has finished"
         )
     return claimed
 
