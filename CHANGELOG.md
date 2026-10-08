@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### The stdio proxy no longer crashes at startup on an import race (F-949)
+
+Intermittently a session failed to start: Claude Code reported CONNECTION_CLOSED, and
+the proxy's log ended in `KeyError: 'mcp.server'` (or, on other runs, a
+`_DeadlockError` on `mcp.server.lowlevel`) while importing `mcp.server.stdio`. One
+launch worked and the next died. The proxy starts its error reporting on a background
+thread so it does not delay the handshake. That thread's Sentry setup auto-enabled
+Sentry's integrations, and the MCP one imports `mcp` and `fastmcp`, the same packages
+the proxy's main thread was importing at that moment. Two threads importing one
+package is not safe. The proxy serves no MCP server, so its Sentry setup now asks for
+no auto-enabled integrations, which also makes it cheaper. The backend and the ops
+CLI are unchanged.
+
 ## 2.1.24
 
 ### A call cut off by a broken connection no longer says the backend died (F-944)

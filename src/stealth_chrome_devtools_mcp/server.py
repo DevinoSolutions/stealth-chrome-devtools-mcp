@@ -47,10 +47,21 @@ def _start_proxy_error_reporting() -> threading.Thread:
     A daemon thread overlaps it with the backend discovery that follows and can
     never hold the process open. The residual is stated, not hidden: a failure
     in the proxy's first ~2s is not reported.
+
+    **Without auto-enabling integrations (F-949).** The SDK's default set
+    imports ``mcp`` / ``fastmcp`` on this thread while the main thread imports
+    ``mcp.server.stdio``; two threads importing one package intermittently died
+    with ``KeyError: 'mcp.server'``. The proxy serves no MCP server, so it
+    asks for none, which also makes the init cheaper.
     """
     from stealth_chrome_devtools_mcp.observability import sentry_init
 
-    thread = threading.Thread(target=sentry_init, name="proxy-sentry-init", daemon=True)
+    thread = threading.Thread(
+        target=sentry_init,
+        kwargs={"auto_enabling_integrations": False},
+        name="proxy-sentry-init",
+        daemon=True,
+    )
     thread.start()
     return thread
 
