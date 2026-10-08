@@ -25,6 +25,7 @@ import pytest
 
 from fakes import FakeBrowser, FakeTab, held_profile
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_claim,
     browser_cmdline,
     browser_reattach,
     cdp_attach,
@@ -40,7 +41,7 @@ from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 #: asks psutil about a browser whose handle is gone. A made-up pid reads as a
 #: dead Chrome and ``list_instances`` discards the instance, which would hide the
 #: very predicate these pins are about.
-CHROME_PID = os.getpid()
+CHROME_PID = os.getppid()
 SIBLING = 4_000_001
 PORT = 9223
 
@@ -152,15 +153,69 @@ class TestAnEntryOwnedByThisBackendIsOurs:
         assert found is not None
         assert found.instance_id == "i-old"
 
-    def test_the_identity_witness_decides_whether_the_pid_is_us(self):
-        """``held_by_sibling`` must NOT collapse into "same pid means us":
-        ``owner_alive`` is asked twice, once as the reapable rule and once as
-        the identity check, and a live owner it vouches for the first time but
-        not as this process is somebody else's."""
-        entry = self._entry(os.getpid())
-        answers = iter([True, False])
+    def test_a_recycled_pid_is_decided_by_the_create_time_not_the_number(self):
+        """The witness honours ``owner_create_time``. An entry stamped with this
+        pid by a backend that started EARLIER is a dead owner whose pid was
+        recycled onto us: reapable, not ours and not a sibling's."""
+        current = 1700000500.0
 
-        assert registry.held_by_sibling(entry, lambda _p, _c: next(answers)) is True
+        def alive(pid, created):
+            return pid == os.getpid() and created == current
+
+        ours = {**self._entry(os.getpid()), "owner_create_time": current}
+        recycled = {**self._entry(os.getpid()), "owner_create_time": current - 90.0}
+        sibling = {**self._entry(SIBLING), "owner_create_time": current}
+
+        assert registry.held_by_sibling(ours, alive) is False
+        assert registry.is_reapable(recycled, alive) is True
+        assert registry.held_by_sibling(recycled, alive) is False
+        assert registry.held_by_sibling(sibling, lambda p, _c: p == SIBLING) is True
+
+    def test_the_claim_still_refuses_an_entry_this_process_owns(self, tmp_path):
+        """The claim is the in-process arbiter of two concurrent spawns onto one
+        browser: the first stamps THIS pid, and the second must lose. Unlike
+        ``held_by`` it must not read our own pid as "not a second driver"."""
+        path = tmp_path / "browser_pids.json"
+        entry = self._entry(os.getpid())
+        registry.update_entries(path, lambda recorded: {**recorded, "i-ours": entry})
+
+        claimed = registry.claim_browser(
+            path,
+            pid=CHROME_PID,
+            entry=entry,
+            instance_id="i-new",
+            owner_pid=os.getpid(),
+            owner_create_time=None,
+            owner_alive=lambda pid, _c: pid == os.getpid(),
+        )
+
+        assert claimed is None
+
+    async def test_the_refusal_names_the_owner_is_us_case(self):
+        """Whoever hits that refusal may be talking to the very backend that owns
+        the browser, so the text must not only say "stop that backend"."""
+        with pytest.raises(browser_claim.Refused) as excinfo:
+            browser_claim._decided(None, CHROME_PID)
+
+        assert "THIS backend" in str(excinfo.value)
+        assert "live backend of ours" in str(excinfo.value)
+
+    def test_the_claim_still_refuses_an_entry_a_sibling_owns(self, tmp_path):
+        path = tmp_path / "browser_pids.json"
+        entry = self._entry(SIBLING)
+        registry.update_entries(path, lambda recorded: {**recorded, "i-theirs": entry})
+
+        claimed = registry.claim_browser(
+            path,
+            pid=CHROME_PID,
+            entry=entry,
+            instance_id="i-new",
+            owner_pid=os.getpid(),
+            owner_create_time=None,
+            owner_alive=lambda pid, _c: pid == SIBLING,
+        )
+
+        assert claimed is None
 
     def test_everyone_else_keeps_the_reapable_rule(self):
         entry = self._entry(SIBLING)
