@@ -295,6 +295,47 @@ touched.
 > at a location inside your user profile (e.g. `%LOCALAPPDATA%\stealth-mcp`) so
 > the OS user ACLs protect it.
 
+### The shared `fleet` session and the session lock
+
+One signed-in browser that several agents work from, and that outlives all of them.
+
+```text
+spawn_browser(session="fleet")                 # first call creates it (a copy of the default seed)
+spawn_browser(session="fleet", seed_from="upup-b9be57135713-84488-27")
+                                               # or: make a browser that is ALREADY running the fleet
+```
+
+`fleet` is an ordinary named session, so everything named sessions promise holds:
+`close_instance` keeps the profile, a backend restart re-attaches the browser under the
+same `instance_id` (and restores `fleet` **first**), and nothing reaps it except
+`kill-orphans --force`. A failed re-attach to `fleet` leaves its browser running and
+recorded instead of reaping it, because the login in it cannot be re-created.
+
+Asking for `fleet` while it is already open in this backend returns that instance with
+`already_running: true` and the current `session_lock`; it is never walked to `fleet-2`
+and never a copy. A spawn that names nothing is still never handed it.
+
+`seed_from` accepts any session **name** in the sessions directory, including the
+`<name>-<n>` an agent's browser was walked to. If this backend drives the source, its live
+cookie jar is carried over; if another process holds it, the request is refused by name.
+Cookies only: no localStorage or IndexedDB from a running source (see `spawn_browser`).
+
+**Make it the default source** for every new clone and new named session, instead of
+`master-snapshot`: set `STEALTH_MCP_SEED_SESSION=fleet`. It is off by default. The
+`fleet` session itself still bootstraps from the snapshot, and a misnamed value is refused
+naming the setting. Only the source rotates Google cookies (F-939); clones stay fenced.
+
+**The lock is advisory.** Tool calls carry no caller identity, so a lock cannot stop another
+agent's calls; it is the shared answer to "is somebody using this?".
+
+| Tool | Purpose |
+|---|---|
+| `acquire_session_lock(owner, session="fleet", lease_seconds=300, wait_seconds=0)` | Take or renew (same owner) the lease. Refused with the holder and expiry when held. `lease_seconds` 1-3600, `wait_seconds` 0-120; out-of-range is refused, not clamped. |
+| `release_session_lock(owner, session="fleet")` | Holder only; anyone else, or a free session, is refused. |
+| `get_session_lock_status(session="fleet")` | `locked`, `holder`, `acquired_at`, `expires_at`, `expires_in_seconds`. |
+
+Leases expire on their own and are held in memory, so a backend restart clears them.
+
 ### Stealth Arg Filtering
 
 The server automatically strips Chrome flags that would compromise stealth:
@@ -368,11 +409,11 @@ spawn_browser(headless=True, browser_args=["--enable-automation"])
 | `list_network_requests` | View intercepted network traffic |
 | `get_cookies` / `set_cookie` | Manage browser cookies |
 
-**94 tools** across 11 sections — the count is derived from the live tool registry,
+**97 tools** across 12 sections — the count is derived from the live tool registry,
 never hand-maintained. [See the full navigation map →](NAVMAP.md).
 
 That is what the server **serves**, which is not the same as what the release
-gate **proves**. At the release SHA in the evidence ledger, 3 of those 94 are
+gate **proves**. At the release SHA in the evidence ledger, 3 of those 97 are
 release-qualified: asserted end-to-end over the real stdio transport a client
 actually speaks. The rest are driven against real Chrome by the E2E suite but
 through an in-process seam, so they are `served-unqualified` at the wire — tested,
@@ -431,6 +472,7 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 | `STEALTH_MCP_ALLOW_BROWSER_SIGNIN` | `false` | Chrome's own sign-in is off by default (F-938): every spawn (master, named session, auto-clone, delegated desktop launch) passes `--allow-browser-signin=false`, so Account Consistency is `None` and the account reconcilor `Inactive`. With it on (stock `DICE`), a clone or seed carries Google cookies but no token in the token service, and the reconcilor logs those cookies out server-side, which signs the master out too. Web sign-in to Google still works. A caller's own `--allow-browser-signin=...` in `browser_args` wins. Set to `true` to launch without the switch. |
 | `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION` | `false` | Clones never rotate Google session cookies (F-939): on every target of an auto-clone (tabs, popups, iframes, workers) requests to `accounts.google.com` / `accounts.youtube.com` `/RotateCookies*` and `/RotateBoundCookies*` are failed, so only the master rotates. Many clones rotating one copied session fork its `__Secure-*PSIDTS` chain and Google revokes the session everywhere. `true` lets clones rotate. |
 | `STEALTH_MCP_NO_LIVE_MASTER_SEED` | `false` | A clone spawned while the shared (master) session is open in a browser this backend does not drive gets the master's LIVE cookies over its loopback debug port (F-939), not the stale `master-snapshot`. `true` restores the refusal. |
+| `STEALTH_MCP_SEED_SESSION` | _(empty)_ | Copy every NEW clone and NEW named session from this session (e.g. `fleet`) instead of `master-snapshot` (F-952). Its live cookies are handed over when this backend drives it. Empty keeps the snapshot. A name that does not exist is refused naming this setting. |
 
 ## CLI
 

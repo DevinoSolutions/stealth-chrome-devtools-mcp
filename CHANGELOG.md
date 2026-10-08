@@ -2,6 +2,31 @@
 
 ## 2.1.25
 
+### A shared signed-in browser that survives restarts, plus a lock for taking turns (F-952)
+
+Several agents can now work from one signed-in browser. Name it `fleet`:
+`spawn_browser(session="fleet")` creates it, or `spawn_browser(session="fleet",
+seed_from="<a running session>")` turns a browser you are already logged in to into it
+(the name of a walked copy such as `upup-b9be57135713-84488-27` works too; its live
+cookies are carried over when this backend drives it).
+
+`fleet` is a normal named session, so closing it keeps the profile and a backend restart
+re-attaches the same browser under the same `instance_id`. What is new: it is restored
+before every other browser, and if re-attaching it fails the browser is left running and
+recorded rather than killed (every other profile still takes the old remedy). Asking for
+`fleet` while it is open now returns that browser with `already_running: true` and the
+current lock status, instead of reading like an ordinary spawn.
+
+Three new tools take turns on a session: `acquire_session_lock(owner, session="fleet",
+lease_seconds=300, wait_seconds=0)`, `release_session_lock(owner, session="fleet")` and
+`get_session_lock_status(session="fleet")`. The lock is advisory: tool calls carry no
+caller identity, so it cannot block anyone, but a refused acquire names the holder and when
+the lease expires, leases expire on their own, and only the holder can release. Leases are
+in memory, so a backend restart clears them. The tool count is now 97.
+
+New opt-in setting `STEALTH_MCP_SEED_SESSION=fleet` copies every new clone and new named
+session from `fleet` (with its live cookies) instead of `master-snapshot`. Off by default.
+
 ### Logins made in the shared browser no longer get lost in a throwaway copy (F-950)
 
 What happened: after a restart, the backend re-attaches to the shared `default` browser

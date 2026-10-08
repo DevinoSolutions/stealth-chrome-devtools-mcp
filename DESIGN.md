@@ -20,7 +20,7 @@ them in exactly that sense.
 
 There are **two front-ends** over a **shared backend process**:
 
-- the **MCP tool surface** — **94 tools** exposed over HTTP (and bridged to stdio),
+- the **MCP tool surface** — **97 tools** exposed over HTTP (and bridged to stdio),
   defined in `stealth_chrome_devtools_mcp.embedded.server` and registered through
   `stealth_chrome_devtools_mcp.embedded.tool_registry`;
 - the **ops CLI** — the `stealth-chrome-devtools` verbs (`status` / `doctor` / `stop`
@@ -29,7 +29,7 @@ There are **two front-ends** over a **shared backend process**:
 
 Both talk to a shared ***backend***: a detached
 `python -m stealth_chrome_devtools_mcp --transport http` process that hosts FastMCP
-and all 94 tools. There is **one backend per (source fingerprint, display context)** —
+and all 97 tools. There is **one backend per (source fingerprint, display context)** —
 in practice one process on a headless box, and at most two on a desktop box that is
 also SSH'd into ([§2.7](#27-display-context-where-a-window-launched-here-would-be-seen)).
 A Claude Code session connects through a short-lived ***stdio proxy*** that bridges
@@ -38,7 +38,7 @@ contract. Keeping the tool surface and the CLI as thin front-ends over a shared
 backend is what lets N client sessions share one browser fleet without N competing
 servers.
 
-**The tool count is 94, and it is derived, not typed.** The authoritative source is
+**The tool count is 97, and it is derived, not typed.** The authoritative source is
 the live `SECTION_TOOLS` registry (`sum(len(v) for v in SECTION_TOOLS.values())`).
 The CLI's `--list-sections` output and description string derive their numbers from
 that registry so no hand-maintained count can drift again (see `CONTRIBUTING.md` and
@@ -308,7 +308,7 @@ user is logged on" — and **Windows itself** places the process in that user's
 interactive session. The window is visible by construction rather than by our guess.
 The same backend then attaches over CDP (`uc.Config(host, port)` →
 `connect_existing`), so there is still exactly ONE backend, the instance lives in the
-same registry as every other instance, and all 94 tools work unchanged.
+same registry as every other instance, and all 97 tools work unchanged.
 
 This does **not** reintroduce session-picking. `display_context.py` is untouched and
 still observational; the tool still never selects or enters a session. The one new
@@ -536,19 +536,19 @@ disposition), not a bug — do not rewrite it into a middleware chain.
   which is exactly why the error helpers live in a leaf module.
 - **The section-module corollary: a module that holds tool bodies must not register
   them either.** The rule above forbids importing `server`; this one forbids the thing
-  the import would have been for. The 94 bodies live in `embedded/tool_sections/*.py`,
+  the import would have been for. The 97 bodies live in `embedded/tool_sections/*.py`,
   and every one of those modules is a plain module — imported **once** per process,
   into one `sys.modules` entry. `embedded/server.py` is not: its body runs up to three
   times (canonical import, bare-name `spec_from_file_location` load, `runpy` `__main__`),
   building a fresh `FastMCP` app each time. So a `@section_tool(...)` at a section
   module's own scope would run on the FIRST of those executions and never again,
   registering into that app and leaving the runpy `__main__` load — the one that actually
-  serves — with **zero** tools. That failure is invisible to the 94-count tripwire,
+  serves — with **zero** tools. That failure is invisible to the 97-count tripwire,
   because `SECTION_TOOLS` lives in `tool_registry.py` and is shared: it would still say
-  94 (see `tests/test_tool_module_reload.py`, which asserts per-identity app counts for
+  97 (see `tests/test_tool_module_reload.py`, which asserts per-identity app counts for
   exactly this reason). Registration is therefore **driven from `server.py`'s module
   body** by a four-line binding loop over `SECTION_MODULES`, so each execution registers
-  into its own `mcp` and binds all 94 names into its own namespace. A section module
+  into its own `mcp` and binds all 97 names into its own namespace. A section module
   exports only `SECTION` and `TOOLS`, imports no `mcp`/`registry`/`server`, and resolves
   every singleton as `rt.<name>` against `embedded/tool_runtime.py` at call time (an
   import-time `from ... import browser_manager` would create a second patchable home and

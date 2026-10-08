@@ -188,7 +188,7 @@ session themselves as the completion message describes.
 - Sessions and profile handling: https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp#sessions
 - CLI reference: https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp#cli
 - Operating the backend (logs, recovery): https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/blob/main/RUNBOOK.md
-- The 94 MCP tools: https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp#mcp-tools
+- The 97 MCP tools: https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp#mcp-tools
 - PyPI: https://pypi.org/project/stealth-chrome-devtools-mcp/
 - Issues: https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues
 - Error reporting (on by default, how to turn it off): https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp#error-reporting

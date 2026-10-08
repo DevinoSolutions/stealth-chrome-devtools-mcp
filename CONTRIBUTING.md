@@ -578,7 +578,7 @@ The tool count is derived from `SECTION_TOOLS`, so adding to a `TOOLS` tuple upd
 by itself — but the served surface is pinned by the HARD golden
 `tests/goldens/tool_surface.json`, so a new tool means a deliberate regeneration
 (`PYTHONUTF8=1 python tools/dump_tool_surface.py --write`) with a justification, and the
-`94` in the root docs moves in the same PR.
+`97` in the root docs moves in the same PR.
 
 The canonical **verb taxonomy** — the one tool-naming rule new tools follow (`list_*`,
 `get_*`, `create_*`/`spawn_*`, `execute_*`/`call_*`, `extract_*`/`clone_*`,
