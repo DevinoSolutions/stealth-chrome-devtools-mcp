@@ -131,7 +131,7 @@ class TestInitPlacement:
         exactly like the cold-start ``_start_backend_holding_lock`` does."""
         released = anyio.Event()
 
-        def _slow_init():
+        def _slow_init(**_kwargs):
             # Would deadlock the test if the caller waited for it.
             while not released.is_set():
                 pass
