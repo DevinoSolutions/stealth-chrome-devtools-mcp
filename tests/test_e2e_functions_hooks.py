@@ -469,14 +469,22 @@ E2E_COVERED = {
 # So it moved to E2E_COVERED and nothing remains exempt. Keep this dict: it is
 # half of the partition tripwire below, and a future exemption belongs here WITH
 # a reason, never as a silent deletion from E2E_COVERED.
-E2E_EXEMPT: dict[str, str] = {}
+E2E_EXEMPT: dict[str, str] = {
+    # F-952: the session lock is an in-memory lease table. No browser, CDP or
+    # transport is involved, so a real-Chrome E2E would prove nothing the
+    # hermetic node does not: tests/test_session_lease.py drives all three
+    # through the registered tool objects.
+    "acquire_session_lock": "no browser involved; tests/test_session_lease.py",
+    "release_session_lock": "no browser involved; tests/test_session_lease.py",
+    "get_session_lock_status": "no browser involved; tests/test_session_lease.py",
+}
 
 
 def test_e2e_coverage_manifest():
     """The E2E suite covers every registered section tool (partition tripwire)."""
     assert server_mod is not None, "server module failed to load"
     all_names = {name for names in server_mod.SECTION_TOOLS.values() for name in names}
-    assert len(all_names) == 94
+    assert len(all_names) == 97
 
     covered = set(E2E_COVERED)
     exempt = set(E2E_EXEMPT)

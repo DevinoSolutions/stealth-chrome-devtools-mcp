@@ -33,6 +33,7 @@ from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import (
     clone_trash,
+    fleet_session,
     profile_copy,
     profile_lock,
     profile_seed,
@@ -767,6 +768,32 @@ def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, An
     return public
 
 
+def _clone_seed(
+    override: profile_source.SeedSource | None,
+    driven: Callable[[Path], bool],
+) -> tuple[profile_source.SeedSource, bool]:
+    """What a new clone is copied from, and whether the OWNER chose it.
+
+    A retry's ``override``; the configured seed session (F-952), whose live jar
+    rides with it; the snapshot; then the shared profile itself, the only copy
+    when there is no seed yet (F-920: OPEN means the jar arrives over CDP,
+    CLOSED is a directory at rest)."""
+    if override is not None:
+        return override, False
+    if named := fleet_session.default_seed(None, None):
+        return _seed_source_for_copy(named, driven), True
+    if master_snapshot_dir().exists():
+        return profile_source.SeedSource(master_snapshot_dir(), "default-seed"), False
+    if master_profile_dir().exists():
+        seed = profile_source.SeedSource(master_profile_dir(), "live-default-fallback")
+        return seed, False
+    raise RuntimeError(
+        "No shared profile directory found — nothing to copy from. Spawn a "
+        "browser with no session first to create and populate the "
+        f"{profile_seed.DEFAULT_SESSION!r} session."
+    )
+
+
 async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per independent input to one selection)
     user_data_dir: str | None,
     *,
@@ -792,15 +819,12 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
 
     **Since F-914/F-915 it is also the witness for the TARGET.** Both held
     branches — a NAMED session and the shared one — ask
-    ``profile_target.hand_over_or_refuse``, so there is one rule and two call
-    sites rather than two rules. What differs is only which directory the copy
-    is taken FROM: a named holder is its own source (no closed form of it
-    exists), while the shared session keeps one — the seed — so its copy still
-    comes from a directory nothing is writing to and only the jar comes live.
+    ``profile_target.hand_over_or_refuse``: one rule, two call sites. Only the
+    copy's SOURCE differs: a named holder is its own (no closed form exists);
+    the shared session's is the seed, and only the jar comes live.
     """
     master = master_profile_dir()
     clone_root = clone_root_dir()
-    snapshot = master_snapshot_dir()
 
     # F-894: refused before anything is created, in front of the walk, through
     # the same gate the SPAWN asks — "where does this land" has ONE answer, not
@@ -810,12 +834,11 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # because only anchoring turns a name into a directory.
     landed = require_allowed_user_data_dir(user_data_dir)
     # F-897: refused BEFORE the walk, because `--from` is about the session the
-    # caller NAMED. A held target that we DRIVE is walked to `<name>-2`, which
-    # does not exist — so asking afterwards would seed a substitute directory
-    # under a flag the caller passed about theirs; one we do not drive is
-    # refused below, and asking afterwards would never be reached at all.
-    # `driven` is INERT here — `check_source=False` gates its only reader — and
-    # is passed for symmetry, so a future True cannot fail closed (review S5).
+    # caller NAMED: a held target we DRIVE is walked to `<name>-2`, so asking
+    # afterwards would seed a substitute directory under a flag passed about
+    # theirs; one we do not drive is refused below, never reaching it at all.
+    # `driven` is INERT here (`check_source=False` gates its only reader) and
+    # passed for symmetry, so a future True cannot fail closed (review S5).
     seed_from = require_allowed_seed_from(
         seed_from, landed, check_source=False, driven=driven
     )
@@ -852,12 +875,13 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         live_seed: dict[str, Any] = {}
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
             # A hand-over REPLACES the seed for this copy and can never drop a
-            # caller's `seed_from`: a held session is one that EXISTS, which is
-            # `require_new_session`'s fourth refusal, raised before this line.
-            # `_for_copy`, never `_seed_source`: that read owns the freshen and
-            # is the AUTHORITATIVE hold check — the pre-flight skipped it (S) —
-            # and a hand-over needs neither, copying from the holder instead.
-            seed = handed_over or _seed_source_for_copy(seed_from, driven)
+            # caller's `seed_from` (a held session EXISTS: `require_new_session`
+            # refuses it earlier). `_for_copy`, never `_seed_source`: that read
+            # owns the freshen and the AUTHORITATIVE hold check. F-952: with no
+            # `seed_from`, the configured seed session is the source.
+            seed = handed_over or _seed_source_for_copy(
+                fleet_session.default_seed(seed_from, str(explicit)), driven
+            )
             _require_copied(
                 _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
             )
@@ -878,10 +902,9 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         }
 
     master.parent.mkdir(parents=True, exist_ok=True)
-    # ONE hold read where there used to be one liveness bool: F-914 needs the
-    # REASON as well as the fact, and a second walk of the process table for it
-    # would be a second answer to one question a line apart. The shared session
-    # being OPEN is the same rule the named branch above asks, about a
+    # ONE hold read (F-914 needs the REASON as well as the fact; a second walk
+    # of the process table would be a second answer to one question). The
+    # shared session being OPEN is the same rule the named branch asks about a
     # different directory — `profile_target` argues it once for both.
     shared_hold = _profile_hold(master)
     if shared_hold is None:
@@ -906,48 +929,25 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         else _available_clone_dir(base_clone)
     )
     clone_root.mkdir(parents=True, exist_ok=True)
-    # Backstop against unbounded session bloat: kick a background sweep (delete
-    # idle auto-clones over the clone cap; trim idle named profiles over the
-    # session cap) before adding another clone. Non-blocking so spawns stay
-    # fast; the clone we are about to write has no marker yet, so it is never a
-    # sweep target.
+    # Backstop against unbounded session bloat: kick a background sweep (idle
+    # auto-clones over the clone cap, idle named profiles over the session cap)
+    # before adding another clone. Non-blocking; the clone about to be written
+    # has no marker yet, so it is never a sweep target.
     spawn_background_sweep("pre-clone")
 
     _refresh_snapshot_if_stale()
 
-    if override is not None:
-        seed = override
-    elif snapshot.exists():
-        seed = profile_source.SeedSource(snapshot, "default-seed")
-    elif master.exists():
-        # No seed yet (first run, seed deleted, or the seed copy failed), so the
-        # only copy available is of the shared profile itself. F-920: this
-        # comment used to claim cookies "transfer successfully even while Chrome
-        # has it open", which `profile_copy.copy_file`'s own docstring
-        # contradicts — a held file is SKIPPED, twice for the double pass, and
-        # the gap cannot be enumerated. What makes the branch honest is the
-        # hold read above: OPEN here means `profile_target` allowed it and the
-        # jar is about to arrive over CDP; CLOSED here is a copy of a directory
-        # at rest, which is what 2.1.11's first run always was.
-        seed = profile_source.SeedSource(master, "live-default-fallback")
-    else:
-        raise RuntimeError(
-            "No shared profile directory found — nothing to copy from. Spawn a "
-            "browser with no session first to create and populate the "
-            f"{profile_seed.DEFAULT_SESSION!r} session."
-        )
-    if shared_live is not None:
+    seed, configured = _clone_seed(override, driven)
+    if shared_live is not None and not configured:
         # The hand-off's source is the SHARED profile, the copy's is whichever
-        # of the three above answered — different directories, which is why
-        # `SeedSource` carries `live` as a third fact and not a flag on `kind`
-        # (F-898 review M1). A live shared session decided HERE outranks the one
-        # `override` may have carried forward from a previous attempt.
+        # answered above (F-898 review M1: `live` is a third fact, not a flag on
+        # `kind`). It outranks one `override` carried from a previous attempt;
+        # a configured seed session (F-952) brings its own live jar instead.
         seed = seed._replace(live=shared_live, live_port=live_port)
 
-    # Shield this clone from the storage-cap sweep BEFORE its marker is written.
-    # The marker (written inside the copy below) makes the clone a reclaim target,
-    # yet its browser has not launched/attached yet — so without this the sweep
-    # could delete it out from under the spawning browser. Released when the
+    # Shield this clone from the storage-cap sweep BEFORE its marker is written:
+    # the marker makes it a reclaim target while its browser has not launched
+    # yet, so the sweep could delete it from under the spawn. Released when the
     # instance closes (or when this spawn attempt fails).
     _protect_clone_dir(clone)
     return _copy_clone_from_source(seed, clone, clone_root)

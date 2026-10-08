@@ -185,11 +185,9 @@ async def spawn_browser(
             (``seeded_via: "cdp-cookies"``) — which matters because the seed is
             NOT refreshed while ``default`` is open, so the copy alone can be
             days old. If a Chrome we do not drive holds it, the copy happens
-            anyway and nothing is refused; the answer's ``seed_changed_since``
-            says the seed is behind. The only refusal is a machine with no seed
-            yet AND ``default`` open, where the only available copy would be of
-            the live directory: nothing is created, and closing that window
-            once writes the seed.
+            anyway (``seed_changed_since`` says the seed is behind). The only
+            refusal is no seed yet AND ``default`` open: nothing is created, and
+            closing that window once writes the seed.
             WHAT A HAND-OFF CARRIES IS COOKIES AND NOTHING ELSE: every kind
             (session, persistent, HttpOnly, Secure, SameSite=None and
             Partitioned), and the WHOLE jar — every site that session is logged
@@ -227,7 +225,9 @@ async def spawn_browser(
     live-refetches a body on demand regardless of this setting.
 
     Returns:
-        Dict[str, Any]: Instance information including instance_id. ``viewport`` is
+        Dict[str, Any]: Instance information including instance_id. A named
+        session already running HERE (e.g. ``fleet``) comes back as is, with
+        ``already_running: true`` and its ``session_lock``, never walked. ``viewport`` is
         the window size Chrome ACTUALLY produced (measured post-launch, F-804), not
         an echo of the request; ``spawn_diagnostics["window_size"]`` carries
         ``requested``/``actual``/``inner_viewport``/``clamped`` so a size the OS
@@ -245,18 +245,15 @@ async def spawn_browser(
     # what THIS HOST can do: a reserved path is refused on every machine there is,
     # while "no desktop here" is a fact about this backend, and a caller told the
     # second about a request that fails the first goes looking for a display they
-    # do not need. Measured: every headless CI cell answered the F-808 message for
-    # a reserved snapshot path, so the reservation was unreachable there. Neither
-    # guard has a side effect, so the order decides only which message is sent.
+    # do not need (measured: every headless CI cell answered the F-808 message
+    # for a reserved snapshot path). Neither guard has a side effect.
     # The rule has one home; this is the second site that asks it.
     #
-    # It is also where the TWO spellings become ONE (F-896): this call reads
-    # `session` and `user_data_dir` as a single request and ANSWERS the
-    # directory it means, so every line below — the re-attach, the resolver,
-    # the diagnostics — sees one value and `session` cannot develop a second
-    # path of its own. `session="default"` is the shared profile by the time it
-    # reaches the re-attach, which is what lets that re-attach find a browser
-    # already open on it.
+    # It is also where the TWO spellings become ONE (F-896): `session` and
+    # `user_data_dir` are read as a single request and ANSWER the directory it
+    # means, so every line below sees one value. `session="default"` is the
+    # shared profile by the time it reaches the re-attach, which is what lets
+    # that re-attach find a browser already open on it.
     user_data_dir = rt.clone_storage.require_allowed_user_data_dir(
         user_data_dir, session
     )
@@ -355,7 +352,11 @@ async def spawn_browser(
             ),
         )
         if held.instance_id:
-            return await _adopted_instance_record(held.instance_id, block_resources)
+            record = await _adopted_instance_record(held.instance_id, block_resources)
+            return {
+                **record,
+                **rt.fleet_session.reuse_answer(held.running, user_data_dir),
+            }
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
             user_data_dir, seed_from=seed_from, driven=driven.holds

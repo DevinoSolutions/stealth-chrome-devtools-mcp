@@ -38,6 +38,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
     file_extraction,
     network_debugging,
     progressive_cloning,
+    session_lock,
     tabs,
 )
 
@@ -64,4 +65,5 @@ SECTION_MODULES = (
     file_extraction,
     cdp_functions,
     dynamic_hooks,
+    session_lock,
 )

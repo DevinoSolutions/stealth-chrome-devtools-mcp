@@ -421,6 +421,11 @@ def build_arg_parser():
         action="store_true",
         help="Disable dynamic network hook system",
     )
+    parser.add_argument(
+        "--disable-session-lock",
+        action="store_true",
+        help="Disable the advisory session lock tools",
+    )
 
     parser.add_argument(
         "--minimal",
@@ -471,6 +476,7 @@ if __name__ == "__main__":
             "tabs": "Tab management",
             "debugging": "Debug and system tools",
             "dynamic-hooks": "AI-powered network hook system",
+            "session-lock": "Advisory lease on a shared session",
         }
         print("Available tool sections:")
         for section, tools in SECTION_TOOLS.items():
@@ -493,6 +499,7 @@ if __name__ == "__main__":
                 "tabs",
                 "debugging",
                 "dynamic-hooks",
+                "session-lock",
             ]
         )
 
@@ -518,6 +525,8 @@ if __name__ == "__main__":
         DISABLED_SECTIONS.add("debugging")
     if args.disable_dynamic_hooks:
         DISABLED_SECTIONS.add("dynamic-hooks")
+    if args.disable_session_lock:
+        DISABLED_SECTIONS.add("session-lock")
 
     if args.xpool_safe:
         DISABLED_SECTIONS.add("cdp-functions")
