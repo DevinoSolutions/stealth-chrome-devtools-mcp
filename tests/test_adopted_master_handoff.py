@@ -295,13 +295,14 @@ class TestAnAdoptedMasterIsOurs:
     async def test_the_driven_snapshot_sees_the_adopted_master(
         self, tmp_session_root, tmp_path
     ):
-        """The witness the resolver's hand-off is gated on, over the lowercased
-        path the record stores."""
+        """The witness the resolver's hand-off is gated on, over the path in the
+        form the record stores it: ``normcase`` (lowercased on Windows only, so
+        a hand-lowercased path names a different directory on macOS)."""
         master = tmp_session_root["master"]
         cleanup = _cleanup(tmp_path, live_backends={os.getpid()})
         manager = BrowserManager()
         instance_id = await _adopt_as_the_startup_pass_does(
-            manager, cleanup, str(master).lower()
+            manager, cleanup, os.path.normcase(os.path.normpath(str(master)))
         )
 
         driven = await cookie_handoff.driven_profiles(manager)
