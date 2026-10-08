@@ -14,7 +14,9 @@ from a source the human is still using.
 **What it carries, and what it does not.** Cookies. Every kind, measured:
 session, persistent, ``HttpOnly``, ``Secure``, ``SameSite=None`` and
 ``Partitioned``/CHIPS, with every field the two CDP types share round-tripping
-exactly and nothing refused, 3 of 3 runs. It carries NO ``localStorage``, no
+exactly and nothing refused, 3 of 3 runs — for cookies Chrome stored from a
+secure origin. A Secure cookie stored from a loopback http page is refused on the
+way back, and ``write_jar`` carries the rest (F-950). It carries NO ``localStorage``, no
 ``sessionStorage``, no IndexedDB, no Cache Storage and no service-worker
 registration — ``Storage.getCookies`` is a cookie call and there is no
 "enumerate every origin" CDP command to build the rest on. A JWT-in-
@@ -206,15 +208,46 @@ async def read_jar(browser: "Browser") -> list["Cookie"]:
     return await _connection(browser).send(uc.cdp.storage.get_cookies()) or []
 
 
-async def write_jar(browser: "Browser", cookies: Sequence["CookieParam"]) -> None:
-    """Put a whole jar into the BROWSER, in ONE call.
+#: How many cookies Chrome may refuse before the failure is read as SYSTEMIC
+#: (a dead connection, a bad command) rather than as a few unacceptable cookies.
+MAX_REFUSED = 32
 
-    ``Storage.setCookies`` gives no per-cookie verdict — one answer for the
-    batch — so there is nothing to read back here and the caller counts what
-    landed instead. Measured: nothing was refused, 3 of 3 runs, and every
-    cookie offered alone afterwards was already there.
+
+async def write_jar(browser: "Browser", cookies: Sequence["CookieParam"]) -> int:
+    """Put a jar into the BROWSER and return how many cookies Chrome refused.
+
+    ``Storage.setCookies`` is ALL OR NOTHING: Chrome answers ``Invalid cookie
+    fields`` for the batch if any one entry is unacceptable and stores none of
+    them (F-950, measured on Chrome 153). A ``Secure`` cookie Chrome itself
+    stored from a loopback ``http`` page carries ``sourceScheme: NonSecure``,
+    and is one Chrome will not take back. So the clean case is still ONE call;
+    a refused batch is bisected until the refused cookies stand alone, and
+    every other cookie is carried.
+
+    It raises, as a whole-jar failure always did, when the failure is not about
+    a few cookies: more than :data:`MAX_REFUSED` were refused (a dead connection
+    refuses everything, and must not cost a call per cookie) or none were
+    accepted (a clone that carried nothing must not say it was seeded). The
+    refused cookies are COUNTED and never named: see the PII paragraph above.
     """
-    await _connection(browser).send(uc.cdp.storage.set_cookies(cookies=list(cookies)))
+    connection = _connection(browser)
+    pending = [list(cookies)]
+    refused = 0
+    first: Exception | None = None
+    while pending and refused <= MAX_REFUSED:
+        batch = pending.pop()
+        try:
+            await connection.send(uc.cdp.storage.set_cookies(cookies=batch))
+        except Exception as error:  # noqa: BLE001  PERMANENT(F-950): Chrome's refusal of a batch is an answer, not a crash
+            first = first or error
+            if len(batch) == 1:
+                refused += 1
+            else:
+                middle = len(batch) // 2
+                pending += [batch[middle:], batch[:middle]]
+    if first is not None and (refused > MAX_REFUSED or refused >= len(cookies)):
+        raise first
+    return refused
 
 
 class HandoffError(RuntimeError):
@@ -310,6 +343,7 @@ class Handoff(NamedTuple):
     jar_after: int
     session_cookies: int
     partitioned: int
+    rejected: int = 0
 
     def record(self) -> dict[str, object]:
         """The diagnostics fields, shape only — see the module docstring."""
@@ -320,6 +354,7 @@ class Handoff(NamedTuple):
             "cookies_session": self.session_cookies,
             "cookies_partitioned": self.partitioned,
             "cookies_in_target": self.jar_after,
+            "cookies_rejected": self.rejected,
         }
 
 
@@ -334,11 +369,12 @@ async def hand_off(source: "Browser", target: "Browser") -> Handoff:
     """
     jar = await _step(READ_METHOD, read_jar(source))
     outgoing = _translated(jar)
-    await _step(WRITE_METHOD, write_jar(target, outgoing))
+    rejected = await _step(WRITE_METHOD, write_jar(target, outgoing))
     landed = await _step(READ_METHOD, read_jar(target))
     return Handoff(
         read=len(jar),
-        sent=len(outgoing),
+        sent=len(outgoing) - rejected,
+        rejected=rejected,
         jar_after=len(landed),
         session_cookies=sum(1 for cookie in jar if is_session(cookie)),
         partitioned=sum(
@@ -435,11 +471,12 @@ async def hand_off_from_port(port: int, target: "Browser") -> Handoff:
     three round trips, same read-back."""
     jar = await _step(READ_METHOD, _read_raw_jar_over_port(port))
     outgoing = _translated_raw(jar)
-    await _step(WRITE_METHOD, write_jar(target, outgoing))
+    rejected = await _step(WRITE_METHOD, write_jar(target, outgoing))
     landed = await _step(READ_METHOD, read_jar(target))
     return Handoff(
         read=len(jar),
-        sent=len(outgoing),
+        sent=len(outgoing) - rejected,
+        rejected=rejected,
         jar_after=len(landed),
         session_cookies=sum(1 for cookie in jar if _raw_expiry(cookie) <= 0),
         partitioned=sum(1 for cookie in jar if cookie.get("partitionKey") is not None),
