@@ -99,11 +99,30 @@ def isolated_state(tmp_path, monkeypatch):
 class TestInitPlacement:
     def test_the_proxy_bootstrap_calls_sentry_init_exactly_once(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(observability, "sentry_init", lambda: calls.append(1))
+        monkeypatch.setattr(observability, "sentry_init", lambda **kw: calls.append(kw))
 
         entrypoint._start_proxy_error_reporting().join(timeout=30)
 
-        assert calls == [1]
+        assert calls == [{"auto_enabling_integrations": False}]
+
+    def test_the_proxys_sentry_auto_enables_no_integrations_and_the_backends_does(
+        self, monkeypatch
+    ):
+        """F-949: the SDK's auto-enabled set imports ``mcp`` / ``fastmcp`` on the
+        init thread while the main thread imports ``mcp.server.stdio``; two
+        threads importing one package died intermittently with
+        ``KeyError: 'mcp.server'`` and Claude Code saw CONNECTION_CLOSED. The
+        proxy serves no MCP server, so its init must not ask for any. Pinned at
+        the one seam that decides it, ``sentry_sdk.init``'s keyword."""
+        sentry_sdk = pytest.importorskip("sentry_sdk")
+        monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
+        seen = []
+        monkeypatch.setattr(sentry_sdk, "init", lambda **kw: seen.append(kw))
+
+        entrypoint._start_proxy_error_reporting().join(timeout=30)
+        observability.sentry_init()  # the backend's and the ops CLI's call
+
+        assert [kw["auto_enabling_integrations"] for kw in seen] == [False, True]
 
     def test_init_does_not_block_the_bridge_coming_up(self, monkeypatch):
         """sentry_sdk costs ~1.5-2.5s to import+init. Paid inline it is added to

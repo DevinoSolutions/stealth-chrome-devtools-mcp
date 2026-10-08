@@ -567,8 +567,14 @@ def capture_lifecycle(
     return True
 
 
-def sentry_init() -> bool:
+def sentry_init(*, auto_enabling_integrations: bool = True) -> bool:
     """Initialize Sentry error shipping unless the operator opted out.
+
+    ``auto_enabling_integrations=False`` is the stdio proxy's (F-949): the SDK's
+    auto-enabled set imports ``mcp`` and ``fastmcp`` to instrument a server, and
+    the proxy runs this on a thread while its main thread imports the same
+    packages. It serves no MCP server, so it opts out; the backend and the ops
+    CLI keep the default.
 
     Returns ``True`` when Sentry was initialized, ``False`` when it was a no-op
     — either ``STEALTH_MCP_NO_ERROR_REPORTING`` is set, or ``sentry_sdk`` could
@@ -613,5 +619,6 @@ def sentry_init() -> bool:
         # Path scrubbing does not help there: the secret is the value itself.
         # We now know third parties run this, so the locals are theirs.
         include_local_variables=False,
+        auto_enabling_integrations=auto_enabling_integrations,
     )
     return True
