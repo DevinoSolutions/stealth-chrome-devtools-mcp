@@ -1,12 +1,14 @@
 # F-950 — a browser this backend re-attached to is read as a SIBLING backend's, and is reported as `explicit`
 
-**Severity:** High. Data-loss class for the shared (`default`) session: logins made in the
-re-attached master are not carried by a session that names it, and closing the master does
-not refresh the seed every later session is copied from.
+**Severity:** High. Data-loss class: logins made in a session that was meant to be the shared
+(`default`) one were made in a throwaway copy and deleted with it; and a hand-off from a
+running browser could lose its whole jar to one cookie Chrome refused.
 **Files:** `src/stealth_chrome_devtools_mcp/embedded/browser_pid_registry.py`
 (`held_by_sibling`), `src/stealth_chrome_devtools_mcp/embedded/browser_reattach.py`
 (`held_by`, `_attach_one`), `src/stealth_chrome_devtools_mcp/embedded/profile_source.py` (`adopted_role`), `tests/test_adopted_master_handoff.py`,
-`tests/test_e2e_adopted_master_handoff.py`.
+`tests/test_e2e_adopted_master_handoff.py`,
+`src/stealth_chrome_devtools_mcp/embedded/cookie_handoff.py` (`write_jar`),
+`tests/test_cookie_handoff_rejected.py`.
 **Seen:** the owner's machine, 2026-10-08.
 
 ---
@@ -27,6 +29,15 @@ not refresh the seed every later session is copied from.
   84488. Two such lines in 41 spawns (09:59:47 and 11:40:09).
 - The log has no `Removed stale browser instance` line, so instance `47b1e8d0` stayed in the
   manager's table for the whole run.
+
+- Owner-side measurement (team lead, read-only, over CDP): the live master jar (1515 cookies)
+  compared with a clone made at 13:23 the same day has every cookie present with an
+  identical value, including GitHub's `__Host-` cookies and Google's 98. The master has ZERO
+  dub.co cookies and no IndexedDB from today. The logins happened in the two walked clones
+  the bug below returned for the named `session="default"` spawns declined at 09:59 and
+  11:40; those clones were deleted on close at 11:14 and 11:47. So the live hand-off for
+  UNNAMED spawns worked, and this finding's cause is the whole story of the lost logins.
+  This supersedes the "Not measured" note in section 3.
 
 ## 2. Cause
 
@@ -101,3 +112,37 @@ echo of the `Cookie` header) is collected but was not run here.
 
 The helper lives in `profile_source` rather than `browser_reattach` because
 `browser_reattach.py` sits exactly at its 1000-line budget and caps ratchet down only.
+
+## 7. Hardening found by the real-Chrome test: one refused cookie dropped the whole jar
+
+The first real run of `test_e2e_adopted_master_handoff.py` failed with
+`seeded_via == 'copy'`, `cookie_handoff_error: 'ProtocolException from Storage.setCookies'`.
+The exception text, read in a scratch run, was `{'code': -32602, 'message': 'Invalid cookie
+fields'}`. The batch held three cookies; the odd one was a `Secure` (`__Host-`) cookie set by
+`document.cookie` on the loopback `http` fixture. Chrome stored it (loopback counts as
+trustworthy) with `sourceScheme: NonSecure`, and then refuses to accept that same cookie back
+through `Storage.setCookies`. The other two were valid. So the translation did not mangle
+anything: it is a verbatim pass-through of what Chrome reported. The defect is that
+`Storage.setCookies` is all or nothing, so one cookie Chrome will not re-accept dropped the
+entire jar, and the clone silently got only the stale seed.
+
+`write_jar` now writes the clean case as one call (unchanged), and on a refused batch bisects
+until the refused cookies stand alone, carrying every other cookie. It reports
+`cookies_rejected` as a count next to the existing counts, with `seeded_via: "cdp-cookies"`.
+It still raises, as before, when nothing was accepted or more than `MAX_REFUSED` (32) were
+refused, since that is a dead connection or a bad command and not a few bad cookies (a dead
+connection costs at most about `3 * MAX_REFUSED` calls, pinned).
+
+Deliberate deviation from the brief: the refused cookies are counted, not named. The module's
+PII rule (a cookie NAME identifies the sites a person uses; pinned by
+`TestNoCookieNameOrValueEscapes`) already forbids a name in the answer, the log and Sentry, and
+the hand-off record reaches all three.
+
+Evidence: `tests/test_cookie_handoff_rejected.py` (7 nodes, over a wire double that drives the
+real generated command and judges the batch all or nothing like Chrome); RED before the change
+(`HandoffError: ChromeRefusedError from Storage.setCookies` for a jar with one refused cookie, and
+no `rejected` attribute), GREEN after. The e2e now builds the `__Host-` cookie and a CHIPS cookie
+through `Storage.setCookies` with an `https` url (so their source scheme is honest), keeps the
+loopback Secure cookie as the refused one, and reads the clone's jar back. On real Chrome:
+5 read, 4 carried, 1 rejected, and the `__Host-`, session and partitioned cookies all landed
+with their values.

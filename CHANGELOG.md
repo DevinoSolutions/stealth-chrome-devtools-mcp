@@ -2,16 +2,26 @@
 
 ## Unreleased
 
-### A browser this backend re-attached to is no longer refused as another backend's (F-950)
+### Logins made in the shared browser no longer get lost in a throwaway copy (F-950)
 
-After a restart, the backend re-attaches to the shared `default` browser and stamps
-itself as the record's owner. The rule that stops two backends driving one Chrome then
-read that live owner as a sibling and refused the backend its own browser ("stop that
-backend first"), so a spawn naming the shared session got a copy instead of the browser
-already open. The check now asks whose the live owner is: this process is not a second
-backend, and a genuinely different live backend is still refused. A re-attached shared
-browser is also reported as the `default` session, so closing it refreshes the seed (it
-reported `explicit` and skipped the refresh).
+What happened: after a restart, the backend re-attaches to the shared `default` browser
+you are logged in to. A request that named that session (`session="default"`) was then
+refused by the rule that stops two backends driving one Chrome, because that rule read
+the backend itself as "another backend". The request got a throwaway copy of the
+session instead of the browser that was already open, you logged in there, and the
+copy was deleted when it closed, taking those logins with it. The shared browser itself
+never had them, which a cookie-by-cookie comparison of its jar confirmed.
+
+The check now asks whose the live owner is: this process is not a second backend, so a
+request for the shared session gets the open browser. A genuinely different live
+backend is still refused. A re-attached shared browser is also reported as the
+`default` session, so closing it refreshes the seed that new sessions are copied from
+(it used to be reported as `explicit` and skipped the refresh).
+
+Separately, a copy made from a running browser could silently lose the whole cookie jar
+if Chrome refused any single cookie in it (`Storage.setCookies` accepts all of them or
+none). One refused cookie now costs only that cookie: the rest are carried, and the
+answer reports `cookies_rejected` as a count (never names or values).
 
 ### The stdio proxy no longer crashes at startup on an import race (F-949)
 
