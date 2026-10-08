@@ -27,7 +27,7 @@ CLI are unchanged.
   `uvicorn` are unchanged. The lock drops `diskcache`, `pydocket`, `redis`, `typer`
   and 14 other packages that fastmcp 2 pulled in, and adds `aiofile`, `caio` and
   `griffelib`.
-* **What changes in `tools/list`:** two things, and nothing else moves.
+* **What changes in `tools/list`:** two things, and nothing else in that answer moves.
   * Each tool's input schema now says `"additionalProperties": false`. An unknown
     argument was already refused on every call; the schema now says so.
   * fastmcp's own metadata key on each tool and resource template is renamed from
@@ -39,7 +39,15 @@ CLI are unchanged.
   to its first paragraph and also copied each `Args:` line into its parameter's
   schema, so every client would load that text twice (+28%). The full docstring is
   still the description, and only the description.
-* **Unchanged:** errors read as before on the wire (`Error calling tool '<name>':
+* **What changes in `tools/call`:** two things, measured on a live backend.
+  * A successful result of each of the 31 tools whose output fastmcp wraps in
+    `{"result": …}` now also carries `"_meta": {"fastmcp": {"wrap_result": true}}`.
+    2.14.7 sent no `_meta` there.
+  * An unknown tool's error now quotes the name: `Unknown tool: 'no_such_tool'`,
+    where it read `Unknown tool: no_such_tool`.
+
+  Nothing in `src/` or the stdio proxy reads either, so no caller is affected.
+* **Unchanged:** errors from a failing tool read as before on the wire (`Error calling tool '<name>':
   …`). A caller's mistyped argument is answered and not reported, a crash in a tool
   is still reported, and MCP is still served at `/mcp/`. There are still 94 tools.
 * **Idle MCP sessions are still cleaned up.** fastmcp 3 builds a different session
