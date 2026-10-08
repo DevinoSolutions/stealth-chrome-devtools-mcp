@@ -169,7 +169,8 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #: and close no door that ``mcp.client`` does not already close.
 #:
 #: ``fastmcp``'s tool-ARGUMENT DEBUG line (``server/server.py``:1537 in fastmcp
-#: 2.14.7; :672 in 2.11.2; gone in 3.4.8) was real, and the library already
+#: 2.14.7; :672 in 2.11.2; ``server/mixins/mcp_operations.py``:211 in 3.4.8,
+#: ``"Handler called: call_tool %s with %s"``) is real, and the library already
 #: shields its DEBUG: every
 #: one of its loggers hangs under a ``fastmcp`` root that carries its own level
 #: and ``propagate = False``, so a caller's root DEBUG never reaches them.

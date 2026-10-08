@@ -131,6 +131,13 @@ The remaining 2.9% is the `additionalProperties` flag and the `_meta` rename. Bo
 HARD golden and the SOFT per-section snapshot in `test_correlation_id.py` were
 regenerated, with this justification beside them.
 
+Changed on the wire in `tools/call`, measured on a live backend and not in the first
+draft of this finding: a successful result of each of the 31 tools whose output fastmcp
+wraps in `{"result": …}` carries `"_meta": {"fastmcp": {"wrap_result": true}}` (2.14.7
+sent no `_meta`), and an unknown tool's error quotes the name, `Unknown tool:
+'no_such_tool'` where it read `Unknown tool: no_such_tool`. Nothing in `src/` or the stdio
+proxy reads either.
+
 Unchanged on the wire, measured: `Error calling tool '<name>': …` for a failing tool;
 a caller's bad argument answered `1 validation error for call[<tool>] …`; a body's own
 pydantic error answered with its own text; 94 tools in 11 sections; MCP served at
