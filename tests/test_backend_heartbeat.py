@@ -252,12 +252,16 @@ class TestTheRead:
 
     def test_a_stamp_from_the_future_is_not_evidence(self, record):
         """A clock that jumped forward is not a backend that is alive. The bound
-        is symmetric for exactly that reason."""
+        is symmetric for exactly that reason.
+
+        The stamp is a whole bound past the edge, not one second (F-947): time
+        spent between stamping and reading brings a FUTURE stamp back toward
+        the window, and on a starved lane that delay passed one second."""
         backend_registry.stamp_heartbeat(
             record,
             port=PORT,
             pid=PID,
-            at=time.time() + backend_liveness.HEARTBEAT_STALE_SECONDS + 1.0,
+            at=time.time() + 2 * backend_liveness.HEARTBEAT_STALE_SECONDS,
         )
 
         assert backend_liveness.self_report(record, PORT) is None
