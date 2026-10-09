@@ -39,6 +39,14 @@ owner, position and seconds waited, in order), and takes an optional `owner` so 
 The same fields appear in the `session_lock` block `spawn_browser` returns for a session that is
 already running. The wait cap stays at 60 seconds.
 
+### A closed tab no longer logs a false "not guarded" warning (F-957)
+
+The Google cookie-rotation guard warned `Chrome refused Fetch.enable on a target; it is
+not guarded` when a tab closed in the instant between opening and being guarded. That
+tab no longer exists, so nothing was unguarded, but the warning looked like a hole and
+failed tests that forbid warnings. It is now silent for a closed tab. A target that is
+still open and refused is still reported.
+
 ## 2.1.26
 
 ### A shared signed-in browser that survives restarts, plus a lock for taking turns (F-952)
