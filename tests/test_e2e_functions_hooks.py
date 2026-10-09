@@ -473,10 +473,11 @@ E2E_EXEMPT: dict[str, str] = {
     # F-952: the session lock is an in-memory lease table. No browser, CDP or
     # transport is involved, so a real-Chrome E2E would prove nothing the
     # hermetic node does not: tests/test_session_lease.py drives all three
-    # through the registered tool objects.
-    "acquire_session_lock": "no browser involved; tests/test_session_lease.py",
-    "release_session_lock": "no browser involved; tests/test_session_lease.py",
-    "get_session_lock_status": "no browser involved; tests/test_session_lease.py",
+    # through the registered tool objects, and tests/test_e2e_fleet_session.py
+    # drives them beside the real-Chrome fleet session.
+    "acquire_session_lock": "no browser involved; tests/test_session_lease.py, tests/test_e2e_fleet_session.py",
+    "release_session_lock": "no browser involved; tests/test_session_lease.py, tests/test_e2e_fleet_session.py",
+    "get_session_lock_status": "no browser involved; tests/test_session_lease.py, tests/test_e2e_fleet_session.py",
 }
 
 

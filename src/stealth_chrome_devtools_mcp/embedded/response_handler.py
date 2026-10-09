@@ -101,7 +101,7 @@ def surrogate_safe(data: Any, depth: int = 0) -> Any:
     Deliberately narrower than :func:`json_safe`: this is the ENCODING guard,
     so it rewrites **strings only** and returns every other leaf — including
     objects it does not understand — by identity. That is what makes it safe to
-    run on the return of all 94 tools from ``tool_registry``, where a type
+    run on the return of every tool from ``tool_registry``, where a type
     conversion would silently change payload shapes that FastMCP's serializer
     handles natively (``datetime``, ``bytes``, ``UUID``). ``json_safe`` calls
     it too, so the large-response spill file gets the same one policy.

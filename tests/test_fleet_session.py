@@ -15,12 +15,13 @@ be lost or a caller could be told something false:
    backend drives it, is refused by name when something else does, and reports
    ``seeded_from`` truthfully. ``STEALTH_MCP_SEED_SESSION`` makes it the default
    source and is off unless set.
-   F-939 (only the source rotates Google cookies) needs no code here: the
-   guard follows ``auto_clone`` (``profile_role == "clone"``, `spawn_browser`),
-   and ``test_google_rotation_guard.TestTheSpawnArmsClonesOnly`` pins the
-   arming. These tests pin the two role words it reads: the fleet resolves to
-   ``explicit`` (a source, free to rotate) and a clone seeded from it to
-   ``clone`` (fenced).
+   F-939 (only the source rotates Google cookies): the guard follows
+   ``auto_clone`` (``profile_role == "clone"``), and since F-952 also
+   ``guard_rotation``, which a NEW named session whose jar came from a LIVE
+   hand-off carries (its creation launch, and later launches via the clone
+   marker's ``seeded_via``). The fleet itself resolves to ``explicit`` and is
+   free to rotate; ``TestARotationGuardForNamedSessionsSeededLive`` pins both.
+   Open: a session later signed in to Google afresh stays guarded.
 5. **A running browser can become the fleet session**: ``session="fleet",
    seed_from=<name>`` -- including a walked auto-clone name.
 """

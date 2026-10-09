@@ -43,6 +43,18 @@
     "user_impact": "Tested, not proved at the wire: the E2E suite drives this tool against REAL Chrome through the in-process seam, but no per-tool assertion exists over the stdio transport a user speaks. plan_RELEASE 2.5 does not let in-process evidence license a transport claim. Not a known defect - a question of where the test runs."
   },
   "served_unqualified_notes": {
+    "acquire_session_lock": {
+      "tracking_id": "F-952",
+      "user_impact": "An in-memory lease table with no browser or CDP behind it: driven hermetically through the registered tool objects (tests/test_session_lease.py) and in tests/test_e2e_fleet_session.py, but not asserted over the stdio transport. The lease lives and dies with the backend process."
+    },
+    "get_session_lock_status": {
+      "tracking_id": "F-952",
+      "user_impact": "An in-memory lease table with no browser or CDP behind it: driven hermetically through the registered tool objects (tests/test_session_lease.py) and in tests/test_e2e_fleet_session.py, but not asserted over the stdio transport. The lease lives and dies with the backend process."
+    },
+    "release_session_lock": {
+      "tracking_id": "F-952",
+      "user_impact": "An in-memory lease table with no browser or CDP behind it: driven hermetically through the registered tool objects (tests/test_session_lease.py) and in tests/test_e2e_fleet_session.py, but not asserted over the stdio transport. The lease lives and dies with the backend process."
+    },
     "select_option": {
       "tracking_id": "E8-1",
       "user_impact": "A select whose page script re-declares a const swallows the change: the tool returns True while the option did not change. Silent wrong-success."

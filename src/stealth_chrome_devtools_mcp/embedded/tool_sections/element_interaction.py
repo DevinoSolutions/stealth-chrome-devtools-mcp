@@ -17,7 +17,7 @@ reaching it from a section module.
 
 With this slice ``server.py`` holds no tool bodies at all — only ``mcp``, the
 registry, ``app_lifespan``, the four ``@mcp.resource`` handlers, the binding loop
-that registers all 94 of these functions once per execution of its module body,
+that registers every one of these functions once per execution of its module body,
 the xpool-safe gate, ``build_arg_parser`` and the ``__main__`` block, plus the
 migration alias block slice 12 deletes.
 

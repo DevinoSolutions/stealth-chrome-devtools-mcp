@@ -577,6 +577,16 @@ a seed whose cookie hand-off failed returns `seed_warning`). Agents take turns w
 under its recorded `instance_id`; if the re-attach fails the browser is left running and recorded
 (look for `Could not re-attach the fleet session` in the log) rather than reaped. To make `fleet`
 the source for every new clone, set `STEALTH_MCP_SEED_SESSION=fleet` in `~/.stealth-mcp/.env`.
+If the seed session is unusable (held by a browser this backend does not drive, or gone), an
+unnamed clone falls back to `master-snapshot` and the answer carries a `seed_warning` saying it
+does NOT carry the fleet logins; an explicit `seed_from`, or a NEW named session created under
+the setting, is refused by name. A retry never replaces the original spawn error with the
+seed's. Lock keys are one per directory (`Fleet` and `fleet` share a lock; the shared profile
+is `default`); `wait_seconds` is capped at 60 and may exceed a client's per-call timeout, and
+waiters are not served in order. A new named session seeded from a live browser keeps the
+Google rotation guard (open items: a session you later sign in to Google afresh stays
+guarded, a re-attached browser after a restart is not re-armed, and the guard blocks that
+session's own legitimate rotation; escape: `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION`).
 
 ### Code edit didn't take effect
 There is no live reload. A source edit changes the **source fingerprint**, so the next

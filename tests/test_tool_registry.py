@@ -54,7 +54,7 @@ class _FakeMcp:
 class TestSectionToolDecorator:
     async def test_registers_and_stamps_correlation_id(self, monkeypatch):
         # Isolate the module-global map so the test never pollutes the live
-        # 94-tool registry that the count tripwire (and M6) reads.
+        # live registry that the count tripwire (and M6) reads.
         monkeypatch.setattr(tool_registry, "SECTION_TOOLS", defaultdict(list))
         fake = _FakeMcp()
         registry = ToolRegistry(fake)

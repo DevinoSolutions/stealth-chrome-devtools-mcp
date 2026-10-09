@@ -29,7 +29,8 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
 )
 
 # Captured from the pre-change tree: one representative tool's real FastMCP
-# name + inputSchema per section (11 sections). See M3-5's commit message for
+# name + inputSchema per section (11 sections when captured; F-952 adds a
+# session_lock section, whose tools are pinned by the HARD golden). See M3-5's commit message for
 # the capture method. A structural change here means section_tool's wrapper
 # altered what a real MCP client sees in tools/list.
 #
