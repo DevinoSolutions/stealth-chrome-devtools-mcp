@@ -83,6 +83,8 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from anyio import CancelScope, Event
+
 # One stream: the heal is part of the proxy's story, so it writes to the proxy
 # log configure_logging("proxy") already owns (same logger name as singleton).
 _logger = logging.getLogger("stealth.proxy")
@@ -122,6 +124,20 @@ RETRY_JITTER = 0.25
 # call was sent to stopped existing".
 _BACKEND_DIED_CODE = -32603
 
+# F-959. What the SDK's client hands back for a request the backend answered
+# with 404 — "I do not know this mcp-session-id" — built by
+# ``mcp.client.streamable_http._send_session_terminated_error``. The code is the
+# SDK's own (a positive 32600) and both halves are matched exactly, so nothing a
+# TOOL returns can be mistaken for it. A 404 proves the backend never ran the
+# call, which is what makes resending it safe even for a non-idempotent one.
+SESSION_TERMINATED_CODE = 32600
+SESSION_TERMINATED_MESSAGE = "Session terminated"
+# How long a generation whose session is gone keeps listening for the replies
+# still owed on it before it ends anyway. Every other call on a terminated
+# session is refused just as fast, so this only bounds a call that was running
+# when the session was terminated, whose reply may never come.
+SESSION_LOST_GRACE_SECONDS = 2.0
+
 # The proxy's reported vocabulary (F-827). Three of the four disconnect-relevant
 # transitions happen here, so their names live here; the fourth (an eviction for
 # a genuine source change) is reported from its own site in ``singleton``. Named
@@ -157,6 +173,10 @@ CONNECTION_RESET_CAUSE = "connection_reset"  # the leg broke; the backend is not
 # than folded into a neighbour because what a reader must not conclude from it
 # is that a backend died.
 NEVER_READY_CAUSE = "never_ready"
+# F-959: the backend is answering but no longer knows this proxy's MCP session
+# (reaped, or a different backend now owns the port), so every call gets a 404.
+# Nothing died; the remedy is a fresh session, which is a re-bridge.
+SESSION_LOST_CAUSE = "session_lost"
 # Internal sentinel: the bridge leg ended while armed, verdict not yet asked.
 _BRIDGE_ENDED = "bridge_ended"
 
@@ -244,24 +264,90 @@ class PendingCalls:
     correct rather than a retry, while the ones genuinely in flight are failed
     explicitly. An unanswered id is an unbounded wait for whatever is driving
     the client; replaying a non-idempotent ``tools/call`` would be worse.
+
+    The one call that IS resent is one the backend refused with 404 (F-959):
+    the session it was sent on no longer exists there, so the backend never ran
+    it. It is resent once, on the fresh session the next generation opens; a
+    second 404 goes to the client as it is.
     """
 
     def __init__(self) -> None:
         self._inflight: dict[str | int, str] = {}
+        self._messages: dict[str | int, object] = {}
+        self._retried: set[str | int] = set()
+        self._retry: list[object] = []
+        self._lost: Event | None = None  # this generation's, once armed
 
-    def track(self, inner: object) -> None:
+    def track(self, inner: object, message: object = None) -> None:
         """Record a request being handed to the backend (ignores notifications,
-        which have no id and therefore no answer to owe)."""
+        which have no id and therefore no answer to owe). ``message`` is the
+        whole frame, kept so a call the backend refused can be resent."""
         method = getattr(inner, "method", None)
         request_id = getattr(inner, "id", None)
         if method is not None and isinstance(request_id, str | int):
             self._inflight[request_id] = str(method)
+            if message is not None:
+                self._messages[request_id] = message
 
     def settle(self, inner: object) -> None:
         """Drop a request the backend has now answered (result or error)."""
         answered = getattr(inner, "id", None)
         if isinstance(answered, str | int):
             self._inflight.pop(answered, None)
+            self._messages.pop(answered, None)
+            self._retried.discard(answered)
+
+    def idle(self) -> bool:
+        """Nothing is waiting for a reply from the current backend session."""
+        return not self._inflight
+
+    def session_lost(self, inner: object) -> bool:
+        """Is ``inner`` the SDK's "Session terminated" answer to a call that has
+        not been resent yet? If so it is held for the next session, and the
+        client does not see this answer (F-959)."""
+        error = getattr(inner, "error", None)
+        request_id = getattr(inner, "id", None)
+        if (
+            getattr(error, "code", None) != SESSION_TERMINATED_CODE
+            or getattr(error, "message", None) != SESSION_TERMINATED_MESSAGE
+            or not isinstance(request_id, str | int)
+            or request_id in self._retried
+            or request_id not in self._messages
+        ):
+            return False
+        self._inflight.pop(request_id, None)
+        self._retry.append(self._messages.pop(request_id))
+        self._retried.add(request_id)
+        if self._lost is not None:
+            self._lost.set()
+        return True
+
+    @property
+    def session_was_lost(self) -> bool:
+        """A call is waiting to be resent on a fresh session."""
+        return bool(self._retry)
+
+    def generation_is_done(self) -> bool:
+        """The session is gone and no other reply is owed on it, so the bridge
+        can end now rather than when the grace runs out."""
+        return self.session_was_lost and self.idle()
+
+    async def end_when_session_lost(self, cancel_scope: CancelScope) -> None:
+        """Arm for ONE generation, started with its bridge. Once a call is
+        refused, the replies still owed on the old session get
+        ``SESSION_LOST_GRACE_SECONDS``, then the generation ends anyway: a call
+        that was running when the session was terminated may never be answered."""
+        import anyio
+
+        self._lost = lost = anyio.Event()
+        await lost.wait()
+        await anyio.sleep(SESSION_LOST_GRACE_SECONDS)
+        cancel_scope.cancel()
+
+    def take_retries(self) -> list[object]:
+        """The calls to resend, oldest first, handed over exactly once."""
+        retries, self._retry = self._retry, []
+        return retries
 
     async def fail_all(
         self, client_write: _MessageSink, port: int, cause: str | None
@@ -282,6 +368,9 @@ class PendingCalls:
         else:
             what = f"the connection to the backend on port {port} broke"
         inflight, self._inflight = self._inflight, {}
+        for request_id in inflight:
+            self._messages.pop(request_id, None)
+            self._retried.discard(request_id)
         for request_id, method in inflight.items():
             error = JSONRPCError(
                 jsonrpc="2.0",
@@ -461,6 +550,15 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
     # its errors before anything slower than that runs.
     await pending.fail_all(client_write, port, verdict["cause"])
     if verdict["cause"] == _BRIDGE_ENDED:
+        if pending.session_was_lost:
+            # F-959: the bridge ended itself because the backend refused this
+            # session. It answered, so there is no death to confirm.
+            _logger.warning(
+                "backend on port %d no longer knows this session; "
+                "re-initializing and resending the refused call(s) once",
+                port,
+            )
+            return SESSION_LOST_CAUSE
         return await _confirm_bridge_verdict(port, confirm_alive=confirm_alive)
     return verdict["cause"]
 
@@ -482,8 +580,14 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
 
     One iteration per backend. EVERY ending is an incident with a ``cause``, and
     every cause heals; ``replay()`` yields the client's original ``initialize``
-    so the next generation opens with a real handshake and its own fresh
-    ``mcp-session-id``.
+    AND its ``notifications/initialized`` (F-959) so the next generation opens
+    with a real handshake and its own fresh ``mcp-session-id``. Without the
+    second message, the SDK client never opened that session's standing event
+    stream. F-862's sweep reaps a session that has none and has been quiet for
+    five minutes, and from then on every call answered "Session terminated".
+    :data:`SESSION_LOST_CAUSE` is that answer, and it heals like any other
+    cause: ``ensure_running`` hands back the live backend and the next
+    generation re-initializes.
 
     **It does not return** (F-889 (c)). When a recovery runs out of allowance —
     ``heal_backend`` gave up, or ``MAX_CONSECUTIVE_HEALS`` deaths came back to
