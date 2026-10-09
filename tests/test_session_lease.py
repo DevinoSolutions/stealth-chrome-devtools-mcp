@@ -277,6 +277,29 @@ class TestTheLineIsFirstComeFirstServed:
         got = await asyncio.wait_for(patient, STEP)
         assert got["holder"] == "b"
 
+    async def test_the_next_waiter_re_arms_on_the_new_holders_expiry(self):
+        """The head takes the lock and never releases: the waiter behind it must
+        get the lock at that lease's expiry, not at its own (much later) deadline."""
+        await session_lease.acquire("fleet", "x", 1, 0)
+        taken: dict[str, float] = {}
+
+        async def wait_for_lock(owner: str):
+            got = await session_lease.acquire("fleet", owner, 1, 10)
+            taken[owner] = time.monotonic()
+            return got
+
+        first = asyncio.create_task(wait_for_lock("a"))
+        await asyncio.sleep(0.1)
+        second = asyncio.create_task(wait_for_lock("b"))
+        await asyncio.sleep(0.1)
+        session_lease.release("fleet", "x")  # "a" takes a 1 s lease, never releases
+
+        await asyncio.wait_for(first, STEP)
+        await asyncio.wait_for(second, STEP)
+
+        lag = taken["b"] - taken["a"]
+        assert lag < 3, f"b got the lock {lag:.1f}s after a took it (a's lease is 1s)"
+
     async def test_a_cancelled_waiter_leaves_the_line(self):
         await session_lease.acquire("fleet", "x", 60, 0)
         order: list[str] = []
