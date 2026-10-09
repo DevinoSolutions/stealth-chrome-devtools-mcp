@@ -351,7 +351,12 @@ class TestAskingForItWhileItRunsHere:
 
         assert answer["instance_id"] == "i-fleet"
         assert answer["already_running"] is True
-        assert answer["session_lock"] == {"session": "fleet", "locked": False}
+        assert answer["session_lock"] == {
+            "session": "fleet",
+            "locked": False,
+            "queue_length": 0,
+            "waiting": [],
+        }
         assert resolved == [], "the resolver walked or cloned instead of reusing"
         assert not (tmp_session_root["sessions"] / "fleet-2").exists()
 

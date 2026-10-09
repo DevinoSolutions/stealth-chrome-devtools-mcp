@@ -583,7 +583,7 @@ does NOT carry the fleet logins; an explicit `seed_from`, or a NEW named session
 the setting, is refused by name. A retry never replaces the original spawn error with the
 seed's. Lock keys are one per directory (`Fleet` and `fleet` share a lock; the shared profile
 is `default`); `wait_seconds` is capped at 60 and may exceed a client's per-call timeout, and
-waiters are not served in order. A new named session seeded from a live browser keeps the
+waiters are served in the order they asked (F-956: a per-session queue, `get_session_lock_status(owner=...)` shows `your_position`). A new named session seeded from a live browser keeps the
 Google rotation guard (open items: a session you later sign in to Google afresh stays
 guarded, a re-attached browser after a restart is not re-armed, and the guard blocks that
 session's own legitimate rotation; escape: `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION`).

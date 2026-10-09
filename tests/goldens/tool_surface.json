@@ -1,6 +1,6 @@
 {
   "acquire_session_lock": {
-    "description": "Take the advisory lock on a shared session so other agents know it is in use.\n\nThe lock is ADVISORY: it does not stop another agent's tool calls. It is the\nshared record of whose turn it is, and spawn_browser reports it beside a\nsession that is already running. A lease expires on its own, so an agent that\ndied holding it cannot lock the session forever. The same owner acquiring\nagain renews the lease. Waiters are not served in order, and a wait longer\nthan your client's per-call timeout is cut off by the client, not by us.\n\nArgs:\n    owner (str): A label for who is taking the lock (any non-empty string).\n    session (str): The session NAME to lock (default: \"fleet\").\n    lease_seconds (int): How long the lease lasts, 1-3600 (default: 300).\n    wait_seconds (int): How long to wait for a current holder, 0-60\n        (default: 0, fail at once).\n\nReturns:\n    Dict[str, Any]: acquired, holder, acquired_at, expires_at and\n    expires_in_seconds. Raises when the session is held by someone else,\n    naming the holder and when the lease expires.",
+    "description": "Take the advisory lock on a shared session so other agents know it is in use.\n\nThe lock is ADVISORY: it does not stop another agent's tool calls. It is the\nshared record of whose turn it is, and spawn_browser reports it beside a\nsession that is already running. A lease expires on its own, so an agent that\ndied holding it cannot lock the session forever. The same owner acquiring\nagain renews the lease. Waiters are served first come, first served: with a\nwait you join a queue and only the head of it can take the lock once it is\nreleased or expires, and a call that does not wait (wait_seconds=0) is\nrefused while others are queued, so nobody jumps the line. An owner can wait\nin a queue once; asking again while waiting raises. A wait longer than your\nclient's per-call timeout is cut off by the client, not by us, and a waiter\nthat disconnects leaves the queue.\n\nArgs:\n    owner (str): A label for who is taking the lock (any non-empty string).\n    session (str): The session NAME to lock (default: \"fleet\").\n    lease_seconds (int): How long the lease lasts, 1-3600 (default: 300).\n    wait_seconds (int): How long to wait in line for a current holder, 0-60\n        (default: 0, fail at once).\n\nReturns:\n    Dict[str, Any]: acquired, holder, acquired_at, expires_at and\n    expires_in_seconds. Raises when the session is held by someone else or\n    others are queued ahead of you, naming the holder, when the lease\n    expires and the position you reached.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2049,11 +2049,22 @@
     "tags": []
   },
   "get_session_lock_status": {
-    "description": "Read who holds the advisory lock on a shared session, if anyone.\n\nArgs:\n    session (str): The session NAME (default: \"fleet\").\n\nReturns:\n    Dict[str, Any]: locked, and when locked: holder, acquired_at, expires_at\n    and expires_in_seconds.",
+    "description": "Read who holds the advisory lock on a shared session, if anyone, and who is\nwaiting for it, in the order they will be served.\n\nArgs:\n    session (str): The session NAME (default: \"fleet\").\n    owner (str): Optional. Your owner label, to get your_position back.\n\nReturns:\n    Dict[str, Any]: locked, queue_length, waiting (a list of owner,\n    position from 1 and waiting_seconds, in queue order), and when locked:\n    holder, acquired_at, expires_at and expires_in_seconds. With owner,\n    also your_position: 0 if you hold the lock, 1..N your place in the\n    queue, null if neither.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
+        "owner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "session": {
           "default": "fleet",
           "type": "string"

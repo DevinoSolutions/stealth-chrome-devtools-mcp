@@ -3,7 +3,8 @@
 Pinned: a refused acquire names the holder and the expiry; a lease expires on
 its own; only the holder releases; the same owner renewing is not a conflict;
 out-of-range numbers are refused rather than clamped; a bounded wait sees a
-release. And the tool surface: three tools in one section, raising ``ToolError``
+release. F-956: waiters are served in the order they asked, and status shows
+the line. And the tool surface: three tools in one section, raising ``ToolError``
 and never returning a ``success: False`` dict.
 """
 
@@ -62,7 +63,12 @@ class TestTheLease:
         await session_lease.acquire("fleet", "agent-a", 60, 0)
         clock(61)
 
-        assert session_lease.status("fleet") == {"session": "fleet", "locked": False}
+        assert session_lease.status("fleet") == {
+            "session": "fleet",
+            "locked": False,
+            "queue_length": 0,
+            "waiting": [],
+        }
         got = await session_lease.acquire("fleet", "agent-b", 60, 0)
         assert got["holder"] == "agent-b"
 
@@ -157,6 +163,202 @@ class TestTheLease:
         assert 0.9 <= time.monotonic() - started < 3
 
 
+#: Every wait in the queue tests is bounded; a hang pin that can hang is no pin.
+STEP = 5.0
+
+
+async def _until(predicate, what: str) -> None:
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(poll(), STEP)
+    except TimeoutError:
+        raise AssertionError(f"never happened within {STEP}s: {what}") from None
+
+
+def _line(session: str = "fleet") -> list[str]:
+    return [w["owner"] for w in session_lease.status(session).get("waiting", [])]
+
+
+async def _enqueue(order: list[str], owner: str, wait: int = 30, session="fleet"):
+    """Start *owner* waiting and let it get into the line. The 0.1 s stagger is
+    deliberate: it puts each waiter on a different phase of the old 0.25 s poll,
+    so a hand-off that is not first-come-first-served cannot pass by luck."""
+
+    async def go():
+        got = await session_lease.acquire(session, owner, 60, wait)
+        order.append(owner)
+        return got
+
+    task = asyncio.create_task(go())
+    await asyncio.sleep(0.1)
+    return task
+
+
+class TestTheLineIsFirstComeFirstServed:
+    async def test_waiters_get_the_lock_in_the_order_they_asked(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        tasks = [await _enqueue(order, name) for name in ("a", "b", "c")]
+
+        for done, holder in enumerate(("x", "a", "b"), start=1):
+            session_lease.release("fleet", holder)
+            await _until(lambda n=done: len(order) >= n, f"hand-off after {holder}")
+        await asyncio.wait_for(asyncio.gather(*tasks), STEP)
+
+        assert order == ["a", "b", "c"]
+
+    async def test_a_newcomer_with_no_wait_does_not_jump_the_line(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        first = await _enqueue(order, "a")
+        session_lease.release("fleet", "x")  # free now, but "a" has not run yet
+
+        with pytest.raises(ToolError, match="free but 1 other"):
+            await session_lease.acquire("fleet", "jumper", 60, 0)
+
+        await asyncio.wait_for(first, STEP)
+        assert order == ["a"]
+
+    async def test_a_refused_newcomer_is_told_the_holder_and_how_many_are_ahead(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        await _enqueue(order, "a")
+        await _enqueue(order, "b")
+
+        with pytest.raises(ToolError) as refused:
+            await session_lease.acquire("fleet", "c", 60, 0)
+
+        assert "'x'" in str(refused.value)
+        assert "position 3" in str(refused.value)
+        assert "2 waiting ahead" in str(refused.value)
+
+    async def test_an_expired_lease_goes_to_the_head_not_a_later_poller(self):
+        await session_lease.acquire("fleet", "x", 1, 0)  # nobody will release it
+        order: list[str] = []
+        first = await _enqueue(order, "a")
+        second = await _enqueue(order, "b")
+
+        got = await asyncio.wait_for(first, STEP)
+
+        assert got["holder"] == "a"
+        assert order == ["a"]
+        assert not second.done()
+        session_lease.release("fleet", "a")
+        await asyncio.wait_for(second, STEP)
+        assert order == ["a", "b"]
+
+    async def test_a_lease_that_just_expired_is_not_up_for_grabs_to_a_newcomer(
+        self, clock
+    ):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        await _enqueue(order, "a")
+        clock(61)  # expired, and the head has not been scheduled yet
+
+        with pytest.raises(ToolError, match="free but 1 other"):
+            await session_lease.acquire("fleet", "jumper", 60, 0)
+
+        assert _line() == ["a"]
+
+    async def test_a_waiter_that_times_out_leaves_and_the_next_gets_the_lock(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        quitter = await _enqueue(order, "a", wait=1)
+        patient = await _enqueue(order, "b", wait=30)
+
+        with pytest.raises(ToolError, match="position 1"):
+            await asyncio.wait_for(quitter, STEP)
+
+        assert _line() == ["b"]
+        session_lease.release("fleet", "x")
+        got = await asyncio.wait_for(patient, STEP)
+        assert got["holder"] == "b"
+
+    async def test_a_cancelled_waiter_leaves_the_line(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        gone = await _enqueue(order, "a")
+        stays = await _enqueue(order, "b")
+
+        gone.cancel()
+        await asyncio.gather(gone, return_exceptions=True)
+
+        assert _line() == ["b"]
+        session_lease.release("fleet", "x")
+        got = await asyncio.wait_for(stays, STEP)
+        assert got["holder"] == "b"
+
+    async def test_a_cancelled_head_does_not_strand_a_free_lock(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        head = await _enqueue(order, "a")
+        second = await _enqueue(order, "b")
+        session_lease.release("fleet", "x")
+        head.cancel()  # woken, but cancelled before it takes the lock
+        await asyncio.gather(head, return_exceptions=True)
+
+        got = await asyncio.wait_for(second, STEP)
+
+        assert got["holder"] == "b"
+
+    async def test_the_same_owner_cannot_queue_twice(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        await _enqueue(order, "a")
+        await _enqueue(order, "b")
+
+        with pytest.raises(ToolError, match=r"already waiting.*position 2"):
+            await session_lease.acquire("fleet", "b", 60, 5)
+        assert _line() == ["a", "b"]
+
+    async def test_the_holder_renews_at_once_even_with_a_queue(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        await _enqueue(order, "a")
+
+        got = await asyncio.wait_for(session_lease.acquire("fleet", "x", 120, 0), STEP)
+
+        assert got["holder"] == "x"
+        assert got["expires_in_seconds"] == 120
+        assert _line() == ["a"]
+
+    async def test_status_reports_positions_and_your_position(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        await _enqueue(order, "a")
+        await _enqueue(order, "b")
+
+        status = session_lease.status("fleet")
+
+        assert status["queue_length"] == 2
+        assert [(w["owner"], w["position"]) for w in status["waiting"]] == [
+            ("a", 1),
+            ("b", 2),
+        ]
+        assert all(w["waiting_seconds"] >= 0 for w in status["waiting"])
+        assert "your_position" not in status
+        assert session_lease.status("fleet", "x")["your_position"] == 0
+        assert session_lease.status("fleet", "a")["your_position"] == 1
+        assert session_lease.status("fleet", "b")["your_position"] == 2
+        assert session_lease.status("fleet", "nobody")["your_position"] is None
+
+    async def test_reset_leaves_no_waiter_stuck(self):
+        await session_lease.acquire("fleet", "x", 60, 0)
+        order: list[str] = []
+        tasks = [await _enqueue(order, name) for name in ("a", "b")]
+
+        session_lease.reset()
+
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), STEP
+        )
+        assert all(isinstance(r, ToolError) for r in results)
+        assert session_lease.status("fleet")["queue_length"] == 0
+
+
 class TestTheToolSurface:
     async def test_three_tools_in_the_session_lock_section(self, patched_server):
         from stealth_chrome_devtools_mcp.embedded.tool_registry import SECTION_TOOLS
@@ -185,6 +387,23 @@ class TestTheToolSurface:
         released = await call_tool(srv, "release_session_lock", owner="agent-a")
         assert released["released"] is True
         assert (await call_tool(srv, "get_session_lock_status"))["locked"] is False
+
+    async def test_the_status_tool_takes_an_owner_and_shows_the_line(
+        self, call_tool, patched_server
+    ):
+        srv = patched_server()
+        await call_tool(srv, "acquire_session_lock", owner="agent-a")
+        waiter = asyncio.create_task(
+            call_tool(srv, "acquire_session_lock", owner="agent-b", wait_seconds=30)
+        )
+        await _until(lambda: len(_line()) == 1, "agent-b in line")
+
+        status = await call_tool(srv, "get_session_lock_status", owner="agent-b")
+
+        assert status["your_position"] == 1
+        assert status["waiting"][0]["owner"] == "agent-b"
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
 
     async def test_the_session_is_a_name_not_a_path(self, call_tool, patched_server):
         srv = patched_server()
