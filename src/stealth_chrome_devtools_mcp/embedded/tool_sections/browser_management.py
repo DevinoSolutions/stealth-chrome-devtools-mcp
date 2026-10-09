@@ -356,6 +356,7 @@ async def spawn_browser(
             return {
                 **record,
                 **rt.fleet_session.reuse_answer(held.running, user_data_dir),
+                **rt.fleet_session.headless_mismatch(headless, record["headless"]),
             }
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
@@ -446,15 +447,11 @@ async def spawn_browser(
                 # actually reads, rather than sitting quietly beside it in
                 # walk_reason — same field set, no second diagnostics home.
                 #
-                # F-915 changed what that change COSTS, so the sentence had to
-                # change with it: a walk now happens only when this backend
-                # drives the holder, and the new directory is copied from that
-                # holder with its jar handed over — so "with none of the cookies
-                # or logins the requested one holds" became false the moment the
-                # only walk left was one carrying them. What is still true, and
-                # is what the warning now says, is that it is a DIFFERENT
-                # directory: the two diverge from here on, and whatever the
-                # holder keeps outside its cookie jar did not come across.
+                # F-915: a walk now happens only when this backend drives the
+                # holder, and the copy gets its jar handed over, so the warning
+                # says what is still true: it is a DIFFERENT directory, the two
+                # diverge from here, and what the holder keeps outside its
+                # cookie jar did not come across.
                 walked = profile_selection.get("walk_reason")
                 substitution = (
                     f"NOT the directory you asked for: "
@@ -479,6 +476,7 @@ async def spawn_browser(
             "headless": instance.headless,
             "viewport": instance.viewport,
             "spawn_diagnostics": spawn_diagnostics or {},
+            **{k: v for k, v in cookie_seed.items() if k == "seed_warning"},
         }
     except Exception as e:
         # A spawn that failed onto a directory a live browser HOLDS is the one
@@ -589,6 +587,8 @@ async def _seed_cookies_over_cdp(
         return {
             "seeded_via": rt.cookie_handoff.VIA_COPY,
             "cookie_handoff_error": reason,
+            "seed_warning": f"The source's cookies were NOT carried ({reason}): this "
+            "session has only what was on disk, so it is probably signed out.",
         }
     return handoff.record()
 

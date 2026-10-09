@@ -571,7 +571,8 @@ spawn_browser(session="fleet")                                        # or: star
 `seed_from` takes the NAME (the `<name>-<n>` of a walked clone works) and needs this backend to
 drive the source; a source another process holds is refused by name. Only cookies cross a running
 source. After that, every `spawn_browser(session="fleet")` returns the running instance with
-`already_running: true`. Agents take turns with `acquire_session_lock` / `release_session_lock`
+`already_running: true` (plus `headless_mismatch` when you wanted a window and it is headless;
+a seed whose cookie hand-off failed returns `seed_warning`). Agents take turns with `acquire_session_lock` / `release_session_lock`
 (advisory; leases expire, and a backend restart clears them). A restart re-attaches `fleet` first
 under its recorded `instance_id`; if the re-attach fails the browser is left running and recorded
 (look for `Could not re-attach the fleet session` in the log) rather than reaped. To make `fleet`

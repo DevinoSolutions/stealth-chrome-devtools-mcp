@@ -96,6 +96,27 @@ def reuse_answer(running_here: bool, user_data_dir: str | None) -> dict[str, obj
     return {"already_running": True, "session_lock": session_lease.status(name)}
 
 
+def headless_mismatch(requested: bool, actual: bool) -> dict[str, object]:
+    """What a reused or re-attached browser adds when its headless state is not
+    the one asked for. ``headless=False`` is the tool default, so a bare call
+    cannot be told from an explicit one: the answer says so either way, because
+    an invisible browser handed to a caller who wanted a window is the outcome
+    nobody can see for themselves. Launch flags cannot be changed on a running
+    browser; the remedy is to close it and spawn again."""
+    if bool(requested) == bool(actual):
+        return {}
+    got, asked = ("headless", "headed") if actual else ("headed", "headless")
+    return {
+        "headless_mismatch": {
+            "requested_headless": bool(requested),
+            "actual_headless": bool(actual),
+            "warning": f"You asked for a {asked} browser but this session's running "
+            f"browser is {got}; a running browser cannot change that. Close it "
+            "(close_instance) and spawn again to get the other.",
+        }
+    }
+
+
 def default_seed(seed_from: str | None, landed: str | None) -> str | None:
     """The ``seed_from`` a copy should use: the caller's, else the configured
     ``STEALTH_MCP_SEED_SESSION``, else None (the snapshot).
