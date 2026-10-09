@@ -16,7 +16,7 @@ creation* to Task Scheduler with a "run only when the user is logged on" task,
 and **Windows itself** places the process in the logged-on user's interactive
 session. The window is then visible by construction rather than by our guess.
 The same backend attaches over CDP, so there is exactly ONE backend, the
-instance lives where every other instance lives, and all 94 tools work unchanged.
+instance lives where every other instance lives, and every tool works unchanged.
 
 When delegation is impossible (non-win32, nobody logged on at the console) or
 fails, we raise: ``server.spawn_browser``'s F-808 refusal is the fallback, which

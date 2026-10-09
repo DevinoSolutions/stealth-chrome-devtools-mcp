@@ -327,7 +327,10 @@ Cookies only: no localStorage or IndexedDB from a running source (see `spawn_bro
 **Make it the default source** for every new clone and new named session, instead of
 `master-snapshot`: set `STEALTH_MCP_SEED_SESSION=fleet`. It is off by default. The
 `fleet` session itself still bootstraps from the snapshot, and a misnamed value is refused
-naming the setting. Only the source rotates Google cookies (F-939); clones stay fenced.
+naming the setting. If the seed is held by a browser this backend does not drive, an
+unnamed clone falls back to the snapshot with a `seed_warning`; an explicit `seed_from` or
+a new named session is refused by name. Only the source rotates Google cookies (F-939);
+clones, and a new named session seeded from a live browser, stay fenced.
 
 **The lock is advisory.** Tool calls carry no caller identity, so a lock cannot stop another
 agent's calls; it is the shared answer to "is somebody using this?".

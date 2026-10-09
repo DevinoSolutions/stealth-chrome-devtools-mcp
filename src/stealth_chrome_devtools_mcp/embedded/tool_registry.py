@@ -50,7 +50,7 @@ def _surrogate_safe_returns(func):
     UTF-8 has no encoding for the unpaired ``\\ud83d`` a page hands back when
     something sliced an emoji in half. Sentry caught it on ``execute_script``,
     which never touches ``ResponseHandler`` — so the repair has to sit here,
-    where all 94 tools pass, not in the large-response path.
+    where every tool passes, not in the large-response path.
 
     The policy itself is not duplicated: ``response_handler.surrogate_safe`` is
     the one implementation, and ``json_safe`` calls the same helper so the

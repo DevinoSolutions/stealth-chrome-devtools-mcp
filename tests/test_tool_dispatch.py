@@ -104,8 +104,8 @@ def test_smoke_import_server_registered_without_side_effects():
 class TestRegistryContract:
     """The registry invariants: name <-> section <-> ``.fn`` <-> live ``mcp``."""
 
-    async def test_live_tool_count_is_94(self):
-        """F-108 tripwire: the live FastMCP tool count is exactly 94 (post-M2)."""
+    async def test_live_tool_count_is_the_registry_count(self):
+        """F-108 tripwire: the live FastMCP tool count is exactly EXPECTED_TOOL_COUNT."""
         tools = await _live_tools()
         assert len(tools) == EXPECTED_TOOL_COUNT
 
@@ -174,9 +174,10 @@ class TestSectionGating:
                 if name not in current:
                     server.mcp.add_tool(tool)
 
-    async def test_registry_restored_to_94_after_gating(self):
+    async def test_registry_restored_after_gating(self):
         """Guards the restore itself: whatever order tests run, the live count is
-        back to 94 (this passing after the gating test proves clean teardown)."""
+        back to EXPECTED_TOOL_COUNT (this passing after the gating test proves
+        clean teardown)."""
         tools = await _live_tools()
         assert len(tools) == EXPECTED_TOOL_COUNT
 
@@ -237,7 +238,7 @@ class TestAdapterContract:
         lands. Not every tool uses the raise-style adapter: some delegate to a
         BrowserManager method, and ``get_instance_state`` degrades to a partial
         dict instead of raising. The adapter contract is *not* uniform across the
-        94 tools; that inconsistency is the finding M4 formalizes."""
+        tools; that inconsistency is the finding M4 formalizes."""
         srv = patched_server(browser_manager=FakeBrowserManager())
         # Graceful-degradation variant: returns a dict, does NOT raise.
         state = await call_tool(srv, "get_instance_state", instance_id="missing")

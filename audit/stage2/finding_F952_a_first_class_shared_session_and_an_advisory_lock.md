@@ -179,6 +179,22 @@ A PARTIAL hand-off (`cookies_rejected > 0`, F-950's bisection) gets its own, dis
 configured session before a retry's `override`, and the fallback no longer needs a snapshot when
 one is configured (RED: the `retry` and `final` attempts cloned the snapshot).
 
+### 4.x Review fixes
+
+- **One lock key per directory** (`fleet_session.lock_key`): the master is `default`, a direct
+  child of the clone root is its name casefolded, anything else its normcased resolved path. The
+  lock tools and `reuse_answer` both use it (pinned: a running `default`; `Fleet` and `fleet`; an
+  absolute directory merely ending in `fleet`).
+- **Bounds**: `wait_seconds` capped at 60 (it can still exceed a client's per-call timeout, and
+  waiters are not served in order), owner 128 characters, key 255, expired leases swept on acquire.
+- **Unusable seed session**: an UNNAMED clone falls back to the snapshot with a `seed_warning`
+  (`fleet_session.clone_seed`); an explicit `seed_from` or a NEW named session still refuses by
+  name. A retry's `default_seed` error never replaces the original spawn error.
+- **F-939 for named sessions**: a NEW named session whose jar came from a LIVE hand-off shares its
+  source's Google chain, so `BrowserOptions.guard_rotation` arms the guard at its creation launch,
+  and `seeded_via` in the clone marker re-arms it on later launches.
+
+
 ## 5. Open items
 
 - The lock is advisory (2.4). Enforcement would need caller identity.
@@ -186,3 +202,6 @@ one is configured (RED: the `retry` and `final` attempts cloned the snapshot).
   operator removes it with `kill-orphans --force`.
 - `hand-off` is cookies only; sites that keep their token in localStorage need a CLOSED source.
 - The real-Chrome node uses headless Chrome on a tmp session root; it does not cover a HEADED fleet.
+- A session the user later signs in to Google afresh is still guarded (the marker says it was
+  seeded live); the guard also blocks that session's own legitimate rotation (escape:
+  `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION`). A browser re-attached after a restart is not re-armed.

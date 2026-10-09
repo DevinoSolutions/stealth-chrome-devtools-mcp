@@ -2,7 +2,7 @@
 
 Every tool body resolves its dependencies as ``rt.<name>`` against THIS module at
 call time, from whichever ``tool_sections`` module it lives in. That is what gives
-the whole 94-tool surface exactly one patchable home (``tests/conftest.py``'s
+the whole tool surface exactly one patchable home (``tests/conftest.py``'s
 ``patched_server``) instead of one per section module: a module attribute is looked
 up at call time, so ``monkeypatch.setattr(tool_runtime, "browser_manager", fake)``
 reaches every body no matter which file it lives in.

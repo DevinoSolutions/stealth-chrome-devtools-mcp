@@ -414,7 +414,7 @@ def patched_server(monkeypatch):
 
     ``embedded/tool_runtime.py`` is THE one patchable home: a tool body resolves
     ``rt.<name>`` against that module at CALL time, from whichever file it lives
-    in, so one ``setattr`` there reaches all 94 bodies — and ``server.py``'s own
+    in, so one ``setattr`` there reaches every body — and ``server.py``'s own
     non-tool readers (``app_lifespan``, the four ``@mcp.resource`` handlers, the
     ``__main__`` block) too, because plan_SERVERSPLIT slice 12 re-pointed those to
     ``rt.<name>`` as well. ``server`` is still what is RETURNED, because tool

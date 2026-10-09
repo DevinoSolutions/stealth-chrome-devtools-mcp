@@ -272,9 +272,9 @@ exists at this SHA.
 | `expand_pseudo_elements` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `expand_styles` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `list_stored_elements` | progressive-cloning | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
-| `acquire_session_lock` | session-lock | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
-| `get_session_lock_status` | session-lock | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
-| `release_session_lock` | session-lock | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
+| `acquire_session_lock` | session-lock | served-unqualified | **none** — an explicit coverage-manifest exemption | F-952 |
+| `get_session_lock_status` | session-lock | served-unqualified | **none** — an explicit coverage-manifest exemption | F-952 |
+| `release_session_lock` | session-lock | served-unqualified | **none** — an explicit coverage-manifest exemption | F-952 |
 | `close_tab` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-775b/macOS-close-flake |
 | `get_active_tab` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `list_tabs` | tabs | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
@@ -297,6 +297,9 @@ exists at this SHA.
 | `select_option` | E8-1 | A select whose page script re-declares a const swallows the change: the tool returns True while the option did not change. Silent wrong-success. |
 | `type_text` | E7-1/E8-3/E8-4 | clear_first bypasses readonly (E8-3); contenteditable is not cleared before typing (E7-1); range/color/date inputs are not reachable through this path at all (E8-4). |
 | `modify_headers` | F-165 | Duplicate header names are mishandled in the rewrite loop. |
+| `acquire_session_lock` | F-952 | An in-memory lease table with no browser or CDP behind it: driven hermetically through the registered tool objects (tests/test_session_lease.py) and in tests/test_e2e_fleet_session.py, but not asserted over the stdio transport. The lease lives and dies with the backend process. |
+| `get_session_lock_status` | F-952 | An in-memory lease table with no browser or CDP behind it: driven hermetically through the registered tool objects (tests/test_session_lease.py) and in tests/test_e2e_fleet_session.py, but not asserted over the stdio transport. The lease lives and dies with the backend process. |
+| `release_session_lock` | F-952 | An in-memory lease table with no browser or CDP behind it: driven hermetically through the registered tool objects (tests/test_session_lease.py) and in tests/test_e2e_fleet_session.py, but not asserted over the stdio transport. The lease lives and dies with the backend process. |
 | `close_tab` | F-775b/macOS-close-flake | Closing by target id is fixed (FIX-F). One macOS CI attempt returned True while the target survived a 10s poll; that observation is NOT reproducible and is NOT recorded as closed. |
 | `switch_tab` | F-775c-residual | Activation is fixed (FIX-F), but the instance's main tab is still stored from the raw browser.tabs entry, which can be a Connection rather than a Tab. Loud if it fires, and it seeds the F-775a family. |
 

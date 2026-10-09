@@ -704,7 +704,7 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
     It is also where a FAILED call is recorded (F-835,
     :func:`tool_failure.record`): the same chokepoint argument that makes this
     the home of the correlation id makes it the home of "this call failed" —
-    one place, all 94 tools, instead of a per-tool ``except`` nobody adds. The
+    one place, every tool, instead of a per-tool ``except`` nobody adds. The
     exception is recorded and re-raised unchanged.
 
     91 of the 96 registered tools are ``async def`` and 5 are plain ``def``;

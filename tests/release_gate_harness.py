@@ -87,7 +87,7 @@ COOKIE_ROUND_TRIP = "cookies"
 SOAK_STABILITY = "soak"
 
 SERVER_NAME = "stealth-chrome-devtools-mcp"
-REGISTRY_TOOL_COUNT = 97  # remediation baseline (CLAUDE.md: derived == 94)
+REGISTRY_TOOL_COUNT = 97  # remediation baseline (CLAUDE.md: derived == 97)
 RESULT_SCHEMA_VERSION = 1
 FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
 

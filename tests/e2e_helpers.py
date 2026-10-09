@@ -32,7 +32,7 @@ import pytest
 # getattr on it, which the binding loop keeps true. It is the WRONG handle for a
 # singleton: those were attributes of ``server`` only because of the migration
 # alias block, and slice 12 deleted it. ``tool_runtime`` is a normal module,
-# imported once, so this is the same object all 94 bodies and every ``server.py``
+# imported once, so this is the same object every body and every ``server.py``
 # execution drive — exactly what an E2E assertion about live browsers wants.
 # Re-exported (like ``get_fn`` and ``server_mod``) for the three E2E files that
 # need it: test_browser_integration, test_e2e_interaction, test_stealth. ruff sees

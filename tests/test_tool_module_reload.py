@@ -1,5 +1,5 @@
 """The runpy/spec double-load must leave every loaded identity with a full
-94-tool app, and must not accumulate in the shared ``SECTION_TOOLS`` map.
+tool app, and must not accumulate in the shared ``SECTION_TOOLS`` map.
 
 ``embedded/server.py``'s module body can execute up to three times in ONE process,
 under three different identities:
@@ -20,7 +20,7 @@ both fatal, and only ONE of them is visible to the existing count tripwire:
   * 0x REGISTRATION (the hazard plan_SERVERSPLIT introduces): a section module
     decorates at ITS OWN module scope, so it registers into the FIRST execution's
     ``mcp`` and never runs again — a section module is imported once per process.
-    ``SECTION_TOOLS`` still says 94, so ``tests/test_tool_registry.py``'s
+    ``SECTION_TOOLS`` still says EXPECTED_TOOL_COUNT, so ``tests/test_tool_registry.py``'s
     ``TestCountTripwire`` stays GREEN — but the second and third identities carry
     an EMPTY app, and ``tests/e2e_helpers.py``'s ``getattr`` lookups would skip the
     whole E2E tier into vacuous green. Only the PER-IDENTITY assertions below see

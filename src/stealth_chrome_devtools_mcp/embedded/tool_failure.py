@@ -10,7 +10,7 @@ to record a failure, so never call it from a tool.
 
 Two properties every function here guarantees:
 
-* it **never raises**. It sits on the failure path of all 94 tools, and a
+* it **never raises**. It sits on the failure path of every tool, and a
   recording problem must not replace (or mask) the error the client is owed.
   The recording is the only thing that can be lost here.
 * it **never touches** ``error``. The exception continues to the client

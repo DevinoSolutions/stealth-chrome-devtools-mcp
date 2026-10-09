@@ -32,6 +32,13 @@ caller identity, so it cannot block anyone, but a refused acquire names the hold
 the lease expires, leases expire on their own, and only the holder can release. Leases are
 in memory, so a backend restart clears them. The tool count is now 97.
 
+Lock keys are one per directory (`Fleet` and `fleet` share a lock), `wait_seconds` is
+capped at 60 (waiters are not served in order), owner and session-name lengths are bounded,
+and expired leases are swept on acquire. A new named session seeded from a live browser keeps
+the Google rotation guard (F-939). If the seed session is unusable, an unnamed clone falls back
+to the snapshot with a `seed_warning`; an explicit `seed_from` or a new named session is
+refused by name, and a retry never replaces the original spawn error.
+
 New opt-in setting `STEALTH_MCP_SEED_SESSION=fleet` copies every new clone and new named
 session from `fleet` (with its live cookies) instead of `master-snapshot`. Off by default.
 
