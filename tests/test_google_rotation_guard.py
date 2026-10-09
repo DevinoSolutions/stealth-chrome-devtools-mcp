@@ -215,6 +215,76 @@ class TestTheGuardConversation:
         assert guard not in google_rotation_guard._LIVE
 
 
+_SESSION_GONE = {"code": -32001, "message": "Session with given id not found."}
+
+
+class TestARefusedFetchEnable:
+    """F-957 — a ``Fetch.enable`` Chrome refuses warns ONLY for a target that is
+    still alive. Measured on Chrome: a session closed before our command arrives
+    is torn down with ``Target.detachedFromTarget`` FIRST, then the command is
+    answered ``{"code": -32001, "message": "Session with given id not found."}``
+    with no ``sessionId`` on the reply. That is a closed tab, not an unguarded one."""
+
+    @pytest.fixture
+    def warnings(self, monkeypatch):
+        seen: list[str] = []
+        monkeypatch.setattr(
+            google_rotation_guard.debug_logger,
+            "log_warning",
+            lambda component, method, message: seen.append(message),
+        )
+        return seen
+
+    @staticmethod
+    async def _attach(guard, session):
+        await guard._handle(
+            {
+                "method": "Target.attachedToTarget",
+                "params": {
+                    "sessionId": session,
+                    "targetInfo": {"type": "page"},
+                    "waitingForDebugger": False,
+                },
+            }
+        )
+        return next(
+            i
+            for i in sorted(guard._pending_by_session[session])
+            if i in guard._fetch_enable_ids
+        )
+
+    async def test_a_target_that_detached_first_does_not_warn(self, warnings):
+        guard = google_rotation_guard.RotationGuard()
+        fetch_enable = await self._attach(guard, "tab-1")
+        await guard._handle(
+            {"method": "Target.detachedFromTarget", "params": {"sessionId": "tab-1"}}
+        )
+        await guard._handle({"id": fetch_enable, "error": _SESSION_GONE})
+        assert warnings == []
+        assert guard._fetch_enable_ids == set()
+
+    async def test_a_target_still_attached_warns(self, warnings):
+        guard = google_rotation_guard.RotationGuard()
+        fetch_enable = await self._attach(guard, "tab-1")
+        await guard._handle(
+            {"id": fetch_enable, "sessionId": "tab-1", "error": {"code": -32000}}
+        )
+        assert warnings == [
+            "Chrome refused Fetch.enable on a target; it is not guarded"
+        ]
+
+    async def test_one_detached_target_does_not_hide_a_live_one(self, warnings):
+        guard = google_rotation_guard.RotationGuard()
+        gone = await self._attach(guard, "tab-1")
+        live = await self._attach(guard, "tab-2")
+        await guard._handle(
+            {"method": "Target.detachedFromTarget", "params": {"sessionId": "tab-1"}}
+        )
+        await guard._handle({"id": gone, "error": _SESSION_GONE})
+        await guard._handle({"id": live, "error": {"code": -32000}})
+        assert len(warnings) == 1
+
+
 class TestAMalformedFrame:
     async def test_a_reader_failure_closes_the_socket(self, monkeypatch):
         async with ScriptedChrome() as chrome:
