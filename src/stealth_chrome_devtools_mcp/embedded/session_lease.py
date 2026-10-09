@@ -37,7 +37,6 @@ for the ``acquired_at`` / ``expires_at`` the caller reads.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from dataclasses import dataclass, field
 
@@ -254,8 +253,15 @@ async def _wait_in_line(
             if queue[0] is me and held is not None:
                 timeout = min(timeout, max(held.expires_mono - _mono(), 0))
             me.wake.clear()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(me.wake.wait(), timeout)
+            # `asyncio.wait`, not `wait_for`: on Python 3.11 `wait_for` SWALLOWS a
+            # cancellation that lands after the event was set and returns normally,
+            # so a caller that disconnected right after being woken went on to take
+            # the lock and held it for its whole lease. `wait` never swallows one.
+            woken = asyncio.ensure_future(me.wake.wait())
+            try:
+                await asyncio.wait({woken}, timeout=timeout)
+            finally:
+                woken.cancel()
     finally:
         if me in queue:
             queue.remove(me)
