@@ -616,6 +616,27 @@ class TestTheDefaultSeedSetting:
             "held when the clone was made"
         )
 
+    @pytest.mark.parametrize("attempt", [0, 1], ids=["retry", "final"])
+    async def test_a_retry_clone_is_seeded_from_it_not_from_the_snapshot(
+        self, tmp_session_root, seeded_by_fleet, attempt
+    ):
+        """A spawn that failed once re-clones through the fallback. Without the
+        setting honoured there it would quietly copy master-snapshot: a second
+        way to seed, and a clone that has none of the fleet's login."""
+        fleet = tmp_session_root["sessions"] / "fleet"
+        await _selection(session="fleet")
+        (fleet / COOKIE_JAR).parent.mkdir(parents=True, exist_ok=True)
+        (fleet / COOKIE_JAR).write_bytes(LOGIN)
+        previous = await clone_storage.resolve_profile_selection(None, force_clone=True)
+
+        retry = await clone_storage._fallback_profile_selection(previous, attempt)
+
+        assert retry is not None
+        clone = Path(retry["user_data_dir"])
+        assert clone != Path(previous["user_data_dir"])
+        assert (clone / COOKIE_JAR).read_bytes() == LOGIN
+        assert profile_seed.provenance(clone)["seeded_from"] == "fleet"
+
     def test_the_setting_is_a_name_not_a_path(self, monkeypatch, tmp_session_root):
         monkeypatch.setenv("STEALTH_MCP_SEED_SESSION", os.fspath(Path("/x/y")))
         get_settings.cache_clear()
