@@ -1228,7 +1228,9 @@ class TestAnAdoptedInstanceTellsTheTruth:
     """F-888 review M2. What ``_build_instance`` fills in from OPTIONS is a
     request nobody made here — the process that launched this browser is gone."""
 
-    async def _adopt(self, tmp_path, tab, *, headless=False, dead_egress=None):
+    async def _adopt(
+        self, tmp_path, tab, *, headless=False, dead_egress=None, profile="C:/p"
+    ):
         manager = BrowserManager()
         browser = FakeBrowser(alive=None, pid=CHROME_PID, main_tab=tab)
         # `dead_egress` rides on the CANDIDATE, because that is where the real
@@ -1236,7 +1238,7 @@ class TestAnAdoptedInstanceTellsTheTruth:
         candidate = browser_reattach.Adoptable(
             instance_id="i-held",
             pid=CHROME_PID,
-            user_data_dir="C:/p",
+            user_data_dir=profile,
             port=9223,
             dead_egress=dead_egress,
         )
@@ -1247,9 +1249,38 @@ class TestAnAdoptedInstanceTellsTheTruth:
             patch.object(browser_cmdline, "is_headless", return_value=headless),
         ):
             held = await browser_reattach.adopt_held_profile(
-                manager, _spawn_cleanup(tmp_path), "C:/p"
+                manager, _spawn_cleanup(tmp_path), profile
             )
         return manager, held
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seeded_live", [True, False])
+    async def test_the_rotation_guard_is_rearmed_from_the_marker(
+        self, tmp_path, monkeypatch, seeded_live
+    ):
+        """F-952: a named session seeded from a LIVE hand-off holds a second copy
+        of its source's Google chain, and a restart must not drop the guard."""
+        import json
+
+        from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
+
+        profile = tmp_path / "job-g"
+        profile.mkdir()
+        marker = {"seeded_via": "cdp-cookies"} if seeded_live else {}
+        (profile / ".stealth_chrome_devtools_mcp_clone.json").write_text(
+            json.dumps(marker), encoding="utf-8"
+        )
+        armed: list = []
+
+        async def fake_arm(browser, *_a):
+            armed.append(browser)
+
+        monkeypatch.setattr(google_rotation_guard, "arm", fake_arm)
+        monkeypatch.setattr(google_rotation_guard, "enabled", lambda: True)
+
+        manager, held = await self._adopt(tmp_path, FakeTab(), profile=str(profile))
+
+        assert len(armed) == (1 if seeded_live else 0)
 
     @pytest.mark.asyncio
     async def test_headless_comes_off_the_holders_command_line(self, tmp_path):

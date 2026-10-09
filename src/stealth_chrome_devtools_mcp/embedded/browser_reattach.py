@@ -918,10 +918,9 @@ async def _attach_one(
         measured = await window_sizing.measure(tab)
         if measured is not None:
             instance.viewport = measured
-        # Exactly what a spawn does at this point, and for the same reason the
-        # tool body sets interception up: an adopted tab carries none of THIS
-        # backend's handlers, so a hook created against the adopted instance
-        # would otherwise be registered and never fire.
+        # As a spawn does, for the same reason the tool body sets interception
+        # up: an adopted tab carries none of THIS backend's handlers, so a hook
+        # on it would be registered and never fire.
         await manager._setup_dynamic_hooks(tab, instance_id)
         # Ownership is already ours from the claim; this re-records the entry
         # through the ONE write protocol and adds the in-memory tracking the
@@ -936,6 +935,10 @@ async def _attach_one(
         )
         from stealth_chrome_devtools_mcp.embedded import clone_storage  # lazy: cycle
 
+        role = profile_source.adopted_role(
+            candidate.user_data_dir, clone_storage.master_profile_dir()
+        )
+        await fleet_session.rearm_rotation_guard(browser, candidate.user_data_dir, role)
         diagnostics: dict[str, object] = {
             "reattached": True,
             "reattached_pid": candidate.pid,
@@ -947,14 +950,11 @@ async def _attach_one(
             # browser. `block_resources` and dynamic hooks are NOT here — both are
             # re-established above and at the tool body.
             "not_restored": ["extra_headers", "timezone_id", "user_agent", "proxy"],
-            # The role the close path reads: "explicit" keeps close_instance from
-            # refreshing the master snapshot from a named profile; the SHARED
-            # profile is `default` (F-950), so closing it refreshes the seed.
+            # The role close_instance reads: "explicit" never refreshes the
+            # snapshot; the SHARED profile is `default` (F-950), which does.
             "profile_selection": {
                 "user_data_dir": candidate.user_data_dir,
-                "profile_role": profile_source.adopted_role(
-                    candidate.user_data_dir, clone_storage.master_profile_dir()
-                ),
+                "profile_role": role,
                 "clone_source": None,
             },
         }
