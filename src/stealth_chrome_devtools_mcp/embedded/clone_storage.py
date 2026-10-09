@@ -760,7 +760,7 @@ def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, An
     It is also where an INTERNAL key stops being one (F-898): this function's
     whole job is the line between what the resolver decided and what a caller is
     told, so :data:`LIVE_SEED_KEY` is dropped HERE and nowhere else."""
-    internal = (LIVE_SEED_KEY, profile_target.LIVE_PORT_KEY)
+    internal = (LIVE_SEED_KEY, *profile_target.INTERNAL_KEYS)
     public = {k: v for k, v in profile_selection.items() if k not in internal}
     selected = public.get("user_data_dir")
     if isinstance(selected, str) and selected:
@@ -856,7 +856,7 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         # `<name>-N` is CONDITIONAL since F-915 and its module docstring is
         # where that is argued. What stays here is the walk's own REPORT
         # (F-871) and the holder as this copy's source.
-        walk: dict[str, Any] = {}
+        walk: dict[str, Any] = profile_target.existing_fields(explicit)
         handed_over: profile_source.SeedSource | None = None
         if _is_relative_to(explicit, clone_root):
             hold = _profile_hold(explicit)

@@ -47,6 +47,16 @@ tab no longer exists, so nothing was unguarded, but the warning looked like a ho
 failed tests that forbid warnings. It is now silent for a closed tab. A target that is
 still open and refused is still reported.
 
+### Reopening a named session no longer says it was just created (F-958)
+
+Asking for a session that is already open (for example a second Claude session asking for
+`fleet`) correctly hands back the running browser, but the answer still carried "Named session
+created — it is NOT auto-cleaned ...", although nothing was created. That warning now says "Named
+session reused, not created" when the session already existed or its running browser is handed
+back, and keeps the original wording only for a session this call actually made. A new release
+test starts one backend, signs in to `fleet` from one Claude session, and checks that a second,
+independent session gets the same browser, the same directory and the same login.
+
 ## 2.1.26
 
 ### A shared signed-in browser that survives restarts, plus a lock for taking turns (F-952)

@@ -143,6 +143,22 @@ def live_master_port(master: Path, hold: profile_lock.Hold) -> int | None:
 #: like ``clone_storage.LIVE_SEED_KEY``, and dropped beside it.
 LIVE_PORT_KEY = "seed_live_port"
 
+#: F-958: set on an explicit selection whose directory was ALREADY on disk,
+#: i.e. the spawn reopens a session rather than makes one. Absent means
+#: this spawn made it (a walk to ``<name>-N`` lands on a fresh directory).
+#: Internal like the keys above: ``fleet_session.named_session_warning``
+#: words the caller's ``warning`` from it, and it is never reported.
+EXISTING_KEY = "session_existed"
+
+#: Every selection key that is an instruction to this process, dropped by
+#: ``clone_storage._public_profile_selection``.
+INTERNAL_KEYS = (LIVE_PORT_KEY, EXISTING_KEY)
+
+
+def existing_fields(directory: Path) -> dict[str, bool]:
+    """``{EXISTING_KEY: True}`` when *directory* is already on disk."""
+    return {EXISTING_KEY: True} if directory.exists() else {}
+
 
 def shared_live_source(
     master: Path,
