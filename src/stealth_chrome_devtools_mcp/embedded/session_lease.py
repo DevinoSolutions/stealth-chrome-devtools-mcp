@@ -13,6 +13,14 @@ shared, truthful answer to "is somebody using this?": a refused ``acquire`` name
 the holder and the expiry, and ``spawn_browser`` reports the lease beside the
 running instance it hands back.
 
+Waiters are NOT served in order: a bounded wait polls, and whoever polls first
+after a release wins. A wait is also capped (``MAX_WAIT_SECONDS``) because a
+client's own per-call timeout can end the call before the wait does.
+
+The key is the canonical one from ``fleet_session.lock_key`` (the session's
+resolved directory, not the spelling), so two spellings of one profile share a
+lease.
+
 State is in memory and per backend. A lease is short (seconds to an hour), the
 session it guards survives a restart but the lease does not, and a restart
 clearing every lease is the safe direction. Time comes from ``monotonic`` for
@@ -31,7 +39,10 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 MIN_LEASE_SECONDS = 1
 MAX_LEASE_SECONDS = 3600
 DEFAULT_LEASE_SECONDS = 300
-MAX_WAIT_SECONDS = 120
+#: Below a typical MCP client's per-call timeout, which a longer wait would outlive.
+MAX_WAIT_SECONDS = 60
+MAX_OWNER_LENGTH = 128
+MAX_KEY_LENGTH = 255
 #: How often a bounded wait looks again. A lease is released by another tool
 #: call on the same loop, so this is a poll and not a race.
 POLL_SECONDS = 0.25
@@ -82,6 +93,8 @@ def _require_owner(owner: str) -> str:
     name = owner.strip() if isinstance(owner, str) else ""
     if not name:
         raise ToolError("owner must name who is taking the lock (a non-empty label).")
+    if len(name) > MAX_OWNER_LENGTH:
+        raise ToolError(f"owner is at most {MAX_OWNER_LENGTH} characters.")
     return name
 
 
@@ -107,6 +120,10 @@ async def acquire(
     day-long lease and silently got an hour would plan around the wrong expiry.
     """
     name = _require_owner(owner)
+    if len(session) > MAX_KEY_LENGTH:
+        raise ToolError(f"session is at most {MAX_KEY_LENGTH} characters.")
+    for key in list(_leases):
+        _live(key)  # sweeps an expired lease on a key nobody asks about again
     if not MIN_LEASE_SECONDS <= lease_seconds <= MAX_LEASE_SECONDS:
         raise ToolError(
             f"lease_seconds must be {MIN_LEASE_SECONDS}-{MAX_LEASE_SECONDS}, "

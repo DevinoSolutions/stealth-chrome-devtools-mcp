@@ -191,3 +191,69 @@ class TestTheToolSurface:
 
         with pytest.raises(ToolError, match="NAME"):
             await call_tool(srv, "get_session_lock_status", session="/tmp/fleet")
+
+
+class TestOneKeyPerDirectory:
+    """The lease is keyed by the DIRECTORY a session means, not its spelling."""
+
+    async def test_the_default_session_is_one_key_in_the_tools_and_the_marker(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        from stealth_chrome_devtools_mcp.embedded import fleet_session
+
+        srv = patched_server()
+        await call_tool(srv, "acquire_session_lock", owner="agent-a", session="default")
+
+        marker = fleet_session.reuse_answer(True, str(tmp_session_root["master"]))
+
+        assert marker["session_lock"]["session"] == "default"
+        assert marker["session_lock"]["locked"] is True
+        assert marker["session_lock"]["holder"] == "agent-a"
+
+    async def test_two_spellings_of_one_name_are_one_lock(
+        self, call_tool, patched_server, tmp_session_root
+    ):
+        srv = patched_server()
+        await call_tool(srv, "acquire_session_lock", owner="agent-a", session="fleet")
+
+        status = await call_tool(srv, "get_session_lock_status", session="Fleet")
+
+        assert status["locked"] is True
+        assert status["holder"] == "agent-a"
+        with pytest.raises(ToolError, match="agent-a"):
+            await call_tool(srv, "acquire_session_lock", owner="b", session="FLEET")
+
+    async def test_a_directory_that_merely_ends_in_the_name_is_not_the_session(
+        self, call_tool, patched_server, tmp_session_root, tmp_path
+    ):
+        from stealth_chrome_devtools_mcp.embedded import fleet_session
+
+        srv = patched_server()
+        await call_tool(srv, "acquire_session_lock", owner="agent-a", session="fleet")
+
+        elsewhere = fleet_session.reuse_answer(True, str(tmp_path / "other" / "fleet"))
+
+        assert elsewhere["session_lock"]["locked"] is False
+        assert elsewhere["session_lock"]["session"] != "fleet"
+
+
+class TestTheBounds:
+    async def test_an_owner_label_has_a_length_cap(self):
+        with pytest.raises(ToolError, match="128"):
+            await session_lease.acquire("fleet", "x" * 129, 60, 0)
+
+    async def test_a_session_key_has_a_length_cap(self):
+        with pytest.raises(ToolError, match="at most"):
+            await session_lease.acquire("k" * 256, "agent-a", 60, 0)
+
+    async def test_an_acquire_sweeps_leases_nobody_asks_about_again(self, clock):
+        await session_lease.acquire("old-session", "agent-a", 5, 0)
+        clock(10)
+
+        await session_lease.acquire("fleet", "agent-b", 60, 0)
+
+        assert "old-session" not in session_lease._leases
+
+    async def test_a_wait_longer_than_a_client_would_stay_is_refused(self):
+        with pytest.raises(ToolError, match="0-60"):
+            await session_lease.acquire("fleet", "agent-a", 60, 61)

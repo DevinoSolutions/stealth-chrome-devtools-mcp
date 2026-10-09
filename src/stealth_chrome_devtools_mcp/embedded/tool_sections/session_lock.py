@@ -14,7 +14,9 @@ _NAME_HINT = "Pass the session NAME, as spawn_browser(session=...) takes it."
 
 
 def _name(session: str) -> str:
-    return rt.profile_seed.require_name("session", session, path_hint=_NAME_HINT)
+    """The lease key for a session NAME: one key per DIRECTORY (F-952)."""
+    named = rt.profile_seed.require_name("session", session, path_hint=_NAME_HINT)
+    return rt.fleet_session.session_key(named)
 
 
 async def acquire_session_lock(
@@ -30,13 +32,14 @@ async def acquire_session_lock(
     shared record of whose turn it is, and spawn_browser reports it beside a
     session that is already running. A lease expires on its own, so an agent that
     died holding it cannot lock the session forever. The same owner acquiring
-    again renews the lease.
+    again renews the lease. Waiters are not served in order, and a wait longer
+    than your client's per-call timeout is cut off by the client, not by us.
 
     Args:
         owner (str): A label for who is taking the lock (any non-empty string).
         session (str): The session NAME to lock (default: "fleet").
         lease_seconds (int): How long the lease lasts, 1-3600 (default: 300).
-        wait_seconds (int): How long to wait for a current holder, 0-120
+        wait_seconds (int): How long to wait for a current holder, 0-60
             (default: 0, fail at once).
 
     Returns:
