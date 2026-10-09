@@ -32,7 +32,11 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import profile_seed, session_lease
+from stealth_chrome_devtools_mcp.embedded import (
+    google_rotation_guard,
+    profile_seed,
+    session_lease,
+)
 from stealth_chrome_devtools_mcp.embedded.cookie_handoff import VIA_CDP
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -240,6 +244,15 @@ def guards_rotation(selection: dict[str, object]) -> bool:
     return bool(directory) and (
         profile_seed.read_marker(Path(str(directory))).get(SEEDED_VIA_KEY) is not None
     )
+
+
+async def rearm_rotation_guard(browser: object, user_data_dir: str, role: str) -> None:
+    """Re-arm the F-939 guard on a RE-ATTACHED named session whose marker says
+    its jar came from a live hand-off: the restart dropped the guard with the
+    process that held it. The ONE rule is :func:`guards_rotation`'s."""
+    selection = {"profile_role": role, "user_data_dir": user_data_dir}
+    if guards_rotation(selection) and google_rotation_guard.enabled():
+        await google_rotation_guard.arm(browser)  # type: ignore[arg-type]
 
 
 def record_live_seed(
