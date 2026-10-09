@@ -21,6 +21,9 @@ re-attached) browser's headless state is not the one asked for, the answer carri
 bare call is told too instead of silently receiving an invisible browser. A seed whose live
 cookie hand-off did not complete (`seeded_via: "copy"`) now also puts `seed_warning` at the top
 level of the answer, not only inside `spawn_diagnostics`.
+A cookie hand-off Chrome only partly accepted (`cookies_rejected > 0`) gets its own, distinct
+`seed_warning` naming the refused count (never a name or value). A retry clone after a failed
+first spawn now honours `STEALTH_MCP_SEED_SESSION` instead of quietly copying the snapshot.
 
 Three new tools take turns on a session: `acquire_session_lock(owner, session="fleet",
 lease_seconds=300, wait_seconds=0)`, `release_session_lock(owner, session="fleet")` and

@@ -114,8 +114,8 @@ opens the free shared profile itself. The configured session never seeds itself 
 bootstraps from the snapshot). A missing source is refused naming the setting and nothing is
 created. A caller's `seed_from` always wins. When the seed is a configured session its own live jar
 is used and the master's live jar (F-939/F-914) is NOT layered over it (`configured` guard).
-Known degradation: `_fallback_profile_selection`'s retry still clones from the snapshot, so a clone
-that needed a retry reports `seeded_from: "default"` — truthfully, but not from the fleet.
+The retry door (`_fallback_profile_selection`) honours it too: a clone that needed a retry is seeded
+from the configured session, never silently from the snapshot (a second way to seed).
 
 ### 2.6 F-939 is preserved without new code
 
@@ -149,14 +149,21 @@ documents `already_running`) and the generated `RELEASE_CONTRACT.md`.
 
 ## 4. RED -> GREEN
 
-Run against a `git archive` export of the base commit (no shared worktree mutated). With the two
-missing modules stubbed so the file imports, `tests/test_fleet_session.py` at baseline: **13 failed,
-14 passed**. The 13 are the behaviour F-952 adds (restore order, no reap on fleet, the
-`already_running` marker, lock status in the spawn answer, every default-seed case). The 14 that
-pass at baseline are the "verify and pin" claims: persistence (marker, close, sweep, adoptable),
+Measured, not estimated. The base is `ec5a81e^` (F-950 is already in it), exported with `git archive`
+(no shared worktree mutated); the FINAL test files were copied over it, with `fleet_session.py` and
+`session_lease.py` present but empty so the files import. Four files, 112 tests:
+
+| file | at base | after |
+|---|---|---|
+| `test_fleet_session.py` (30) | 25 failed, 5 passed | 30 passed |
+| `test_session_lease.py` (21) | 21 errors (the module does not exist) | 21 passed |
+| `test_cookie_handoff_rejected.py` | 1 failed (partial-jar warning) | all passed |
+| `test_cookie_handoff.py` | 1 failed (top-level `seed_warning`) | all passed |
+
+Total at base: 27 failed, 64 passed, 21 errors; after: 112 passed. The 5 `test_fleet_session.py`
+tests that pass at base are the "verify and pin" claims that were already true: persistence,
 `seed_from` live hand-off, refusal by name, and adoption from a running or walked-clone source.
-`test_session_lease.py` cannot import at baseline (no module) — RED by absence. After the change:
-28 + 21 pass.
+The real-Chrome node `tests/test_e2e_fleet_session.py` (marked integration) is not in that table.
 
 Follow-up (team-lead review): two more places a caller could be misled, each RED before GREEN
 (2 failed, the 2 no-warning guards passing, against the unchanged source).
@@ -166,12 +173,16 @@ browser gets `headless_mismatch` (both values and the remedy), not a silently in
 `_seed_cookies_over_cdp`'s failure return gains `seed_warning`, surfaced at the top level of the
 `spawn_browser` answer; a hand-off that succeeded adds nothing. The warning reuses the already
 sanitised `cookie_handoff.failure` reason, so no cookie name or value can reach it (pinned).
+A PARTIAL hand-off (`cookies_rejected > 0`, F-950's bisection) gets its own, distinct
+`seed_warning` from `Handoff.record()` naming only the count. A retry clone
+(`_fallback_profile_selection`) now honours `STEALTH_MCP_SEED_SESSION`: `_clone_seed` tries the
+configured session before a retry's `override`, and the fallback no longer needs a snapshot when
+one is configured (RED: the `retry` and `final` attempts cloned the snapshot).
 
 ## 5. Open items
 
 - The lock is advisory (2.4). Enforcement would need caller identity.
-- Retry clones ignore the configured seed (2.5).
 - A fleet browser that is alive but permanently unattachable is retained rather than reaped; the
   operator removes it with `kill-orphans --force`.
 - `hand-off` is cookies only; sites that keep their token in localStorage need a CLOSED source.
-- No integration (real Chrome) test was added: the brief forbids touching real browsers/profiles.
+- The real-Chrome node uses headless Chrome on a tmp session root; it does not cover a HEADED fleet.
