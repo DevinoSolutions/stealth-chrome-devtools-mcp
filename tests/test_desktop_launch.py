@@ -374,6 +374,45 @@ async def test_a_path_with_spaces_stays_one_chrome_argument(delegation):
     assert "(Windows" not in argv
 
 
+async def test_the_delegated_launch_presents_the_same_user_agent_as_a_normal_spawn(
+    delegation, monkeypatch
+):
+    """F-955: one profile must not present two device fingerprints.
+
+    The User-Agent policy is ONE process-wide ``--user-agent=`` switch that
+    ``merge_browser_args`` appends to every launch's args; the delegated launch
+    receives those same args, so what Chrome gets on the user's desktop must carry
+    exactly the one masked agent a normal spawn carries. Asserted as the argv
+    Chrome receives, composed through ``_resolve_launch_args`` like the real
+    spawn, so a delegation that dropped or duplicated the switch fails here.
+    """
+    from stealth_chrome_devtools_mcp.embedded import platform_utils
+
+    executable = "C:/Program Files/Google/Chrome/chrome.exe"
+    monkeypatch.setattr(browser_manager, "check_browser_executable", lambda: executable)
+    monkeypatch.setattr(platform_utils, "check_browser_executable", lambda: executable)
+    monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        platform_utils, "resolve_browser_major_version", lambda _exe: "154"
+    )
+    platform_info = {"system": "Windows", "is_root": False, "is_container": False}
+    launch_args, _exe, _warnings = (
+        browser_manager.BrowserManager()._resolve_launch_args(
+            browser_manager.BrowserOptions(headless=False), None, platform_info
+        )
+    )
+    normal_agents = [a for a in launch_args if a.startswith("--user-agent=")]
+    assert len(normal_agents) == 1
+    assert "Headless" not in normal_agents[0]
+
+    schtasks = delegation.install(FakeSchtasks())
+    await desktop_launch.launch_and_attach(executable, launch_args, "C:/profiles/p")
+    delegated_agents = [
+        a for a in schtasks.chrome_argv if a.startswith("--user-agent=")
+    ]
+    assert delegated_agents == normal_agents
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="CommandLineToArgvW is a Win32 API")
 async def test_the_quoting_matches_windows_own_parser(delegation):
     """Cross-check the reference splitter against the OS: ``CommandLineToArgvW``
