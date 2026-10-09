@@ -39,6 +39,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_reattach,
     cdp_attach,
     clone_storage,
+    desktop_launch,
     fleet_session,
     google_rotation_guard,
     profile_seed,
@@ -394,7 +395,14 @@ class TestAskingForItWhileItRunsHere:
         self, call_tool, patched_server, monkeypatch, tmp_session_root
     ):
         """`headless=False` is the tool default, so a bare call must report it
-        too: the running browser is invisible and the caller wanted a window."""
+        too: the running browser is invisible and the caller wanted a window.
+
+        The premise is a backend that CAN show a window (the fleet was re-attached
+        headless, the caller asks headed). It is stated, not inherited: on a
+        DISPLAY-less Linux cell F-808's host guard refused the headed ask before the
+        running fleet was ever looked at, so this pin was red there and green on
+        Windows and macOS (PR #201, run 37881284432)."""
+        monkeypatch.setattr(desktop_launch, "can_deliver_headed_window", lambda: True)
         fleet = await _fleet(tmp_session_root)
         session_lease.reset()
 
