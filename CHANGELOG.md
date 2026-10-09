@@ -15,7 +15,12 @@ re-attaches the same browser under the same `instance_id`. What is new: it is re
 before every other browser, and if re-attaching it fails the browser is left running and
 recorded rather than killed (every other profile still takes the old remedy). Asking for
 `fleet` while it is open now returns that browser with `already_running: true` and the
-current lock status, instead of reading like an ordinary spawn.
+current lock status, instead of reading like an ordinary spawn. When that running (or
+re-attached) browser's headless state is not the one asked for, the answer carries
+`headless_mismatch` with both values and the remedy; `headless=False` is the default, so a
+bare call is told too instead of silently receiving an invisible browser. A seed whose live
+cookie hand-off did not complete (`seeded_via: "copy"`) now also puts `seed_warning` at the top
+level of the answer, not only inside `spawn_diagnostics`.
 
 Three new tools take turns on a session: `acquire_session_lock(owner, session="fleet",
 lease_seconds=300, wait_seconds=0)`, `release_session_lock(owner, session="fleet")` and

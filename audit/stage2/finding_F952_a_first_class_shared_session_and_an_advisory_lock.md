@@ -6,7 +6,7 @@
 `Held.running`), `clone_storage.py` (`_clone_seed`, the seed hook), `tool_sections/browser_management.py`
 (the already-running marker), `tool_runtime.py`, `tool_sections/__init__.py`, `server.py`
 (`--disable-session-lock`), `settings.py` (`seed_session`). Tests: `tests/test_fleet_session.py`
-(27), `tests/test_session_lease.py` (20).
+(28), `tests/test_session_lease.py` (21), plus 2 guards in `tests/test_cookie_handoff.py`.
 **Branch:** `feat/f952-shared-session`, stacked on the unmerged F-950 branch (e5cd77b).
 
 ---
@@ -156,7 +156,16 @@ missing modules stubbed so the file imports, `tests/test_fleet_session.py` at ba
 pass at baseline are the "verify and pin" claims: persistence (marker, close, sweep, adoptable),
 `seed_from` live hand-off, refusal by name, and adoption from a running or walked-clone source.
 `test_session_lease.py` cannot import at baseline (no module) — RED by absence. After the change:
-27 + 20 pass.
+28 + 21 pass.
+
+Follow-up (team-lead review): two more places a caller could be misled, each RED before GREEN
+(2 failed, the 2 no-warning guards passing, against the unchanged source).
+`fleet_session.headless_mismatch(requested, actual)` is merged into the reuse answer: the default
+`headless=False` is compared like any value, so a bare call that lands on an adopted headless
+browser gets `headless_mismatch` (both values and the remedy), not a silently invisible browser.
+`_seed_cookies_over_cdp`'s failure return gains `seed_warning`, surfaced at the top level of the
+`spawn_browser` answer; a hand-off that succeeded adds nothing. The warning reuses the already
+sanitised `cookie_handoff.failure` reason, so no cookie name or value can reach it (pinned).
 
 ## 5. Open items
 

@@ -278,7 +278,14 @@ class TestAskingForItWhileItRunsHere:
         return manager
 
     async def _spawn(
-        self, call_tool, patched_server, monkeypatch, manager, fleet, **kwargs
+        self,
+        call_tool,
+        patched_server,
+        monkeypatch,
+        manager,
+        fleet,
+        headless=True,
+        **kwargs,
     ):
         resolved: list = []
 
@@ -308,7 +315,7 @@ class TestAskingForItWhileItRunsHere:
             return {}
 
         async def fake_adopted(instance_id, _block_resources):
-            return {"instance_id": instance_id, "reattached": True}
+            return {"instance_id": instance_id, "reattached": True, "headless": True}
 
         monkeypatch.setattr(browser_reattach, "held_by", fake_held_by)
         monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
@@ -320,7 +327,7 @@ class TestAskingForItWhileItRunsHere:
         monkeypatch.setattr(manager, "get_spawn_diagnostics", diagnostics)
         srv = patched_server(browser_manager=manager)
         answer = await call_tool(
-            srv, "spawn_browser", headless=True, sandbox=False, **kwargs
+            srv, "spawn_browser", headless=headless, sandbox=False, **kwargs
         )
         return answer, resolved
 
@@ -380,6 +387,46 @@ class TestAskingForItWhileItRunsHere:
         assert answer["instance_id"] == "i-new"
         assert "already_running" not in answer
         assert resolved == [None]
+
+    async def test_a_headed_ask_that_got_a_headless_browser_is_told_so(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """`headless=False` is the tool default, so a bare call must report it
+        too: the running browser is invisible and the caller wanted a window."""
+        fleet = await _fleet(tmp_session_root)
+        session_lease.reset()
+
+        answer, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(fleet),
+            fleet,
+            headless=False,
+            session="fleet",
+        )
+
+        mismatch = answer["headless_mismatch"]
+        assert mismatch["requested_headless"] is False
+        assert mismatch["actual_headless"] is True
+        assert "headed" in mismatch["warning"] and "headless" in mismatch["warning"]
+
+    async def test_a_matching_headless_state_adds_nothing(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        fleet = await _fleet(tmp_session_root)
+        session_lease.reset()
+
+        answer, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(fleet),
+            fleet,
+            session="fleet",
+        )
+
+        assert "headless_mismatch" not in answer
 
     def test_a_session_that_was_not_running_has_no_marker(self):
         assert fleet_session.reuse_answer(False, "/anywhere/fleet") == {}

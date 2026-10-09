@@ -313,7 +313,11 @@ recorded instead of reaping it, because the login in it cannot be re-created.
 
 Asking for `fleet` while it is already open in this backend returns that instance with
 `already_running: true` and the current `session_lock`; it is never walked to `fleet-2`
-and never a copy. A spawn that names nothing is still never handed it.
+and never a copy. A spawn that names nothing is still never handed it. If the running browser's
+headless state differs from the `headless` you passed (the default `False` counts), the answer
+adds `headless_mismatch`; a running browser cannot change it, so close it and spawn again. A
+new session whose live cookie hand-off failed returns a top-level `seed_warning` (it is then
+probably signed out), in addition to `seeded_via: "copy"` in `spawn_diagnostics`.
 
 `seed_from` accepts any session **name** in the sessions directory, including the
 `<name>-<n>` an agent's browser was walked to. If this backend drives the source, its live

@@ -733,6 +733,34 @@ def _raise_or(jar):
     return jar
 
 
+class TestAJarThatWasNotCarriedIsLoud:
+    """F-952: `seeded_via: "copy"` inside `spawn_diagnostics` is easy to miss,
+    and a session that only has what was on disk is a signed-out session."""
+
+    async def test_a_failed_handoff_puts_a_warning_on_the_answer_itself(
+        self, call_tool, patched_server, monkeypatch
+    ):
+        result = await _spawn_with_live_seed(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            jar=RuntimeError("source wedged"),
+        )
+
+        assert "NOT carried" in result["seed_warning"]
+        assert "signed out" in result["seed_warning"]
+        _no_secret_in(result)
+
+    async def test_a_successful_handoff_has_no_warning(
+        self, call_tool, patched_server, monkeypatch
+    ):
+        result = await _spawn_with_live_seed(
+            call_tool, patched_server, monkeypatch, jar=cookies(*MEASURED_JAR)
+        )
+
+        assert "seed_warning" not in result
+
+
 class TestWhatTheSpawnReports:
     async def test_a_a_live_seed_reports_the_mechanism_and_the_counts(
         self, call_tool, patched_server, monkeypatch
