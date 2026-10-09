@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.25
 
 ### Logins made in the shared browser no longer get lost in a throwaway copy (F-950)
 
