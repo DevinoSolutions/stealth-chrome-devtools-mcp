@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.25
+## Unreleased
 
 ### A shared signed-in browser that survives restarts, plus a lock for taking turns (F-952)
 
@@ -41,6 +41,8 @@ refused by name, and a retry never replaces the original spawn error.
 
 New opt-in setting `STEALTH_MCP_SEED_SESSION=fleet` copies every new clone and new named
 session from `fleet` (with its live cookies) instead of `master-snapshot`. Off by default.
+
+## 2.1.25
 
 ### Logins made in the shared browser no longer get lost in a throwaway copy (F-950)
 
