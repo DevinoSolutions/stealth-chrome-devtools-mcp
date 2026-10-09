@@ -369,7 +369,7 @@ class Handoff(NamedTuple):
 
     def record(self) -> dict[str, object]:
         """The diagnostics fields, shape only — see the module docstring."""
-        return {
+        record: dict[str, object] = {
             "seeded_via": VIA_CDP,
             "cookies_carried": self.sent,
             "cookies_read": self.read,
@@ -378,6 +378,15 @@ class Handoff(NamedTuple):
             "cookies_in_target": self.jar_after,
             "cookies_rejected": self.rejected,
         }
+        if self.rejected:
+            # F-952: a PARTIAL jar reads as success in `seeded_via`; the count
+            # (never a name or value) is surfaced on the answer as a warning.
+            record["seed_warning"] = (
+                f"Chrome refused {self.rejected} of {self.read} cookies from the "
+                "source; the rest were carried. The session may be missing some "
+                "logins."
+            )
+        return record
 
 
 async def hand_off(source: "Browser", target: "Browser") -> Handoff:

@@ -134,6 +134,22 @@ async def test_one_refused_cookie_does_not_cost_the_rest_of_the_jar():
     assert record["cookies_rejected"] == 1
 
 
+async def test_a_partial_jar_carries_a_warning_naming_the_count_only():
+    """F-952: `seeded_via: "cdp-cookies"` alone reads as a complete hand-off."""
+    result, _ = await _hand_off([GOOD_A, REFUSED, GOOD_B], refuse={REFUSED["name"]})
+
+    warning = result.record()["seed_warning"]
+    assert "1 of 3" in warning
+    for secret in (REFUSED["name"], REFUSED["value"]):
+        assert secret not in warning
+
+
+async def test_a_clean_jar_carries_no_warning():
+    result, _ = await _hand_off([GOOD_A, GOOD_B], refuse=())
+
+    assert "seed_warning" not in result.record()
+
+
 async def test_the_refusal_is_found_in_a_logarithmic_number_of_writes():
     rows = [{**GOOD_A, "name": f"f950_{n}"} for n in range(64)] + [REFUSED]
     result, target = await _hand_off(rows, refuse={REFUSED["name"]})
