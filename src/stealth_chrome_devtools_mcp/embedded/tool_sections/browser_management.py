@@ -356,7 +356,7 @@ async def spawn_browser(
             return {
                 **record,
                 **rt.fleet_session.reuse_answer(held.running, user_data_dir),
-                **rt.fleet_session.headless_mismatch(headless, record["headless"]),
+                **rt.fleet_session.headless_mismatch(headless, record.get("headless")),
             }
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
