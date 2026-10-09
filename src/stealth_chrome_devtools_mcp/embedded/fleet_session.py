@@ -27,6 +27,7 @@ No import of ``clone_storage`` at module level: it imports this module.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -86,14 +87,46 @@ def spare_on_failed_attach(
     return True
 
 
+def lock_key(user_data_dir: str | Path | None) -> str:
+    """THE key a session's lease is held under, derived from the DIRECTORY it
+    means and never from the spelling: the shared profile is ``default`` (not
+    ``master``), a session under the session root is its casefolded name
+    (``Fleet`` and ``fleet`` are one directory on Windows and macOS), and a
+    directory outside the root is its whole normalised path, so an absolute dir
+    that merely ends in ``fleet`` cannot alias the session."""
+    from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+    if not user_data_dir:
+        return profile_seed.DEFAULT_SESSION
+    path = Path(str(user_data_dir))
+    if profile_seed.same_dir(path, clone_storage.master_profile_dir()):
+        return profile_seed.DEFAULT_SESSION
+    if profile_seed.same_dir(path.parent, clone_storage.clone_root_dir()):
+        return path.name.casefold()
+    return os.path.normcase(path.resolve())
+
+
+def session_key(session: str) -> str:
+    """:func:`lock_key` for a session NAME, as ``spawn_browser`` takes it."""
+    return lock_key(_dir_of(session))
+
+
+def _dir_of(session: str) -> str | None:
+    from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+    return clone_storage.require_allowed_user_data_dir(None, session)
+
+
 def reuse_answer(running_here: bool, user_data_dir: str | None) -> dict[str, object]:
     """What ``spawn_browser`` adds when the session asked for is already open in
     THIS backend: it is handed back, not walked to ``<name>-N`` and not
     someone else's, and the answer says so plus who holds the lock."""
     if not running_here or not user_data_dir:
         return {}
-    name = Path(user_data_dir).name
-    return {"already_running": True, "session_lock": session_lease.status(name)}
+    return {
+        "already_running": True,
+        "session_lock": session_lease.status(lock_key(user_data_dir)),
+    }
 
 
 def headless_mismatch(requested: bool, actual: bool | None) -> dict[str, object]:
