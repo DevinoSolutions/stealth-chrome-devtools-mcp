@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.26
 
 ### A shared signed-in browser that survives restarts, plus a lock for taking turns (F-952)
 
