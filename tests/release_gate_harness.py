@@ -90,6 +90,11 @@ SERVER_NAME = "stealth-chrome-devtools-mcp"
 REGISTRY_TOOL_COUNT = 97  # remediation baseline (CLAUDE.md: derived == 97)
 RESULT_SCHEMA_VERSION = 1
 FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
+#: The stand-in for a sign-in (F-958): ``GET /api/login`` sets this cookie
+#: HttpOnly, as a real login's session cookie is, so page script cannot read it
+#: back and only the server's own echo of the ``Cookie`` header can.
+LOGIN_COOKIE = "fleet_login"
+LOGIN_COOKIE_VALUE = "signed-in-f958"
 
 # ── Bounds (every await is wrapped; the pytest --timeout is the outer net) ──
 INIT_TIMEOUT = 60.0  # initialize handshake (answered locally by the proxy)
@@ -207,6 +212,16 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
             self.send_header("Set-Cookie", "fixture_cookie=server-set; Path=/")
             self.end_headers()
             self.wfile.write(b"cookie set")
+            return
+        if self.path == "/api/login":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header(
+                "Set-Cookie",
+                f"{LOGIN_COOKIE}={LOGIN_COOKIE_VALUE}; Path=/; HttpOnly; Max-Age=3600",
+            )
+            self.end_headers()
+            self.wfile.write(b"signed in")
             return
         if self.path == "/redirect":
             self.send_response(302)

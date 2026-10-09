@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from stealth_chrome_devtools_mcp.embedded import (
     google_rotation_guard,
     profile_seed,
+    profile_target,
     session_lease,
 )
 from stealth_chrome_devtools_mcp.embedded.cookie_handoff import VIA_CDP
@@ -126,6 +127,12 @@ def _dir_of(session: str) -> str | None:
     return clone_storage.require_allowed_user_data_dir(None, session)
 
 
+REUSED_WARNING = (
+    "Named session reused, not created — it already existed and is NOT "
+    "auto-cleaned; it persists on disk until it is deleted by hand."
+)
+
+
 def reuse_answer(running_here: bool, user_data_dir: str | None) -> dict[str, object]:
     """What ``spawn_browser`` adds when the session asked for is already open in
     THIS backend: it is handed back, not walked to ``<name>-N`` and not
@@ -135,6 +142,46 @@ def reuse_answer(running_here: bool, user_data_dir: str | None) -> dict[str, obj
     return {
         "already_running": True,
         "session_lock": session_lease.status(lock_key(user_data_dir)),
+    }
+
+
+def named_session_warning(selection: dict[str, object]) -> str:
+    """The ``profile_selection.warning`` sentence, in its one home (F-958).
+
+    "Created" is a claim about THIS call, so it is made only for a directory
+    this call made. A session already on disk persists all the same, but
+    nothing was created and the advice about not creating one is moot, so it
+    is dropped with the claim.
+    """
+    if selection.get(profile_target.EXISTING_KEY):
+        return REUSED_WARNING
+    return (
+        "Named session created — it is NOT auto-cleaned and persists on disk. "
+        "Only pass session when the user explicitly asks to keep a login; "
+        "otherwise omit it so the profile is copied and auto-deleted."
+    )
+
+
+def reused_record(record: dict[str, object]) -> dict[str, object]:
+    """*record* with the creating spawn's ``warning`` replaced by the reuse one.
+
+    A running browser keeps the diagnostics its CREATING spawn wrote, so handing
+    it to a second caller replays "Named session created" about a directory
+    nothing created. The stored dicts are copied, never edited: the record is
+    the running browser's own and the next caller reads it too.
+    """
+    diagnostics = record.get("spawn_diagnostics")
+    selection = (
+        diagnostics.get("profile_selection") if isinstance(diagnostics, dict) else None
+    )
+    if not isinstance(selection, dict) or "warning" not in selection:
+        return record
+    return {
+        **record,
+        "spawn_diagnostics": {
+            **diagnostics,
+            "profile_selection": {**selection, "warning": REUSED_WARNING},
+        },
     }
 
 

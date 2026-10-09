@@ -34,7 +34,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fakes import FakeBrowser, FakeTab, held_profile
+from fakes import FakeBrowser, FakeBrowserManager, FakeTab, held_profile
 from stealth_chrome_devtools_mcp.embedded import (
     browser_reattach,
     cdp_attach,
@@ -288,6 +288,7 @@ class TestAskingForItWhileItRunsHere:
         manager,
         fleet,
         headless=True,
+        stored_diagnostics=None,
         **kwargs,
     ):
         resolved: list = []
@@ -315,16 +316,17 @@ class TestAskingForItWhileItRunsHere:
             return None
 
         async def diagnostics(_instance_id):
-            return {}
+            return stored_diagnostics if stored_diagnostics is not None else {}
 
         async def fake_adopted(instance_id, _block_resources):
             return {"instance_id": instance_id, "reattached": True, "headless": True}
 
         monkeypatch.setattr(browser_reattach, "held_by", fake_held_by)
         monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
-        monkeypatch.setattr(
-            browser_management, "_adopted_instance_record", fake_adopted
-        )
+        if stored_diagnostics is None:
+            monkeypatch.setattr(
+                browser_management, "_adopted_instance_record", fake_adopted
+            )
         monkeypatch.setattr(manager, "spawn_browser", fake_launch)
         monkeypatch.setattr(manager, "get_tab", no_tab)
         monkeypatch.setattr(manager, "get_spawn_diagnostics", diagnostics)
@@ -445,6 +447,42 @@ class TestAskingForItWhileItRunsHere:
 
     def test_a_session_that_was_not_running_has_no_marker(self):
         assert fleet_session.reuse_answer(False, "/anywhere/fleet") == {}
+
+    async def test_the_reuse_answer_does_not_claim_it_created_the_session(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        """F-958. The diagnostics a running browser keeps are the ones its
+        CREATING spawn wrote, ``warning`` included, and the reuse answer
+        replays them: a second Claude session was told "Named session
+        created" about a directory nothing had created."""
+        fleet = await _fleet(tmp_session_root)
+        session_lease.reset()
+        stored = {
+            "profile_selection": {
+                "user_data_dir": str(fleet),
+                "warning": "Named session created — it is NOT auto-cleaned "
+                "and persists on disk. Only pass session when the user "
+                "explicitly asks to keep a login.",
+            }
+        }
+        before = json.loads(json.dumps(stored))
+
+        answer, _ = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            self._manager(fleet),
+            fleet,
+            session="fleet",
+            stored_diagnostics=stored,
+        )
+        session_lease.reset()
+
+        warning = answer["spawn_diagnostics"]["profile_selection"]["warning"]
+        assert answer["already_running"] is True
+        assert not warning.startswith("Named session created")
+        assert "already existed" in warning and "NOT auto-cleaned" in warning
+        assert stored == before, "the reuse rewrote the running browser's own record"
 
 
 class TestSeedingFromIt:
@@ -850,3 +888,100 @@ class TestARotationGuardForNamedSessionsSeededLive:
         browser = await Arms()._post_launch_with(options, monkeypatch)
 
         assert armed == [browser]
+
+
+class TestTheNamedSessionWarningTellsTheTruth:
+    """F-958. ``profile_selection.warning`` says "Named session created" only
+    when THIS spawn made the directory; a session that was already on disk is
+    reopened, and saying otherwise sends a caller hunting for a duplicate."""
+
+    def _manager(self) -> "FakeBrowserManager":
+        return FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i1",
+                state="active",
+                headless=True,
+                viewport={"width": 800, "height": 600},
+            ),
+            spawn_diagnostics={},
+        )
+
+    async def _warning(self, call_tool, patched_server, monkeypatch, session):
+        monkeypatch.setattr(browser_reattach, "held_by", lambda *_a, **_k: None)
+        answer = await call_tool(
+            patched_server(browser_manager=self._manager()),
+            "spawn_browser",
+            headless=True,
+            sandbox=False,
+            session=session,
+        )
+        return answer["spawn_diagnostics"]["profile_selection"]["warning"]
+
+    async def test_a_session_this_spawn_makes_is_called_created(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        warning = await self._warning(
+            call_tool, patched_server, monkeypatch, "brand-new"
+        )
+
+        assert warning.startswith("Named session created")
+        assert "NOT auto-cleaned" in warning
+
+    async def test_a_session_already_on_disk_is_not_called_created(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        await _selection(session="kept")
+
+        warning = await self._warning(call_tool, patched_server, monkeypatch, "kept")
+
+        assert not warning.startswith("Named session created")
+        assert "already existed" in warning
+        assert "NOT auto-cleaned" in warning
+
+
+class TestASiblingBackendsFleetIsRefusedWhole:
+    """F-958, the other half of "the fleet survives across sessions".
+
+    A caller on THIS backend is handed the running fleet; a caller on a
+    DIFFERENT backend (another version, another identity) cannot be, because no
+    connection of ours reaches that browser. It is refused BY NAME at the tool,
+    and the refusal is all that happens: the browser keeps running, its login
+    stays in its directory, and nothing is launched, killed or copied beside it.
+    """
+
+    async def test_the_tool_refuses_and_touches_nothing(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        fleet = await _fleet(tmp_session_root)
+        held_profile(fleet)
+        before = sorted(p.name for p in tmp_session_root["sessions"].iterdir())
+        killed: list = []
+        monkeypatch.setattr(os, "kill", lambda *a, **_k: killed.append(a))
+        monkeypatch.setattr(
+            browser_reattach,
+            "held_by",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                browser_reattach.Refused("a sibling backend owns it")
+            ),
+        )
+        manager = FakeBrowserManager(
+            spawn_instance=SimpleNamespace(
+                instance_id="i-new", state="active", headless=True, viewport={}
+            )
+        )
+
+        with pytest.raises(ToolError, match="fleet") as refusal:
+            await call_tool(
+                patched_server(browser_manager=manager),
+                "spawn_browser",
+                headless=True,
+                sandbox=False,
+                session="fleet",
+            )
+
+        assert "a sibling backend owns it" in str(refusal.value)
+        assert manager.spawn_calls == [], "a browser was launched beside the held one"
+        assert killed == [], "the holder was signalled"
+        assert (fleet / COOKIE_JAR).read_bytes() == LOGIN, "the login was touched"
+        after = sorted(p.name for p in tmp_session_root["sessions"].iterdir())
+        assert after == before, "a copy or a walked fleet-2 was left on disk"

@@ -354,7 +354,7 @@ async def spawn_browser(
         if held.instance_id:
             record = await _adopted_instance_record(held.instance_id, block_resources)
             return {
-                **record,
+                **rt.fleet_session.reused_record(record),
                 **rt.fleet_session.reuse_answer(held.running, user_data_dir),
                 **rt.fleet_session.headless_mismatch(headless, record.get("headless")),
             }
@@ -462,10 +462,9 @@ async def spawn_browser(
                     if walked
                     else ""
                 )
-                spawn_diagnostics["profile_selection"]["warning"] = substitution + (
-                    "Named session created — it is NOT auto-cleaned and persists on disk. "
-                    "Only pass session when the user explicitly asks to keep a login; "
-                    "otherwise omit it so the profile is copied and auto-deleted."
+                spawn_diagnostics["profile_selection"]["warning"] = (
+                    substitution
+                    + rt.fleet_session.named_session_warning(profile_selection)
                 )
         return {
             "instance_id": instance.instance_id,
