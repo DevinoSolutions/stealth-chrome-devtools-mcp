@@ -237,7 +237,12 @@ class RotationGuard:
             )
         elif method == "Target.detachedFromTarget":
             gone = params.get("sessionId")
-            self._pending -= self._pending_by_session.pop(gone, set())
+            # A target that closed before Chrome answered is not an unguarded
+            # one: Chrome detaches it first, then refuses our command for a
+            # session it no longer has (F-957).
+            ids = self._pending_by_session.pop(gone, set())
+            self._pending -= ids
+            self._fetch_enable_ids -= ids
             self._release_if_idle()
 
     def _settle(self, message: dict[str, object]) -> None:
