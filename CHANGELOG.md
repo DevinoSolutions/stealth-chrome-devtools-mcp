@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Agents waiting for a shared session now take turns in the order they asked (F-956)
+
+Waiting on `acquire_session_lock` used to be a free-for-all: every waiter checked back every
+quarter second and whoever happened to check first after a release got the session. Now each
+session has a queue. A waiter joins the back of it, and when the holder releases (or the lease
+simply runs out) the agent at the front gets the session, right away, in the order agents asked.
+Nobody can cut in: a call that does not wait (`wait_seconds=0`) is refused while others are
+queued, even if the lock has just become free, and the refusal names the holder, when the lease
+expires, and how many are waiting ahead of you. An agent that gives up, runs out of wait time,
+or disconnects leaves the queue and the next one moves up, so a dead caller cannot block the
+line. The holder renewing its own lease still works at once, and one owner label can wait in a
+queue only once (a second try says it is already waiting, and at which position).
+
+`get_session_lock_status` now also lists who is waiting (`queue_length`, and `waiting` with each
+owner, position and seconds waited, in order), and takes an optional `owner` so it can answer
+`your_position`: 0 if you hold the lock, 1 or more for your place in the line, null if neither.
+The same fields appear in the `session_lock` block `spawn_browser` returns for a session that is
+already running. The wait cap stays at 60 seconds.
+
 ## 2.1.26
 
 ### A shared signed-in browser that survives restarts, plus a lock for taking turns (F-952)
