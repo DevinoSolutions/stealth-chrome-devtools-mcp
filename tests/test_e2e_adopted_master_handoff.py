@@ -191,7 +191,9 @@ async def test_a_clone_of_a_re_attached_master_carries_its_logins(
                         iid: {
                             "pid": chrome_pid,
                             "create_time": psutil.Process(chrome_pid).create_time(),
-                            "user_data_dir": str(master).lower(),
+                            "user_data_dir": os.path.normcase(
+                                os.path.normpath(str(master))
+                            ),
                             "uses_custom_data_dir": True,
                             "auto_clone": False,
                             "cdp_port": port,
