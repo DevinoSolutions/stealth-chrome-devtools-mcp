@@ -40,7 +40,7 @@ that had waited for minutes. There was also no way to see who was waiting.
   ("lock state was reset") instead of waiting on a queue that no longer exists.
 * `POLL_SECONDS` is gone (its only reader was the poll loop). `MAX_WAIT_SECONDS` stays 60.
 
-No deviation from the brief. One choice the brief left open: a waiter whose own deadline passes
+No deviation from the brief. Follow-up (review): the finally wakes the new head unconditionally, so when the head TAKES the lock the next waiter re-arms its timer on the new holder's expiry instead of sleeping to its own deadline (pinned by `test_the_next_waiter_re_arms_on_the_new_holders_expiry`). One choice the brief left open: a waiter whose own deadline passes
 while it is not head simply leaves; its refusal reports the position it had reached then.
 
 ## 3. Evidence

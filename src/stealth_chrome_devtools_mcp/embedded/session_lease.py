@@ -235,7 +235,6 @@ async def _wait_in_line(
     queue = _queues.setdefault(session, [])
     queue.append(me)
     deadline = me.enqueued_mono + wait_seconds
-    took = False
     try:
         while True:
             if me.dropped:
@@ -245,7 +244,6 @@ async def _wait_in_line(
                 )
             held = _live(session)
             if _may_take(queue, me, held):
-                took = True
                 return {**_take(session, name, lease_seconds), "acquired": True}
             remaining = deadline - _mono()
             if remaining <= 0:
@@ -263,8 +261,10 @@ async def _wait_in_line(
             queue.remove(me)
         if not queue and _queues.get(session) is queue:
             del _queues[session]
-        if not took:
-            _wake_head(session)  # the next in line may be able to take it now
+        # Always wake the new head: if we left empty-handed it may take the lock
+        # now, and if we took it, it must re-arm its timer on OUR lease's expiry
+        # (it slept as a non-head, with only its own deadline as a timeout).
+        _wake_head(session)
 
 
 def release(session: str, owner: str) -> dict[str, object]:
