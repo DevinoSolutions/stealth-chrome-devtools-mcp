@@ -380,6 +380,7 @@ async def spawn_browser(
                 user_data_dir=selected_user_data_dir,
                 sandbox=sandbox,
                 auto_clone=(profile_selection.get("profile_role") == "clone"),
+                guard_rotation=rt.fleet_session.guards_rotation(profile_selection),
             )
             try:
                 instance = await rt.browser_manager.spawn_browser(options)
@@ -393,17 +394,14 @@ async def spawn_browser(
                 if profile_selection.get("profile_role") == "clone":
                     rt.clone_storage._release_clone_dir(selected_user_data_dir)
                 if spawn_attempt == _SPAWN_ATTEMPTS - 1:
-                    # The budget is spent and the loop's `else` raises below, so
-                    # a re-selection here is one nothing will ever drive: for a
-                    # role that clones it copies a whole profile tree and then
-                    # leaves it `_protect_clone_dir`-ed for the life of the
-                    # process — this handler has already run for it and
-                    # `close_instance`, the only other release, never will.
+                    # The budget is spent and the `else` raises below, so a
+                    # re-selection here is never driven: a cloning role would copy
+                    # a whole tree and leave it `_protect_clone_dir`-ed for the
+                    # life of the process (`close_instance` never releases it).
                     continue
-                # The SAME witness the first selection was made with (F-914):
-                # this is the second door onto the held-shared-session rule, and
-                # a retry that asked nobody would answer a held `default` with
-                # the clone the resolver refuses one call earlier.
+                # The SAME witness as the first selection (F-914): the second
+                # door onto the held-shared-session rule, which a retry that
+                # asked nobody would answer with the clone the resolver refuses.
                 fallback_selection = await rt.clone_storage._fallback_profile_selection(
                     profile_selection, spawn_attempt, driven=driven.holds
                 )
@@ -418,11 +416,10 @@ async def spawn_browser(
             await rt.network_interceptor.setup_interception(
                 tab, instance.instance_id, block_resources
             )
-        # F-898: the file copy that made this session ran against a directory
-        # Chrome is writing to and carried no cookies, so the jar comes across
-        # here instead — after the target exists, because the hand-off writes
-        # INTO it. It never raises: the session exists and works, and a failed
-        # hand-off is a session missing its cookies, not a spawn that failed.
+        # F-898: the file copy ran against a directory Chrome is writing to and
+        # carried no cookies, so the jar comes across here, after the target
+        # exists. It never raises: a failed hand-off is a session missing its
+        # cookies, not a spawn that failed.
         cookie_seed = await _seed_cookies_over_cdp(profile_selection, instance)
 
         spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(
@@ -476,7 +473,7 @@ async def spawn_browser(
             "headless": instance.headless,
             "viewport": instance.viewport,
             "spawn_diagnostics": spawn_diagnostics or {},
-            **{k: v for k, v in cookie_seed.items() if k == "seed_warning"},
+            **rt.fleet_session.seed_warning(profile_selection, cookie_seed),
         }
     except Exception as e:
         # A spawn that failed onto a directory a live browser HOLDS is the one
@@ -590,7 +587,9 @@ async def _seed_cookies_over_cdp(
             "seed_warning": f"The source's cookies were NOT carried ({reason}): this "
             "session has only what was on disk, so it is probably signed out.",
         }
-    return handoff.record()
+    record = handoff.record()
+    rt.fleet_session.record_live_seed(profile_selection, record)
+    return record
 
 
 def _launch_only_args(**passed: Any) -> list[str]:

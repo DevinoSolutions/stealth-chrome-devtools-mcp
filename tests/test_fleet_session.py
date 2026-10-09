@@ -39,12 +39,13 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     clone_storage,
     fleet_session,
+    google_rotation_guard,
     profile_seed,
     profile_source,
     session_lease,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
-from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.embedded.tool_sections import browser_management
@@ -637,6 +638,85 @@ class TestTheDefaultSeedSetting:
         assert (clone / COOKIE_JAR).read_bytes() == LOGIN
         assert profile_seed.provenance(clone)["seeded_from"] == "fleet"
 
+    async def test_an_unnamed_clone_falls_back_when_the_seed_is_held_by_a_stranger(
+        self, tmp_session_root, seeded_by_fleet
+    ):
+        """It asked for no particular profile, so it must not fail; it gets the
+        snapshot and the answer says why the configured session was not used."""
+        fleet = tmp_session_root["sessions"] / "fleet"
+        await _selection(session="fleet")
+        (fleet / COOKIE_JAR).parent.mkdir(parents=True, exist_ok=True)
+        (fleet / COOKIE_JAR).write_bytes(LOGIN)
+        master = tmp_session_root["master"]
+        held_profile(master)
+        held_profile(fleet)
+
+        selection = await _selection(driven=_driving(master))
+
+        clone = Path(selection["user_data_dir"])
+        assert selection["profile_role"] == "clone"
+        assert not (clone / COOKIE_JAR).exists() or (
+            (clone / COOKIE_JAR).read_bytes() != LOGIN
+        )
+        warning = selection["seed_warning"]
+        assert "STEALTH_MCP_SEED_SESSION" in warning
+        assert "snapshot" in warning and "fleet" in warning
+
+    async def test_an_unnamed_clone_falls_back_when_the_seed_is_gone(
+        self, tmp_session_root, seeded_by_fleet
+    ):
+        forced = await clone_storage.resolve_profile_selection(None, force_clone=True)
+        assert "does not exist" in forced["seed_warning"]
+        assert forced["profile_role"] == "clone"
+
+    async def test_a_new_named_session_under_the_setting_still_refuses_by_name(
+        self, tmp_session_root, seeded_by_fleet
+    ):
+        fleet = tmp_session_root["sessions"] / "fleet"
+        await _selection(session="fleet")
+        held_profile(fleet)
+
+        with pytest.raises(ToolError, match="fleet"):
+            await _selection(session="job-e")
+
+        assert not (tmp_session_root["sessions"] / "job-e").exists()
+
+    @pytest.mark.parametrize("snapshot", [True, False], ids=["snapshot", "none"])
+    async def test_a_retry_never_replaces_the_original_error_with_the_seeds(
+        self, tmp_session_root, seeded_by_fleet, snapshot
+    ):
+        """The seed session is gone: the fallback must neither raise the
+        setting's ToolError over the spawn error that caused the retry, nor
+        fail to retry because of it."""
+        previous = {
+            "profile_role": "clone",
+            "user_data_dir": str(tmp_session_root["sessions"] / "gone"),
+        }
+        if not snapshot:
+            import shutil
+
+            shutil.rmtree(clone_storage.master_snapshot_dir(), ignore_errors=True)
+
+        retry = await clone_storage._fallback_profile_selection(previous, 0)
+
+        if snapshot:
+            assert retry is not None
+            assert "does not exist" in retry["seed_warning"]
+        else:
+            assert retry is None
+
+    def test_the_warning_reaches_the_top_level_of_the_answer(self):
+        merged = fleet_session.seed_warning(
+            {"seed_warning": "the seed was not used"},
+            {"seed_warning": "cookies were not carried"},
+            {},
+        )
+
+        assert merged == {
+            "seed_warning": "the seed was not used cookies were not carried"
+        }
+        assert fleet_session.seed_warning({}, {}) == {}
+
     def test_the_setting_is_a_name_not_a_path(self, monkeypatch, tmp_session_root):
         monkeypatch.setenv("STEALTH_MCP_SEED_SESSION", os.fspath(Path("/x/y")))
         get_settings.cache_clear()
@@ -645,3 +725,114 @@ class TestTheDefaultSeedSetting:
                 fleet_session.default_seed(None, None)
         finally:
             get_settings.cache_clear()
+
+
+class TestARotationGuardForNamedSessionsSeededLive:
+    """F-939 for named sessions: a NEW named session whose jar was handed over
+    from a LIVE browser holds a second copy of that browser's Google chain, so
+    its launch is guarded -- the first one and every later one."""
+
+    async def _live_named(self, tmp_session_root) -> dict:
+        fleet = await _fleet(tmp_session_root)
+        held_profile(fleet)
+        landed = clone_storage.require_allowed_user_data_dir(None, "job-g")
+        return await clone_storage.resolve_profile_selection(
+            landed, seed_from="fleet", driven=_driving(fleet)
+        )
+
+    async def test_the_creation_launch_is_guarded(self, tmp_session_root):
+        selection = await self._live_named(tmp_session_root)
+
+        assert selection["profile_role"] == "explicit"
+        assert fleet_session.guards_rotation(selection) is True
+
+    async def test_the_source_itself_is_not(self, tmp_session_root):
+        await _fleet(tmp_session_root)
+        selection = await clone_storage.resolve_profile_selection(
+            clone_storage.require_allowed_user_data_dir(None, "fleet")
+        )
+
+        assert fleet_session.guards_rotation(selection) is False
+
+    async def test_a_session_copied_from_a_closed_source_is_not(self, tmp_session_root):
+        await _fleet(tmp_session_root)
+        selection = await clone_storage.resolve_profile_selection(
+            clone_storage.require_allowed_user_data_dir(None, "job-h"),
+            seed_from="fleet",
+        )
+
+        assert fleet_session.guards_rotation(selection) is False
+
+    async def test_a_relaunch_is_guarded_from_the_marker(self, tmp_session_root):
+        selection = await self._live_named(tmp_session_root)
+        created = Path(selection["user_data_dir"])
+        fleet_session.record_live_seed(selection, {"seeded_via": "cdp-cookies"})
+        assert (
+            json.loads((created / profile_seed.MARKER_NAME).read_text("utf-8"))[
+                "seeded_via"
+            ]
+            == "cdp-cookies"
+        )
+
+        relaunch = {"profile_role": "explicit", "user_data_dir": str(created)}
+
+        assert fleet_session.guards_rotation(relaunch) is True
+
+    async def test_a_failed_handoff_stamps_nothing(self, tmp_session_root):
+        selection = await self._live_named(tmp_session_root)
+        created = Path(selection["user_data_dir"])
+
+        fleet_session.record_live_seed(
+            selection, {"seeded_via": "copy", "cookie_handoff_error": "X"}
+        )
+
+        assert "seeded_via" not in profile_seed.read_marker(created)
+        relaunch = {"profile_role": "explicit", "user_data_dir": str(created)}
+        assert fleet_session.guards_rotation(relaunch) is False
+
+    async def test_the_spawn_hands_the_manager_the_flag(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        selection = await self._live_named(tmp_session_root)
+        seen: list = []
+
+        async def fake_resolve(*_a, **_k):
+            return selection
+
+        async def fake_launch(options):
+            seen.append(options)
+            raise RuntimeError("stop after the options are built")
+
+        manager = BrowserManager()
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", fake_resolve)
+        monkeypatch.setattr(manager, "spawn_browser", fake_launch)
+        srv = patched_server(browser_manager=manager)
+
+        with pytest.raises(ToolError):
+            await call_tool(
+                srv,
+                "spawn_browser",
+                headless=True,
+                sandbox=False,
+                session="job-g2",
+            )
+
+        assert seen and seen[0].guard_rotation is True
+        assert seen[0].auto_clone is False, "the session must stay persistent"
+
+    async def test_the_manager_arms_it_without_making_it_disposable(
+        self, monkeypatch, tmp_path
+    ):
+        from test_google_rotation_guard import TestTheSpawnArmsClonesOnly as Arms
+
+        armed: list = []
+
+        async def fake_arm(browser, *args):
+            armed.append(browser)
+
+        monkeypatch.setattr(google_rotation_guard, "arm", fake_arm)
+        options = BrowserOptions(user_data_dir=str(tmp_path), guard_rotation=True)
+
+        browser = await Arms()._post_launch_with(options, monkeypatch)
+
+        assert armed == [browser]

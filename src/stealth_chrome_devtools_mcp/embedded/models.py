@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class BrowserState(StrEnum):
@@ -136,6 +136,14 @@ class BrowserOptions(BaseModel):
         default=None, description="Path to user data directory"
     )
     sandbox: bool = Field(default=True, description="Enable browser sandbox mode")
+    guard_rotation: bool = Field(
+        default=False,
+        description=(
+            "Internal: fail Google cookie-rotation requests, as for an auto-clone, "
+            "without making the profile disposable (a named session seeded from a "
+            "live browser's jar, F-952). Set by the server, never by callers."
+        ),
+    )
     auto_clone: bool = Field(
         default=False,
         description=(
@@ -144,6 +152,11 @@ class BrowserOptions(BaseModel):
             "resolved profile role, never by callers."
         ),
     )
+
+    @model_validator(mode="after")
+    def _a_clone_is_guarded(self) -> "BrowserOptions":
+        self.guard_rotation = self.guard_rotation or self.auto_clone
+        return self
 
 
 class NavigationOptions(BaseModel):

@@ -734,19 +734,20 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
                 # first, or the claim could not be written at all. Neither is
                 # evidence about the BROWSER.
                 #
-                # Reaping here was worse than the race it was added to fix: B and
-                # C start together and both classify entry E adoptable; C claims
-                # and adopts, and B (refused) would then kill every browser on
-                # that profile predating its own `_init_time` -- C's adopted one
-                # included -- and drop the entry C re-stamped. A lost claim is the
-                # rule WORKING; the entry and the browser stay as they are.
+                # Reaping here was worse than the race it fixed: B and C start
+                # together, C claims and adopts, and B (refused) would kill every
+                # browser on that profile predating its `_init_time` -- C's too --
+                # and drop C's entry. The login dies, C holds a handle to a
+                # corpse, nothing on disk names it. A lost claim is the rule
+                # WORKING; entry and browser stay as they are.
                 report("reattach", f"Left to its owner: {exc}")
                 continue
             except Exception as exc:  # noqa: BLE001  PERMANENT(a startup background pass must never raise; every failure that is evidence about the BROWSER has the one remedy below)
-                # Blind on purpose BELOW the refusal above: this background
-                # startup pass MUST never raise. What is left after `Refused` is
-                # evidence about the browser (refused connect, no tab, wedged
-                # Chrome, a nodriver change), all with the same remedy, the reap.
+                # Blind on purpose BELOW the refusal: this startup pass MUST never
+                # raise, and what is left is evidence about the browser (refused
+                # connect, no tab, wedged Chrome, a nodriver change) with one remedy,
+                # the reap; narrowing would turn an unforeseen one into an
+                # unhandled task exception.
                 if fleet_session.spare_on_failed_attach(instance_id, candidate, exc):
                     continue
                 failed.add(instance_id)
