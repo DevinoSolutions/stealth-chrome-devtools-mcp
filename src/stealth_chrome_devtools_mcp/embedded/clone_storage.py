@@ -774,14 +774,16 @@ def _clone_seed(
 ) -> tuple[profile_source.SeedSource, bool]:
     """What a new clone is copied from, and whether the OWNER chose it.
 
-    A retry's ``override``; the configured seed session (F-952), whose live jar
-    rides with it; the snapshot; then the shared profile itself, the only copy
-    when there is no seed yet (F-920: OPEN means the jar arrives over CDP,
-    CLOSED is a directory at rest)."""
-    if override is not None:
-        return override, False
+    The configured seed session (F-952), whose live jar rides with it and which
+    a retry's ``override`` may NOT replace (a retry that fell back to the
+    snapshot would be a second way to seed); a retry's ``override``; the
+    snapshot; then the shared profile itself, the only copy when there is no
+    seed yet (F-920: OPEN means the jar arrives over CDP, CLOSED is a directory
+    at rest)."""
     if named := fleet_session.default_seed(None, None):
         return _seed_source_for_copy(named, driven), True
+    if override is not None:
+        return override, False
     if master_snapshot_dir().exists():
         return profile_source.SeedSource(master_snapshot_dir(), "default-seed"), False
     if master_profile_dir().exists():
@@ -961,18 +963,14 @@ async def _fallback_profile_selection(
 ) -> dict[str, Any] | None:
     # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
     # the two non-clone roles retry the SAME directory, which this attempt's
-    # F-860 reap has just freed — a NAMED profile is the identity the caller
-    # asked for and is never walked or swapped, and a shared profile no sibling
-    # took is still the best profile here, while one a sibling DID take falls
-    # through. The hold is asked about the directory this attempt DROVE, off the
-    # selection, never config. No wait, no reservation: CLAUDE.md's row.
+    # F-860 reap has just freed — a NAMED profile is never walked or swapped, and
+    # a shared profile no sibling took is still the best profile here, while one
+    # a sibling DID take falls through. The hold is asked about the directory this
+    # attempt DROVE, off the selection, never config. No wait, no reservation.
     #
-    # `driven` is F-914/F-915's witness, threaded for TWO reasons. This is the
-    # SECOND DOOR onto the held-shared-session rule — F-834 widened this
-    # function to all three roles, so without it a spawn that failed once
-    # answers a held shared session with exactly the snapshot clone the
-    # resolver refuses one call earlier — and it is what decides whether a
-    # hand-off the previous attempt was making survives this one.
+    # `driven` is F-914/F-915's witness: this is the SECOND DOOR onto the
+    # held-shared-session rule, and it decides whether a hand-off the previous
+    # attempt was making survives this one.
     shared = profile_seed.DEFAULT_SESSION
     role = previous_selection.get("profile_role")
     same = previous_selection.get("user_data_dir")
@@ -982,7 +980,8 @@ async def _fallback_profile_selection(
         return None
 
     snapshot = master_snapshot_dir()
-    if not snapshot.exists():
+    # F-952: a configured seed session needs no snapshot, and wins over it.
+    if not snapshot.exists() and not fleet_session.default_seed(None, None):
         return None
     final = attempt > 0
     return await resolve_profile_selection(
