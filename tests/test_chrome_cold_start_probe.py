@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import http.server
 import json
 import os
 import socket
@@ -56,9 +57,6 @@ import chrome_cold_start_probe as probe
 #             handler answers yet, so the probe must keep polling through it.
 #   silent  — start, never announce, never listen (hypothesis H3's shape).
 #   die     — exit immediately with a distinctive code.
-#   squat   — serve /json/version on the port given as argv[5] and NEVER print a
-#             banner: something else holding the port we reserved, which is the
-#             H2 race. Must NOT score as a successful launch.
 _FAKE_BROWSER = """
 import http.server, json, pathlib, socketserver, sys, time
 
@@ -85,12 +83,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-if mode == "squat":
-    http.server.HTTPServer.allow_reuse_address = True
-    squatter = http.server.HTTPServer(("127.0.0.1", int(sys.argv[5])), Handler)
-    squatter.serve_forever()
-    raise SystemExit(0)
-
 server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
 port = server.server_address[1]
 pathlib.Path(profile, "bound-port").write_text(str(port), encoding="utf-8")
@@ -99,6 +91,15 @@ sys.stderr.flush()
 time.sleep(lead)
 server.serve_forever()
 """
+
+
+# How long a probe that is EXPECTED to succeed may take before the test gives up.
+# A success ends the probe's loop at once, so a generous budget costs nothing on a
+# healthy machine, while a fixed few seconds was spent by interpreter start-up alone
+# on a starved lane (F-954): the banner arrived after the deadline and the record
+# read "never listened". Only the tests that expect a death or silence keep a
+# short deadline, because they run it out on purpose.
+_LAUNCH_BUDGET_SECONDS = probe.DEADLINE_SECONDS
 
 
 @pytest.fixture
@@ -153,6 +154,36 @@ def _pid_alive(pid: int) -> bool:
 
 
 @contextlib.contextmanager
+def _squatter(port: int) -> Iterator[None]:
+    """Something OTHER than the launched browser already serving `/json/version`
+    on `port`, up BEFORE the launch begins. It lives in this process rather than in
+    the launched child so its readiness does not depend on how soon a starved
+    interpreter gets to bind (F-954)."""
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802  PERMANENT(http.server dispatches on this name)
+            body = json.dumps({"Browser": "Squatter/1.0"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@contextlib.contextmanager
 def _garbage_server() -> Iterator[int]:
     """A socket that ACCEPTS and then replies with a non-HTTP line.
 
@@ -202,7 +233,7 @@ def test_both_timings_are_measured_and_ordered(fake_browser: Path, tmp_path: Pat
         _log(tmp_path, "p1"),
         launch=1,
         port_requested=0,
-        deadline_seconds=20.0,
+        deadline_seconds=_LAUNCH_BUDGET_SECONDS,
     )
     assert record.listening is True
     assert record.error is None
@@ -256,7 +287,7 @@ def test_a_browser_that_dies_reports_its_exit_code_promptly(
         _log(tmp_path, "p3"),
         launch=2,
         port_requested=0,
-        deadline_seconds=20.0,
+        deadline_seconds=_LAUNCH_BUDGET_SECONDS,
     )
     elapsed = time.monotonic() - started
     assert record.listening is False
@@ -277,7 +308,7 @@ def test_the_launched_process_is_killed_before_the_record_is_returned(
         _log(tmp_path, "p7"),
         launch=1,
         port_requested=0,
-        deadline_seconds=20.0,
+        deadline_seconds=_LAUNCH_BUDGET_SECONDS,
     )
     assert record.pid is not None
     deadline = time.monotonic() + 10.0
@@ -369,7 +400,7 @@ def test_a_port_the_browser_did_not_take_is_flagged(fake_browser: Path, tmp_path
         _log(tmp_path, "p4"),
         launch=1,
         port_requested=65500,
-        deadline_seconds=20.0,
+        deadline_seconds=_LAUNCH_BUDGET_SECONDS,
     )
     assert record.port_from_banner == _bound_port(profile)
     assert record.port_from_banner != 65500
@@ -393,17 +424,14 @@ def test_a_squatter_on_the_reserved_port_does_not_score_as_a_launch(
     """
     profile = _profile(tmp_path, "p8")
     port = probe._reserve_port()
-    command = [
-        *_command(fake_browser, profile, delay=0, lead=0, mode="squat"),
-        str(port),
-    ]
-    record = probe.probe_once(
-        command,
-        _log(tmp_path, "p8"),
-        launch=1,
-        port_requested=port,
-        deadline_seconds=3.0,
-    )
+    with _squatter(port):
+        record = probe.probe_once(
+            _command(fake_browser, profile, delay=0, lead=0, mode="silent"),
+            _log(tmp_path, "p8"),
+            launch=1,
+            port_requested=port,
+            deadline_seconds=3.0,
+        )
     assert record.json_answered_before_banner is True
     assert record.listening is False
     assert record.port_from_banner is None
@@ -424,7 +452,7 @@ def test_the_launch_output_is_captured_rather_than_discarded(
         _log(tmp_path, "p5"),
         launch=1,
         port_requested=0,
-        deadline_seconds=20.0,
+        deadline_seconds=_LAUNCH_BUDGET_SECONDS,
     )
     assert "DevTools listening on ws://" in record.output_excerpt
     assert "fake-browser start" in record.output_excerpt

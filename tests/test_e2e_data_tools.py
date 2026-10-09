@@ -73,6 +73,27 @@ async def _poll_response_details(rid: str, timeout: float = 10.0):
     return None
 
 
+async def _poll_response_body(iid: str, rid: str, timeout: float = 10.0):
+    """Bounded-poll get_response_content until it returns a non-None body.
+
+    The body is a SECOND eventual-consistency window (F-953). The response record
+    is stored once ``_on_response`` has asked CDP for the body, which happens on
+    ``Network.responseReceived`` (headers in), not on ``loadingFinished``; the
+    tool's own live ``Network.getResponseBody`` can still be refused for a body
+    that has not finished arriving, and the tool reports every such refusal as
+    ``None`` (a body that is "unavailable" and one that is "not here yet" read
+    the same). Polling the record alone therefore does not cover the body. Same
+    deadline/interval style as ``_poll_response_details``."""
+    get_response_content = get_fn("get_response_content")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = await get_response_content(instance_id=iid, request_id=rid)
+        if body is not None:
+            return body
+        await asyncio.sleep(0.25)
+    return None
+
+
 def _first_existing_path(result) -> Path | None:
     """Pull the first string value that names an existing file out of a tool
     result dict (the to-file tools report their path under file_path/filepath/
@@ -97,7 +118,6 @@ async def test_network_debugging_flow(fixture_app_server, tmp_path):
     set_filters = get_fn("set_network_capture_filters")
     get_filters = get_fn("get_network_capture_filters")
     get_request_details = get_fn("get_request_details")
-    get_response_content = get_fn("get_response_content")
     search = get_fn("search_network_requests")
     export = get_fn("export_network_data")
     import_data = get_fn("import_network_data")
@@ -130,8 +150,8 @@ async def test_network_debugging_flow(fixture_app_server, tmp_path):
         )
 
         # Response body parses to the fixture ground truth (value == 42).
-        body = await get_response_content(instance_id=iid, request_id=rid)
-        assert body is not None
+        body = await _poll_response_body(iid, rid)
+        assert body is not None, "response body never became available"
         assert json.loads(body)["value"] == 42
 
         # search filters by our URL substring only (never a total count).
@@ -156,9 +176,8 @@ async def test_network_debugging_flow(fixture_app_server, tmp_path):
         # Same eventual-consistency window: wait for the response record before
         # reading its content.
         assert isinstance(await _poll_response_details(echo["request_id"]), dict)
-        echo_body = await get_response_content(
-            instance_id=iid, request_id=echo["request_id"]
-        )
+        echo_body = await _poll_response_body(iid, echo["request_id"])
+        assert echo_body is not None, "echo response body never became available"
         reflected = json.loads(echo_body)
         assert reflected["body"] == "fixture-payload"
         assert reflected["headers"].get("x-fixture-injected") == "yes"
