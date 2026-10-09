@@ -27,17 +27,22 @@ No import of ``clone_storage`` at module level: it imports this module.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed, session_lease
+from stealth_chrome_devtools_mcp.embedded.cookie_handoff import VIA_CDP
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from stealth_chrome_devtools_mcp.embedded.browser_reattach import Adoptable
+    from stealth_chrome_devtools_mcp.embedded.profile_source import SeedSource
 
 FLEET_SESSION = "fleet"
 
@@ -175,3 +180,86 @@ def default_seed(seed_from: str | None, landed: str | None) -> str | None:
             f"Create it with spawn_browser(session={name!r}) or unset the setting."
         )
     return name
+
+
+def clone_seed(
+    source_for_copy: Callable[[str, Callable[[Path], bool]], SeedSource],
+    driven: Callable[[Path], bool],
+) -> tuple[SeedSource | None, str | None]:
+    """The configured seed session as an UNNAMED clone's source, as
+    ``(source, None)``; ``(None, None)`` when nothing is configured; and
+    ``(None, warning)`` when it is configured but cannot be used right now
+    (held by a browser this backend does not drive, or gone).
+
+    An unnamed spawn asked for no particular profile, so a source that cannot
+    be copied must not fail it: the caller falls back to the snapshot and the
+    answer carries *warning*, which names why. The refusal stays BY NAME for an
+    explicit ``seed_from`` and for a NEW named session created under the
+    setting -- those callers asked for that profile specifically."""
+    try:
+        named = default_seed(None, None)
+        return (source_for_copy(named, driven) if named else None), None
+    except ToolError as exc:
+        return None, (
+            f"{SEED_SETTING} could not be used, so this clone was copied from "
+            f"the snapshot instead and does NOT carry the {FLEET_SESSION} "
+            f"session's logins: {exc}"
+        )
+
+
+def seed_warning(*selections: dict[str, object]) -> dict[str, object]:
+    """The ``seed_warning`` fields of *selections* (the profile selection, the
+    cookie hand-off's record) as one top-level answer field, or ``{}``."""
+    found = [str(sel["seed_warning"]) for sel in selections if sel.get("seed_warning")]
+    return {"seed_warning": " ".join(found)} if found else {}
+
+
+#: The clone-marker key that remembers a named session's jar came from a LIVE
+#: browser (its value is ``cookie_handoff.VIA_CDP``), so a relaunch re-arms the guard.
+SEEDED_VIA_KEY = "seeded_via"
+
+
+def guards_rotation(selection: dict[str, object]) -> bool:
+    """True when the browser about to launch must have Google's cookie-rotation
+    requests failed (F-939/F-952) although it is not a disposable clone.
+
+    A clone always is (``auto_clone``). A NAMED session is too when its jar was
+    handed over from a LIVE browser: it then holds a second copy of that
+    browser's Google chain, and if both rotate Google reads it as theft and
+    signs the source out. That is known at creation (the resolver marked a live
+    source) and, for every later launch, from the marker
+    :func:`record_live_seed` wrote. A session the owner later signs in to Google
+    afresh is not recognised as different: it stays guarded (open item)."""
+    from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+    if selection.get("profile_role") != "explicit":
+        return False
+    if selection.get(clone_storage.LIVE_SEED_KEY):
+        return True
+    directory = selection.get("user_data_dir")
+    return bool(directory) and (
+        profile_seed.read_marker(Path(str(directory))).get(SEEDED_VIA_KEY) is not None
+    )
+
+
+def record_live_seed(
+    selection: dict[str, object], cookie_seed: dict[str, object]
+) -> None:
+    """After a hand-off that SUCCEEDED into a named session, remember in its
+    marker that its jar came from a live browser (see :func:`guards_rotation`).
+    Never raises: the session works either way, it would only relaunch unguarded."""
+    if selection.get("profile_role") != "explicit":
+        return
+    if cookie_seed.get("seeded_via") != VIA_CDP:
+        return
+    directory = Path(str(selection["user_data_dir"]))
+    try:
+        marker = profile_seed.read_marker(directory)
+        marker[SEEDED_VIA_KEY] = VIA_CDP
+        (directory / profile_seed.MARKER_NAME).write_text(
+            json.dumps(marker, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        debug_logger.log_warning(
+            "fleet_session", "record_live_seed", f"could not stamp the marker: {exc!r}"
+        )

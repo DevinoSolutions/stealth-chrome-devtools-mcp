@@ -771,24 +771,27 @@ def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, An
 def _clone_seed(
     override: profile_source.SeedSource | None,
     driven: Callable[[Path], bool],
-) -> tuple[profile_source.SeedSource, bool]:
-    """What a new clone is copied from, and whether the OWNER chose it.
+) -> tuple[profile_source.SeedSource, bool, str | None]:
+    """What a new clone is copied from, whether the OWNER chose it, and a
+    warning when the owner's choice could not be used.
 
-    The configured seed session (F-952), whose live jar rides with it and which
-    a retry's ``override`` may NOT replace (a retry that fell back to the
-    snapshot would be a second way to seed); a retry's ``override``; the
-    snapshot; then the shared profile itself, the only copy when there is no
-    seed yet (F-920: OPEN means the jar arrives over CDP, CLOSED is a directory
-    at rest)."""
-    if named := fleet_session.default_seed(None, None):
-        return _seed_source_for_copy(named, driven), True
+    The configured seed session (F-952) first: its live jar rides with it, a
+    retry's ``override`` may NOT replace it, and when unusable the clone falls
+    back with a warning. Then ``override``; the snapshot; then the shared
+    profile itself. F-920: ``profile_copy.copy_file`` SKIPS a held file (twice,
+    for the double pass, unenumerable), so OPEN here means the jar arrives over
+    CDP and CLOSED is a directory at rest."""
+    configured, warning = fleet_session.clone_seed(_seed_source_for_copy, driven)
+    if configured is not None:
+        return configured, True, None
     if override is not None:
-        return override, False
+        return override, False, warning
     if master_snapshot_dir().exists():
-        return profile_source.SeedSource(master_snapshot_dir(), "default-seed"), False
+        seed = profile_source.SeedSource(master_snapshot_dir(), "default-seed")
+        return seed, False, warning
     if master_profile_dir().exists():
         seed = profile_source.SeedSource(master_profile_dir(), "live-default-fallback")
-        return seed, False
+        return seed, False, warning
     raise RuntimeError(
         "No shared profile directory found — nothing to copy from. Spawn a "
         "browser with no session first to create and populate the "
@@ -807,12 +810,9 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
 ) -> dict[str, Any]:
     """Which directory this spawn drives, and how it got there.
 
-    ``override`` is ``_fallback_profile_selection``'s — the (source, kind) pair
-    a RETRY clones from. It was two parameters, ``source_override`` and
-    ``source_kind``, and folding them into the ``SeedSource`` F-897 already
-    needed is not tidying: a path and the word recorded for it are decided
-    together, and two parameters let a caller record a copy as having come
-    from somewhere it did not.
+    ``override`` is ``_fallback_profile_selection``'s (source, kind) pair a
+    RETRY clones from, one ``SeedSource`` because a path and the word recorded
+    for it are decided together.
 
     ``driven`` is F-898's witness, passed through to ``_seed_source``. A seed
     with a LIVE source makes the answer carry :data:`LIVE_SEED_KEY` — set by the
@@ -876,11 +876,11 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
                 )
         live_seed: dict[str, Any] = {}
         if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            # A hand-over REPLACES the seed for this copy and can never drop a
-            # caller's `seed_from` (a held session EXISTS: `require_new_session`
-            # refuses it earlier). `_for_copy`, never `_seed_source`: that read
-            # owns the freshen and the AUTHORITATIVE hold check. F-952: with no
-            # `seed_from`, the configured seed session is the source.
+            # `handed_over or`: a held session EXISTS, which `require_new_session`
+            # refuses earlier, so a hand-over never drops a caller's `seed_from`.
+            # `_for_copy`, never `_seed_source`: that owns the freshen and the
+            # AUTHORITATIVE hold check, which a hand-off copying from the holder
+            # does not need. F-952: no `seed_from` means the configured seed.
             seed = handed_over or _seed_source_for_copy(
                 fleet_session.default_seed(seed_from, str(explicit)), driven
             )
@@ -931,15 +931,14 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
         else _available_clone_dir(base_clone)
     )
     clone_root.mkdir(parents=True, exist_ok=True)
-    # Backstop against unbounded session bloat: kick a background sweep (idle
-    # auto-clones over the clone cap, idle named profiles over the session cap)
-    # before adding another clone. Non-blocking; the clone about to be written
-    # has no marker yet, so it is never a sweep target.
+    # Backstop against unbounded bloat: a non-blocking background sweep (idle
+    # clones over the cap, idle named profiles over theirs) before adding
+    # another. The clone about to be written has no marker, so is never a target.
     spawn_background_sweep("pre-clone")
 
     _refresh_snapshot_if_stale()
 
-    seed, configured = _clone_seed(override, driven)
+    seed, configured, warning = _clone_seed(override, driven)
     if shared_live is not None and not configured:
         # The hand-off's source is the SHARED profile, the copy's is whichever
         # answered above (F-898 review M1: `live` is a third fact, not a flag on
@@ -952,7 +951,8 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # yet, so the sweep could delete it from under the spawn. Released when the
     # instance closes (or when this spawn attempt fails).
     _protect_clone_dir(clone)
-    return _copy_clone_from_source(seed, clone, clone_root)
+    selection = _copy_clone_from_source(seed, clone, clone_root)
+    return {**selection, "seed_warning": warning} if warning else selection
 
 
 async def _fallback_profile_selection(
@@ -962,15 +962,13 @@ async def _fallback_profile_selection(
     driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
 ) -> dict[str, Any] | None:
     # What the NEXT attempt drives (F-834 stage 1). A ``clone`` re-clones below;
-    # the two non-clone roles retry the SAME directory, which this attempt's
-    # F-860 reap has just freed — a NAMED profile is never walked or swapped, and
-    # a shared profile no sibling took is still the best profile here, while one
-    # a sibling DID take falls through. The hold is asked about the directory this
-    # attempt DROVE, off the selection, never config. No wait, no reservation.
+    # the non-clone roles retry the SAME directory this attempt's F-860 reap
+    # freed: a NAMED profile is never walked or swapped, a shared one no sibling
+    # took is still best, one a sibling DID take falls through. The hold is asked
+    # about the directory this attempt DROVE, off the selection, never config.
     #
-    # `driven` is F-914/F-915's witness: this is the SECOND DOOR onto the
-    # held-shared-session rule, and it decides whether a hand-off the previous
-    # attempt was making survives this one.
+    # `driven` (F-914/F-915) is the SECOND DOOR onto the held-shared-session rule:
+    # it decides whether the previous attempt's hand-off survives this one.
     shared = profile_seed.DEFAULT_SESSION
     role = previous_selection.get("profile_role")
     same = previous_selection.get("user_data_dir")
@@ -981,7 +979,10 @@ async def _fallback_profile_selection(
 
     snapshot = master_snapshot_dir()
     # F-952: a configured seed session needs no snapshot, and wins over it.
-    if not snapshot.exists() and not fleet_session.default_seed(None, None):
+    if (
+        not snapshot.exists()
+        and fleet_session.clone_seed(_seed_source, driven)[0] is None
+    ):
         return None
     final = attempt > 0
     return await resolve_profile_selection(
