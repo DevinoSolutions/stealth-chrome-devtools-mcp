@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### A chat whose backend was replaced keeps working instead of answering "Session terminated" (F-959)
+
+When the backend behind a chat died or was replaced, the chat's proxy reconnected
+("backend healed") and the next calls worked. But about five minutes later, once the chat had
+been quiet for a while, every stealth call answered "Session terminated", and only reconnecting
+the MCP server in that chat fixed it. The reconnect sent the backend the chat's opening
+`initialize` and skipped the message that follows it. Without that message the new connection
+never opened the stream that marks a session as alive, so the backend's cleanup of abandoned
+sessions removed it after five quiet minutes. Nothing then opened a new one.
+
+Now the reconnect sends both messages, so a healed session is a whole one. As a second line of
+defence, whenever the backend answers a call with "unknown session" (HTTP 404), for any reason,
+the proxy opens a fresh session on the same backend and sends that call once more. A 404 means
+the backend never ran the call, so resending it is safe; if the fresh session refuses it too,
+the error reaches the chat as before. A chat already showing "Session terminated" is running an
+older proxy and needs one reconnect (`/mcp`, then reconnect stealth-chrome-devtools-mcp) after
+upgrading.
+
 ### Agents waiting for a shared session now take turns in the order they asked (F-956)
 
 Waiting on `acquire_session_lock` used to be a free-for-all: every waiter checked back every

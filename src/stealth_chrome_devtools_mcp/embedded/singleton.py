@@ -805,7 +805,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     client = client_presence.capture()
     to_backend_tx, to_backend_rx = anyio.create_memory_object_stream(1024)
     init_request_id = {"value": None}
-    init_message = {"value": None}
+    init_message = {"value": None, "initialized": None}
     pending = proxy_selfheal.PendingCalls()
 
     async def pump_client():
@@ -833,6 +833,8 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                     )
                     init_request_id["value"] = inner.id
                     init_message["value"] = msg  # F-838 replays it on a re-bridge
+                elif getattr(inner, "method", None) == "notifications/initialized":
+                    init_message["initialized"] = msg  # F-959: replayed too
                 # Forward everything (including initialize) so the backend session
                 # initializes with the client's real params. Buffered until the
                 # backend connects.
@@ -872,14 +874,20 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                 # before it exists yields 400. A real client gets that
                 # sequencing by awaiting the initialize response; we answered
                 # locally, so we reproduce the wait. ``replay`` is F-838's
-                # re-bridge: generation 2+ re-sends the client's own initialize.
-                first = replay or await to_backend_rx.receive()
-                await backend_write.send(first)
-                inner = first.message.root
+                # re-bridge: generation 2+ re-sends the client's own initialize
+                # and initialized (F-959), then the calls a 404 refused.
+                opening = list(replay) if replay else [await to_backend_rx.receive()]
+                await backend_write.send(opening[0])
+                inner = opening[0].message.root
                 if isinstance(inner, JSONRPCRequest) and inner.method == "initialize":
                     await backend_initialized.wait()
+                for msg in opening[1:]:
+                    await backend_write.send(msg)
+                for msg in pending.take_retries():
+                    pending.track(msg.message.root, msg)
+                    await backend_write.send(msg)
                 async for msg in to_backend_rx:
-                    pending.track(msg.message.root)
+                    pending.track(msg.message.root, msg)
                     await backend_write.send(msg)
 
             async def from_backend():
@@ -897,13 +905,17 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
                             init_swallowed["done"] = True
                             backend_initialized.set()
                             continue  # client already got a local initialize result
-                        pending.settle(inner)
-                        await client_write.send(msg)
+                        if not pending.session_lost(inner):  # F-959: held, not shown
+                            pending.settle(inner)
+                            await client_write.send(msg)
+                        if pending.generation_is_done():
+                            tg.cancel_scope.cancel()
                 finally:
                     # never leave to_backend blocked on a never-answered init
                     backend_initialized.set()
 
             async with anyio.create_task_group() as tg:
+                tg.start_soon(pending.end_when_session_lost, tg.cancel_scope)
                 tg.start_soon(to_backend)
                 tg.start_soon(from_backend)
 
@@ -929,7 +941,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
             connect=run_backend,
             watch=_watch_backend_liveness,
             confirm_alive=_same_identity_backend_ready,  # F-843's discriminator
-            replay=lambda: init_message["value"],
+            replay=lambda: [m for m in init_message.values() if m is not None],
             pending=pending,
             client_write=client_write,
             ensure_running=ensure_server_running,
