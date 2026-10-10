@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.27
 
 ### A chat whose backend was replaced keeps working instead of answering "Session terminated" (F-959)
 
