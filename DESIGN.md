@@ -65,6 +65,13 @@ session it created). A bare socket connect (`singleton._server_is_healthy`) only
 proves *something* holds the port; it is used as a cheap first gate, **not** as the
 liveness answer.
 
+The proxy's 2-second watchdog heartbeat is the one exception (F-960): it asks
+`backend_probe.Heartbeat`, which GETs the backend's session-free health route
+(`backend_probe.HEALTH_PATH`, served by the same app and loop, 200 only while the
+session manager runs) over one keep-alive connection, because an `initialize` every
+2 s per proxy is a new TCP connection and a new MCP session each time. A backend
+that predates the route answers 404 and is probed by `initialize` as before.
+
 `singleton._probe_backend_status` collapses this into four states the CLI reports and
 the lifecycle code branches on:
 

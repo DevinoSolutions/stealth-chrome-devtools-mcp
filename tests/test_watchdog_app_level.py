@@ -7,7 +7,8 @@ Before this change the watchdog's default polled `_server_is_healthy` — a
 wedged backend (dispatch loop dead, socket still open) always passed that
 check, so the "sole auto-recovery watchdog" (F-501) never armed against the
 exact failure mode it exists for. After: the default runs
-`_backend_http_ready(port)` off-thread via `anyio.to_thread.run_sync`, and
+`backend_probe.Heartbeat.alive` off-thread via `anyio.to_thread.run_sync` (F-960
+moved the steady beat off `_backend_http_ready`'s `initialize`), and
 `res = check(); if inspect.isawaitable(res): res = await res` drives either
 shape. Signature, `interval`, and `failures_before_teardown` are UNCHANGED
 (human-resolved decision, plan_M1 appendix) — this file adds coverage, it
@@ -26,7 +27,7 @@ import anyio
 import anyio.lowlevel
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_probe, singleton
 
 
 @pytest.fixture()
@@ -62,11 +63,11 @@ class TestWatchdogDefaultUsesAppProbe:
         # watchdog's DEFAULT-wiring + await-aware loop + WARNING emission.
         calls = {"n": 0}
 
-        def fake_probe(port, **kwargs):
+        def fake_probe(self, timeout):
             calls["n"] += 1
             return False
 
-        monkeypatch.setattr(singleton, "_backend_http_ready", fake_probe)
+        monkeypatch.setattr(backend_probe.Heartbeat, "alive", fake_probe)
 
         async def tiny_sleep(_):
             await anyio.lowlevel.checkpoint()
@@ -104,7 +105,9 @@ class TestWatchdogDefaultUsesAppProbe:
             return False
 
         monkeypatch.setattr(anyio.to_thread, "run_sync", fake_run_sync)
-        monkeypatch.setattr(singleton, "_backend_http_ready", lambda port, **kw: False)
+        monkeypatch.setattr(
+            backend_probe.Heartbeat, "alive", lambda self, timeout: False
+        )
 
         async def tiny_sleep(_):
             await anyio.lowlevel.checkpoint()
