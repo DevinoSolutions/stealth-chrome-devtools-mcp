@@ -39,8 +39,8 @@ from typing import TYPE_CHECKING
 from stealth_chrome_devtools_mcp.embedded import backend_client, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
-    InstanceNotFoundError,
     ToolError,
+    instance_not_found,
 )
 
 if TYPE_CHECKING:
@@ -68,8 +68,18 @@ _requested: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "stealth_requested_tab", default=None
 )
 
-#: (caller, instance id) -> target id of that caller's tab.
+#: (caller, instance id) -> target id of that caller's tab, oldest first. Kept
+#: to the last ``_BOUND_KEPT`` so a long-lived backend does not grow without
+#: bound; a caller whose binding aged out is refused or re-claims, never misled.
 _bound: dict[tuple[str, str], str] = {}
+_BOUND_KEPT = 4096
+
+
+def _keep(key: tuple[str, str], target_id: str) -> None:
+    _bound.pop(key, None)
+    _bound[key] = target_id
+    while len(_bound) > _BOUND_KEPT:
+        del _bound[next(iter(_bound))]
 
 
 def caller() -> str | None:
@@ -123,7 +133,7 @@ async def tab_for_caller(
                     "tab. Call new_tab(instance_id) (or spawn_browser again) to get "
                     "one, or pass tab_id."
                 )
-            _bound[(who, instance_id)] = _id(tab)
+            _keep((who, instance_id), _id(tab))
         return tab
     browser = await browser_manager.get_browser(instance_id)
     if browser is None:
@@ -154,7 +164,7 @@ def bind(instance_id: str, target_id: str) -> None:
     """Bind the caller to *target_id* (no-op for an in-process call)."""
     who = caller()
     if who is not None:
-        _bound[(who, instance_id)] = str(target_id)
+        _keep((who, instance_id), str(target_id))
 
 
 def forget_tab(instance_id: str, target_id: str) -> None:
@@ -220,7 +230,7 @@ async def navigate_callers_tab(  # noqa: PLR0913  PERMANENT(navigate's own five,
         )
     tab = await tab_for_caller(browser_manager, instance_id)
     if tab is None:
-        raise InstanceNotFoundError(f"Instance not found: {instance_id}")
+        raise instance_not_found(instance_id)
     main = await browser_manager.get_tab(instance_id)
     if main is None or _id(main) != _id(tab):
         return await browser_manager.navigate(
