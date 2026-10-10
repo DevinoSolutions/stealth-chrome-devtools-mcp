@@ -103,7 +103,26 @@ class TestThePromptIsWhatTheSentencePromises:
         assert "~/.cursor/mcp.json" in text
 
 
+#: A github.com file page, as the owner/repo/ref-and-path it names.
+_BLOB = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$")
+
+
 def _status(url: str) -> int:
+    """The link's status. A github.com file page that answers 5xx is decided by
+    the same file on raw.githubusercontent.com: GitHub's blob pages have answered
+    503 for EVERY repo at once while githubstatus read "operational" (2026-10-09,
+    2026-10-10), and then answer 503 for a file that does not exist too, so the
+    5xx says nothing about the link. raw answers 200 for the file and 404 for a
+    missing one, so a dead link still fails here."""
+    code = _fetch(url)
+    blob = _BLOB.match(url.split("#", 1)[0])
+    if code >= 500 and blob:
+        owner, repo, rest = blob.groups()
+        return _fetch(f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}")
+    return code
+
+
+def _fetch(url: str) -> int:
     # Only https ever reaches here: ``test_every_link_is_https`` refuses anything
     # else, and the scheme is re-checked so the S310 waiver below stays honest.
     if not url.startswith("https://"):
