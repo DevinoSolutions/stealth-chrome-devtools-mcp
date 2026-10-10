@@ -226,6 +226,20 @@ def test_forget_tab_drops_every_binding_to_it(world):
     assert tab_binding._bound == {}
 
 
+def test_the_binding_table_keeps_the_most_recent_bindings(world, monkeypatch):
+    """A long-lived backend sees many callers and instances; the table holds the
+    most recent ones, and re-binding an old caller makes it recent again."""
+    monkeypatch.setattr(tab_binding, "_BOUND_KEPT", 3)
+    for who in ("A", "B", "C"):
+        _as(world, who)
+        tab_binding.bind(IID, f"t-{who}")
+    _as(world, "A")
+    tab_binding.bind(IID, "t-A")
+    _as(world, "D")
+    tab_binding.bind(IID, "t-D")
+    assert sorted(who for who, _ in tab_binding._bound) == ["A", "C", "D"]
+
+
 # --- spawn_browser's claim ----------------------------------------------------
 
 
