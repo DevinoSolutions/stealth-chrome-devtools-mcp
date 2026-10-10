@@ -14,6 +14,13 @@ good: measured at 2-7 KB each when the DELETE lands and 0.12 MB each when it is
 lost. Two million probes a day is the 6.7 GB the 2026-09-11 backend showed after
 18.5 h, with no lost DELETE assumed (finding F-862).
 
+F-960 closes the same leak from both ends. The watchdog no longer opens a session
+per beat at all (``backend_probe.Heartbeat`` asks :func:`_health` below, a route
+that creates none). And for a proxy still running the old probe, a DELETE now
+drops the session from the table when it lands (``handle_request``) instead of
+leaving the terminated entry for the sweep: with 38 old proxies that was ~19
+sessions a second listed for ``ABANDONED_AFTER_SECONDS`` each, ~5,600 at once.
+
 :class:`HygienicSessionManager` is that manager with a sweep. Every
 ``SWEEP_INTERVAL_SECONDS`` it walks the live sessions; one that has NO standing
 GET event stream and has made no request for ``ABANDONED_AFTER_SECONDS`` is
@@ -36,7 +43,8 @@ fastmcp 3 binding that old name left the sweep silently unbuilt (F-946), so this
 class now extends FastMCP's subclass and keeps its per-session event-store
 scoping. ``tests/test_session_hygiene.py`` pins that FastMCP still constructs it
 that way. Called from ``embedded/server.py``'s http branch as
-``rt.session_hygiene.install()``. A leaf: imports no other embedded module.
+``rt.session_hygiene.install(mcp)``, which also registers the health route.
+Imports one embedded module, the ``backend_probe`` leaf, for the route's path.
 """
 
 from __future__ import annotations
@@ -50,10 +58,16 @@ from typing import TYPE_CHECKING
 import anyio
 from fastmcp.server.http import FastMCPStreamableHTTPSessionManager
 from mcp.server.streamable_http import GET_STREAM_KEY
+from starlette.responses import JSONResponse
+
+from stealth_chrome_devtools_mcp.embedded.backend_probe import HEALTH_PATH
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
+    from fastmcp import FastMCP
+    from starlette.requests import Request
+    from starlette.responses import Response
     from starlette.types import Receive, Scope, Send
 
 # A probe session lives milliseconds; a live proxy holds its GET stream. Five
@@ -65,6 +79,7 @@ SWEEP_INTERVAL_SECONDS = 30.0
 _SESSION_HEADER = b"mcp-session-id"
 _logger = logging.getLogger("stealth.backend")
 _managers: list[weakref.ref[HygienicSessionManager]] = []
+_routed: weakref.WeakSet[FastMCP] = weakref.WeakSet()
 
 
 class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
@@ -79,11 +94,35 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
     def note_activity(self, session_id: str, *, now: float | None = None) -> None:
         self.last_seen[session_id] = time.monotonic() if now is None else now
 
+    @property
+    def running(self) -> bool:
+        """True between ``run()`` entering and the task group being cancelled."""
+        group = self._task_group
+        return group is not None and not group.cancel_scope.cancel_called
+
     async def handle_request(self, scope: Scope, receive: Receive, send: Send) -> None:
         session_id = _session_id(scope.get("headers") or ())
         if session_id:
             self.note_activity(session_id)
         await super().handle_request(scope, receive, send)
+        if session_id and scope.get("method") == "DELETE":
+            self._forget_if_deleted(session_id)
+
+    def _forget_if_deleted(self, session_id: str) -> None:
+        """Drop a session its client just DELETEd (F-960).
+
+        The SDK's DELETE only marks the transport terminated and leaves the entry
+        listed, relying on the sweep to remove it ``ABANDONED_AFTER_SECONDS``
+        later. Dropping it now changes only the 404's body: a terminated
+        transport answered "Session has been terminated", an unknown id answers
+        "Session not found", both 404, which is what the client reads.
+        """
+        transport = self._server_instances.get(session_id)
+        if transport is None or not transport.is_terminated:
+            return  # refused (bad headers) or already gone: nothing was deleted
+        del self._server_instances[session_id]
+        self._session_owners.pop(session_id, None)
+        self.last_seen.pop(session_id, None)
 
     @contextlib.asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
@@ -148,11 +187,31 @@ def _session_id(headers: Iterable[tuple[bytes, bytes]]) -> str | None:
     return None
 
 
-def install() -> type[HygienicSessionManager]:
-    """Bind the hygienic manager to the name FastMCP constructs. Idempotent."""
+async def _health(_request: Request) -> Response:
+    """200 iff this process's MCP session manager is running; creates no session.
+
+    Served by the same app and event loop as the MCP endpoint, so a loop that
+    cannot turn cannot answer, and a manager that has not started (or has been
+    cancelled) answers 503. That is everything the ``initialize`` probe proved,
+    without minting a session per ask (F-960).
+    """
+    manager = active_manager()
+    if manager is not None and manager.running:
+        return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "session manager not running"}, status_code=503)
+
+
+def install(server: FastMCP | None = None) -> type[HygienicSessionManager]:
+    """Bind the hygienic manager to the name FastMCP constructs, and give
+    ``server`` the health route. Idempotent."""
     from fastmcp.server import http
 
     http.FastMCPStreamableHTTPSessionManager = HygienicSessionManager
+    if server is not None and server not in _routed:
+        server.custom_route(HEALTH_PATH, methods=["GET"], include_in_schema=False)(
+            _health
+        )
+        _routed.add(server)
     return HygienicSessionManager
 
 

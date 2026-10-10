@@ -27,6 +27,27 @@ A chat is told apart from the others by its MCP proxy, so this needs the proxy f
 chats still running an older proxy are told apart by their MCP session instead, which a backend
 replacement changes. Restart them after upgrading.
 
+### The backend no longer fills up with thousands of throwaway sessions (F-960)
+
+With about 38 chats open, the shared backend listed roughly 5,600 sessions, cleaned out about 560
+of them every 30 seconds, and had around 2,200 TCP connections sitting in `TIME_WAIT`. None of
+them were real work. Every chat's proxy checks every 2 seconds that the backend is still alive,
+and that check opened a brand new connection and a brand new session on the backend each time,
+then deleted the session. The delete only marked the session finished; it stayed listed for five
+minutes until the cleanup removed it.
+
+Now the check does not create a session at all. The backend has a small health address that
+answers "yes" only while its session machinery is really running, and each proxy asks it over one
+connection that stays open, so the 2-second check costs one tiny request and nothing is left
+behind. A backend that is stuck or still starting still fails the check, exactly as before. A new
+proxy talking to an older backend (which has no health address) falls back to the old check, so
+mixed versions keep working. Opening a chat and deciding whether to reuse a backend still use the
+full check, since those happen rarely.
+
+Proxies that are already running keep using the old check until their chat reconnects. For them
+the backend now removes a session from its list the moment the proxy deletes it, instead of five
+minutes later, so their checks stop piling up too. A deleted session still answers "not found".
+
 ## 2.1.27
 
 ### A chat whose backend was replaced keeps working instead of answering "Session terminated" (F-959)

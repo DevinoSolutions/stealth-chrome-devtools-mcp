@@ -36,7 +36,7 @@ import anyio
 import anyio.lowlevel
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import singleton
+from stealth_chrome_devtools_mcp.embedded import backend_probe, singleton
 
 PORT = 47820
 
@@ -213,7 +213,9 @@ class TestDefaultConfirmationIsTheColdStartGate:
                 sleep=_bounded_nap(50),
             )
 
-        assert run_sync_calls == [
-            (singleton._backend_http_ready, (PORT,)),
-            (singleton._same_identity_backend_ready, (PORT,)),
-        ]
+        # F-960: the steady beat is the watchdog's own Heartbeat, not the
+        # `initialize` probe; the confirmation is still the cold-start gate.
+        beat, gate = run_sync_calls
+        assert beat[0].__func__ is backend_probe.Heartbeat.alive
+        assert beat[1] == (singleton.LIVENESS_PROBE_TIMEOUT,)
+        assert gate == (singleton._same_identity_backend_ready, (PORT,))

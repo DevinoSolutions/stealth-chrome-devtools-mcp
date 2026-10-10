@@ -39,6 +39,7 @@ import anyio.lowlevel
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_probe,
     backend_watchdog,
     scheduling_lag,
     singleton,
@@ -486,7 +487,6 @@ class TestTheProductionWiring:
             )
 
         assert singleton.backend_liveness.self_report not in run_sync_calls
-        assert run_sync_calls == [
-            singleton._backend_http_ready,
-            singleton._same_identity_backend_ready,
-        ]
+        beat, gate = run_sync_calls
+        assert beat.__func__ is backend_probe.Heartbeat.alive  # F-960
+        assert gate is singleton._same_identity_backend_ready

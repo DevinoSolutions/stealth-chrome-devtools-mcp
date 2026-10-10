@@ -552,8 +552,9 @@ if __name__ == "__main__":
         # F-862: the backend reaps MCP sessions their client abandoned (a
         # liveness probe whose DELETE was lost, a proxy that died). Bound
         # BEFORE run() builds the app, because FastMCP constructs the
-        # manager by module attribute inside create_streamable_http_app.
-        rt.session_hygiene.install()
+        # manager by module attribute inside create_streamable_http_app. F-960:
+        # the same call gives the app the session-free health route.
+        rt.session_hygiene.install(mcp)
         mcp.run(
             transport="http",
             host=args.host,

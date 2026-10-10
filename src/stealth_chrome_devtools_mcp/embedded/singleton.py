@@ -757,18 +757,24 @@ async def _watch_backend_liveness(port: int, **kwargs: object) -> None:
     the fast app-level check and the patient dead-vs-busy verdict, each driven
     off-thread because both block (plan_M1 SS2.2 rejected alternative #3: run
     inline they would freeze the stdio pump for up to ``LIVENESS_PROBE_TIMEOUT``
-    every tick). Bound at call time, so patching either probe still steers the
-    watchdog and an injected ``is_healthy``/``confirm_probe`` still wins.
+    every tick). Bound at call time, so patching either probe (``Heartbeat.alive``
+    or the gate) still steers it and an injected check still wins.
     """
     import anyio
 
     run = anyio.to_thread.run_sync
-    kwargs.setdefault("is_healthy", lambda: run(_backend_http_ready, port))
+    # F-960: the beat is `backend_probe.Heartbeat` - one keep-alive connection
+    # and no MCP session per ask - not `_backend_http_ready`'s `initialize`.
+    beat = backend_probe.Heartbeat(_backend_http_url(port))
+    kwargs.setdefault("is_healthy", lambda: run(beat.alive, LIVENESS_PROBE_TIMEOUT))
     kwargs.setdefault("confirm_probe", lambda: run(_same_identity_backend_ready, port))
     # F-889's second witness. INLINE, not off-thread: a small local JSON read.
     witness = backend_liveness.self_report
     kwargs.setdefault("heartbeat", lambda: witness(SERVER_STATE_FILE, port))
-    await backend_watchdog.watch_liveness(port, **kwargs)
+    try:
+        await backend_watchdog.watch_liveness(port, **kwargs)
+    finally:
+        beat.close()
 
 
 async def _proxy_streams(client_read, client_write, port: int) -> None:
