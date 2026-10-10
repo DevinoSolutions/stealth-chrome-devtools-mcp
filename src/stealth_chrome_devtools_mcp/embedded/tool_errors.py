@@ -9,7 +9,9 @@ way). The former dict/json instance-not-found shapes are converted to raises.
 
 * :class:`ToolError` — base for any tool failure surfaced to the client.
 * :class:`InstanceNotFoundError` — the single instance-not-found shape
-  (message ``Instance not found: {instance_id}``).
+  (message ``Instance not found: {instance_id}``, built by
+  :func:`instance_not_found`, which adds how to relaunch a named session whose
+  browser has gone, F-961).
 * :func:`_require_tab` / :func:`_require_browser` — the single guard replacing
   the ~40 hand-rolled ``if not tab: raise`` / dict / json instance-not-found
   sites. They take ``browser_manager`` as an argument rather than importing it:
@@ -51,6 +53,35 @@ class InstanceNotFoundError(ToolError):
     instance-not-found shape (``Instance not found: {instance_id}``)."""
 
 
+#: instance_id -> the profile directory of a browser that has gone, for the last
+#: few (F-961); oldest first out. Only a directory is kept: whether it is one a
+#: ``session`` name opens is asked when a caller hits the miss, not at close.
+_departed: dict[str, str] = {}
+_DEPARTED_KEPT = 64
+
+
+def remember_departed(instance_id: str, data: dict[str, object]) -> None:
+    """Note, as an instance leaves the manager (closed, or exited on its own),
+    which directory its browser was on, so a later miss can say how to relaunch."""
+    directory = getattr(data.get("options"), "user_data_dir", None)
+    if isinstance(directory, str) and directory:
+        _departed[instance_id] = directory
+        while len(_departed) > _DEPARTED_KEPT:
+            del _departed[next(iter(_departed))]
+
+
+def instance_not_found(instance_id: str) -> InstanceNotFoundError:
+    """THE instance-not-found error: ``Instance not found: {id}``, plus -- for an
+    id remembered as a NAMED session's browser that has gone -- how to get that
+    session back (``fleet_session.relaunch_hint``, F-961). An id never held (a
+    typo, another backend's) keeps the bare message."""
+    from stealth_chrome_devtools_mcp.embedded import fleet_session
+
+    message = f"Instance not found: {instance_id}"
+    hint = fleet_session.relaunch_hint(_departed.get(instance_id))
+    return InstanceNotFoundError(f"{message}. {hint}" if hint else message)
+
+
 async def _require_tab(browser_manager: BrowserManager, instance_id: str) -> Tab:
     """Return the CALLER's tab in the instance, or raise on a miss.
 
@@ -63,7 +94,7 @@ async def _require_tab(browser_manager: BrowserManager, instance_id: str) -> Tab
 
     tab = await tab_binding.tab_for_caller(browser_manager, instance_id)
     if not tab:
-        raise InstanceNotFoundError(f"Instance not found: {instance_id}")
+        raise instance_not_found(instance_id)
     return tab
 
 
@@ -74,7 +105,7 @@ async def _require_browser(
     on a miss — the ``_require_tab`` counterpart for browser-level tools."""
     browser = await browser_manager.get_browser(instance_id)
     if not browser:
-        raise InstanceNotFoundError(f"Instance not found: {instance_id}")
+        raise instance_not_found(instance_id)
     return browser
 
 

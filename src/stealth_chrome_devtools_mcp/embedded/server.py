@@ -15,7 +15,7 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     backend_uvicorn_config,
     bootstrap_backend_process_logging,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import InstanceNotFoundError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import instance_not_found
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
     DISABLED_SECTIONS,
     SECTION_TOOLS,  # used by --list-sections + the derived tool-count (F-108); also re-exported as server.SECTION_TOOLS
@@ -275,7 +275,7 @@ async def get_browser_state_resource(instance_id: str) -> str:
     state = await rt.browser_manager.get_page_state(instance_id)
     if state:
         return json.dumps(state.dict(), indent=2)
-    raise InstanceNotFoundError(f"Instance not found: {instance_id}")
+    raise instance_not_found(instance_id)
 
 
 @mcp.resource("browser://{instance_id}/cookies")
@@ -293,7 +293,7 @@ async def get_cookies_resource(instance_id: str) -> str:
     if tab:
         cookies = await rt.network_interceptor.get_cookies(tab)
         return json.dumps(cookies, indent=2)
-    raise InstanceNotFoundError(f"Instance not found: {instance_id}")
+    raise instance_not_found(instance_id)
 
 
 @mcp.resource("browser://{instance_id}/network")
@@ -325,7 +325,7 @@ async def get_console_resource(instance_id: str) -> str:
     state = await rt.browser_manager.get_page_state(instance_id)
     if state:
         return json.dumps(state.console_logs, indent=2)
-    raise InstanceNotFoundError(f"Instance not found: {instance_id}")
+    raise instance_not_found(instance_id)
 
 
 if get_settings().xpool_safe_mode:

@@ -127,6 +127,36 @@ def _dir_of(session: str) -> str | None:
     return clone_storage.require_allowed_user_data_dir(None, session)
 
 
+def relaunch_hint(user_data_dir: str | Path | None) -> str | None:
+    """What to tell a caller whose ``instance_id`` was the browser of the NAMED
+    session at *user_data_dir*, now gone (F-961), or None when that directory is
+    not one a ``session`` name opens (a disposable clone, the shared profile, a
+    path).
+
+    The answer is the same for every way the browser went -- ``close_instance``
+    by another chat, a closed window, a crash -- because the remedy is: the
+    session is its directory, the login is in it, and ``spawn_browser(session=...)``
+    relaunches it, or hands back the browser another chat already relaunched.
+    The shared profile is left out on purpose: a chat that wants a browser asks
+    for its own with ``spawn_browser()``, never for ``default``."""
+    from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+    if not user_data_dir:
+        return None
+    path = Path(str(user_data_dir))
+    if profile_seed.is_auto(path) or not profile_seed.same_dir(
+        path.parent, clone_storage.clone_root_dir()
+    ):
+        return None
+    return (
+        f"That was the {path.name!r} session's browser and it is gone (closed, or "
+        f"it exited), but the session and its login are saved on disk. Call "
+        f'spawn_browser(session="{path.name}") to get it back: it relaunches the '
+        "browser, or hands you the one another chat already relaunched. Then use "
+        "the instance_id that returns."
+    )
+
+
 REUSED_WARNING = (
     "Named session reused, not created — it already existed and is NOT "
     "auto-cleaned; it persists on disk until it is deleted by hand."
@@ -160,6 +190,57 @@ def named_session_warning(selection: dict[str, object]) -> str:
         "Only pass session when the user explicitly asks to keep a login; "
         "otherwise omit it so the profile is copied and auto-deleted."
     )
+
+
+def annotate_diagnostics(
+    diagnostics: dict[str, object],
+    *,
+    selection: dict[str, object],
+    public: dict[str, object],
+    declined: str | None,
+    retries: list[str],
+) -> None:
+    """Put the profile-selection story of a spawn into its ``spawn_diagnostics``.
+
+    *public* is what the caller may be told of *selection* (plus the cookie
+    hand-off's counts); *declined* is the reason a live holder was not re-attached
+    (``Held.declined``) and *retries* the launch attempts that failed first. Lives
+    here because everything it says is about a NAMED session: what a walk to
+    ``<name>-N`` means, and the warning every named session carries."""
+    diagnostics["profile_selection"] = public
+    if declined:
+        # A live browser held the directory and we spawned anyway: the
+        # caller is owed the reason, beside the walk it caused, because
+        # the browser they were reaching for is STILL RUNNING and this
+        # tool deliberately did not kill it (F-888).
+        diagnostics["reattach_declined"] = declined
+    if retries:
+        public["spawn_retries"] = retries
+    if selection.get("profile_role") == "explicit":
+        # F-871: when the requested profile was held, the walk to
+        # <name>-N is an identity change. It LEADS the field a caller
+        # actually reads, rather than sitting quietly beside it in
+        # walk_reason — same field set, no second diagnostics home.
+        #
+        # F-915: a walk now happens only when this backend drives the
+        # holder, and the copy gets its jar handed over, so the warning
+        # says what is still true: it is a DIFFERENT directory, the two
+        # diverge from here, and what the holder keeps outside its
+        # cookie jar did not come across.
+        walked = selection.get("walk_reason")
+        substitution = (
+            f"NOT the directory you asked for: "
+            f"{selection.get('requested_user_data_dir')} is open "
+            f"in a browser this backend drives ({walked}), so this spawn "
+            f"got {selection.get('walked_to')} — a COPY of it, "
+            f"with its cookies handed over (see seeded_via) so the "
+            f"logins come too. The two are separate profiles from now "
+            f"on, and anything the original keeps outside its cookie "
+            f"jar did not come with them. "
+            if walked
+            else ""
+        )
+        public["warning"] = substitution + named_session_warning(selection)
 
 
 def reused_record(record: dict[str, object]) -> dict[str, object]:
