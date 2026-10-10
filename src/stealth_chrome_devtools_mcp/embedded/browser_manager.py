@@ -191,6 +191,7 @@ class BrowserManager:
         if instance is not None:
             instance.state = BrowserState.CLOSED
         self._instances.pop(instance_id, None)
+        tool_errors.remember_departed(instance_id, data)
         self._spawn_diagnostics.pop(instance_id, None)
         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
         if proxy_forwarder is not None:
@@ -828,6 +829,7 @@ class BrowserManager:
             if instance_id not in self._instances:
                 return False
             data = self._instances.pop(instance_id)
+            tool_errors.remember_departed(instance_id, data)
             self._spawn_diagnostics.pop(instance_id, None)
             proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
             # F-899: the store cross-checks `_instances`, so no `await` may
@@ -1110,9 +1112,7 @@ class BrowserManager:
                 tab = await self._replace_main_tab(instance_id, reason=reason)
 
             if not tab:
-                raise tool_errors.InstanceNotFoundError(
-                    f"Instance not found: {instance_id}"
-                )
+                raise tool_errors.instance_not_found(instance_id)
 
             start_time = time.monotonic()
 

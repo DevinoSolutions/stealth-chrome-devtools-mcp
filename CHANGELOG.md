@@ -48,6 +48,27 @@ Proxies that are already running keep using the old check until their chat recon
 the backend now removes a session from its list the moment the proxy deletes it, instead of five
 minutes later, so their checks stop piling up too. A deleted session still answers "not found".
 
+### The shared `fleet` browser comes back after anyone closes it, and two chats asking at once get one browser (F-961)
+
+Several chats share the signed-in `fleet` browser, each working in its own tab. When one chat
+closed it by mistake (`close_instance`), or someone closed its window, or Chrome crashed, the
+others had to work out what to do. Now the next `spawn_browser(session="fleet")` from any chat
+simply starts it again from its saved profile: same folder, the logins still in it, no
+`fleet-2`, no copy, and no `already_running` for a browser that is gone. Chrome's leftover lock
+files from a killed browser do not stop it. An advisory lock someone held on `fleet` when it
+closed does not stop it either, and stays theirs afterwards.
+
+Two things were actually broken. If two chats asked for a just-closed `fleet` at the same
+moment, each saw "nothing is running" and each started a browser, so one signed-in profile was
+driven by two browsers that then fought over it. A spawn that names a session now waits for any
+other spawn of the same session to finish launching, and then gets that browser back
+(`already_running: true`) instead of starting a second one. Spawns of different sessions never
+wait on each other. And a chat that still held the old `instance_id` was only told "Instance not
+found"; for a named session it is now also told that the browser is gone but the session and its
+login are saved, and to call `spawn_browser(session="<name>")` to get it back (or to be handed
+the one another chat already started). Disposable copies and the shared profile get the plain
+message as before.
+
 ## 2.1.27
 
 ### A chat whose backend was replaced keeps working instead of answering "Session terminated" (F-959)

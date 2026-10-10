@@ -62,6 +62,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
+    directory_gate,
     fleet_session,
     profile_source,
     reap_guard,
@@ -445,36 +446,6 @@ def held_by(
     )
 
 
-# One lock per requested DIRECTORY, because the directory is what two concurrent
-# spawns collide on: without it both read the same live holder, both attach, and
-# one Chrome is registered as two instances that then close each other. Keyed on
-# the normalized path through the record's own `normalize_path`, so `C:\P` and
-# `c:\p\` are one lock.
-#
-# Deliberately NOT `clone_storage`'s protected-dir set: that is sweep EXEMPTION —
-# a membership test with no waiting — and a mutex is not what it offers, so
-# reusing it would mean building the exclusion beside it anyway. And deliberately
-# per directory rather than the module-wide `_pass_lock` below: an unrelated
-# spawn must not wait out a wedged browser's whole ATTACH_BUDGET_SECONDS.
-#
-# The lock is in-PROCESS only, and is not what makes adoption safe; that is
-# `claim`, which two backends and two tasks alike must pass. This only keeps the
-# common case cheap by not sending a second task down a path the claim will
-# refuse.
-_directory_locks: dict[str, asyncio.Lock] = {}
-
-
-def _directory_lock(user_data_dir: str) -> asyncio.Lock:
-    """THE lock two spawns naming one directory serialize on."""
-    key = browser_pid_registry.normalize_path(user_data_dir) or user_data_dir
-    lock = _directory_locks.get(key)
-    if lock is None:
-        # No await between the miss and the insert, so this is atomic for the
-        # loop; two tasks cannot both create one.
-        lock = _directory_locks.setdefault(key, asyncio.Lock())
-    return lock
-
-
 async def _ours(manager: BrowserManager, user_data_dir: str) -> bool:
     """True when THIS backend drives *user_data_dir*, or may be about to (F-931).
 
@@ -543,7 +514,7 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
 
     Never raises.
     """
-    async with _directory_lock(user_data_dir):
+    async with directory_gate.gate_for(user_data_dir):
         try:
             candidate = await asyncio.to_thread(
                 held_by,
@@ -636,7 +607,7 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
 # because there is one BrowserManager per backend and the record is shared.
 #
 # It is NOT the spawn path's lock: that one serializes per DIRECTORY (see
-# `_directory_lock`), so a spawn never waits out a whole-record pass.
+# `directory_gate`), so a spawn never waits out a whole-record pass.
 _pass_lock = asyncio.Lock()
 
 

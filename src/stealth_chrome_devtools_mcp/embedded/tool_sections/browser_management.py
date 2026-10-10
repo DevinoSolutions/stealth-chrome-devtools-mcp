@@ -296,9 +296,9 @@ async def spawn_browser(
             "or pass headless=True; `stealth-chrome-devtools doctor` lists the contexts."
         )
 
-    # Outside the try because the handler READS it: a spawn that fails onto a
-    # held directory owes the caller the reason the re-attach was not taken.
+    # Outside the try: the handler READS `held` (why a re-attach was not taken).
     held = rt.browser_reattach.Held()
+    gate = await rt.browser_reattach.directory_gate.hold(user_data_dir)  # F-961
     try:
         # What the CALLER passed, captured before the resolution below turns an
         # unset `sandbox` into a real bool. `ignored_spawn_args` reports the
@@ -427,46 +427,16 @@ async def spawn_browser(
             instance.instance_id
         )
         if isinstance(spawn_diagnostics, dict):
-            spawn_diagnostics["profile_selection"] = {
-                **rt.clone_storage._public_profile_selection(profile_selection),
-                **cookie_seed,
-            }
-            if held.declined:
-                # A live browser held the directory and we spawned anyway: the
-                # caller is owed the reason, beside the walk it caused, because
-                # the browser they were reaching for is STILL RUNNING and this
-                # tool deliberately did not kill it (F-888).
-                spawn_diagnostics["reattach_declined"] = held.declined
-            if spawn_errors:
-                spawn_diagnostics["profile_selection"]["spawn_retries"] = spawn_errors
-            if profile_selection.get("profile_role") == "explicit":
-                # F-871: when the requested profile was held, the walk to
-                # <name>-N is an identity change. It LEADS the field a caller
-                # actually reads, rather than sitting quietly beside it in
-                # walk_reason — same field set, no second diagnostics home.
-                #
-                # F-915: a walk now happens only when this backend drives the
-                # holder, and the copy gets its jar handed over, so the warning
-                # says what is still true: it is a DIFFERENT directory, the two
-                # diverge from here, and what the holder keeps outside its
-                # cookie jar did not come across.
-                walked = profile_selection.get("walk_reason")
-                substitution = (
-                    f"NOT the directory you asked for: "
-                    f"{profile_selection.get('requested_user_data_dir')} is open "
-                    f"in a browser this backend drives ({walked}), so this spawn "
-                    f"got {profile_selection.get('walked_to')} — a COPY of it, "
-                    f"with its cookies handed over (see seeded_via) so the "
-                    f"logins come too. The two are separate profiles from now "
-                    f"on, and anything the original keeps outside its cookie "
-                    f"jar did not come with them. "
-                    if walked
-                    else ""
-                )
-                spawn_diagnostics["profile_selection"]["warning"] = (
-                    substitution
-                    + rt.fleet_session.named_session_warning(profile_selection)
-                )
+            rt.fleet_session.annotate_diagnostics(
+                spawn_diagnostics,
+                selection=profile_selection,
+                public={
+                    **rt.clone_storage._public_profile_selection(profile_selection),
+                    **cookie_seed,
+                },
+                declined=held.declined,
+                retries=spawn_errors,
+            )
         return {
             "instance_id": instance.instance_id,
             "state": instance.state,
@@ -490,6 +460,8 @@ async def spawn_browser(
                 else ""
             )
         )
+    finally:
+        gate.release()
 
 
 async def _seed_cookies_over_cdp(
