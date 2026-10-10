@@ -58,6 +58,9 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
 # was across all 94 tools (94 flags, zero other diffs). fastmcp 3 would also
 # copy each ``Args:`` line into its parameter's schema; ``section_tool`` keeps
 # that text in the description alone, where fastmcp 2 put it.
+# F-962 adds ONE property, on purpose, to every PAGE tool: ``tab_id`` (the
+# tab to act on; ``tab_binding.scoped``, applied by ``section_tool``). The five
+# page tools below carry it; the six instance-level ones are unchanged.
 _GOLDEN_SCHEMA_JSON = r"""
 {
   "browser-management": {
@@ -93,6 +96,7 @@ _GOLDEN_SCHEMA_JSON = r"""
       "additionalProperties": false,
       "properties": {
         "instance_id": {"type": "string"},
+        "tab_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "urls": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null}
       },
       "required": ["instance_id"],
@@ -137,6 +141,7 @@ _GOLDEN_SCHEMA_JSON = r"""
         "include_inheritance": {"default": false, "type": "boolean"},
         "include_pseudo": {"default": true, "type": "boolean"},
         "instance_id": {"type": "string"},
+        "tab_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "selector": {"type": "string"}
       },
       "required": ["instance_id", "selector"],
@@ -149,6 +154,7 @@ _GOLDEN_SCHEMA_JSON = r"""
       "additionalProperties": false,
       "properties": {
         "instance_id": {"type": "string"},
+        "tab_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "limit": {"anyOf": [{}, {"type": "null"}], "default": null},
         "selector": {"type": "string"},
         "text_filter": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
@@ -165,6 +171,7 @@ _GOLDEN_SCHEMA_JSON = r"""
       "properties": {
         "extraction_options": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "instance_id": {"type": "string"},
+        "tab_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "selector": {"type": "string"}
       },
       "required": ["instance_id", "selector"],
@@ -190,6 +197,7 @@ _GOLDEN_SCHEMA_JSON = r"""
       "properties": {
         "include_children": {"default": true, "type": "boolean"},
         "instance_id": {"type": "string"},
+        "tab_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "selector": {"type": "string"}
       },
       "required": ["instance_id", "selector"],

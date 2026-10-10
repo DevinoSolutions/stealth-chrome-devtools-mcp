@@ -33,7 +33,7 @@
     "tags": []
   },
   "call_javascript_function": {
-    "description": "Invoke an already-defined JavaScript function by its dotted path — does not\nrun arbitrary source.\n\nUse `execute_script` / `inject_and_execute_script` to run source; use this\nwhen the function already exists on the page (e.g. 'document.querySelector');\nuse `execute_function_sequence` to chain several such calls in one round trip.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    function_path (str): Full path to the function (e.g., 'document.getElementById').\n    args (List[Any], optional): List of arguments to pass to the function.\n\nReturns:\n    Dict[str, Any]: Function call result.",
+    "description": "Invoke an already-defined JavaScript function by its dotted path — does not\nrun arbitrary source.\n\nUse `execute_script` / `inject_and_execute_script` to run source; use this\nwhen the function already exists on the page (e.g. 'document.querySelector');\nuse `execute_function_sequence` to chain several such calls in one round trip.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    function_path (str): Full path to the function (e.g., 'document.getElementById').\n    args (List[Any], optional): List of arguments to pass to the function.\n\nReturns:\n    Dict[str, Any]: Function call result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -48,6 +48,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -98,13 +109,24 @@
     "tags": []
   },
   "clear_cookies": {
-    "description": "Clear cookies.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    url (Optional[str]): Optional URL to clear cookies for (clears all if not specified).\n\nReturns:\n    bool: True if cleared successfully.",
+    "description": "Clear cookies.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    url (Optional[str]): Optional URL to clear cookies for (clears all if not specified).\n\nReturns:\n    bool: True if cleared successfully.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "url": {
           "anyOf": [
@@ -181,7 +203,7 @@
     "tags": []
   },
   "click_element": {
-    "description": "Click an element, and report where the click actually went.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    text_match (Optional[str]): Click element with matching text.\n    timeout (int): Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"dispatch\", \"point\", \"size\", \"target\", \"hit\",\n        \"hit_is_target\", \"reason\"}. \"dispatch\" is \"coordinate\" (a real trusted\n        click at \"point\") or \"synthetic\" (the element has no box, so the click\n        was an in-page el.click() — untrusted and not hit-tested). \"hit\" is the\n        tag/id/classes of whatever document.elementFromPoint returned at that\n        point, so an overlay that ate the click is visible. \"reason\" is null\n        when the click reached the target, else one of \"not-rendered\",\n        \"off-viewport\", \"zero-size\", \"not-visible\", \"pointer-events-none\",\n        \"covered\", \"disabled\". Whether the PAGE then reacted is not claimed.",
+    "description": "Click an element, and report where the click actually went.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector or XPath.\n    text_match (Optional[str]): Click element with matching text.\n    timeout (int): Timeout in ms (default 10000, max 60000). Clicks rarely need more than 5s — only increase for dynamically loaded elements. Values above 60000 are capped.\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"dispatch\", \"point\", \"size\", \"target\", \"hit\",\n        \"hit_is_target\", \"reason\"}. \"dispatch\" is \"coordinate\" (a real trusted\n        click at \"point\") or \"synthetic\" (the element has no box, so the click\n        was an in-page el.click() — untrusted and not hit-tested). \"hit\" is the\n        tag/id/classes of whatever document.elementFromPoint returned at that\n        point, so an overlay that ate the click is visible. \"reason\" is null\n        when the click reached the target, else one of \"not-rendered\",\n        \"off-viewport\", \"zero-size\", \"not-visible\", \"pointer-events-none\",\n        \"covered\", \"disabled\". Whether the PAGE then reacted is not claimed.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -191,6 +213,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text_match": {
           "anyOf": [
@@ -221,7 +254,7 @@
     "tags": []
   },
   "clone_element_complete": {
-    "description": "Extract ALL element data inline as one canonical flat clone (the authoritative\n\"complete\" extractor).\n\nComposes the six aspects on the canonical engine — styles via direct CDP, and\nstructure/events/animations/assets/related_files via JS-eval — into a flat,\naspect-keyed dict with ``selector`` forwarded to every sub-extractor. Prefer\nthis for complete fidelity when the payload can be returned inline. The three\nsiblings differ only in delivery/transport: ``clone_element_to_file`` and\n``extract_complete_element_to_file`` write this same clone to disk (path +\nsummary) instead of returning it; ``extract_complete_element_cdp`` returns the\npure-CDP *nested* variant (``element`` block) for CDP-native fidelity.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    extraction_options (Optional[str]): Dict specifying what to extract and options for each.\n        Example: {\n            'styles': {'include_computed': True, 'include_pseudo': True},\n            'structure': {'include_children': True, 'max_depth': 2},\n            'events': {'include_framework': True, 'analyze_handlers': False},\n            'animations': {'analyze_keyframes': True},\n            'assets': {'fetch_external': False},\n            'related_files': {'follow_imports': True, 'max_depth': 1}\n        }\n\nReturns:\n    Dict[str, Any]: Complete element clone with styles, structure, events, animations, assets, related files.",
+    "description": "Extract ALL element data inline as one canonical flat clone (the authoritative\n\"complete\" extractor).\n\nComposes the six aspects on the canonical engine — styles via direct CDP, and\nstructure/events/animations/assets/related_files via JS-eval — into a flat,\naspect-keyed dict with ``selector`` forwarded to every sub-extractor. Prefer\nthis for complete fidelity when the payload can be returned inline. The three\nsiblings differ only in delivery/transport: ``clone_element_to_file`` and\n``extract_complete_element_to_file`` write this same clone to disk (path +\nsummary) instead of returning it; ``extract_complete_element_cdp`` returns the\npure-CDP *nested* variant (``element`` block) for CDP-native fidelity.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    extraction_options (Optional[str]): Dict specifying what to extract and options for each.\n        Example: {\n            'styles': {'include_computed': True, 'include_pseudo': True},\n            'structure': {'include_children': True, 'max_depth': 2},\n            'events': {'include_framework': True, 'analyze_handlers': False},\n            'animations': {'analyze_keyframes': True},\n            'assets': {'fetch_external': False},\n            'related_files': {'follow_imports': True, 'max_depth': 1}\n        }\n\nReturns:\n    Dict[str, Any]: Complete element clone with styles, structure, events, animations, assets, related files.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -242,6 +275,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -257,7 +301,7 @@
     "tags": []
   },
   "clone_element_progressive": {
-    "description": "Clone element progressively - returns lightweight base structure with element_id.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_children (bool): Whether to extract child elements.\n\nReturns:\n    Dict[str, Any]: Base structure with element_id for progressive expansion.",
+    "description": "Clone element progressively - returns lightweight base structure with element_id.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_children (bool): Whether to extract child elements.\n\nReturns:\n    Dict[str, Any]: Base structure with element_id for progressive expansion.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -271,6 +315,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -286,7 +341,7 @@
     "tags": []
   },
   "clone_element_to_file": {
-    "description": "Save the complete canonical clone to a file — the to-file twin of\n``clone_element_complete`` (same engine, same per-aspect transport, accepts the\nsame ``extraction_options``).\n\nReturns ``{file_path, extraction_type, summary}`` instead of the full data, so\na large clone never overwhelms the response. Use\n``extract_complete_element_to_file`` for the lighter variant that takes only an\n``include_children`` toggle (no per-aspect options).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    extraction_options (Optional[str]): JSON string with extraction options.\n\nReturns:\n    Dict[str, Any]: File path and summary information about the cloned element.",
+    "description": "Save the complete canonical clone to a file — the to-file twin of\n``clone_element_complete`` (same engine, same per-aspect transport, accepts the\nsame ``extraction_options``).\n\nReturns ``{file_path, extraction_type, summary}`` instead of the full data, so\na large clone never overwhelms the response. Use\n``extract_complete_element_to_file`` for the lighter variant that takes only an\n``include_children`` toggle (no per-aspect options).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    extraction_options (Optional[str]): JSON string with extraction options.\n\nReturns:\n    Dict[str, Any]: File path and summary information about the cloned element.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -307,6 +362,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -436,7 +502,7 @@
     "tags": []
   },
   "create_persistent_function": {
-    "description": "Create a persistent JavaScript function that survives page reloads.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    function_name (str): Name for the function.\n    function_code (str): JavaScript function code.\n\nReturns:\n    Dict[str, Any]: Function creation result.",
+    "description": "Create a persistent JavaScript function that survives page reloads.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    function_name (str): Name for the function.\n    function_code (str): JavaScript function code.\n\nReturns:\n    Dict[str, Any]: Function creation result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -449,6 +515,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -465,7 +542,7 @@
     "tags": []
   },
   "create_python_binding": {
-    "description": "Create a binding that allows JavaScript to call Python functions.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    binding_name (str): Name for the binding.\n    python_code (str): Python function code (as string).\n\nReturns:\n    Dict[str, Any]: Binding creation result.",
+    "description": "Create a binding that allows JavaScript to call Python functions.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    binding_name (str): Name for the binding.\n    python_code (str): Python function code (as string).\n\nReturns:\n    Dict[str, Any]: Binding creation result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -478,6 +555,17 @@
         },
         "python_code": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -562,7 +650,7 @@
     "tags": []
   },
   "discover_global_functions": {
-    "description": "Discover all global JavaScript functions available in the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    context_id (str, optional): Optional execution context ID.\n\nReturns:\n    List[Dict[str, Any]]: List of discovered functions with their details.",
+    "description": "Discover all global JavaScript functions available in the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    context_id (str, optional): Optional execution context ID.\n\nReturns:\n    List[Dict[str, Any]]: List of discovered functions with their details.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -573,6 +661,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -599,7 +698,7 @@
     "tags": []
   },
   "discover_object_methods": {
-    "description": "Discover methods of a specific JavaScript object.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    object_path (str): Path to the object (e.g., 'document', 'window.localStorage').\n\nReturns:\n    List[Dict[str, Any]]: List of discovered methods.",
+    "description": "Discover methods of a specific JavaScript object.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    object_path (str): Path to the object (e.g., 'document', 'window.localStorage').\n\nReturns:\n    List[Dict[str, Any]]: List of discovered methods.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -609,6 +708,17 @@
         },
         "object_path": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -636,7 +746,7 @@
     "tags": []
   },
   "execute_cdp_command": {
-    "description": "Execute a raw CDP command by name — the low-level escape hatch beneath the\nexec-family tools. Prefer `execute_script` for ordinary page JS; use this\nonly for one specific CDP method (e.g. 'evaluate', 'Page.reload').\n\nArgs:\n    instance_id (str): Browser instance ID.\n    command (str): CDP command, either domain-qualified ('Page.reload',\n            'Emulation.setDeviceMetricsOverride') or a bare Runtime method\n            ('evaluate'). Wire casing and snake_case both resolve.\n    params (Dict[str, Any], optional): Command parameters. Wire casing and\n            snake_case both resolve, per parameter ('returnByValue' and\n            'return_by_value' are the same argument), so the CDP docs' own\n            spelling works.\n\nReturns:\n    Dict[str, Any]: Command execution result.\n\nExample:\n    # Both the command NAME and its PARAM names are casing-flexible.\n    params = {\"expression\": \"document.title\", \"return_by_value\": True}",
+    "description": "Execute a raw CDP command by name — the low-level escape hatch beneath the\nexec-family tools. Prefer `execute_script` for ordinary page JS; use this\nonly for one specific CDP method (e.g. 'evaluate', 'Page.reload').\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    command (str): CDP command, either domain-qualified ('Page.reload',\n            'Emulation.setDeviceMetricsOverride') or a bare Runtime method\n            ('evaluate'). Wire casing and snake_case both resolve.\n    params (Dict[str, Any], optional): Command parameters. Wire casing and\n            snake_case both resolve, per parameter ('returnByValue' and\n            'return_by_value' are the same argument), so the CDP docs' own\n            spelling works.\n\nReturns:\n    Dict[str, Any]: Command execution result.\n\nExample:\n    # Both the command NAME and its PARAM names are casing-flexible.\n    params = {\"expression\": \"document.title\", \"return_by_value\": True}",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -651,6 +761,17 @@
           "additionalProperties": true,
           "default": null,
           "type": "object"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -666,7 +787,7 @@
     "tags": []
   },
   "execute_function_sequence": {
-    "description": "Invoke several already-defined JavaScript functions in order, in a single\nround trip.\n\nEach entry is one `call_javascript_function`-style call; use this to batch\nthem instead of issuing repeated `call_javascript_function` calls.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    function_calls (List[Dict[str, Any]]): List of function calls, each with 'function_path', 'args', and optional 'context_id'.\n\nReturns:\n    List[Dict[str, Any]]: List of function call results.",
+    "description": "Invoke several already-defined JavaScript functions in order, in a single\nround trip.\n\nEach entry is one `call_javascript_function`-style call; use this to batch\nthem instead of issuing repeated `call_javascript_function` calls.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    function_calls (List[Dict[str, Any]]): List of function calls, each with 'function_path', 'args', and optional 'context_id'.\n\nReturns:\n    List[Dict[str, Any]]: List of function call results.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -680,6 +801,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -707,7 +839,7 @@
     "tags": []
   },
   "execute_python_in_browser": {
-    "description": "Author browser logic in Python — it is transpiled to JavaScript and then\nexecuted in the page.\n\nUse `execute_script` to write JavaScript directly; use this when you would\nrather write Python.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    python_code (str): Python code to translate and execute.\n\nReturns:\n    Dict[str, Any]: Execution result.",
+    "description": "Author browser logic in Python — it is transpiled to JavaScript and then\nexecuted in the page.\n\nUse `execute_script` to write JavaScript directly; use this when you would\nrather write Python.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    python_code (str): Python code to translate and execute.\n\nReturns:\n    Dict[str, Any]: Execution result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -717,6 +849,17 @@
         },
         "python_code": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -732,7 +875,7 @@
     "tags": []
   },
   "execute_script": {
-    "description": "Execute JavaScript source in the active page and return its value.\n\nThe default exec-family tool; prefer a sibling when it fits — `inject_and_execute_script`\n(specific execution context), `call_javascript_function`/`execute_function_sequence`\n(invoke defined functions), `execute_python_in_browser` (Python), `execute_cdp_command` (raw CDP).\n\nASYNC IS SUPPORTED (F-883). Top-level `await` works, and a Promise the script\nreturns is awaited for you and answered with the value it resolves to:\n`return fetch(u).then(r => r.text())` and\n`const d = await (await fetch(u)).json(); return d.id;` both give you the data.\nA Promise that REJECTS raises with its reason — it is never reported as a\nsuccess. A script that never settles is killed at `timeout_ms`, exactly like a\nblocking one; a Promise that settles AFTER `timeout_ms` is discarded and the\ninstance stays usable. Note the flip side: a TRAILING expression that is a\nPromise is now awaited too — `fetch('/slow')` as the last statement blocks up\nto `timeout_ms` where it used to answer `{}` at once; write `void fetch(...)`\nfor fire-and-forget. (Before this fix a returned Promise came back as `{}`\nand a rejection as `{}` with `success: true`.)\n\n⚠️ Non-blocking code only. The script runs on the page's main thread, so\nanything that blocks it freezes the whole tab and makes every later call time\nout. Specifically:\n  • NEVER use synchronous XHR — `xhr.open(url, false)`. Use `await fetch(url)`.\n  • NEVER use infinite/blocking loops — `while(true)`, `for(;;)`, busy-waits.\n  • NEVER call `alert()` / `confirm()` / `prompt()` — they block automation.\n  • To UPLOAD FILES, use the `upload_file` tool — do NOT fetch blobs or build\n    base64/DataTransfer here (mixed-content/CORS limits and can freeze the page).\n  • Keep scripts small (< ~100KB); don't inline large payloads.\n\nA top-level `var` / `function` declaration still lands on the page: the source\nis evaluated as written first, and only Chrome's own \"illegal return\" /\n\"await is only valid in async functions\" complaint sends it round again inside\nan async wrapper.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    script (str): JavaScript to execute; non-blocking. Top-level 'return' and\n        top-level 'await' are both OK.\n    args (Optional[List[Any]]): Arguments passed to the script body.\n    timeout_ms (Optional[int]): Max run time in ms (default 10000, max 60000).\n        A blocking script — or a Promise that never settles — is killed at\n        this limit instead of hanging the tab.\n\nReturns:\n    Dict[str, Any]: {\"success\": bool, \"result\": Any, \"error\": Optional[str]}.",
+    "description": "Execute JavaScript source in the active page and return its value.\n\nThe default exec-family tool; prefer a sibling when it fits — `inject_and_execute_script`\n(specific execution context), `call_javascript_function`/`execute_function_sequence`\n(invoke defined functions), `execute_python_in_browser` (Python), `execute_cdp_command` (raw CDP).\n\nASYNC IS SUPPORTED (F-883). Top-level `await` works, and a Promise the script\nreturns is awaited for you and answered with the value it resolves to:\n`return fetch(u).then(r => r.text())` and\n`const d = await (await fetch(u)).json(); return d.id;` both give you the data.\nA Promise that REJECTS raises with its reason — it is never reported as a\nsuccess. A script that never settles is killed at `timeout_ms`, exactly like a\nblocking one; a Promise that settles AFTER `timeout_ms` is discarded and the\ninstance stays usable. Note the flip side: a TRAILING expression that is a\nPromise is now awaited too — `fetch('/slow')` as the last statement blocks up\nto `timeout_ms` where it used to answer `{}` at once; write `void fetch(...)`\nfor fire-and-forget. (Before this fix a returned Promise came back as `{}`\nand a rejection as `{}` with `success: true`.)\n\n⚠️ Non-blocking code only. The script runs on the page's main thread, so\nanything that blocks it freezes the whole tab and makes every later call time\nout. Specifically:\n  • NEVER use synchronous XHR — `xhr.open(url, false)`. Use `await fetch(url)`.\n  • NEVER use infinite/blocking loops — `while(true)`, `for(;;)`, busy-waits.\n  • NEVER call `alert()` / `confirm()` / `prompt()` — they block automation.\n  • To UPLOAD FILES, use the `upload_file` tool — do NOT fetch blobs or build\n    base64/DataTransfer here (mixed-content/CORS limits and can freeze the page).\n  • Keep scripts small (< ~100KB); don't inline large payloads.\n\nA top-level `var` / `function` declaration still lands on the page: the source\nis evaluated as written first, and only Chrome's own \"illegal return\" /\n\"await is only valid in async functions\" complaint sends it round again inside\nan async wrapper.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    script (str): JavaScript to execute; non-blocking. Top-level 'return' and\n        top-level 'await' are both OK.\n    args (Optional[List[Any]]): Arguments passed to the script body.\n    timeout_ms (Optional[int]): Max run time in ms (default 10000, max 60000).\n        A blocking script — or a Promise that never settles — is killed at\n        this limit instead of hanging the tab.\n\nReturns:\n    Dict[str, Any]: {\"success\": bool, \"result\": Any, \"error\": Optional[str]}.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -754,6 +897,17 @@
         },
         "script": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "timeout_ms": {
           "anyOf": [
@@ -1055,7 +1209,7 @@
     "tags": []
   },
   "extract_complete_element_cdp": {
-    "description": "Extract a complete element inline via native CDP for every aspect — the\npure-CDP variant with a *nested* schema (data under an ``element`` block).\n\nUnlike ``clone_element_complete`` (canonical flat schema; styles CDP + the rest\nJS-eval), this bypasses JavaScript entirely and uses CDP directly for all\naspects:\n- Computed styles via CSS.getComputedStyleForNode\n- Matched CSS rules via CSS.getMatchedStylesForNode\n- Event listeners via DOMDebugger.getEventListeners\n- DOM structure and attributes via DOM.describeNode\n\nPrefer this when you specifically need CDP-native fidelity (e.g. matched CSS\nrules, CDP event listeners) and can consume the nested shape; prefer\n``clone_element_complete`` for the flat, per-aspect default.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_children (bool): Whether to include child elements.\n\nReturns:\n    Dict[str, Any]: Complete element data with 100% accuracy.",
+    "description": "Extract a complete element inline via native CDP for every aspect — the\npure-CDP variant with a *nested* schema (data under an ``element`` block).\n\nUnlike ``clone_element_complete`` (canonical flat schema; styles CDP + the rest\nJS-eval), this bypasses JavaScript entirely and uses CDP directly for all\naspects:\n- Computed styles via CSS.getComputedStyleForNode\n- Matched CSS rules via CSS.getMatchedStylesForNode\n- Event listeners via DOMDebugger.getEventListeners\n- DOM structure and attributes via DOM.describeNode\n\nPrefer this when you specifically need CDP-native fidelity (e.g. matched CSS\nrules, CDP event listeners) and can consume the nested shape; prefer\n``clone_element_complete`` for the flat, per-aspect default.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_children (bool): Whether to include child elements.\n\nReturns:\n    Dict[str, Any]: Complete element data with 100% accuracy.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1069,6 +1223,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1084,7 +1249,7 @@
     "tags": []
   },
   "extract_complete_element_to_file": {
-    "description": "Save a complete canonical clone to a file — the lightweight to-file variant.\n\nSame canonical engine as ``clone_element_complete`` (styles via CDP, the rest\nvia JS-eval) but exposes only an ``include_children`` toggle rather than\nper-aspect ``extraction_options``. Returns ``{file_path, extraction_type,\nsummary}``. Use ``clone_element_to_file`` when you need the full per-aspect\noption set.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_children (bool): Whether to include child elements.\n\nReturns:\n    Dict[str, Any]: File path and concise summary instead of massive data dump.",
+    "description": "Save a complete canonical clone to a file — the lightweight to-file variant.\n\nSame canonical engine as ``clone_element_complete`` (styles via CDP, the rest\nvia JS-eval) but exposes only an ``include_children`` toggle rather than\nper-aspect ``extraction_options``. Returns ``{file_path, extraction_type,\nsummary}``. Use ``clone_element_to_file`` when you need the full per-aspect\noption set.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_children (bool): Whether to include child elements.\n\nReturns:\n    Dict[str, Any]: File path and concise summary instead of massive data dump.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1098,6 +1263,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1113,7 +1289,7 @@
     "tags": []
   },
   "extract_element_animations": {
-    "description": "Extract everything needed to retime or restyle an element's motion (schema v2).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_subtree (bool): Include descendant and pseudo-element animations.\n    include_waapi (bool): Include live getAnimations() records (element.animate).\n\nReturns:\n    Dict[str, Any]: `schema_version: 2`, `has_motion`, `overview` prose,\n    `animations[]`, `transitions[]`, `interactions[]` (conflicts + remedies),\n    `sources[]` (href, rule path, author text), `transforms`, `warnings[]`.\n    Per animation: `summary`, `kind`, `target`, `trigger`, `semantics` (each\n    a `{value, confidence}` claim), `timeline` (time|scroll|view — duration\n    edits are IGNORED on scroll/view), `timing` (`*_ms` numbers beside\n    `*_raw` tokens; `iterations` may be \"infinite\"), `derived` (cycle_ms,\n    active window, total_ms, stagger_group), `keyframes[]` (numeric `offset`\n    + parsed properties), `checkpoints[]` (declared values, never\n    interpolated), `edits[]` (per knob: the author's declaration as `find`,\n    the one `token` in it this knob owns, and `replace` — that declaration\n    with only the token swapped for `edit_protocol.placeholder`; no `find`\n    means a pointer, not an edit). Capped at 25 animations / 20 keyframes;\n    subtree records carry `detail_level: \"summary\"`. Undecidable: omitted.",
+    "description": "Extract everything needed to retime or restyle an element's motion (schema v2).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_subtree (bool): Include descendant and pseudo-element animations.\n    include_waapi (bool): Include live getAnimations() records (element.animate).\n\nReturns:\n    Dict[str, Any]: `schema_version: 2`, `has_motion`, `overview` prose,\n    `animations[]`, `transitions[]`, `interactions[]` (conflicts + remedies),\n    `sources[]` (href, rule path, author text), `transforms`, `warnings[]`.\n    Per animation: `summary`, `kind`, `target`, `trigger`, `semantics` (each\n    a `{value, confidence}` claim), `timeline` (time|scroll|view — duration\n    edits are IGNORED on scroll/view), `timing` (`*_ms` numbers beside\n    `*_raw` tokens; `iterations` may be \"infinite\"), `derived` (cycle_ms,\n    active window, total_ms, stagger_group), `keyframes[]` (numeric `offset`\n    + parsed properties), `checkpoints[]` (declared values, never\n    interpolated), `edits[]` (per knob: the author's declaration as `find`,\n    the one `token` in it this knob owns, and `replace` — that declaration\n    with only the token swapped for `edit_protocol.placeholder`; no `find`\n    means a pointer, not an edit). Capped at 25 animations / 20 keyframes;\n    subtree records carry `detail_level: \"summary\"`. Undecidable: omitted.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1131,6 +1307,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1146,7 +1333,7 @@
     "tags": []
   },
   "extract_element_animations_to_file": {
-    "description": "Extract element animations (schema v2) to a file, returning the file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_subtree (bool): Include descendant and pseudo-element animations.\n    include_waapi (bool): Include live getAnimations() records.\n\nReturns:\n    Dict[str, Any]: File path plus a summary (has_motion and the animation,\n    transition, keyframe and interaction counts). The file holds the full\n    schema-v2 payload extract_element_animations() documents.",
+    "description": "Extract element animations (schema v2) to a file, returning the file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_subtree (bool): Include descendant and pseudo-element animations.\n    include_waapi (bool): Include live getAnimations() records.\n\nReturns:\n    Dict[str, Any]: File path plus a summary (has_motion and the animation,\n    transition, keyframe and interaction counts). The file holds the full\n    schema-v2 payload extract_element_animations() documents.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1164,6 +1351,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1179,7 +1377,7 @@
     "tags": []
   },
   "extract_element_assets": {
-    "description": "Extract all assets related to an element (images, fonts, etc.).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_images (bool): Include img src and related images.\n    include_backgrounds (bool): Include background images.\n    include_fonts (bool): Include font information.\n    fetch_external (bool): Whether to fetch external assets for analysis.\n\nReturns:\n    Dict[str, Any]: Images, background images, fonts, icons, videos, audio assets.",
+    "description": "Extract all assets related to an element (images, fonts, etc.).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_images (bool): Include img src and related images.\n    include_backgrounds (bool): Include background images.\n    include_fonts (bool): Include font information.\n    fetch_external (bool): Whether to fetch external assets for analysis.\n\nReturns:\n    Dict[str, Any]: Images, background images, fonts, icons, videos, audio assets.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1205,6 +1403,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1220,7 +1429,7 @@
     "tags": []
   },
   "extract_element_assets_to_file": {
-    "description": "Extract element assets and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_images (bool): Include images.\n    include_backgrounds (bool): Include background images.\n    include_fonts (bool): Include font information.\n    fetch_external (bool): Fetch external assets.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted assets.",
+    "description": "Extract element assets and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_images (bool): Include images.\n    include_backgrounds (bool): Include background images.\n    include_fonts (bool): Include font information.\n    fetch_external (bool): Fetch external assets.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted assets.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1246,6 +1455,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1261,7 +1481,7 @@
     "tags": []
   },
   "extract_element_events": {
-    "description": "Extract complete event listener and JavaScript handler information.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_inline (bool): Include inline event handlers (onclick, etc.).\n    include_listeners (bool): Include addEventListener attached handlers.\n    include_framework (bool): Include framework-specific handlers (React, Vue, etc.).\n    analyze_handlers (bool): Analyze handler functions for full details (can be large).\n\nReturns:\n    Dict[str, Any]: Event listeners, inline handlers, framework handlers, detected frameworks.",
+    "description": "Extract complete event listener and JavaScript handler information.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_inline (bool): Include inline event handlers (onclick, etc.).\n    include_listeners (bool): Include addEventListener attached handlers.\n    include_framework (bool): Include framework-specific handlers (React, Vue, etc.).\n    analyze_handlers (bool): Analyze handler functions for full details (can be large).\n\nReturns:\n    Dict[str, Any]: Event listeners, inline handlers, framework handlers, detected frameworks.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1287,6 +1507,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1302,7 +1533,7 @@
     "tags": []
   },
   "extract_element_events_to_file": {
-    "description": "Extract element events and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_inline (bool): Include inline event handlers.\n    include_listeners (bool): Include addEventListener handlers.\n    include_framework (bool): Include framework-specific handlers.\n    analyze_handlers (bool): Analyze handler functions.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted events.",
+    "description": "Extract element events and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_inline (bool): Include inline event handlers.\n    include_listeners (bool): Include addEventListener handlers.\n    include_framework (bool): Include framework-specific handlers.\n    analyze_handlers (bool): Analyze handler functions.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted events.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1328,6 +1559,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1343,7 +1585,7 @@
     "tags": []
   },
   "extract_element_structure": {
-    "description": "Extract complete HTML structure and DOM information.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_children (bool): Include child elements.\n    include_attributes (bool): Include all attributes.\n    include_data_attributes (bool): Include data-* attributes specifically.\n    max_depth (int): Maximum depth for children extraction.\n\nReturns:\n    Dict[str, Any]: HTML structure, attributes, position, and children data.",
+    "description": "Extract complete HTML structure and DOM information.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_children (bool): Include child elements.\n    include_attributes (bool): Include all attributes.\n    include_data_attributes (bool): Include data-* attributes specifically.\n    max_depth (int): Maximum depth for children extraction.\n\nReturns:\n    Dict[str, Any]: HTML structure, attributes, position, and children data.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1369,6 +1611,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1384,7 +1637,7 @@
     "tags": []
   },
   "extract_element_structure_to_file": {
-    "description": "Extract element structure and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_children (bool): Include child elements.\n    include_attributes (bool): Include all attributes.\n    include_data_attributes (bool): Include data-* attributes.\n    max_depth (int): Maximum depth for children extraction.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted structure.",
+    "description": "Extract element structure and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_children (bool): Include child elements.\n    include_attributes (bool): Include all attributes.\n    include_data_attributes (bool): Include data-* attributes.\n    max_depth (int): Maximum depth for children extraction.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted structure.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1410,6 +1663,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1425,7 +1689,7 @@
     "tags": []
   },
   "extract_element_styles": {
-    "description": "Extract complete styling information from an element.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_computed (bool): Include computed styles.\n    include_css_rules (bool): Include matching CSS rules.\n    include_pseudo (bool): Include pseudo-element styles (::before, ::after).\n    include_inheritance (bool): Include style inheritance chain.\n\nReturns:\n    Dict[str, Any]: Complete styling data including computed styles, CSS rules, pseudo-elements.",
+    "description": "Extract complete styling information from an element.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_computed (bool): Include computed styles.\n    include_css_rules (bool): Include matching CSS rules.\n    include_pseudo (bool): Include pseudo-element styles (::before, ::after).\n    include_inheritance (bool): Include style inheritance chain.\n\nReturns:\n    Dict[str, Any]: Complete styling data including computed styles, CSS rules, pseudo-elements.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1451,6 +1715,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1466,7 +1741,7 @@
     "tags": []
   },
   "extract_element_styles_cdp": {
-    "description": "Extract element styles using direct CDP calls (no JavaScript evaluation).\nThis prevents hanging issues by using nodriver's native CDP methods.\n\nArgs:\n    instance_id (str): Browser instance ID\n    selector (str): CSS selector for the element\n    include_computed (bool): Include computed styles\n    include_css_rules (bool): Include matching CSS rules\n    include_pseudo (bool): Include pseudo-element styles\n    include_inheritance (bool): Include style inheritance chain\n\nReturns:\n    Dict[str, Any]: Styling data extracted using CDP",
+    "description": "Extract element styles using direct CDP calls (no JavaScript evaluation).\nThis prevents hanging issues by using nodriver's native CDP methods.\n\nArgs:\n    instance_id (str): Browser instance ID\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element\n    include_computed (bool): Include computed styles\n    include_css_rules (bool): Include matching CSS rules\n    include_pseudo (bool): Include pseudo-element styles\n    include_inheritance (bool): Include style inheritance chain\n\nReturns:\n    Dict[str, Any]: Styling data extracted using CDP",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1492,6 +1767,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1507,7 +1793,7 @@
     "tags": []
   },
   "extract_element_styles_to_file": {
-    "description": "Extract element styles and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the element.\n    include_computed (bool): Include computed styles.\n    include_css_rules (bool): Include matching CSS rules.\n    include_pseudo (bool): Include pseudo-element styles.\n    include_inheritance (bool): Include style inheritance chain.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted styles.",
+    "description": "Extract element styles and save to file, returning file path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the element.\n    include_computed (bool): Include computed styles.\n    include_css_rules (bool): Include matching CSS rules.\n    include_pseudo (bool): Include pseudo-element styles.\n    include_inheritance (bool): Include style inheritance chain.\n\nReturns:\n    Dict[str, Any]: File path and summary of extracted styles.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1533,6 +1819,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1548,7 +1845,7 @@
     "tags": []
   },
   "extract_related_files": {
-    "description": "Discover and analyze related CSS/JS files for context.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    analyze_css (bool): Analyze linked CSS files.\n    analyze_js (bool): Analyze linked JS files.\n    follow_imports (bool): Follow @import and module imports (uses network).\n    max_depth (int): Maximum depth for following imports.\n\nReturns:\n    Dict[str, Any]: Stylesheets, scripts, imports, modules, framework detection.",
+    "description": "Discover and analyze related CSS/JS files for context.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    analyze_css (bool): Analyze linked CSS files.\n    analyze_js (bool): Analyze linked JS files.\n    follow_imports (bool): Follow @import and module imports (uses network).\n    max_depth (int): Maximum depth for following imports.\n\nReturns:\n    Dict[str, Any]: Stylesheets, scripts, imports, modules, framework detection.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1571,6 +1868,17 @@
         "max_depth": {
           "default": 2,
           "type": "integer"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1585,13 +1893,24 @@
     "tags": []
   },
   "get_active_tab": {
-    "description": "Get information about the currently active tab.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    Dict[str, Any]: Active tab information.",
+    "description": "Get information about THIS session's tab: the one its page tools act on\nwithout a tab_id (the last tab it opened or switched to).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    Dict[str, Any]: Active tab information.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1606,13 +1925,24 @@
     "tags": []
   },
   "get_cookies": {
-    "description": "Get cookies for current page or specific URLs.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    urls (Optional[List[str]]): Optional list of URLs to get cookies for.\n\nReturns:\n    List[Dict[str, Any]]: List of cookies.",
+    "description": "Get cookies for current page or specific URLs.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    urls (Optional[List[str]]): Optional list of URLs to get cookies for.\n\nReturns:\n    List[Dict[str, Any]]: List of cookies.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "urls": {
           "anyOf": [
@@ -1719,7 +2049,7 @@
     "tags": []
   },
   "get_element_state": {
-    "description": "Get complete state of an element.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n\nReturns:\n    Dict[str, Any]: Element state including attributes, style, position, etc.",
+    "description": "Get complete state of an element.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector or XPath.\n\nReturns:\n    Dict[str, Any]: Element state including attributes, style, position, etc.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1729,6 +2059,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1744,13 +2085,24 @@
     "tags": []
   },
   "get_execution_contexts": {
-    "description": "Get all available JavaScript execution contexts.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    List[Dict[str, Any]]: List of execution contexts with their details.",
+    "description": "Get all available JavaScript execution contexts.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    List[Dict[str, Any]]: List of execution contexts with their details.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1852,13 +2204,24 @@
     "tags": []
   },
   "get_instance_state": {
-    "description": "Get detailed state of a browser instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    Optional[Dict[str, Any]]: Full page state, or a partial record\n    (``partial: True``) with ``detail_error`` if collection times out or fails.",
+    "description": "Get detailed state of a browser instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    Optional[Dict[str, Any]]: Full page state, or a partial record\n    (``partial: True``) with ``detail_error`` if collection times out or fails.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1910,7 +2273,7 @@
     "tags": []
   },
   "get_page_content": {
-    "description": "Get page HTML and text content.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    include_frames (bool): Include iframe information.\n\nReturns:\n    Dict[str, Any]: Page content including HTML, text, and metadata.",
+    "description": "Get page HTML and text content.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    include_frames (bool): Include iframe information.\n\nReturns:\n    Dict[str, Any]: Page content including HTML, text, and metadata.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1921,6 +2284,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1972,7 +2346,7 @@
     "tags": []
   },
   "get_response_content": {
-    "description": "Get response body content.\n\nLive-refetches the body from CDP on demand, so it works even when\nresponse-body capture is off (the default) and independent of the stored-body\ncap. CDP evicts bodies from its own buffer quickly, so fetch soon after load.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    request_id (str): Network request ID.\n\nReturns:\n    Optional[str]: Response body as text (base64 encoded for binary).",
+    "description": "Get response body content.\n\nLive-refetches the body from CDP on demand, so it works even when\nresponse-body capture is off (the default) and independent of the stored-body\ncap. CDP evicts bodies from its own buffer quickly, so fetch soon after load.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    request_id (str): Network request ID.\n\nReturns:\n    Optional[str]: Response body as text (base64 encoded for binary).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1982,6 +2356,17 @@
         },
         "request_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2079,13 +2464,24 @@
     "tags": []
   },
   "go_back": {
-    "description": "Navigate back in history.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
+    "description": "Navigate back in history.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2108,13 +2504,24 @@
     "tags": []
   },
   "go_forward": {
-    "description": "Navigate forward in history.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
+    "description": "Navigate forward in history.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2170,7 +2577,7 @@
     "tags": []
   },
   "inject_and_execute_script": {
-    "description": "Run custom JavaScript source, optionally inside a specific execution context\n(isolated world / iframe) via `context_id`.\n\nLike `execute_script`, but lets you choose the execution context; prefer\nplain `execute_script` when the default page context is what you want.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    script_code (str): JavaScript code to execute.\n    context_id (str, optional): Optional execution context ID.\n\nReturns:\n    Dict[str, Any]: Script execution result.",
+    "description": "Run custom JavaScript source, optionally inside a specific execution context\n(isolated world / iframe) via `context_id`.\n\nLike `execute_script`, but lets you choose the execution context; prefer\nplain `execute_script` when the default page context is what you want.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    script_code (str): JavaScript code to execute.\n    context_id (str, optional): Optional execution context ID.\n\nReturns:\n    Dict[str, Any]: Script execution result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2184,6 +2591,17 @@
         },
         "script_code": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2199,7 +2617,7 @@
     "tags": []
   },
   "inspect_function_signature": {
-    "description": "Inspect a JavaScript function's signature and details.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    function_path (str): Full path to the function.\n\nReturns:\n    Dict[str, Any]: Function signature and details.",
+    "description": "Inspect a JavaScript function's signature and details.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    function_path (str): Full path to the function.\n\nReturns:\n    Dict[str, Any]: Function signature and details.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2209,6 +2627,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2428,7 +2857,7 @@
     "tags": []
   },
   "modify_headers": {
-    "description": "Modify request headers for future requests.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    headers (Dict[str, str]): Headers to add/modify.\n\nReturns:\n    bool: True if modified successfully.",
+    "description": "Modify request headers for future requests.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    headers (Dict[str, str]): Headers to add/modify.\n\nReturns:\n    bool: True if modified successfully.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2441,6 +2870,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2464,7 +2904,7 @@
     "tags": []
   },
   "navigate": {
-    "description": "Navigate to a URL.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    url (str): URL to navigate to.\n    wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.\n    timeout (int): Navigation timeout in ms (default 30000, max 60000). Most pages load in under 10s — only increase if you have evidence the page is slow. Values above 60000 are capped.\n    referrer (Optional[str]): Referrer URL.\n\nReturns:\n    Dict[str, Any]: Navigation result with final URL and title.\n\nRaises:\n    ToolError: the navigation failed at the browser — Chrome committed an\n        error page (unresolvable host, refused connection, TLS failure).\n        An HTTP error status (404/500) is a loaded page, not a failure.",
+    "description": "Navigate to a URL.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    url (str): URL to navigate to.\n    wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.\n    timeout (int): Navigation timeout in ms (default 30000, max 60000). Most pages load in under 10s — only increase if you have evidence the page is slow. Values above 60000 are capped.\n    referrer (Optional[str]): Referrer URL.\n\nReturns:\n    Dict[str, Any]: Navigation result with final URL and title.\n\nRaises:\n    ToolError: the navigation failed at the browser — Chrome committed an\n        error page (unresolvable host, refused connection, TLS failure).\n        An HTTP error status (404/500) is a loaded page, not a failure.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2473,6 +2913,17 @@
           "type": "string"
         },
         "referrer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tab_id": {
           "anyOf": [
             {
               "type": "string"
@@ -2508,7 +2959,7 @@
     "tags": []
   },
   "new_tab": {
-    "description": "Open a new tab in the browser instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    url (str): URL to open in the new tab.\n\nReturns:\n    Dict[str, Any]: New tab information. A Chrome error page raises (F-833).",
+    "description": "Open a new tab in the browser instance. It becomes THIS session's tab:\npage tools called without tab_id act on it from now on.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    url (str): URL to open in the new tab.\n\nReturns:\n    Dict[str, Any]: New tab information. A Chrome error page raises (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2533,7 +2984,7 @@
     "tags": []
   },
   "paste_text": {
-    "description": "Paste text instantly into an input field.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    text (str): Text to paste.\n    clear_first (bool): Clear field before pasting.\n\nReturns:\n    bool: True — the text was pasted AND the page took it. Raises if the\n        element's text did not move (a readonly/range/color control, a\n        non-editable element, or a script that cancels the input).",
+    "description": "Paste text instantly into an input field.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector or XPath.\n    text (str): Text to paste.\n    clear_first (bool): Clear field before pasting.\n\nReturns:\n    bool: True — the text was pasted AND the page took it. Raises if the\n        element's text did not move (a readonly/range/color control, a\n        non-editable element, or a script that cancels the input).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2547,6 +2998,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text": {
           "type": "string"
@@ -2574,7 +3036,7 @@
     "tags": []
   },
   "query_elements": {
-    "description": "Query DOM elements.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath (starts with '//').\n    text_filter (Optional[str]): Filter by text content.\n    visible_only (bool): Only return visible elements.\n    limit (Optional[Any]): Maximum number of elements to return.\n\nReturns:\n    List[Dict[str, Any]]: List of matching elements with their properties.",
+    "description": "Query DOM elements.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector or XPath (starts with '//').\n    text_filter (Optional[str]): Filter by text content.\n    visible_only (bool): Only return visible elements.\n    limit (Optional[Any]): Maximum number of elements to return.\n\nReturns:\n    List[Dict[str, Any]]: List of matching elements with their properties.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2593,6 +3055,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text_filter": {
           "anyOf": [
@@ -2660,7 +3133,7 @@
     "tags": []
   },
   "reload_page": {
-    "description": "Reload the current page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    ignore_cache (bool): Whether to ignore cache when reloading.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
+    "description": "Reload the current page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    ignore_cache (bool): Whether to ignore cache when reloading.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2671,6 +3144,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2714,7 +3198,7 @@
     "tags": []
   },
   "scroll_page": {
-    "description": "Scroll the page and report where it ended up.\n\nWaits for the position to stop changing before answering, so a smooth scroll\nis reported at where it LANDED, not where it had reached.\n\nDrives the page's REAL scroller, which is not always the document: a page\nlaid out as an app shell (`body{overflow:hidden}` plus a scrolling `div`)\nis scrolled by that div, and the record names whichever element was driven.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    direction (str): 'down', 'up', 'left', 'right', 'top', or 'bottom'.\n    amount (int): Pixels to scroll (ignored for 'top' and 'bottom'). A\n        distance, never negative — the direction carries the sign.\n    smooth (bool): Use smooth scrolling.\n\nReturns:\n    Dict[str, object]: ``scrolled`` (the scroll OFFSET changed — a page that\n    merely grew while standing still is not scrolled), ``at_edge`` (the\n    scroller is as far as ``direction`` goes — true when there is nothing to\n    scroll, i.e. ``max_scroll_y`` is 0), ``settled`` (the offset stopped\n    changing within the budget; false means it was still moving),\n    ``settle_seconds``, the requested ``direction``/``amount``/``smooth``,\n    ``scroll_x_before``/``scroll_y_before``/``scroll_x_after``/\n    ``scroll_y_after``/``max_scroll_x``/``max_scroll_y``, plus ``scroller``\n    (``{tag, id, classes}`` of the element that was driven) and\n    ``scroller_is_document`` (false when it was a nested scroller).",
+    "description": "Scroll the page and report where it ended up.\n\nWaits for the position to stop changing before answering, so a smooth scroll\nis reported at where it LANDED, not where it had reached.\n\nDrives the page's REAL scroller, which is not always the document: a page\nlaid out as an app shell (`body{overflow:hidden}` plus a scrolling `div`)\nis scrolled by that div, and the record names whichever element was driven.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    direction (str): 'down', 'up', 'left', 'right', 'top', or 'bottom'.\n    amount (int): Pixels to scroll (ignored for 'top' and 'bottom'). A\n        distance, never negative — the direction carries the sign.\n    smooth (bool): Use smooth scrolling.\n\nReturns:\n    Dict[str, object]: ``scrolled`` (the scroll OFFSET changed — a page that\n    merely grew while standing still is not scrolled), ``at_edge`` (the\n    scroller is as far as ``direction`` goes — true when there is nothing to\n    scroll, i.e. ``max_scroll_y`` is 0), ``settled`` (the offset stopped\n    changing within the budget; false means it was still moving),\n    ``settle_seconds``, the requested ``direction``/``amount``/``smooth``,\n    ``scroll_x_before``/``scroll_y_before``/``scroll_x_after``/\n    ``scroll_y_after``/``max_scroll_x``/``max_scroll_y``, plus ``scroller``\n    (``{tag, id, classes}`` of the element that was driven) and\n    ``scroller_is_document`` (false when it was a nested scroller).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2733,6 +3217,17 @@
         "smooth": {
           "default": true,
           "type": "boolean"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2842,7 +3337,7 @@
     "tags": []
   },
   "select_option": {
-    "description": "Select an option from a dropdown, and report what the control now holds.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector for the select element.\n    value (Optional[str]): Option value attribute (exact match).\n    text (Optional[str]): Option text or label. Matched exactly first, then\n        as a case-insensitive prefix; a disabled option is never matched.\n    index (Optional[Any]): Option index (0-based). Can be string or int.\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"by\", \"selected_index\", \"selected_count\",\n        \"option_count\", \"multiple\", \"changed\"}. \"by\" is which criterion was\n        used (\"text\", \"value\" or \"index\" — in that precedence). \"changed\" is\n        false when the control was already on that option, which is a\n        success. No option text or value is echoed back. Raises if the\n        element is not a <select>, if no option matches, or if the page did\n        not keep the selection.\n        The \"input\" and \"change\" events this fires are UNTRUSTED\n        (isTrusted: false), and are dispatched only when the selection\n        actually moved. A page that gates on event.isTrusted will not react.",
+    "description": "Select an option from a dropdown, and report what the control now holds.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector for the select element.\n    value (Optional[str]): Option value attribute (exact match).\n    text (Optional[str]): Option text or label. Matched exactly first, then\n        as a case-insensitive prefix; a disabled option is never matched.\n    index (Optional[Any]): Option index (0-based). Can be string or int.\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"by\", \"selected_index\", \"selected_count\",\n        \"option_count\", \"multiple\", \"changed\"}. \"by\" is which criterion was\n        used (\"text\", \"value\" or \"index\" — in that precedence). \"changed\" is\n        false when the control was already on that option, which is a\n        success. No option text or value is echoed back. Raises if the\n        element is not a <select>, if no option matches, or if the page did\n        not keep the selection.\n        The \"input\" and \"change\" events this fires are UNTRUSTED\n        (isTrusted: false), and are dispatched only when the selection\n        actually moved. A page that gates on event.isTrusted will not react.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2861,6 +3356,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text": {
           "anyOf": [
@@ -2898,7 +3404,7 @@
     "tags": []
   },
   "set_cookie": {
-    "description": "Set a cookie.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    name (str): Cookie name.\n    value (str): Cookie value.\n    url (Optional[str]): The request-URI to associate with the cookie.\n    domain (Optional[str]): Cookie domain.\n    path (str): Cookie path.\n    secure (bool): Secure flag.\n    http_only (bool): HttpOnly flag.\n    same_site (Optional[str]): SameSite — 'Strict', 'Lax' or 'None' (any case).\n\nReturns:\n    bool: True if set successfully.",
+    "description": "Set a cookie.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    name (str): Cookie name.\n    value (str): Cookie value.\n    url (Optional[str]): The request-URI to associate with the cookie.\n    domain (Optional[str]): Cookie domain.\n    path (str): Cookie path.\n    secure (bool): Secure flag.\n    http_only (bool): HttpOnly flag.\n    same_site (Optional[str]): SameSite — 'Strict', 'Lax' or 'None' (any case).\n\nReturns:\n    bool: True if set successfully.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2942,6 +3448,17 @@
         "secure": {
           "default": false,
           "type": "boolean"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "url": {
           "anyOf": [
@@ -3193,7 +3710,7 @@
     "tags": []
   },
   "switch_tab": {
-    "description": "Switch to a specific tab by bringing it to front.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (str): Target tab ID to switch to.\n\nReturns:\n    bool: True if switched successfully.",
+    "description": "Switch to a specific tab by bringing it to front. It becomes THIS session's\ntab: page tools called without tab_id act on it from now on (other sessions\nsharing the browser keep their own).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (str): Target tab ID to switch to.\n\nReturns:\n    bool: True if switched successfully.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3226,7 +3743,7 @@
     "tags": []
   },
   "take_screenshot": {
-    "description": "Take a screenshot of the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    full_page (bool): Capture full page (not just viewport).\n    format (str): Image format ('png' or 'jpeg').\n    file_path (Optional[str]): Optional file path to save screenshot to.\n\nReturns:\n    Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.",
+    "description": "Take a screenshot of the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    full_page (bool): Capture full page (not just viewport).\n    format (str): Image format ('png' or 'jpeg').\n    file_path (Optional[str]): Optional file path to save screenshot to.\n\nReturns:\n    Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3252,6 +3769,17 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -3282,7 +3810,7 @@
     "tags": []
   },
   "type_text": {
-    "description": "   Type text into an input field.\n\n   Args:\n       instance_id (str): Browser instance ID.\n       selector (str): CSS selector or XPath.\n       text (str): Text to type.\n       clear_first (bool): Clear field before typing.\n       delay_ms (int): Delay between keystrokes in milliseconds.\n       parse_newlines (bool): If True, parse \nas Enter key presses.\n       shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).\n\n   Returns:\n       bool: True — the characters were typed AND the field's own read-back\n           showed them land. Raises if the element's text did not move (a\n           readonly/range/color control, a non-editable element, or a script\n           that cancels the input).\n   ",
+    "description": "   Type text into an input field.\n\n   Args:\n       instance_id (str): Browser instance ID.\n       tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n       selector (str): CSS selector or XPath.\n       text (str): Text to type.\n       clear_first (bool): Clear field before typing.\n       delay_ms (int): Delay between keystrokes in milliseconds.\n       parse_newlines (bool): If True, parse \nas Enter key presses.\n       shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).\n\n   Returns:\n       bool: True — the characters were typed AND the field's own read-back\n           showed them land. Raises if the element's text did not move (a\n           readonly/range/color control, a non-editable element, or a script\n           that cancels the input).\n   ",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3308,6 +3836,17 @@
         "shift_enter": {
           "default": false,
           "type": "boolean"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text": {
           "type": "string"
@@ -3335,7 +3874,7 @@
     "tags": []
   },
   "upload_file": {
-    "description": "Upload local file(s) to a file input. USE THIS for file uploads.\n\nSets the files directly on the <input type=\"file\"> via CDP — reliable and\nnon-blocking. Do NOT try to upload by fetching blobs / building base64 /\nDataTransfer inside execute_script: that hits mixed-content/CORS limits and\ncan freeze the page. This tool is the supported path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath for the <input type=\"file\"> element.\n    file_paths (Union[str, List[str]]): Absolute path, or list of paths, to attach.\n        For multiple files the input must have the `multiple` attribute.\n    timeout (int): Element lookup timeout in ms (default 10000, max 60000).\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"requested\", \"attached\", \"multiple\",\n        \"total_bytes\"} — \"attached\" and \"total_bytes\" are read from the\n        input's own FileList after the attach, never from the request. No\n        path or file name is echoed back. Raises if the input ends up\n        holding a different number of files than were sent, which is what an\n        input without `multiple` does with more than one path: Chrome keeps\n        the first and reports no error.",
+    "description": "Upload local file(s) to a file input. USE THIS for file uploads.\n\nSets the files directly on the <input type=\"file\"> via CDP — reliable and\nnon-blocking. Do NOT try to upload by fetching blobs / building base64 /\nDataTransfer inside execute_script: that hits mixed-content/CORS limits and\ncan freeze the page. This tool is the supported path.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector or XPath for the <input type=\"file\"> element.\n    file_paths (Union[str, List[str]]): Absolute path, or list of paths, to attach.\n        For multiple files the input must have the `multiple` attribute.\n    timeout (int): Element lookup timeout in ms (default 10000, max 60000).\n\nReturns:\n    Dict[str, Any]: {\"selector\", \"requested\", \"attached\", \"multiple\",\n        \"total_bytes\"} — \"attached\" and \"total_bytes\" are read from the\n        input's own FileList after the attach, never from the request. No\n        path or file name is echoed back. Raises if the input ends up\n        holding a different number of files than were sent, which is what an\n        input without `multiple` does with more than one path: Chrome keeps\n        the first and reports no error.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3358,6 +3897,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "timeout": {
           "default": 10000,
@@ -3413,7 +3963,7 @@
     "tags": []
   },
   "wait_for_element": {
-    "description": "Wait for an element to appear.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    selector (str): CSS selector or XPath.\n    timeout (int): Timeout in ms (default 30000, max 60000). Most elements appear within 5-10s — only increase for very slow async content. Values above 60000 are capped.\n    visible (bool): Wait for element to be visible.\n    text_content (Optional[str]): Wait for specific text content.\n\nReturns:\n    bool: True if element found.",
+    "description": "Wait for an element to appear.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    selector (str): CSS selector or XPath.\n    timeout (int): Timeout in ms (default 30000, max 60000). Most elements appear within 5-10s — only increase for very slow async content. Values above 60000 are capped.\n    visible (bool): Wait for element to be visible.\n    text_content (Optional[str]): Wait for specific text content.\n\nReturns:\n    bool: True if element found.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3423,6 +3973,17 @@
         },
         "selector": {
           "type": "string"
+        },
+        "tab_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text_content": {
           "anyOf": [

@@ -2207,6 +2207,7 @@ class FakeBrowserManager:
         self._navigate_result = navigate_result
         self.spawn_calls: list[Any] = []
         self.navigate_calls: list[dict[str, Any]] = []
+        self.armed_tabs: list[tuple[str, Any]] = []
 
     async def list_instances(self) -> list[Any]:
         return list(self._instances)
@@ -2223,6 +2224,11 @@ class FakeBrowserManager:
 
     async def get_browser(self, instance_id: str) -> Any:
         return self._browsers.get(instance_id)
+
+    async def _arm_tracked_tab(self, instance_id: str, tab: Any) -> None:
+        """The real manager arms a tab it starts driving (F-935), and a tab
+        ``new_tab`` opens is one (F-962). Recorded; there is nothing to arm."""
+        self.armed_tabs.append((instance_id, tab))
 
     async def get_instance(self, instance_id: str) -> dict[str, Any] | None:
         """The instance ENTRY, shaped like the real manager's (F-898).

@@ -16,7 +16,7 @@ signatures are byte-identical — FastMCP surfaces them and
 
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded import tab_identity, tab_open
+from stealth_chrome_devtools_mcp.embedded import tab_binding, tab_identity, tab_open
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
@@ -44,7 +44,9 @@ async def list_tabs(instance_id: str) -> list[dict[str, str]]:
 
 async def switch_tab(instance_id: str, tab_id: str) -> bool:
     """
-    Switch to a specific tab by bringing it to front.
+    Switch to a specific tab by bringing it to front. It becomes THIS session's
+    tab: page tools called without tab_id act on it from now on (other sessions
+    sharing the browser keep their own).
 
     Args:
         instance_id (str): Browser instance ID.
@@ -53,9 +55,12 @@ async def switch_tab(instance_id: str, tab_id: str) -> bool:
     Returns:
         bool: True if switched successfully.
     """
-    return await rt._with_cdp_timeout(
+    switched = await rt._with_cdp_timeout(
         rt.browser_manager.switch_to_tab(instance_id, tab_id), instance_id=instance_id
     )
+    if switched:
+        tab_binding.bind(instance_id, tab_id)
+    return switched
 
 
 async def close_tab(instance_id: str, tab_id: str) -> bool:
@@ -69,14 +74,18 @@ async def close_tab(instance_id: str, tab_id: str) -> bool:
     Returns:
         bool: True if closed successfully.
     """
-    return await rt._with_cdp_timeout(
+    closed = await rt._with_cdp_timeout(
         rt.browser_manager.close_tab(instance_id, tab_id), instance_id=instance_id
     )
+    if closed:
+        tab_binding.forget_tab(instance_id, tab_id)
+    return closed
 
 
 async def get_active_tab(instance_id: str) -> dict[str, Any]:
     """
-    Get information about the currently active tab.
+    Get information about THIS session's tab: the one its page tools act on
+    without a tab_id (the last tab it opened or switched to).
 
     Args:
         instance_id (str): Browser instance ID.
@@ -85,7 +94,8 @@ async def get_active_tab(instance_id: str) -> dict[str, Any]:
         Dict[str, Any]: Active tab information.
     """
     tab = await rt._with_cdp_timeout(
-        rt.browser_manager.get_active_tab(instance_id), instance_id=instance_id
+        tab_binding.tab_for_caller(rt.browser_manager, instance_id),
+        instance_id=instance_id,
     )
     if not tab:
         raise ToolError("No active tab found")
@@ -106,7 +116,8 @@ async def get_active_tab(instance_id: str) -> dict[str, Any]:
 
 async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
     """
-    Open a new tab in the browser instance.
+    Open a new tab in the browser instance. It becomes THIS session's tab:
+    page tools called without tab_id act on it from now on.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -123,6 +134,7 @@ async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
         await _require_landing_ok(
             tab, url, rt.CDP_OPERATION_TIMEOUT, close_on_error=True
         )
+        await tab_binding.adopt(rt.browser_manager, instance_id, tab)
         return {
             "tab_id": str(tab.target.target_id),
             "url": getattr(tab, "url", "") or url,

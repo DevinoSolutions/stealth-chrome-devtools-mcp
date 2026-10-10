@@ -25,7 +25,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 from fakes import live_tools
-from stealth_chrome_devtools_mcp.embedded import server, tool_registry
+from stealth_chrome_devtools_mcp.embedded import server, tab_binding, tool_registry
 from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
     ToolRegistry,
@@ -143,7 +143,10 @@ class TestTheDocstringIsServedOnce:
         assert carrying == set(), f"per-parameter descriptions came back: {carrying}"
         for name, tool in tools.items():
             original = inspect.unwrap(tool.fn)
-            assert tool.description == inspect.getdoc(original), name
+            # F-962: a page tool's description also carries its `tab_id` line,
+            # which `tab_binding.scoped` adds beside the `instance_id` one.
+            served = tab_binding.scoped(original)
+            assert tool.description == inspect.getdoc(served), name
             assert original.__doc__, f"{name}: the tool's own docstring was lost"
 
 

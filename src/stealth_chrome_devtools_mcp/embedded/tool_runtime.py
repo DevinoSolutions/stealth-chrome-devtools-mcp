@@ -48,6 +48,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_seed,
     session_hygiene,
     session_lease,
+    tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import cdp_element_cloner
@@ -106,6 +107,7 @@ __all__ = [
     "response_handler",
     "session_hygiene",
     "session_lease",
+    "tab_binding",
 ]
 
 CDP_OPERATION_TIMEOUT = get_settings().cdp_operation_timeout_seconds

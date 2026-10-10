@@ -153,11 +153,15 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # reworded nodriver's StopIteration as "no usable page target" is gone — the
     # StopIteration was a live browser that had lost target discovery, and the
     # opener no longer depends on discovery. Cap == actual.
+    # F-962 RATCHETS DOWN 1454 -> 1449: `_find_tab` moved to `tab_open.find`, the
+    # one home for finding a tab (it now hands back a `Tab`, never a bare
+    # `Connection`), which paid for `navigate`'s `pinned` tab and
+    # `get_page_state`'s caller tab. Cap == actual.
     "embedded/browser_manager.py": (
-        1454,
+        1449,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
         " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939"
-        " - F-940",
+        " - F-940 - F-962",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
