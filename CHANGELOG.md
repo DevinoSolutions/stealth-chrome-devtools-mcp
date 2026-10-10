@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.28
 
 ### Each chat's page tools stay in that chat's own tab (F-962)
 
