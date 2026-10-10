@@ -244,12 +244,15 @@ class TestTheBrowserDiedOnItsOwn:
         kernel normally deletes it; a power loss does not), and on POSIX a
         ``SingletonLock`` symlink to ``<host>-<pid>`` of a pid that is gone, and
         a dangling ``SingletonSocket``. None is a holder: the process table is
-        the witness, and the lock only counts while its pid lives."""
+        the witness, and the lock only counts while its pid lives. The lock names
+        THIS host, as one Chrome left here does: a lock naming another host is a
+        holder by design (it cannot be shown free from here)."""
         fleet = await _fleet(tmp_session_root)
         (fleet / "lockfile").write_bytes(b"")
         if os.name != "nt":
             dead = 2**22 + 12345  # beyond any default pid_max
-            (fleet / profile_lock.LOCK_NAME).symlink_to(f"somehost-{dead}")
+            here = profile_lock._this_host()
+            (fleet / profile_lock.LOCK_NAME).symlink_to(f"{here}-{dead}")
             (fleet / "SingletonSocket").symlink_to(str(fleet.parent / "gone" / "S"))
 
         assert profile_lock.profile_hold(fleet, lambda *_a, **_k: set()) is None
