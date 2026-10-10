@@ -972,18 +972,6 @@ class BrowserManager:
         return str(target_id)
 
     @staticmethod
-    def _find_tab(browser: Browser, tab_id: str) -> Tab | None:
-        """Return the ``browser.tabs`` entry whose target id is ``tab_id``.
-
-        Callers drive it BY ID over ``browser.connection`` (F-775): the entry is
-        a ``Tab`` only if nodriver made it in-process, else a raw ``Connection``
-        with no ``close()``/``bring_to_front()``.
-        """
-        return next(
-            (t for t in browser.tabs if str(t.target.target_id) == tab_id), None
-        )
-
-    @staticmethod
     def _is_recoverable_navigation_error(error: Exception) -> bool:
         """Whether a navigation error earns one stale-tab recovery attempt (the
         nodriver races are classified in element_resolution, not re-listed; F-824)."""
@@ -1089,15 +1077,19 @@ class BrowserManager:
             close_existing=False,
         )
 
-    async def navigate(
+    async def navigate(  # noqa: PLR0913  PERMANENT(navigate's five plus F-962's pinned tab)
         self,
         instance_id: str,
         url: str,
         wait_until: str = "load",
         timeout: int = 30000,  # noqa: ASYNC109  plan_M7
         referrer: str | None = None,
+        pinned: Tab | None = None,
     ) -> dict[str, Any]:
         """Navigate (``timeout`` in ms); answer ``navigation_milestone.answer``.
+
+        ``pinned``: a caller's own tab (F-962), navigated as-is — never recycled,
+        replaced or made the instance's tab, and a failure is reported, not retried.
 
         One stale-tab recovery retry (F-824) — but only for a failure Chrome
         never accepted; a timeout after ``Page.navigate`` answered is the page's
@@ -1111,7 +1103,7 @@ class BrowserManager:
             progress = navigation_milestone.Progress()
             await self.touch_instance(instance_id)
             if attempt == 0:
-                tab = await self.get_navigation_tab(instance_id)
+                tab = pinned or await self.get_navigation_tab(instance_id)
             else:
                 cause = type(last_error).__name__ if last_error else "unknown"
                 reason = f"recovering after navigation failure: {cause}"
@@ -1154,7 +1146,7 @@ class BrowserManager:
                 await self.update_instance_state(instance_id, final_url, title)
 
                 async with self._lock:
-                    if instance_id in self._instances:
+                    if instance_id in self._instances and pinned is None:
                         self._instances[instance_id]["tab"] = tab
                         self._instances[instance_id]["navigation_count"] = (
                             self._instances[instance_id].get("navigation_count", 0) + 1
@@ -1177,7 +1169,7 @@ class BrowserManager:
                 # a page that exists and spend a second budget (F-881).
                 pages_own = isinstance(error, TimeoutError) and progress.accepted
                 retry = self._is_recoverable_navigation_error(error) and not pages_own
-                if attempt == 1 or not retry:
+                if attempt == 1 or not retry or pinned is not None:
                     if isinstance(error, asyncio.TimeoutError):
                         raise tool_errors.ToolError(
                             f"Navigation to {url} timed out after {timeout}ms "
@@ -1246,7 +1238,7 @@ class BrowserManager:
 
         await browser.update_targets()
 
-        target_tab = self._find_tab(browser, tab_id)
+        target_tab = tab_open.find(browser, tab_id)
         if not target_tab:
             return False
 
@@ -1302,7 +1294,7 @@ class BrowserManager:
         if not browser:
             return False
 
-        target_tab = self._find_tab(browser, tab_id)
+        target_tab = tab_open.find(browser, tab_id)
         if not target_tab:
             return False
 
@@ -1339,14 +1331,17 @@ class BrowserManager:
                     instance.last_navigated_title = title
         await self.touch_instance(instance_id)
 
-    async def get_page_state(self, instance_id: str) -> PageState | None:
-        """The instance's full page state, or ``None`` when it has no tab.
+    async def get_page_state(
+        self, instance_id: str, tab: Tab | None = None
+    ) -> PageState | None:
+        """The full page state of *tab* (default: the instance's), or ``None``
+        when there is none. *tab* is the caller's own (F-962).
 
         Raises on a collection failure — ``get_instance_state`` is what turns
         that into its ``partial`` record. Every read below takes the shape
         nodriver really answers with; see the ``JSON.stringify`` note (F-844).
         """
-        tab = await self.get_tab(instance_id)
+        tab = tab or await self.get_tab(instance_id)
         if not tab:
             return None
 

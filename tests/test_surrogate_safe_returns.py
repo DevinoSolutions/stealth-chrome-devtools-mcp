@@ -205,6 +205,8 @@ class TestExecuteScriptReturnBoundary:
             "script",
             "args",
             "timeout_ms",
+            # F-962: every page tool also takes the tab to act on, on purpose.
+            "tab_id",
         ]
 
 

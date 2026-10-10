@@ -33,6 +33,7 @@ from collections import defaultdict
 
 from fastmcp.tools import Tool
 
+from stealth_chrome_devtools_mcp.embedded import tab_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.logging_setup import with_correlation_id
 from stealth_chrome_devtools_mcp.embedded.response_handler import surrogate_safe
@@ -111,7 +112,9 @@ class ToolRegistry:
             names = SECTION_TOOLS[section]
             if func.__name__ not in names:
                 names.append(func.__name__)
-            wrapped = with_correlation_id(_surrogate_safe_returns(func))
+            # F-962: a page tool also takes `tab_id`; every other tool is as-is.
+            scoped = tab_binding.scoped(func)
+            wrapped = with_correlation_id(_surrogate_safe_returns(scoped))
             # The WHOLE docstring is the description, as fastmcp 2 made it.
             # fastmcp 3 left alone keeps only its first paragraph, dropping
             # every ``Returns:`` section and any note after ``Args:`` (F-946).

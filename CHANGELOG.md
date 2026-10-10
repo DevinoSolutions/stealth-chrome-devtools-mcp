@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Each chat's page tools stay in that chat's own tab (F-962)
+
+Several chats can share one browser, such as the signed-in `fleet` session, each working in its
+own tab. Until now every page tool (`execute_script`, `click_element`, `type_text`, `navigate`,
+`get_page_content`, `take_screenshot` and the rest) acted on one tab per browser: whichever tab
+the browser had last switched to, by any chat. When another chat switched tabs, your next read
+landed on its page. Two chats read another chat's GCP console and MinIO login pages this way, and
+a click or a keystroke would have landed there too.
+
+Now each chat has its own tab, and its page tools act on that tab:
+
+* `spawn_browser` answers with a `tab_id`. A chat that gets a browser another chat is already
+  using (`already_running: true`) gets a fresh tab of its own, not the other chat's tab.
+* `new_tab` and `switch_tab` make the tab they open or pick that chat's tab. Another chat
+  switching tabs no longer moves yours.
+* Every page tool takes an optional `tab_id` to act on a particular tab for one call.
+* A chat whose tab was closed is told so and asked to open a new one; it is never quietly moved
+  into another chat's tab. A chat with no tab of its own in a shared browser is refused rather
+  than pointed at someone else's.
+* `get_active_tab` reports the calling chat's tab.
+
+A chat is told apart from the others by its MCP proxy, so this needs the proxy from this release:
+chats still running an older proxy are told apart by their MCP session instead, which a backend
+replacement changes. Restart them after upgrading.
+
 ## 2.1.27
 
 ### A chat whose backend was replaced keeps working instead of answering "Session terminated" (F-959)

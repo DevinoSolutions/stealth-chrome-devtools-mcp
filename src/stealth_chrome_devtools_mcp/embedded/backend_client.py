@@ -50,6 +50,7 @@ selection.
 
 from __future__ import annotations
 
+import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,14 @@ if TYPE_CHECKING:
 #: of the ``clientInfo`` block ``backend_probe._request`` writes by hand.
 CLIENT_NAME = "stealthy-cli"
 CLIENT_VERSION = "0"
+
+#: Who is calling, on every request this process sends (F-962): a stdio proxy is
+#: one Claude Code session, and the backend binds that session's page tools to
+#: ITS tab by this value. Not the ``mcp-session-id``, which a healed proxy
+#: replaces (F-959) — a heal must not cost a chat its tab. Random per process,
+#: so it names a session and nothing about the machine or the user.
+CALLER_HEADER = "x-stealth-caller"
+CALLER_ID = uuid.uuid4().hex
 
 #: The default per-call budget. Deliberately generous and deliberately NOT a
 #: `STEALTH_MCP_*` knob: it bounds a human waiting at a terminal, not a product
@@ -173,7 +182,8 @@ def http_client(read_seconds: float | None) -> httpx.AsyncClient:
     is the transport, not the protocol, and a pin that swapped the protocol
     would be pinning a double instead of the SDK.
 
-    The two clocks are the whole of what is decided here, and they are two
+    The two clocks are what is decided here (plus F-962's caller header,
+    see :data:`CALLER_HEADER`), and they are two
     because ``httpx.Timeout(connect_and_write, read=…)`` is two. Connecting
     always keeps :data:`CONNECT_TIMEOUT_SECONDS`, so a backend whose socket is
     gone is reported in seconds rather than at the end of a long read budget.
@@ -197,6 +207,7 @@ def http_client(read_seconds: float | None) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         follow_redirects=True,
         timeout=httpx.Timeout(CONNECT_TIMEOUT_SECONDS, read=read_seconds),
+        headers={CALLER_HEADER: CALLER_ID},
     )
 
 

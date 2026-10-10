@@ -52,12 +52,16 @@ class InstanceNotFoundError(ToolError):
 
 
 async def _require_tab(browser_manager: BrowserManager, instance_id: str) -> Tab:
-    """Return the instance's main tab, or raise on a miss.
+    """Return the CALLER's tab in the instance, or raise on a miss.
 
     The one guard collapsing the ~40 ``tab = await browser_manager.get_tab(id);
     if not tab: raise/return`` sites into a single call and a single shape.
+    Which tab is ``tab_binding``'s answer (F-962): the call's ``tab_id``, else
+    the caller's own, never another caller's.
     """
-    tab = await browser_manager.get_tab(instance_id)
+    from stealth_chrome_devtools_mcp.embedded import tab_binding
+
+    tab = await tab_binding.tab_for_caller(browser_manager, instance_id)
     if not tab:
         raise InstanceNotFoundError(f"Instance not found: {instance_id}")
     return tab

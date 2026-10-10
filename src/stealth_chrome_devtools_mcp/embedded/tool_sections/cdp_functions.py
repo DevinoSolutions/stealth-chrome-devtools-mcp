@@ -90,7 +90,7 @@ async def get_execution_contexts(instance_id: str) -> list[dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: List of execution contexts with their details.
     """
-    tab = await rt.browser_manager.get_tab(instance_id)
+    tab = await rt.tab_binding.tab_for_caller(rt.browser_manager, instance_id)
     if not tab:
         return []
     contexts = await rt._with_cdp_timeout(
@@ -121,7 +121,7 @@ async def discover_global_functions(
     Returns:
         List[Dict[str, Any]]: List of discovered functions with their details.
     """
-    tab = await rt.browser_manager.get_tab(instance_id)
+    tab = await rt.tab_binding.tab_for_caller(rt.browser_manager, instance_id)
     if not tab:
         return []
     functions = await rt._with_cdp_timeout(
@@ -174,7 +174,7 @@ async def discover_object_methods(
     Returns:
         List[Dict[str, Any]]: List of discovered methods.
     """
-    tab = await rt.browser_manager.get_tab(instance_id)
+    tab = await rt.tab_binding.tab_for_caller(rt.browser_manager, instance_id)
     if not tab:
         return []
     methods = await rt._with_cdp_timeout(

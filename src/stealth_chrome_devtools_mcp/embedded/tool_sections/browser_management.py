@@ -357,6 +357,7 @@ async def spawn_browser(
                 **rt.fleet_session.reused_record(record),
                 **rt.fleet_session.reuse_answer(held.running, user_data_dir),
                 **rt.fleet_session.headless_mismatch(headless, record.get("headless")),
+                **await rt.tab_binding.claim(rt.browser_manager, held.instance_id),
             }
 
         profile_selection = await rt.clone_storage.resolve_profile_selection(
@@ -473,6 +474,7 @@ async def spawn_browser(
             "viewport": instance.viewport,
             "spawn_diagnostics": spawn_diagnostics or {},
             **rt.fleet_session.seed_warning(profile_selection, cookie_seed),
+            **await rt.tab_binding.claim(rt.browser_manager, instance.instance_id),
         }
     except Exception as e:
         # A spawn that failed onto a directory a live browser HOLDS is the one
@@ -843,56 +845,53 @@ async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
         (``partial: True``) with ``detail_error`` if collection times out or fails.
     """
     timeout_seconds = get_settings().browser_state_timeout_seconds
+    tab = await rt.tab_binding.tab_for_caller(rt.browser_manager, instance_id)
     try:
         # F-164 non-CDP: bounds a multi-step page-state aggregation with its own
         # browser_state_timeout_seconds budget; the except paths below return an
         # honest partial record (F-746), not the generic CDP-timeout error that
         # _with_cdp_timeout raises — so this is deliberately not that wrapper.
         state = await asyncio.wait_for(
-            rt.browser_manager.get_page_state(instance_id),
+            rt.browser_manager.get_page_state(instance_id, tab),
             timeout=timeout_seconds,
         )
     except TimeoutError:
-        for instance in await rt.browser_manager.list_instances():
-            if instance.instance_id == instance_id:
-                return {
-                    "instance_id": instance.instance_id,
-                    "state": instance.state,
-                    "last_navigated_url": instance.last_navigated_url,
-                    "last_navigated_title": instance.last_navigated_title,
-                    "source": "active",
-                    "partial": True,
-                    "detail_error": f"Timed out after {timeout_seconds:g}s while collecting full page state.",
-                }
-        return {
-            "instance_id": instance_id,
-            "state": "unknown",
-            "partial": True,
-            "detail_error": f"Timed out after {timeout_seconds:g}s while collecting full page state.",
-        }
+        return await _partial_state(
+            instance_id,
+            f"Timed out after {timeout_seconds:g}s while collecting full page state.",
+        )
     except Exception as exc:
-        for instance in await rt.browser_manager.list_instances():
-            if instance.instance_id == instance_id:
-                return {
-                    "instance_id": instance.instance_id,
-                    "state": instance.state,
-                    "last_navigated_url": instance.last_navigated_url,
-                    "last_navigated_title": instance.last_navigated_title,
-                    "source": "active",
-                    "partial": True,
-                    "detail_error": f"Failed to collect full page state: {type(exc).__name__}: {exc}",
-                }
-        return {
-            "instance_id": instance_id,
-            "state": "unknown",
-            "partial": True,
-            "detail_error": f"Failed to collect full page state: {type(exc).__name__}: {exc}",
-        }
+        return await _partial_state(
+            instance_id,
+            f"Failed to collect full page state: {type(exc).__name__}: {exc}",
+        )
     if state:
         result = state.dict()
         result["partial"] = False
         return result
     return None
+
+
+async def _partial_state(instance_id: str, detail_error: str) -> dict[str, Any]:
+    """``get_instance_state``'s honest partial record (F-746), one shape for
+    both of its failures."""
+    for instance in await rt.browser_manager.list_instances():
+        if instance.instance_id == instance_id:
+            return {
+                "instance_id": instance.instance_id,
+                "state": instance.state,
+                "last_navigated_url": instance.last_navigated_url,
+                "last_navigated_title": instance.last_navigated_title,
+                "source": "active",
+                "partial": True,
+                "detail_error": detail_error,
+            }
+    return {
+        "instance_id": instance_id,
+        "state": "unknown",
+        "partial": True,
+        "detail_error": detail_error,
+    }
 
 
 async def navigate(
@@ -923,7 +922,8 @@ async def navigate(
     timeout = rt._clamp_timeout(timeout, default=30_000)
     outer_timeout = max(timeout / 1000 + 5, rt.CDP_OPERATION_TIMEOUT)
     result = await rt._with_cdp_timeout(
-        rt.browser_manager.navigate(
+        rt.tab_binding.navigate_callers_tab(
+            rt.browser_manager,
             instance_id=instance_id,
             url=url,
             wait_until=wait_until,

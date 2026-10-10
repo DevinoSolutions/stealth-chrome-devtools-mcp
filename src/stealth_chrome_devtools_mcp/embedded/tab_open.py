@@ -61,6 +61,27 @@ async def open_tab(browser: Browser, url: str) -> Tab:
     return tab
 
 
+def find(browser: Browser, tab_id: str) -> Tab | None:
+    """The open tab whose target id is *tab_id*, as a ``Tab``; ``None`` if none.
+
+    Moved from ``BrowserManager._find_tab`` (F-962), which handed back the bare
+    ``Connection`` ``update_targets`` registers for a target it discovered
+    (F-771/F-775): a caller's page tools now act on any tab it picks, so it gets
+    a ``Tab`` built the way :func:`open_tab` builds one, registered in place.
+    """
+    entry = next(
+        (t for t in browser.tabs if str(t.target.target_id) == str(tab_id)), None
+    )
+    if entry is None or not _is_bare_connection(entry):
+        return entry
+    return _register(
+        browser,
+        Tab(
+            _websocket_url(browser, entry.target), target=entry.target, browser=browser
+        ),
+    )
+
+
 def _is_bare_connection(entry: Connection) -> bool:
     # The exact type, not ``isinstance``: ``Tab`` IS a ``Connection``, and the
     # bare base class is precisely what ``update_targets`` registers.
