@@ -20,7 +20,8 @@ Now each chat has its own tab, and its page tools act on that tab:
 * Every page tool takes an optional `tab_id` to act on a particular tab for one call.
 * A chat whose tab was closed is told so and asked to open a new one; it is never quietly moved
   into another chat's tab. A chat with no tab of its own in a shared browser is refused rather
-  than pointed at someone else's.
+  than pointed at someone else's; it calls `new_tab`, or names a tab from `list_tabs` with
+  `tab_id` (for example to check on a browser whose chat has exited).
 * `get_active_tab` reports the calling chat's tab.
 
 A chat is told apart from the others by its MCP proxy, so this needs the proxy from this release:
