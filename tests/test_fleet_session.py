@@ -981,7 +981,10 @@ class TestASiblingBackendsFleetIsRefusedWhole:
 
         assert "a sibling backend owns it" in str(refusal.value)
         assert manager.spawn_calls == [], "a browser was launched beside the held one"
-        assert killed == [], "the holder was signalled"
+        # ``os.kill(pid, 0)`` is POSIX's "is it alive?" probe and delivers
+        # nothing; the hold check makes it there (Windows asks another way).
+        signalled = [args for args in killed if args[1:] != (0,)]
+        assert signalled == [], "the holder was signalled"
         assert (fleet / COOKIE_JAR).read_bytes() == LOGIN, "the login was touched"
         after = sorted(p.name for p in tmp_session_root["sessions"].iterdir())
         assert after == before, "a copy or a walked fleet-2 was left on disk"
