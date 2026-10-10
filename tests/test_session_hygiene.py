@@ -190,10 +190,15 @@ async def test_end_to_end_abandoned_probes_are_reaped_and_the_live_client_is_not
 ):
     """Real streamable HTTP, in-process: five abandoned probe sessions vanish
     within the window, the connected client keeps working, and a reaped id
-    answers 404 exactly as a DELETE'd one would."""
+    answers 404 exactly as a DELETE'd one would.
+
+    The window is held open while the probes are built and shortened after
+    they are counted: both settings are read at every sweep, and five
+    sequential round trips can outlast a 0.5 s window on a loaded machine,
+    which reaped the first probes before the count (pre-push, 2026-10-10)."""
     import uvicorn
 
-    monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 0.5)
+    monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 60.0)
     monkeypatch.setattr(session_hygiene, "SWEEP_INTERVAL_SECONDS", 0.1)
     session_hygiene.install()
 
@@ -224,7 +229,11 @@ async def test_end_to_end_abandoned_probes_are_reaped_and_the_live_client_is_not
             assert manager is not None, "FastMCP did not build OUR manager"
             assert len(manager._server_instances) == 6
 
-            await asyncio.sleep(1.5)  # > window + sweep interval
+            monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 0.5)
+            for _ in range(100):  # bounded: 10 s, against a 0.5 s window
+                if len(manager._server_instances) == 1:
+                    break
+                await asyncio.sleep(0.1)
 
             assert len(manager._server_instances) == 1
             assert (
