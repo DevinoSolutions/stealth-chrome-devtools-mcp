@@ -387,17 +387,23 @@ async def _handshake(wire: RawStdioWire) -> None:
     await wire.response(listed, HANDSHAKE_BOUND)
 
 
-async def _spawn(wire: RawStdioWire, profile: str) -> str:
+async def _spawn_answer(wire: RawStdioWire, profile: str) -> dict:
     frame = await _call(
         wire,
         "spawn_browser",
         {"headless": True, "sandbox": False, "user_data_dir": profile},
         timeout=SPAWN_BOUND,
     )
-    return _tool_payload(frame)["instance_id"]
+    return _tool_payload(frame)
 
 
-async def _cdp_round_trip(wire: RawStdioWire, instance_id: str) -> None:
+async def _spawn(wire: RawStdioWire, profile: str) -> str:
+    return (await _spawn_answer(wire, profile))["instance_id"]
+
+
+async def _cdp_round_trip(
+    wire: RawStdioWire, instance_id: str, tab_id: str | None = None
+) -> None:
     """Prove the browser is USABLE, not merely running.
 
     Two calls on purpose. ``get_active_tab`` goes through ``tab_identity``'s
@@ -405,10 +411,18 @@ async def _cdp_round_trip(wire: RawStdioWire, instance_id: str) -> None:
     answer — and ``execute_script`` proves a live execution context in the page.
     A browser whose process survived a stress but whose websocket did not is
     exactly the failure an operator reports as "my browser closed".
+
+    *tab_id* names the tab when *wire* is not the session that opened it: a
+    session that holds no tab of its own in an instance is refused rather than
+    handed another session's (F-962), so reaching into a sibling's browser is
+    done the documented way, by naming the tab.
     """
-    await _call(wire, "get_active_tab", {"instance_id": instance_id})
+    named = {"tab_id": tab_id} if tab_id else {}
+    await _call(wire, "get_active_tab", {"instance_id": instance_id, **named})
     frame = await _call(
-        wire, "execute_script", {"instance_id": instance_id, "script": "1 + 1"}
+        wire,
+        "execute_script",
+        {"instance_id": instance_id, "script": "1 + 1", **named},
     )
     payload = _tool_payload(frame)
     assert payload["success"] is True, payload
@@ -1234,7 +1248,8 @@ async def test_s2_hard_killing_one_proxy_leaves_the_fleet_untouched(
     await wire_a.start()
     try:
         await _handshake(wire_a)
-        instance_a = await _spawn(wire_a, "life-sibling-a")
+        spawned_a = await _spawn_answer(wire_a, "life-sibling-a")
+        instance_a = spawned_a["instance_id"]
         await _call(
             wire_a,
             "navigate",
@@ -1263,6 +1278,7 @@ async def test_s2_hard_killing_one_proxy_leaves_the_fleet_untouched(
                     proxy_a_pid=proxy_a_pid,
                     instance_a=instance_a,
                     instance_b=instance_b,
+                    tab_a=spawned_a["tab_id"],
                 )
             finally:
                 # A FINALIZER, not trailing code: an assertion that fires inside
@@ -1280,7 +1296,16 @@ async def test_s2_hard_killing_one_proxy_leaves_the_fleet_untouched(
 
 
 async def _s2_kill_and_assert(  # noqa: PLR0913  PERMANENT(one call site, named args)
-    *, space, offsets, backend_pid, wire_a, wire_b, proxy_a_pid, instance_a, instance_b
+    *,
+    space,
+    offsets,
+    backend_pid,
+    wire_a,
+    wire_b,
+    proxy_a_pid,
+    instance_a,
+    instance_b,
+    tab_a,
 ) -> tuple[float, int]:
     """S2's stress and its four invariants. Split out of the node ONLY so the
     node's cleanup can be a ``finally`` without burying the assertions three
@@ -1316,9 +1341,10 @@ async def _s2_kill_and_assert(  # noqa: PLR0913  PERMANENT(one call site, named 
     # which returns True for a ZOMBIE, and in this node the backend is
     # deliberately still alive, so a Chrome killed by a hypothetical
     # proxy-death reaper would sit unreaped on Linux/macOS and read as a pass.
-    # A round trip cannot be answered by a zombie.
-    for instance_id in (instance_b, instance_a):
-        await _cdp_round_trip(wire_b, instance_id)
+    # A round trip cannot be answered by a zombie. A's tab is named: B holds no
+    # tab of its own in A's browser, and F-962 refuses to hand it A's silently.
+    await _cdp_round_trip(wire_b, instance_b)
+    await _cdp_round_trip(wire_b, instance_a, tab_a)
 
     strikes, _ = assert_no_lifecycle_incident(space, offsets, "S2 sibling death")
     return time.monotonic() - started, strikes
