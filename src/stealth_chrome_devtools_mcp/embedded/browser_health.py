@@ -90,6 +90,13 @@ FAILURES_BEFORE_HEAL = 2
 #: The minimum gap between two heals of one instance.
 HEAL_COOLDOWN_SECONDS = 900
 
+#: How long the heal waits for the old Chrome to be gone after the close path
+#: returns. ``close_instance`` offloads its kill, so it answers while the
+#: process is still dying, and nodriver drops its process handle by then, so
+#: ``process_exit.browser_is_alive`` cannot be the witness (measured on real
+#: Chrome): the pid taken BEFORE the close is.
+EXIT_WAIT_SECONDS = 15
+
 #: The bound on the forensics a failure writes. They are best effort.
 FORENSICS_TIMEOUT_SECONDS = 10
 
@@ -334,6 +341,12 @@ class BrowserHealth:
         persistent: Callable[[str], bool] = _is_persistent,
         forensics: Callable[..., Awaitable[str]] = gather_forensics,
         heal: Callable[[str], Awaitable[bool]] | None = None,
+        browser_pid: Callable[
+            [object, int | None], int | None
+        ] = process_exit.browser_pid,
+        wait_exit: Callable[..., Awaitable[process_exit.Exited]] = (
+            process_exit.wait_for_exit_async
+        ),
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._manager = manager
@@ -344,6 +357,8 @@ class BrowserHealth:
         self._persistent = persistent
         self._forensics = forensics
         self._heal = heal or self.heal
+        self._browser_pid = browser_pid
+        self._wait_exit = wait_exit
         self._clock = clock
         self._failures: dict[str, int] = {}
         self._last_heal: dict[str, float] = {}
@@ -484,10 +499,17 @@ class BrowserHealth:
                 "guard_rotation": guard,
             }
         )
+        old_pid = self._browser_pid(
+            getattr(old_browser, "_process", None),
+            getattr(old_browser, "_process_pid", None),
+        )
         gate = await directory_gate.hold(options.user_data_dir)
         try:
             await self._close(instance_id)
-            if process_exit.browser_is_alive(old_browser):
+            if (
+                old_pid is not None
+                and not (await self._wait_exit(old_pid, EXIT_WAIT_SECONDS)).exited
+            ):
                 debug_logger.log_error(
                     _COMPONENT,
                     "heal",

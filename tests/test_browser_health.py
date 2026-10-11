@@ -34,6 +34,7 @@ from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, Browser
 
 DIRECTORY = "C:/sessions/fleet"
 INSTANCE_ID = "i-fleet"
+OLD_PID = 4242
 SELECTION = {"user_data_dir": DIRECTORY, "profile_role": "explicit"}
 
 
@@ -108,6 +109,7 @@ class _Stage:
         self.heals: list[str] = []
         self.launch_error: BaseException | None = None
         self.close_kills = True
+        self.waits: list[tuple[int | None, float]] = []
         monkeypatch.setattr(manager, "spawn_browser", self._spawn)
 
     def _held(self) -> bool:
@@ -162,6 +164,10 @@ class _Stage:
     async def forensics(self, **facts) -> str:
         return f"uptime={facts['uptime_seconds']:.0f}s targets(page=1 other=0)"
 
+    async def wait_exit(self, pid, timeout):
+        self.waits.append((pid, timeout))
+        return SimpleNamespace(exited=self.close_kills)
+
     async def own_ok(self, _browser) -> None:
         return None
 
@@ -173,6 +179,8 @@ class _Stage:
             "own_check": self.own_ok,
             "persistent": lambda iid: iid in self.persistent,
             "forensics": self.forensics,
+            "browser_pid": lambda _process, _pid: OLD_PID,
+            "wait_exit": self.wait_exit,
             "clock": lambda: self.now,
         }
         kwargs.update(overrides)
@@ -343,6 +351,17 @@ class TestTheHeal:
         assert stage.gate_held_during == ["close", "spawn"]
         assert spawn_waited == [1], "the racer got the gate only after the relaunch"
         assert not directory_gate.gate_for(DIRECTORY)._lock.locked()
+
+    async def test_it_waits_for_the_pid_it_took_before_the_close(self, stage):
+        """``close_instance`` offloads its kill and nodriver drops its process
+        handle, so only the pid read BEFORE the close can witness the exit."""
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.waits == [(OLD_PID, browser_health.EXIT_WAIT_SECONDS)]
 
     async def test_the_gate_is_released_when_the_relaunch_fails(self, stage, log):
         stage.launch_error = RuntimeError("no chrome")
