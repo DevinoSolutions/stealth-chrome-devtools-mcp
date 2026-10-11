@@ -5,6 +5,7 @@ import contextlib
 import json
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,7 @@ from nodriver import Browser, Tab
 
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
+    chrome_log,
     desktop_launch,
     google_rotation_guard,
     login_persistence,
@@ -89,6 +91,14 @@ class BrowserManager:
         # F-935: ``armer(tab, instance_id)`` for per-tab state kept OUTSIDE this
         # class (network capture), run on every tab tracked after spawn.
         self._tab_armers = tuple(tab_armers)
+        # F-964: (id, entry) of each browser that died ON ITS OWN, for browser_health.
+        self._exited: deque[tuple[str, dict]] = deque(maxlen=16)
+
+    def take_exited(self) -> list[tuple[str, dict]]:
+        """Drain the browsers that died unasked (only the discard records one)."""
+        exited = list(self._exited)
+        self._exited.clear()
+        return exited
 
     async def _arm_tracked_tab(self, instance_id: str, tab: Tab) -> None:
         """Give a newly tracked tab what the spawn tab got (F-935): its per-target
@@ -191,6 +201,7 @@ class BrowserManager:
         if instance is not None:
             instance.state = BrowserState.CLOSED
         self._instances.pop(instance_id, None)
+        self._exited.append((instance_id, data))
         tool_errors.remember_departed(instance_id, data)
         self._spawn_diagnostics.pop(instance_id, None)
         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
@@ -610,10 +621,10 @@ class BrowserManager:
     ) -> BrowserInstance:
         """Spawn a browser: ``_build_instance`` → ``_resolve_proxy`` →
         ``_resolve_launch_args`` → ``_launch_browser`` → ``_apply_post_launch``,
-        under one try/except that owns the cancel/error cleanup (``browser`` and
-        ``proxy_forwarder`` are orchestrator locals, so a failure at any phase
-        tears down what was already created). *instance_id* is internal: a heal
-        (F-963) relaunches under the id its callers already hold."""
+        under one try/except owning the cancel/error cleanup (``browser`` and
+        ``proxy_forwarder`` are orchestrator locals, so any phase's failure tears
+        down what exists). *instance_id* is internal: a heal or relaunch (F-963,
+        F-964) reuses the id its callers already hold."""
         instance_id = instance_id or str(uuid.uuid4())
         instance = self._build_instance(instance_id, options)
         self._spawns_in_flight += 1
@@ -639,6 +650,7 @@ class BrowserManager:
             launch_args, browser_executable, stealth_warnings = (
                 self._resolve_launch_args(options, launch_proxy_server, platform_info)
             )
+            launch_args[:0] = chrome_log.flags(options, instance_id)  # F-964
 
             launch_attempt = spawn_leak.Attempt()
             browser = await self._launch_browser(
@@ -682,6 +694,7 @@ class BrowserManager:
                 user_data_dir=actual_user_data_dir,
             )
             spawn_diagnostics["window_size"] = window_metrics
+            spawn_diagnostics.update(chrome_log.diagnostics(launch_args))
             instance.viewport = window_metrics["actual"] or instance.viewport
             if stealth_warnings:
                 spawn_diagnostics["stealth_args_stripped"] = stealth_warnings
@@ -807,10 +820,7 @@ class BrowserManager:
             return [data["instance"] for data in self._instances.values()]
 
     async def close_instance(self, instance_id: str) -> bool:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
-        """
-        Close and remove a browser instance.
-
-        Four-step teardown that keeps the event loop responsive:
+        """Close and remove an instance; four steps keep the event loop responsive:
         Phase 1 (claim) — pop shared state under lock, the in-memory-storage
             entry included (F-899: it must not outlive the pop).
         Phase 2 (graceful CDP) — close tabs/connection on the loop (bounded).
@@ -1187,11 +1197,8 @@ class BrowserManager:
         instance_id: str,
         touch_activity: bool = False,
     ) -> Tab | None:
-        """Get the main tab for a browser instance (pure read).
-
-        Does NOT refresh the idle timer. Pass ``touch_activity=True``
-        or call ``touch_instance`` explicitly to record activity.
-        """
+        """The main tab of an instance (pure read: the idle timer is NOT refreshed
+        unless ``touch_activity=True`` or ``touch_instance`` says so)."""
         data = await self.get_instance(instance_id)
         if data:
             if touch_activity:
@@ -1204,11 +1211,8 @@ class BrowserManager:
         instance_id: str,
         touch_activity: bool = False,
     ) -> Browser | None:
-        """Get the browser object for an instance (pure read).
-
-        Does NOT refresh the idle timer. Pass ``touch_activity=True``
-        or call ``touch_instance`` explicitly to record activity.
-        """
+        """The browser of an instance (pure read: the idle timer is NOT refreshed
+        unless ``touch_activity=True`` or ``touch_instance`` says so)."""
         data = await self.get_instance(instance_id)
         if data:
             if touch_activity:
@@ -1435,11 +1439,7 @@ class BrowserManager:
         return len(to_close)
 
     async def close_all(self):
-        """
-        Close all browser instances.
-
-        Closes all currently managed browser instances.
-        """
+        """Close every managed browser instance."""
         instance_ids = list(self._instances.keys())
         for instance_id in instance_ids:
             await self.close_instance(instance_id)

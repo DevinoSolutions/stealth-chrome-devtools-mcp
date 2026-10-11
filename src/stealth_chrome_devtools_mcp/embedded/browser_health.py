@@ -35,6 +35,24 @@ browser that cannot recover does not loop. A relaunch that fails leaves the
 session closed, which is exactly the state ``spawn_browser(session=…)`` relaunches
 from (F-961).
 
+**F-964: a browser that EXITED is relaunched too, for the two shared sessions only.**
+On 2026-10-11 ~16:27Z ``default``, ``fleet`` and one clone, all driven by one
+backend, exited within seconds of each other and the log said only "Removed stale
+browser instance: browser process is not running"; nobody relaunched them. The
+manager records each browser that died on its own (``BrowserManager.take_exited``:
+``_discard_instance_unlocked`` is the one place that is told apart from a
+deliberate close, every ``close_instance`` having popped its entry first), and the
+loop relaunches the ones whose directory is ``profile_seed.DEFAULT_SESSION``'s or
+``fleet_session.FLEET_SESSION``'s through the SAME tail the heal uses
+(:meth:`BrowserHealth._launch_again`: spawn under the same id, re-arm, probe). Any
+other named session and every clone is left alone: an exit there is the caller's
+to notice. Not relaunched: a browser whose directory a live browser already holds
+(``spawn_browser(session=...)`` adopts that one), one that exited again inside
+:data:`HEAL_COOLDOWN_SECONDS` of the last heal or relaunch (a crash loop is an
+ERROR, not a retry loop), and anything while the backend is stopping. A failed
+relaunch is an ERROR and the end of it. A human who closes a shared headed
+window gets it back at the next round: the loop cannot tell that from a crash.
+
 **Forensics are counts and shapes only** — never a URL, title or cookie. They are
 written once on the first failed probe (WARNING) and again when the heal fires
 (ERROR, which reaches Sentry through ``debug_logger``).
@@ -53,6 +71,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
+from pathlib import Path
 
 import nodriver as uc
 import psutil
@@ -66,12 +85,14 @@ from stealth_chrome_devtools_mcp.embedded import (
     directory_gate,
     fleet_session,
     process_exit,
+    profile_lock,
+    profile_seed,
     spawn_exhaustion,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
-from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 
 #: Seconds between two rounds of probes. A module constant on purpose: an unknown
@@ -291,21 +312,26 @@ async def gather_forensics(
     fetch_targets: Callable[
         [str], Awaitable[list[dict[str, object]]]
     ] = fetch_target_infos,
+    browser_alive: bool = True,
 ) -> str:
-    """One line of counts and shapes about a browser that stopped answering."""
+    """One line of counts and shapes about a browser that stopped answering, or
+    (``browser_alive=False``, F-964) one that is gone: no targets, no tree."""
 
     async def targets() -> str:
         if not websocket_url:
             return "unavailable (no endpoint)"
         return describe_targets(await fetch_targets(websocket_url))
 
+    machine = asyncio.to_thread(machine_facts)
+    named = ("targets", "tree", "machine") if browser_alive else ("machine",)
     parts = await asyncio.gather(
-        targets(),
-        asyncio.to_thread(process_tree, pid),
-        asyncio.to_thread(machine_facts),
+        *(
+            (targets(), asyncio.to_thread(process_tree, pid), machine)
+            if browser_alive
+            else (machine,)
+        ),
         return_exceptions=True,
     )
-    named = ("targets", "tree", "machine")
     shown = [
         f"{name}=unavailable ({type(part).__name__})"
         if isinstance(part, BaseException)
@@ -327,8 +353,63 @@ def _is_persistent(instance_id: str) -> bool:
     return bool(entry) and browser_pid_registry.on_persistent_profile(entry)
 
 
+def is_shared_session(options: BrowserOptions) -> bool:
+    """The ``default`` or ``fleet`` session's browser (F-964): a directory the
+    caller named (never an auto-clone) that ``fleet_session.lock_key`` -- the one
+    mapping from a directory to a session -- keys as one of the two."""
+    return (
+        bool(options.user_data_dir)
+        and not options.auto_clone
+        and fleet_session.lock_key(options.user_data_dir)
+        in (profile_seed.DEFAULT_SESSION, fleet_session.FLEET_SESSION)
+    )
+
+
+def holder_of(user_data_dir: str) -> str | None:
+    """Who holds *user_data_dir* right now, as a short phrase, or ``None``: the
+    one witness ``spawn_browser(session=...)`` asks before it adopts or spawns."""
+    hold = profile_lock.profile_hold(
+        Path(user_data_dir),
+        getattr(process_cleanup, "_get_browser_pids_for_profile", None),
+    )
+    if hold is None:
+        return None
+    return f"pid {hold.pid}" if isinstance(hold.pid, int) else "an unaddressable holder"
+
+
+def _relaunch_options(
+    options: BrowserOptions, instance: BrowserInstance, previous: dict[str, object]
+) -> BrowserOptions:
+    """What a relaunch of *instance* spawns with: the same directory, headless and
+    viewport it had, and rotation-guarded when the spawn path's own rule says so."""
+    selection = previous.get("profile_selection") or {}
+    # The ONE rule for "this relaunch must be guarded" is the spawn path's.
+    guard = options.guard_rotation or fleet_session.guards_rotation(
+        {
+            "profile_role": selection.get("profile_role"),
+            "user_data_dir": options.user_data_dir,
+        }
+    )
+    return options.model_copy(
+        update={
+            "headless": instance.headless,
+            "viewport_width": instance.viewport.get("width", options.viewport_width),
+            "viewport_height": instance.viewport.get("height", options.viewport_height),
+            "guard_rotation": guard,
+        }
+    )
+
+
+def _log_note(diagnostics: dict[str, object] | None) -> str:
+    """``; chrome_log=<path>`` when the browser's launch asked Chrome for a log
+    (F-964): the PATH only, never a line of it."""
+    path = (diagnostics or {}).get("chrome_log")
+    return f"; chrome_log={path}" if path else ""
+
+
 class BrowserHealth:
-    """Probes every persistent-profile browser and heals a hung one."""
+    """Probes every persistent-profile browser and heals a hung one; relaunches
+    a shared-session browser that exited."""
 
     def __init__(  # noqa: PLR0913  PERMANENT(F-963: one keyword seam per external effect, so the loop runs hermetically)
         self,
@@ -348,6 +429,8 @@ class BrowserHealth:
             process_exit.wait_for_exit_async
         ),
         clock: Callable[[], float] = time.monotonic,
+        shared: Callable[[BrowserOptions], bool] = is_shared_session,
+        holder: Callable[[str], str | None] = holder_of,
     ) -> None:
         self._manager = manager
         self._close = close
@@ -360,6 +443,9 @@ class BrowserHealth:
         self._browser_pid = browser_pid
         self._wait_exit = wait_exit
         self._clock = clock
+        self._shared = shared
+        self._holder = holder
+        self.stopping = False
         self._failures: dict[str, int] = {}
         self._last_heal: dict[str, float] = {}
 
@@ -375,6 +461,18 @@ class BrowserHealth:
     async def check_once(self) -> None:
         """One round. An exception in one instance's probe costs that instance
         its round and nobody else theirs."""
+        if self.stopping:
+            return
+        # The listing is what discovers a browser that died (it discards it), so
+        # the exits are taken after it and the live set is listed again after they
+        # are handled: a relaunched browser is probed, and keeps its cooldown.
+        await self._manager.list_instances()
+        for instance_id, data in self._manager.take_exited():
+            try:
+                if self._shared(data["options"]):
+                    await self.relaunch_exited(instance_id, data)
+            except Exception as error:  # noqa: BLE001  PERMANENT(F-964: one instance's relaunch must not end the round, nor skip the probes)
+                debug_logger.log_error(_COMPONENT, "relaunch", error)
         listed = [i.instance_id for i in await self._manager.list_instances()]
         scoped = [iid for iid in listed if self._persistent(iid)]
         for gone in set(self._failures) | set(self._last_heal):
@@ -416,7 +514,10 @@ class BrowserHealth:
         facts = await self._facts(
             instance_id, data["browser"], data["instance"].created_at
         )
-        label = f"{instance_id}: probe {count} failed ({failure}); {facts}"
+        label = (
+            f"{instance_id}: probe {count} failed ({failure}); {facts}"
+            f"{_log_note(data.get('spawn_diagnostics'))}"
+        )
         if count < FAILURES_BEFORE_HEAL:
             debug_logger.log_warning(_COMPONENT, "probe", label)
             return
@@ -450,9 +551,11 @@ class BrowserHealth:
             )
 
     async def _facts(
-        self, instance_id: str, browser: Browser, created: datetime
+        self, instance_id: str, browser: Browser | None, created: datetime
     ) -> str:
-        """The forensics line; bounded, and never raises."""
+        """The forensics line; bounded, and never raises. *browser* is ``None``
+        for one that exited: its tree and targets are gone, and only the rest is
+        asked."""
         entry = process_cleanup.browser_processes.get(instance_id) or {}
         try:
             return await asyncio.wait_for(
@@ -462,6 +565,7 @@ class BrowserHealth:
                     ).total_seconds(),
                     websocket_url=getattr(browser, "websocket_url", None),
                     pid=entry.get("pid") or getattr(browser, "_process_pid", None),
+                    browser_alive=browser is not None,
                 ),
                 FORENSICS_TIMEOUT_SECONDS,
             )
@@ -475,30 +579,10 @@ class BrowserHealth:
         if data is None:
             return False
         old_browser, options = data["browser"], data["options"]
-        instance = data["instance"]
         # What close_instance reads later (the `default` seed refresh) lives in
         # the spawn diagnostics; the relaunch writes new ones.
         previous = dict(await self._manager.get_spawn_diagnostics(instance_id) or {})
-        selection = previous.get("profile_selection") or {}
-        # The ONE rule for "this relaunch must be guarded" is the spawn path's.
-        guard = options.guard_rotation or fleet_session.guards_rotation(
-            {
-                "profile_role": selection.get("profile_role"),
-                "user_data_dir": options.user_data_dir,
-            }
-        )
-        relaunch = options.model_copy(
-            update={
-                "headless": instance.headless,
-                "viewport_width": instance.viewport.get(
-                    "width", options.viewport_width
-                ),
-                "viewport_height": instance.viewport.get(
-                    "height", options.viewport_height
-                ),
-                "guard_rotation": guard,
-            }
-        )
+        relaunch = _relaunch_options(options, data["instance"], previous)
         old_pid = self._browser_pid(
             getattr(old_browser, "_process", None),
             getattr(old_browser, "_process_pid", None),
@@ -520,14 +604,87 @@ class BrowserHealth:
                 )
                 return False
             try:
-                await self._manager.spawn_browser(relaunch, instance_id=instance_id)
-            except Exception as error:  # noqa: BLE001  PERMANENT(F-963: a failed relaunch leaves the session closed, which spawn_browser(session=…) relaunches from)
+                return await self._launch_again(
+                    instance_id,
+                    relaunch,
+                    previous,
+                    "healed (relaunched under the same id)",
+                )
+            except Exception as error:  # noqa: BLE001  PERMANENT(F-963: a failed relaunch leaves the session closed, which spawn_browser(session=...) relaunches from)
                 debug_logger.log_error(_COMPONENT, "heal", error)
                 return False
-            await self._rearm(instance_id, relaunch, previous)
-            return await self._report_healed(instance_id)
         finally:
             gate.release()
+
+    async def relaunch_exited(self, instance_id: str, data: dict) -> bool:
+        """Relaunch a shared-session browser that exited on its own, under the
+        same id (F-964); True when the relaunched browser answers a probe. Every
+        refusal is logged with its reason."""
+        previous = dict(data.get("spawn_diagnostics") or {})
+        facts = await self._facts(instance_id, None, data["instance"].created_at)
+        label = f"{instance_id}: exited unexpectedly ({facts}){_log_note(previous)}"
+        since = self._clock() - self._last_heal.get(instance_id, -HEAL_COOLDOWN_SECONDS)
+        if since < HEAL_COOLDOWN_SECONDS:
+            debug_logger.log_error(
+                _COMPONENT,
+                "relaunch",
+                HungBrowserError(
+                    f"{label}; it was healed or relaunched {since:.0f}s ago, not "
+                    f"relaunching again within {HEAL_COOLDOWN_SECONDS}s"
+                ),
+            )
+            return False
+        self._last_heal[instance_id] = self._clock()
+        options = data["options"]
+        gate = await directory_gate.hold(options.user_data_dir)
+        try:
+            holder = await asyncio.to_thread(self._holder, options.user_data_dir)
+            if self.stopping or holder is not None:
+                debug_logger.log_warning(
+                    _COMPONENT,
+                    "relaunch",
+                    f"{label}; not relaunching: "
+                    + (
+                        "the backend is stopping"
+                        if self.stopping
+                        else f"a live browser ({holder}) holds its directory"
+                    ),
+                )
+                return False
+            debug_logger.log_warning(_COMPONENT, "relaunch", f"{label}; relaunching")
+            try:
+                return await self._launch_again(
+                    instance_id,
+                    _relaunch_options(options, data["instance"], previous),
+                    previous,
+                    "relaunched after an unexpected exit (under the same id)",
+                )
+            except Exception as error:  # noqa: BLE001  PERMANENT(F-964: a failed relaunch is the end of it; spawn_browser(session=...) starts the session from the closed state it leaves)
+                debug_logger.log_error(
+                    _COMPONENT,
+                    "relaunch",
+                    HungBrowserError(
+                        f"{label}; relaunch failed ({type(error).__name__}: "
+                        f"{error}); not trying again"
+                    ),
+                )
+                return False
+        finally:
+            gate.release()
+
+    async def _launch_again(
+        self,
+        instance_id: str,
+        relaunch: BrowserOptions,
+        previous: dict[str, object],
+        verb: str,
+    ) -> bool:
+        """THE tail of a heal and of an exit relaunch, run with the directory gate
+        held: spawn under the same id, re-arm what the spawn tool arms, and probe
+        the result. Raises the spawn's own error; *verb* words the success line."""
+        await self._manager.spawn_browser(relaunch, instance_id=instance_id)
+        await self._rearm(instance_id, relaunch, previous)
+        return await self._report_healed(instance_id, verb)
 
     async def _rearm(
         self, instance_id: str, options: BrowserOptions, previous: dict[str, object]
@@ -541,7 +698,7 @@ class BrowserHealth:
         if tab:
             await self._arm_interception(tab, instance_id, options.block_resources)
 
-    async def _report_healed(self, instance_id: str) -> bool:
+    async def _report_healed(self, instance_id: str, verb: str) -> bool:
         data = await self._manager.get_instance(instance_id)
         failure = await self._failure_of(data["browser"]) if data else "no instance"
         if failure is not None:
@@ -554,20 +711,25 @@ class BrowserHealth:
             )
             return False
         debug_logger.log_info(
-            _COMPONENT, "heal", f"{instance_id}: healed (relaunched under the same id)"
+            _COMPONENT,
+            "heal",
+            f"{instance_id}: {verb}",
         )
         return True
 
 
 _task: asyncio.Task[None] | None = None
+_health: BrowserHealth | None = None
 
 
 def start(manager: BrowserManager, *, close: Closer, arm_interception: Armer) -> None:
     """Start the loop beside the idle reaper; a no-op while one is running."""
-    global _task  # noqa: PLW0603  PERMANENT(F-963: one loop per process, like the reaper's single task)
+    global _task, _health  # noqa: PLW0603  PERMANENT(F-963: one loop per process, like the reaper's single task)
     if _task is not None and not _task.done():
         return
-    health = BrowserHealth(manager, close=close, arm_interception=arm_interception)
+    health = _health = BrowserHealth(
+        manager, close=close, arm_interception=arm_interception
+    )
     _task = asyncio.create_task(health.run())
     debug_logger.log_info(
         _COMPONENT,
@@ -581,6 +743,8 @@ async def stop() -> None:
     """Stop the loop if it is running."""
     global _task
     task, _task = _task, None
+    if _health is not None:
+        _health.stopping = True  # F-964: a browser that dies in shutdown stays dead
     if task is None or task.done():
         return
     task.cancel()
