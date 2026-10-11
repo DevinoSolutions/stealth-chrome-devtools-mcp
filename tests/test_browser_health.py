@@ -14,6 +14,7 @@ websocket server that speaks the four CDP commands, so no Chrome is involved.
 """
 
 import asyncio
+import contextvars
 import json
 import os
 from types import SimpleNamespace
@@ -344,10 +345,26 @@ class TestTheHeal:
             spawn_waited.append(len(stage.launches))
             gate.release()
 
-        racer = asyncio.create_task(a_concurrent_spawn())
-        await health.check_once()  # the second failure: heals
-        await racer
+        # The racer starts INSIDE the heal, once the gate is held: started before
+        # `check_once`, when it reaches the gate depends on how long the
+        # forensics' worker threads take, and on Linux CI it won the gate first.
+        racers: list[asyncio.Task[None]] = []
+        close = health._close
 
+        async def close_while_a_spawn_races(instance_id: str) -> object:
+            # An EMPTY context, as another request's task has: the gate is
+            # reentrant per context, and a copy of this one already holds it.
+            racers.append(
+                asyncio.create_task(a_concurrent_spawn(), context=contextvars.Context())
+            )
+            await asyncio.sleep(0)  # the racer runs to the gate and waits there
+            return await close(instance_id)
+
+        health._close = close_while_a_spawn_races
+        await health.check_once()  # the second failure: heals
+        await asyncio.gather(*racers)
+
+        assert len(racers) == 1, "the heal closed once"
         assert stage.gate_held_during == ["close", "spawn"]
         assert spawn_waited == [1], "the racer got the gate only after the relaunch"
         assert not directory_gate.gate_for(DIRECTORY)._lock.locked()
