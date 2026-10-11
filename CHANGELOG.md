@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### The default and fleet browsers are relaunched when they exit, and Chrome keeps its own log (F-964)
+
+On 2026-10-11 the shared `default` browser, the `fleet` browser and one disposable copy, all driven
+by one backend, exited within seconds of each other. The backend log said only "Removed stale
+browser instance ...: browser process is not running", and nothing started them again until
+someone asked, five minutes later. The backend now notices a browser it drove that died on its own
+(not one closed with `close_instance`, by the idle timeout or at shutdown) and, for the `default`
+and `fleet` sessions only, starts it again on the same profile with the same `instance_id`,
+headless setting and window size, within the two-minute check round. Any other named session and
+every disposable copy is left alone. It does not relaunch when a live browser already holds the
+profile (the next `spawn_browser(session=...)` adopts that one), when the same instance was healed
+or relaunched in the last 15 minutes (a crash loop is an error line, not a retry loop) or while the
+backend is stopping. A failed relaunch is an error line and the end of it. The warning line carries
+counts only (uptime, Chromium process count, free RAM) and the path of the browser's log. A
+headed `default` or `fleet` window that you close by hand comes back at the next round: the backend
+cannot tell that from a crash.
+
+A browser on a saved profile (a named session, or `default`) is now started with Chrome's own log:
+`--enable-logging --log-level=1 --log-file=<log dir>/chrome-<session>-<instance id>-<UTC time>.log`,
+one file per launch, newest 20 kept per session. Its path is `spawn_diagnostics["chrome_log"]` and
+is named in the relaunch and heal log lines. Crash dumps (breakpad) stay off. Disposable copies get
+no log. Pages cannot see the flags (measured: same navigator and user agent), and Chrome does write the
+file. The log can contain what Chrome logs at warning level and above, which includes the page
+URLs it mentions in console messages; it stays on this machine and only its path is ever logged.
+
 ## 2.1.29
 
 ### A frozen named-session browser is detected and relaunched, and a closed tab no longer fails a spawn (F-963)

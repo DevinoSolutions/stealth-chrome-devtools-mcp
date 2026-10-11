@@ -612,6 +612,37 @@ Disposable clones are never probed. Chats that held a tab in the instance find i
 the first one to use a page tool takes the new browser's tab and the others call
 `new_tab`.
 
+### The default or fleet browser exited and came back (F-964)
+Symptom: the shared `default` or `fleet` browser vanished (its window closed, its tools
+said "no such instance" or "removed stale browser instance") and then reappeared under the
+**same `instance_id`**. That is the backend relaunching a browser that exited on its own;
+it checks every 120 s, so the gap is up to two minutes. Only `default` and `fleet` are
+relaunched. Any other named session or disposable copy stays gone: call
+`spawn_browser(session="<name>")`. The backend log (logger `browser_health`) says:
+
+* `<id>: exited unexpectedly (uptime=... machine(...)); chrome_log=<path>; relaunching`
+  (WARNING), then `relaunched after an unexpected exit (under the same id)` (INFO).
+* `... not relaunching: a live browser (pid N) holds its directory` (WARNING) - something
+  else already runs on that profile; `spawn_browser(session="<name>")` adopts it.
+* `... not relaunching again within 900s` (ERROR) - the same instance was healed or
+  relaunched in the last 15 minutes: a crash loop. Read the `chrome_log` file named in the
+  line, fix the cause, then `spawn_browser(session="<name>")`.
+* `... relaunch failed (...); not trying again` (ERROR) - the session is left closed;
+  `spawn_browser(session="<name>")` starts it.
+* `... not relaunching: the backend is stopping` (WARNING) - a shutdown, not a crash.
+
+Closing a headed `default` or `fleet` window by hand is indistinguishable from a crash, so
+it comes back at the next round; use `close_instance` to close it for good (a deliberate
+close is never relaunched).
+
+**Chrome's own log.** Every browser on a saved profile (named session or `default`; not a
+disposable copy) writes `chrome-<session>-<instance id>-<UTC time>.log` into the backend's
+log directory (`~/.stealth-mcp/logs`, or `STEALTH_MCP_LOG_DIR`); the path is
+`spawn_diagnostics["chrome_log"]` and appears in the lines above. It is the only record of
+why Chrome itself ended (crash dumps stay off). One file per launch, newest 20 per session
+kept. It can mention page URLs in console messages, so treat it as local: share its path,
+not its contents.
+
 ### Code edit didn't take effect
 There is no live reload. A source edit changes the **source fingerprint**, so the next
 client connection gets a fresh backend automatically. If you want it now: `restart`.
