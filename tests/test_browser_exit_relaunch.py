@@ -375,6 +375,16 @@ class TestWhenItDoesNot:
 
         assert stage.launches == []
 
+    async def test_a_stopping_backend_probes_and_heals_nothing_either(self, stage):
+        stage.probe_ok = False
+        health = stage.health()
+        health.stopping = True
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.closes == [] and stage.launches == []
+
     async def test_a_stop_that_lands_mid_round_stops_the_relaunch(self, stage, log):
         """``stop()`` between the round's listing and the relaunch: the gate is
         taken, the flag is read AFTER it, and nothing launches."""
