@@ -1,4 +1,6 @@
-"""Real-Chrome proof for F-963: a named-session browser is healed under the same id.
+"""Real-Chrome proof for F-963 and F-964.
+
+F-963: a named-session browser is healed under the same id.
 
 The hermetic pins in ``test_browser_health.py`` prove the loop's decisions against
 doubles and the probe against a loopback websocket. This node runs the whole thing
@@ -9,11 +11,16 @@ Chrome and starts another on the same directory under the same ``instance_id``, 
 old process is gone, the new one answers the probe, and ``navigate`` works on the
 instance afterwards.
 
+F-964: the shared ``fleet`` session's Chrome is killed by ITS OWN pid, one
+``check_once`` relaunches it under the same instance id with a new pid and a new
+``chrome_log`` that exists on disk, and the log flags are not visible to a page.
+
 Only the node's tmp root and a tmp browser record are touched.
 """
 
 import asyncio
 import contextlib
+import re
 import uuid
 from pathlib import Path
 
@@ -29,7 +36,11 @@ from e2e_helpers import (
     sandbox_kwargs,
     warmup_once,
 )
-from stealth_chrome_devtools_mcp.embedded import browser_health, tool_runtime
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_health,
+    chrome_log,
+    tool_runtime,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_sections import browser_management
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -123,3 +134,97 @@ async def test_a_named_session_is_healed_under_the_same_instance_id(
         with contextlib.suppress(Exception):
             await get_fn("close_instance")(instance_id=instance_id)
         await released(profile)
+
+
+_CHROME_LOG_NAME = re.compile(r"chrome-fleet-[0-9a-f]{8}-\d{8}T\d{6}Z\.log")
+
+
+async def test_a_shared_session_that_exits_is_relaunched_under_the_same_id(
+    fixture_app_server, tmp_empty_root
+):
+    spawn = get_fn("spawn_browser")
+    manager = tool_runtime.browser_manager
+
+    spawned = await spawn(session="fleet", headless=True, **sandbox_kwargs())
+    instance_id = spawned["instance_id"]
+    profile = Path(spawned["spawn_diagnostics"]["profile_selection"]["user_data_dir"])
+    try:
+        assert profile == tmp_empty_root["sessions"] / "fleet", profile
+        first_log = Path(spawned["spawn_diagnostics"]["chrome_log"])
+        assert _CHROME_LOG_NAME.fullmatch(first_log.name), first_log.name
+        assert first_log.stat().st_size > 0, "Chrome wrote it, not just us"
+        old_pid = (await _browser_of(instance_id))._process_pid
+        assert isinstance(old_pid, int) and psutil.pid_exists(old_pid)
+
+        # the browser dies on its own: nobody asked close_instance
+        psutil.Process(old_pid).kill()
+        await _until_exited(old_pid)
+
+        health = browser_health.BrowserHealth(
+            manager,
+            close=browser_management.close_instance,
+            arm_interception=tool_runtime.network_interceptor.setup_interception,
+        )
+        await health.check_once()
+
+        live = [i.instance_id for i in await manager.list_instances()]
+        assert live == [instance_id], "the same id, and no second instance"
+        new_browser = await _browser_of(instance_id)
+        new_pid = new_browser._process_pid
+        assert isinstance(new_pid, int) and new_pid != old_pid
+        assert psutil.pid_exists(new_pid)
+        diagnostics = await manager.get_spawn_diagnostics(instance_id)
+        assert Path(diagnostics["profile_selection"]["user_data_dir"]) == profile
+        second_log = Path(diagnostics["chrome_log"])
+        assert second_log != first_log and second_log.stat().st_size > 0
+        assert _CHROME_LOG_NAME.fullmatch(second_log.name), second_log.name
+        await browser_health.probe_browser(new_browser.websocket_url, [])
+        assert await eval_js(instance_id, "1+1") == 2
+    finally:
+        with contextlib.suppress(Exception):
+            await get_fn("close_instance")(instance_id=instance_id)
+        await released(profile)
+
+
+_FINGERPRINT = (
+    "JSON.stringify([navigator.userAgent, navigator.webdriver, navigator.languages,"
+    " navigator.plugins.length, typeof window.chrome, navigator.hardwareConcurrency,"
+    " navigator.platform])"
+)
+
+
+async def test_the_log_flags_are_not_visible_to_a_page(tmp_empty_root, monkeypatch):
+    """The same named session launched with and without ``--enable-logging``
+    reads the same navigator to a page, and Chrome keeps the log file it was told
+    to."""
+    spawn = get_fn("spawn_browser")
+    logged = await spawn(
+        session=f"f964-{uuid.uuid4().hex[:8]}", headless=True, **sandbox_kwargs()
+    )
+    monkeypatch.setattr(chrome_log, "flags", lambda *_a, **_k: [])  # the control
+    plain = await spawn(
+        session=f"f964-{uuid.uuid4().hex[:8]}", headless=True, **sandbox_kwargs()
+    )
+    logged_id, plain_id = logged["instance_id"], plain["instance_id"]
+    profiles = [
+        Path(spawned["spawn_diagnostics"]["profile_selection"]["user_data_dir"])
+        for spawned in (logged, plain)
+    ]
+    try:
+        log_path = Path(logged["spawn_diagnostics"]["chrome_log"])
+        assert "chrome_log" not in plain["spawn_diagnostics"]
+        args = (await tool_runtime.browser_manager.get_spawn_diagnostics(logged_id))[
+            "effective_browser_args"
+        ]
+        assert "--enable-logging" in args
+        assert await eval_js(logged_id, _FINGERPRINT) == await eval_js(
+            plain_id, _FINGERPRINT
+        )
+        assert "enable-logging" not in await eval_js(logged_id, "navigator.userAgent")
+    finally:
+        for instance_id in (logged_id, plain_id):
+            with contextlib.suppress(Exception):
+                await get_fn("close_instance")(instance_id=instance_id)
+        for profile in profiles:
+            await released(profile)
+    assert log_path.stat().st_size > 0, "Chrome wrote the file it was told to"
