@@ -24,7 +24,10 @@ from stealth_chrome_devtools_mcp.embedded.tool_registry import (
 from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
     clone_storage,  # noqa: F401  plan_SERVERSPLIT slice 12 — see the keep-reason below
 )
-from stealth_chrome_devtools_mcp.embedded.tool_sections import SECTION_MODULES
+from stealth_chrome_devtools_mcp.embedded.tool_sections import (
+    SECTION_MODULES,
+    browser_management,
+)
 from stealth_chrome_devtools_mcp.observability import sentry_init
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -159,6 +162,15 @@ async def app_lifespan(server):
                 rt.backend_registry.SERVER_STATE_FILE, _SERVE_PORT, os.getpid()
             )
         await rt.browser_manager.start_idle_reaper()
+        # F-963: the probe-and-heal loop for persistent-profile browsers, started
+        # where the reaper is and independent of its idle-timeout setting. The
+        # close path and the interception arming are handed in, because the
+        # module imports no tool section (nor this file).
+        rt.browser_health.start(
+            rt.browser_manager,
+            close=browser_management.close_instance,
+            arm_interception=rt.network_interceptor.setup_interception,
+        )
         # Adopt the browsers a previous backend of ours left running on
         # persistent profiles, so a human login survives a restart (F-888).
         # Fire-and-forget for the same reason the sweep below is: it reaches a
@@ -183,6 +195,7 @@ async def app_lifespan(server):
             )
             try:
                 await rt.browser_manager.stop_idle_reaper()
+                await rt.browser_health.stop()
             except Exception as e:
                 rt.debug_logger.log_error("server", "cleanup", e)
             try:

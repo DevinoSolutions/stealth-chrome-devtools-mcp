@@ -174,6 +174,13 @@ def forget_tab(instance_id: str, target_id: str) -> None:
             del _bound[key]
 
 
+def forget_instance(instance_id: str) -> None:
+    """Drop every caller's binding in *instance_id* (its browser was relaunched
+    under the same id, F-963, so each bound target id is gone)."""
+    for key in [key for key in _bound if key[1] == instance_id]:
+        del _bound[key]
+
+
 async def claim(
     browser_manager: BrowserManager, instance_id: str
 ) -> dict[str, str | None]:

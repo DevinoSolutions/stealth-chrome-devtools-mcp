@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### A frozen named-session browser is detected and relaunched, and a closed tab no longer fails a spawn (F-963)
+
+Two long-lived named-session browsers (the shared `default` one and `fleet`) froze after about
+26 hours: Chrome still answered its web endpoints, but no page in it ever ran any script, and
+closing it did not end it. Callers saw every tool hang, and new sessions copied from it got no
+live cookies. The backend now checks every browser on a saved profile (a named session or the
+shared `default` one; disposable copies are skipped) every two minutes, over a fresh connection of
+its own: it opens a blank background tab, runs `1+1` in it and closes it. A browser that fails
+that twice in a row is closed through the normal close path and started again on the same
+profile, with the same `instance_id`, headless setting and window size, so callers and saved ids
+keep working. The old tabs are gone: the first chat to use a page tool afterwards gets the new
+browser's tab, and the others open their own with `new_tab`. A spawn that names the same session
+while this happens waits for the relaunch and is handed that browser. A browser is healed at most once every 15 minutes, and if the relaunch fails the session
+is left closed, so the next `spawn_browser(session="<name>")` starts it, as after any close.
+
+The first failed check writes a warning, and the heal writes an error, both with counts only (how
+long the browser has been up, how many pages and other targets it has, its processes by kind and
+their memory, how many Chromium processes the machine has, and free memory; never a URL, title or
+cookie), so the next freeze is explained as well as cured. If the browser answers a fresh
+connection but this backend's own connection to it does not, that is logged as "backend
+connection wedged" and nothing is relaunched.
+
+Separately, `spawn_browser(session="fleet")` on a session that was already running could fail
+with "Failed to setup network interception: server rejected WebSocket connection: HTTP 500".
+When a chat had closed the tab the backend was tracking for that browser, Chrome refused the
+connection to the vanished tab. The spawn now checks that the tab still exists and, if not,
+opens a fresh blank one for itself; it never closes a tab that belongs to another chat.
+
 ## 2.1.28
 
 ### Each chat's page tools stay in that chat's own tab (F-962)

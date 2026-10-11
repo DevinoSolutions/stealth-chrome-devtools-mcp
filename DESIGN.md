@@ -335,6 +335,27 @@ CI depends on exactly that, and a headless spawn is never delegated.
 
 ---
 
+### 2.8 A hung persistent-profile browser is detected and relaunched (F-963)
+
+`browser_health.start` runs one background loop beside the idle reaper in
+`app_lifespan` (and regardless of `BROWSER_IDLE_TIMEOUT`). Every 120 s it probes each
+instance whose profile is persistent (`browser_pid_registry.on_persistent_profile`:
+a named session or `default`; disposable clones are skipped) over a **fresh
+`websockets` connection**, never nodriver's: a background `about:blank` target,
+`Runtime.evaluate("1+1")`, close. The measured freeze (two browsers at ~26.5 h) left
+the HTTP endpoints answering while no tab ran any script, so only a probe that
+executes script sees it, and only one outside this backend's own listener cannot be
+faked or hidden by it. A failure of the backend's own `Browser.getVersion` while the
+direct probe passes is logged as "backend connection wedged" and heals nothing.
+
+Two failures in a row heal: hold the F-961 directory gate for the whole heal, close
+through the `close_instance` tool's path (so exit-wait, kill escalation and the
+`default` seed refresh stay in one place), then `spawn_browser(options,
+instance_id=<old id>)` on the same directory, headless and viewport, and re-arm
+interception. At most one heal per 15 minutes per instance. The module takes the
+manager, the close path and the interception armer as arguments, because an `embedded`
+module imports neither `server` nor a tool section (convention 1).
+
 ## 3. The observability spine
 
 File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`
