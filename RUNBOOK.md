@@ -588,6 +588,30 @@ Google rotation guard (open items: a session you later sign in to Google afresh 
 guarded, a re-attached browser after a restart is not re-armed, and the guard blocks that
 session's own legitimate rotation; escape: `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION`).
 
+### A saved-profile browser stopped answering (F-963)
+Symptom: every tool on one named-session instance (`fleet`, `default`) hangs or times
+out, although the browser's window is up. Nothing needs doing: the backend probes every
+instance on a **persistent** profile every 120 s over its own fresh connection (a blank
+background tab, `1+1`, closed again) and, after two failed probes in a row, closes the
+browser through the normal close path and starts it again on the same profile and with
+the **same `instance_id`**. The backend log (`backend-<pid>.log`, logger
+`browser_health`) says what happened:
+
+* `probe 1 failed (...); uptime=... targets(...) tree(...) chromium_processes=... free_ram=...`
+  (WARNING) — the first miss, with counts only (never a URL or title).
+* `... healing it` (ERROR, also sent to Sentry) — the second miss; the heal follows,
+  then `healed (relaunched under the same id)` (INFO). A heal is attempted at most once
+  per 15 minutes per instance.
+* `relaunched but the probe still fails`, or a relaunch error — the session is left
+  closed; `spawn_browser(session="<name>")` starts it again.
+* `backend connection wedged` (WARNING) — the browser answers a fresh connection but
+  this backend's own connection to it does not. Nothing is relaunched; `restart` the
+  backend.
+
+Disposable clones are never probed. Chats that held a tab in the instance find it gone:
+the first one to use a page tool takes the new browser's tab and the others call
+`new_tab`.
+
 ### Code edit didn't take effect
 There is no live reload. A source edit changes the **source fingerprint**, so the next
 client connection gets a fresh backend automatically. If you want it now: `restart`.
