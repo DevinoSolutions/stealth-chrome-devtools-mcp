@@ -356,6 +356,36 @@ interception. At most one heal per 15 minutes per instance. The module takes the
 manager, the close path and the interception armer as arguments, because an `embedded`
 module imports neither `server` nor a tool section (convention 1).
 
+**A browser that exits is relaunched too, for `default` and `fleet` only (F-964).**
+`_discard_instance_unlocked` is the manager's one "the process died on its own" path
+(`get_instance` and `list_instances` call it); every deliberate close (the tool, the
+idle reaper, `close_all`, the heal) pops its entry in `close_instance` Phase 1 and never
+reaches it. So the discard also keeps `(id, entry)` in a bounded deque, and the loop
+drains it with `take_exited()` after its own listing. That one seam covers both ways of
+learning about an exit: the loop's listing finding the dead pid, and a tool call that
+discarded the instance first. The scope is `fleet_session.lock_key`, the single mapping
+from a directory to a session (`default` or `fleet`; an auto-clone never), because the
+two are the browsers a login lives in and several chats rely on, while any other
+session or clone is cheap for its caller to restart. The relaunch runs the heal's own
+tail (`_launch_again`: `spawn_browser(instance_id=...)`, re-arm, probe) under the same
+directory gate, and shares its 15-minute cooldown, so a browser that keeps dying is an
+ERROR and not a loop. It stands down when a live browser already holds the directory
+(`profile_lock.profile_hold`, the witness adoption uses) and while the backend is
+stopping. Not done: telling a human closing a headed window from a crash (nothing in
+Chrome's exit separates them), so that window returns at the next round.
+
+**Chrome's own log (F-964).** nodriver launches Chrome with `--disable-breakpad` and no
+logging, so a Chrome-side exit or freeze left nothing to read. A persistent-profile
+launch (`browser_pid_registry.on_persistent_profile`'s predicate, asked of what the
+launch records) now carries `--enable-logging --log-level=1 --log-file=<log dir>/chrome-<key>-<id8>-<UTC>.log`,
+assembled in `spawn_browser` right after the stealth filter and before the start page,
+so no filter can strip it. One file per launch: a relaunch must not overwrite the
+evidence it exists to explain. Retention is the newest 20 per session key, pruned at
+launch by an exact name pattern (`fleet` is not `fleet-2`), and `logging_setup`'s
+backend sweep leaves these files out of its 50-file / 7-day rules. Breakpad stays
+disabled on purpose: crash dumps can hold cookie memory and may upload. The file is
+local evidence; only its path is logged or returned (`spawn_diagnostics["chrome_log"]`).
+
 ## 3. The observability spine
 
 File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`
