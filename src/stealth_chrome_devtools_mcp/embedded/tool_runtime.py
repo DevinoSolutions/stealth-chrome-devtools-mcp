@@ -38,6 +38,7 @@ import re
 from stealth_chrome_devtools_mcp.embedded import (
     backend_liveness,
     backend_registry,
+    browser_health,
     browser_reattach,
     cdp_transport,
     clone_storage,
@@ -85,6 +86,7 @@ __all__ = [
     "_with_cdp_timeout",
     "backend_liveness",
     "backend_registry",
+    "browser_health",
     "browser_manager",
     "browser_reattach",
     "cdp_element_cloner",

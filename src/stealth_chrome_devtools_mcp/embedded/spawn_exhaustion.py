@@ -62,7 +62,7 @@ _EXHAUSTION_PROCESS_THRESHOLD = 120
 _SKIPPABLE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 
-def _live_chromium_processes() -> int:
+def live_chromium_processes() -> int:
     """Machine-wide count of live Chromium-family processes.
 
     ``process_iter(["name"])`` asks for the name and nothing else: reading
@@ -118,7 +118,7 @@ def exhaustion_hint(pid_file: Path) -> str | None:
     run out of the developer's live ``~/.stealth-mcp``.
     """
     try:
-        live = _live_chromium_processes()
+        live = live_chromium_processes()
         if live < _EXHAUSTION_PROCESS_THRESHOLD:
             return None
         tracked = len(browser_pid_registry.read_entries(pid_file))
