@@ -375,6 +375,20 @@ class TestWhenItDoesNot:
 
         assert stage.launches == []
 
+    async def test_a_stop_that_lands_mid_round_stops_the_relaunch(self, stage, log):
+        """``stop()`` between the round's listing and the relaunch: the gate is
+        taken, the flag is read AFTER it, and nothing launches."""
+        _die(stage.manager, FLEET_ID)
+        health = stage.health()
+        entry = stage.manager._instances[FLEET_ID]
+        options, instance = entry["options"], entry["instance"]
+        health.stopping = True
+
+        assert await health.relaunch_exited(FLEET_ID, options, instance, {}) is False
+
+        assert stage.launches == []
+        assert any("the backend is stopping" in w for w in log.at("warning"))
+
     async def test_stop_marks_the_running_loop_as_stopping(self, stage):
         browser_health.start(
             stage.manager, close=stage.close, arm_interception=stage.arm
