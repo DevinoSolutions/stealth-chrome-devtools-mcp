@@ -605,17 +605,16 @@ class BrowserManager:
             except (OSError, ConnectionError) as err:
                 self._warn_spawn_cleanup("Proxy close", phase, instance_id, err)
 
-    async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:  # noqa: PLR0915  DEBT(F-702)
-        """
-        Spawn a new browser instance with given options.
-
-        Orchestrates the spawn pipeline (``_build_instance`` → ``_resolve_proxy``
-        → ``_resolve_launch_args`` → ``_launch_browser`` → ``_apply_post_launch``)
-        under one try/except that owns the cancel/error cleanup. ``browser`` and
-        ``proxy_forwarder`` are held as orchestrator locals so a failure at any
-        phase tears down whatever was already created.
-        """
-        instance_id = str(uuid.uuid4())
+    async def spawn_browser(  # noqa: PLR0915  DEBT(F-702)
+        self, options: BrowserOptions, *, instance_id: str | None = None
+    ) -> BrowserInstance:
+        """Spawn a browser: ``_build_instance`` → ``_resolve_proxy`` →
+        ``_resolve_launch_args`` → ``_launch_browser`` → ``_apply_post_launch``,
+        under one try/except that owns the cancel/error cleanup (``browser`` and
+        ``proxy_forwarder`` are orchestrator locals, so a failure at any phase
+        tears down what was already created). *instance_id* is internal: a heal
+        (F-963) relaunches under the id its callers already hold."""
+        instance_id = instance_id or str(uuid.uuid4())
         instance = self._build_instance(instance_id, options)
         self._spawns_in_flight += 1
         self._spawn_peak_in_flight = max(
@@ -796,12 +795,7 @@ class BrowserManager:
             return data
 
     async def list_instances(self) -> list[BrowserInstance]:
-        """
-        List all browser instances.
-
-        Returns:
-            List[BrowserInstance]: List of all browser instances.
-        """
+        """All browser instances (a dead browser is discarded)."""
         async with self._lock:
             for instance_id, data in list(self._instances.items()):
                 if not process_exit.browser_is_alive(data["browser"]):
@@ -1038,38 +1032,48 @@ class BrowserManager:
         return new_tab
 
     async def get_navigation_tab(self, instance_id: str) -> Tab | None:
-        """A healthy tab for navigation, recovering from a stale tracked tab
-        when needed. ``None`` when the instance does not exist."""
+        """A healthy tab for navigation: the recycle threshold, then
+        :meth:`live_tab`. ``None`` when the instance does not exist."""
         data = await self.get_instance(instance_id)
         if not data:
             return None
 
-        browser = data["browser"]
-        tracked_tab = data.get("tab")
-        navigation_count = data.get("navigation_count", 0)
-
         threshold = self.NAVIGATION_RECYCLE_THRESHOLD
-        if threshold > 0 and navigation_count >= threshold:
+        if threshold > 0 and data.get("navigation_count", 0) >= threshold:
             return await self._replace_main_tab(
                 instance_id,
                 reason=f"navigation recycle threshold {threshold} reached",
             )
+        return await self.live_tab(instance_id)
 
-        # F-775a: never await a browser.tabs entry, nor hand one to a caller that
-        # calls Tab-only methods on it (they are raw Connections after any
-        # rediscovery). The loop is a presence check on the target id and returns
-        # the caller's own live Tab; every other path takes _replace_main_tab.
+    async def live_tab(self, instance_id: str) -> Tab | None:
+        """The tracked tab if Chrome still has its target, else a fresh one (F-963).
+
+        THE one stale-tab recovery: a caller may have closed the tab we track,
+        and any CDP socket opened on its gone target id is answered HTTP 500.
+        Never closes another caller's tab. ``None`` when the instance is gone.
+
+        F-775a: never await a ``browser.tabs`` entry, nor hand one to a caller that
+        calls Tab-only methods on it (they are raw Connections after any
+        rediscovery). The loop is a presence check on the target id and returns
+        the caller's own live Tab; every other path takes _replace_main_tab.
+        """
+        data = await self.get_instance(instance_id)
+        if not data:
+            return None
+
+        tracked_tab = data.get("tab")
         try:
-            await browser.update_targets()
+            await data["browser"].update_targets()
             tracked_target_id = self._get_tab_target_id(tracked_tab)
             if tracked_target_id:
-                for candidate_tab in browser.tabs:
+                for candidate_tab in data["browser"].tabs:
                     if self._get_tab_target_id(candidate_tab) == tracked_target_id:
                         return tracked_tab
         except Exception as error:
             debug_logger.log_warning(
                 "browser_manager",
-                "get_navigation_tab",
+                "live_tab",
                 f"Tab health check failed for {instance_id}: {error}",
             )
 
@@ -1405,16 +1409,8 @@ class BrowserManager:
             raise Exception(f"Failed to get page state: {e!s}")  # noqa: B904  plan_M4ph1
 
     async def cleanup_inactive(self, timeout_seconds: int | None = None) -> int:
-        """
-        Clean up inactive browser instances.
-
-        Args:
-            timeout_seconds (Optional[int]): Override timeout in seconds for
-            all instances. Uses per-instance values when None.
-
-        Returns:
-            int: Number of instances selected for idle cleanup.
-        """
+        """Close idle instances; the count selected. *timeout_seconds* overrides
+        every instance's own idle timeout."""
         now = datetime.now(tz=timezone.utc)
 
         to_close = []

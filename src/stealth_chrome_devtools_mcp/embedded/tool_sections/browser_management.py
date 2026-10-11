@@ -633,7 +633,10 @@ async def _adopted_instance_record(
     Interception is set up here for the same reason the spawn path does it: an
     adopted tab has none of this backend's handlers on it, so a caller passing
     ``block_resources`` to a spawn that adopted would otherwise be silently
-    ignored.
+    ignored. The tab it is set up on is ``live_tab``'s, not the tracked one
+    (F-963): a caller may have closed that tab since, and a CDP socket on a
+    gone target id is answered HTTP 500 — which failed the whole spawn on a
+    session that was running fine.
     """
     data = await rt.browser_manager.get_instance(instance_id)
     if not data:
@@ -641,7 +644,7 @@ async def _adopted_instance_record(
             f"Re-attached instance {instance_id} vanished before it could be reported"
         )
     instance = data["instance"]
-    tab = await rt.browser_manager.get_tab(instance_id)
+    tab = await rt.browser_manager.live_tab(instance_id)
     if tab:
         await rt.network_interceptor.setup_interception(
             tab, instance_id, block_resources
