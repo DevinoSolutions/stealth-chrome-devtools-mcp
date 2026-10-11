@@ -164,11 +164,16 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # paid for by collapsing the Args:/Returns: blocks of `spawn_browser`,
     # `list_instances` and `cleanup_inactive` that only restated their own
     # signatures (the plan_F856 mechanism). Cap == actual.
+    # F-964 holds 1445: `_exited` + `take_exited` (the one place a browser that
+    # died on its own is recorded, for browser_health's relaunch) and the
+    # `chrome_log` flags/diagnostics lines in `spawn_browser` were paid for by
+    # collapsing the `get_tab` / `get_browser` / `close_all` / `close_instance`
+    # docstrings that restated what their names and signatures say. Cap == actual.
     "embedded/browser_manager.py": (
         1445,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
         " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939"
-        " - F-940 - F-962 - F-963",
+        " - F-940 - F-962 - F-963 + F-964 (paid, net 0)",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

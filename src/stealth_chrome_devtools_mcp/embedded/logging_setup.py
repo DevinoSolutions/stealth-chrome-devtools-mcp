@@ -755,6 +755,11 @@ def with_correlation_id(func: Callable[..., object]) -> Callable[..., object]:
     return sync_wrapper
 
 
+#: Chrome's own per-launch logs (``chrome_log``, F-964) live in this directory but
+#: keep their own per-session retention; this sweep must not count or delete them.
+CHROME_LOG_PREFIX = "chrome-"
+
+
 def resolve_log_dir() -> Path:
     """``STEALTH_MCP_LOG_DIR`` override, else the existing per-user state-dir
     convention (``singleton.STATE_DIR / "logs"``). Pure — never creates the
@@ -967,7 +972,11 @@ def prune_old_logs(
         if not target_dir.is_dir():
             return
         files = sorted(
-            (p for p in target_dir.glob("*.log*") if p.is_file()),
+            (
+                p
+                for p in target_dir.glob("*.log*")
+                if p.is_file() and not p.name.startswith(CHROME_LOG_PREFIX)
+            ),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
