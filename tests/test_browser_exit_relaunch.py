@@ -414,10 +414,10 @@ class TestWhenItDoesNot:
         health = stage.health()
         real = health.relaunch_exited
 
-        async def first_blows_up(instance_id, data):
+        async def first_blows_up(instance_id, *rest):
             if instance_id == FLEET_ID:
                 raise RuntimeError("relaunch blew up")
-            return await real(instance_id, data)
+            return await real(instance_id, *rest)
 
         health.relaunch_exited = first_blows_up
 

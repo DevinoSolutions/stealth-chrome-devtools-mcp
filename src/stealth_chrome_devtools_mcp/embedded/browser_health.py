@@ -382,11 +382,12 @@ def _relaunch_options(
 ) -> BrowserOptions:
     """What a relaunch of *instance* spawns with: the same directory, headless and
     viewport it had, and rotation-guarded when the spawn path's own rule says so."""
-    selection = previous.get("profile_selection") or {}
+    selection = previous.get("profile_selection")
+    role = selection.get("profile_role") if isinstance(selection, dict) else None
     # The ONE rule for "this relaunch must be guarded" is the spawn path's.
     guard = options.guard_rotation or fleet_session.guards_rotation(
         {
-            "profile_role": selection.get("profile_role"),
+            "profile_role": role,
             "user_data_dir": options.user_data_dir,
         }
     )
@@ -470,7 +471,12 @@ class BrowserHealth:
         for instance_id, data in self._manager.take_exited():
             try:
                 if self._shared(data["options"]):
-                    await self.relaunch_exited(instance_id, data)
+                    await self.relaunch_exited(
+                        instance_id,
+                        data["options"],
+                        data["instance"],
+                        dict(data.get("spawn_diagnostics") or {}),
+                    )
             except Exception as error:  # noqa: BLE001  PERMANENT(F-964: one instance's relaunch must not end the round, nor skip the probes)
                 debug_logger.log_error(_COMPONENT, "relaunch", error)
         listed = [i.instance_id for i in await self._manager.list_instances()]
@@ -616,12 +622,20 @@ class BrowserHealth:
         finally:
             gate.release()
 
-    async def relaunch_exited(self, instance_id: str, data: dict) -> bool:
+    async def relaunch_exited(
+        self,
+        instance_id: str,
+        options: BrowserOptions,
+        instance: BrowserInstance,
+        previous: dict[str, object],
+    ) -> bool:
         """Relaunch a shared-session browser that exited on its own, under the
         same id (F-964); True when the relaunched browser answers a probe. Every
-        refusal is logged with its reason."""
-        previous = dict(data.get("spawn_diagnostics") or {})
-        facts = await self._facts(instance_id, None, data["instance"].created_at)
+        refusal is logged with its reason. *previous* is its spawn diagnostics."""
+        directory = options.user_data_dir
+        if not directory:
+            return False  # `is_shared_session` never admits one; a seam might
+        facts = await self._facts(instance_id, None, instance.created_at)
         label = f"{instance_id}: exited unexpectedly ({facts}){_log_note(previous)}"
         since = self._clock() - self._last_heal.get(instance_id, -HEAL_COOLDOWN_SECONDS)
         if since < HEAL_COOLDOWN_SECONDS:
@@ -635,10 +649,9 @@ class BrowserHealth:
             )
             return False
         self._last_heal[instance_id] = self._clock()
-        options = data["options"]
-        gate = await directory_gate.hold(options.user_data_dir)
+        gate = await directory_gate.hold(directory)
         try:
-            holder = await asyncio.to_thread(self._holder, options.user_data_dir)
+            holder = await asyncio.to_thread(self._holder, directory)
             if self.stopping or holder is not None:
                 debug_logger.log_warning(
                     _COMPONENT,
@@ -655,7 +668,7 @@ class BrowserHealth:
             try:
                 return await self._launch_again(
                     instance_id,
-                    _relaunch_options(options, data["instance"], previous),
+                    _relaunch_options(options, instance, previous),
                     previous,
                     "relaunched after an unexpected exit (under the same id)",
                 )
