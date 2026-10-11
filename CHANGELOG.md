@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.30
 
 ### The default and fleet browsers are relaunched when they exit, and Chrome keeps its own log (F-964)
 
