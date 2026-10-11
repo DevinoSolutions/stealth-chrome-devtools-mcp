@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.29
 
 ### A frozen named-session browser is detected and relaunched, and a closed tab no longer fails a spawn (F-963)
 
