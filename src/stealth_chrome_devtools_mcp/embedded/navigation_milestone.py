@@ -382,16 +382,23 @@ def _aborted_error(url: str) -> ToolError:
     )
 
 
-async def navigate(
+async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget and progress, plus F-965's referrer)
     tab: Tab,
     url: str,
     wait_until: str,
     budget_seconds: float,
     progress: Progress | None = None,
+    referrer: str | None = None,
 ) -> None:
     """Send ``Page.navigate`` for *url* and return once the LATEST document in
     that frame's loader chain has reached the milestone *wait_until* names,
     marking *progress* on the way.
+
+    *referrer* is sent as ``Page.navigate``'s own parameter, with ``unsafeUrl``
+    so it reaches the page exactly as given (F-965). Never as a
+    ``Referer`` extra header: Chrome cancels a request whose header the policy
+    would not send (``net::ERR_BLOCKED_BY_CLIENT``), and the header stays on
+    the tab for every later navigation.
     """
     milestone = require(wait_until)
     progress = progress if progress is not None else Progress()
@@ -414,7 +421,15 @@ async def navigate(
         # reads as new each time. Both commands are idempotent, ~1 ms together,
         # and that beats tracking either flag per tab.
         await tab.send(cdp.page.set_lifecycle_events_enabled(enabled=True))
-        frame_id, loader_id, error_text = await tab.send(cdp.page.navigate(url))
+        frame_id, loader_id, error_text = await tab.send(
+            cdp.page.navigate(
+                url,
+                referrer=referrer or None,
+                referrer_policy=(
+                    cdp.page.ReferrerPolicy.UNSAFE_URL if referrer else None
+                ),
+            )
+        )
         progress.accepted = True
         aborted = error_text == ABORTED
         if error_text and not aborted:

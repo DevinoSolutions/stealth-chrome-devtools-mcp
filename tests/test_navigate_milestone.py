@@ -174,6 +174,24 @@ async def test_a_navigation_chrome_never_accepted_keeps_its_one_recovery_retry(
     assert len(replacements) == 1
 
 
+async def test_the_recovery_retry_still_carries_the_referrer(monkeypatch, manager):
+    """F-965: the referrer is a parameter of ``Page.navigate``, so the stale-tab
+    retry's second send carries it too — it is not state set once before the loop."""
+    tab = _UnansweringTab()
+    _with_tab(monkeypatch, tab)
+    referrer = "https://referrer.invalid/some/path?q=1"
+
+    with pytest.raises(ToolError, match="timed out"):
+        await manager.navigate(
+            instance_id="iid-1", url=URL, timeout=100, referrer=referrer
+        )
+
+    sent = [f["params"] for f in tab.cdp_frames if f["method"] == "Page.navigate"]
+    assert [p["referrer"] for p in sent] == [referrer, referrer]
+    assert [p["referrerPolicy"] for p in sent] == ["unsafeUrl", "unsafeUrl"]
+    assert "Network.setExtraHTTPHeaders" not in [f["method"] for f in tab.cdp_frames]
+
+
 async def test_the_milestone_is_keyed_on_the_responses_loader_id(monkeypatch, manager):
     """An older document's ``load`` (a page still finishing when the new
     navigation was sent) must not end the wait for the new one."""

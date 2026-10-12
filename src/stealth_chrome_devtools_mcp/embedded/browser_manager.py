@@ -1107,6 +1107,10 @@ class BrowserManager:
         ``pinned``: a caller's own tab (F-962), navigated as-is — never recycled,
         replaced or made the instance's tab, and a failure is reported, not retried.
 
+        ``referrer`` rides this one ``Page.navigate`` (F-965), never the tab's
+        extra headers, so it cannot outlive the navigation or replace the set the
+        caller installed.
+
         One stale-tab recovery retry (F-824) — but only for a failure Chrome
         never accepted; a timeout after ``Page.navigate`` answered is the page's
         own and is reported, not retried (F-881).
@@ -1131,18 +1135,11 @@ class BrowserManager:
             start_time = time.monotonic()
 
             try:
-                if referrer:
-                    await tab.send(
-                        uc.cdp.network.set_extra_http_headers(
-                            headers=uc.cdp.network.Headers({"Referer": referrer})
-                        )
-                    )
-
                 # The ONE navigation wait (F-881) — never `tab.get` (a 0.5 s
                 # sleep) nor `tab.wait(<event class>)` (a no-op).
                 await asyncio.wait_for(
                     navigation_milestone.navigate(
-                        tab, url, wait_until, timeout_seconds, progress
+                        tab, url, wait_until, timeout_seconds, progress, referrer
                     ),
                     timeout=timeout_seconds,
                 )

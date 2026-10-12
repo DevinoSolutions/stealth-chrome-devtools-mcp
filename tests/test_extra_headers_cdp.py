@@ -148,7 +148,7 @@ async def test_spawn_sends_no_header_command_when_extra_headers_is_empty(
 
 
 # ---------------------------------------------------------------------------
-# Site 2 — navigate's referrer
+# Site 2 — navigate's referrer (F-965: no longer a header at all)
 # ---------------------------------------------------------------------------
 
 
@@ -174,25 +174,32 @@ def _with_tab(monkeypatch, manager, tab):
     return manager
 
 
-async def test_navigate_referrer_serializes_into_the_cdp_frame(
+async def test_navigate_referrer_rides_the_page_navigate_frame(
     monkeypatch, navigating_manager
 ):
+    """F-965: the referrer is ``Page.navigate``'s own parameter, delivered as
+    given (``unsafeUrl``) — one frame, and NO ``Network.setExtraHTTPHeaders``,
+    which Chrome answers with ``ERR_BLOCKED_BY_CLIENT`` for a cross-origin
+    full-URL ``Referer`` and then keeps on the tab for every later navigation."""
     tab = FakeTab(evaluate_map=NAV_EVALUATES)
     _with_tab(monkeypatch, navigating_manager, tab)
+    referrer = "https://referrer.invalid/some/path?q=1"
 
     result = await navigating_manager.navigate(
         instance_id="iid-1",
         url="https://fake.test/target",
-        referrer="https://fake.test/origin",
+        referrer=referrer,
     )
 
     assert result["success"] is True
-    assert one_frame(tab, SET_EXTRA)["params"]["headers"] == {
-        "Referer": "https://fake.test/origin"
-    }
+    params = one_frame(tab, "Page.navigate")["params"]
+    assert params["url"] == "https://fake.test/target"
+    assert params["referrer"] == referrer
+    assert params["referrerPolicy"] == "unsafeUrl"
+    assert SET_EXTRA not in [f["method"] for f in tab.cdp_frames]
 
 
-async def test_navigate_without_a_referrer_sends_no_header_command(
+async def test_navigate_without_a_referrer_sends_no_referrer_and_no_header_command(
     monkeypatch, navigating_manager
 ):
     tab = FakeTab(evaluate_map=NAV_EVALUATES)
@@ -200,8 +207,9 @@ async def test_navigate_without_a_referrer_sends_no_header_command(
 
     await navigating_manager.navigate(instance_id="iid-1", url="https://fake.test/t")
 
-    # The navigation itself is a CDP frame (``Page.navigate`` — the fake models
-    # it since F-881); what must be absent is the header command.
+    params = one_frame(tab, "Page.navigate")["params"]
+    assert "referrer" not in params
+    assert "referrerPolicy" not in params
     assert SET_EXTRA not in [f["method"] for f in tab.cdp_frames]
 
 
