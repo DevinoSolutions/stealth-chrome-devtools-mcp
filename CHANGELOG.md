@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.31
 
 ### `navigate(referrer=...)` no longer blocks the page and every navigation after it (F-965)
 
