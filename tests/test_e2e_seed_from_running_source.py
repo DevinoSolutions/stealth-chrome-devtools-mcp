@@ -263,6 +263,17 @@ async def test_b_the_default_session_hands_its_jar_over_while_it_is_open(
     # Open the SHARED session itself, log in, and leave it running. Opening it
     # is also what writes the seed (`before-default-open`), so the third
     # outcome — no seed at all — is not the state under test here.
+    #
+    # SOFT GOLDEN UPDATED for F-966: that holds for a master that EXISTS. On a
+    # root with no master at all, opening `default` used to publish an EMPTY seed,
+    # which an unnamed spawn would then copy silently; it publishes nothing now
+    # (a first install is an empty clone with a warning), so this node starts
+    # from a master that has been opened before, which is also the state its
+    # docstring describes — a seed that may be days old.
+    (tmp_empty_root["master"] / "Default").mkdir(parents=True)
+    (tmp_empty_root["master"] / "Default" / "Preferences").write_text(
+        "{}", encoding="utf-8"
+    )
     shared = (await spawn(session="default", headless=True, **sandbox_kwargs()))[
         "instance_id"
     ]
