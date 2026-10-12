@@ -259,10 +259,14 @@ C:\stealth-mcp-browser-sessions\
 The directory names are historical and are what you will see in a path; the
 words you type and the words the tool answers with are `default` and the seed.
 
-1. An unnamed spawn opens `default` when it is free
-2. Before opening it, the server refreshes its seed
-3. When `default` is busy, a disposable copy is made from the seed
-4. Copies carry all cookies, logins, and session data
+1. An unnamed spawn is **always** a disposable copy of the seed and never opens
+   `default`, whether or not anything has it open (F-966); only
+   `session="default"` opens it
+2. Before opening `default` by name, the server refreshes its seed
+3. When `default` is busy, a copy is made from the seed with its live jar handed over
+4. Copies carry all cookies, logins, and session data. On a brand-new install
+   there is no seed yet, so an unnamed spawn gets an empty copy and a
+   `seed_warning` that says how to create `default`
 5. A stale seed is auto-refreshed when auth files change
 6. `--from <session>` copies a NEW session from that session instead
 
@@ -313,7 +317,10 @@ recorded instead of reaping it, because the login in it cannot be re-created.
 
 Asking for `fleet` while it is already open in this backend returns that instance with
 `already_running: true` and the current `session_lock`; it is never walked to `fleet-2`
-and never a copy. A spawn that names nothing is still never handed it. If the running browser's
+and never a copy. A spawn that names nothing is still never handed it. Closing it needs the
+name too: `close_instance(instance_id=..., session="fleet")` (and `session="default"` for
+`default`); without it the close is refused and the browser is left running, because other
+chats work in it. If the running browser's
 headless state differs from the `headless` you passed (the default `False` counts), the answer
 adds `headless_mismatch`; a running browser cannot change it, so close it and spawn again. A
 new session whose live cookie hand-off failed returns a top-level `seed_warning` (it is then
@@ -385,7 +392,7 @@ spawns work from anywhere.
 ## Usage Examples
 
 ```python
-# The shared default session (what you get when you name none)
+# A disposable copy of the shared default session (what you get when you name none)
 spawn_browser()
 
 # A named session, with login persistence
@@ -499,7 +506,7 @@ table on a terminal and JSON in a pipe:
 stealthy ls                                          # browser instances
 stealthy spawn --session seller-central --headed     # recover a stranded login
 stealthy spawn --session staging --from seller-central  # a new session, already logged in
-stealthy spawn --headed                              # whatever spawn_browser() picks
+stealthy spawn --headed                              # a disposable copy of `default`
 stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
 stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com
 stealthy tools --section browser-management
@@ -516,7 +523,7 @@ already holding that session it is re-attached to over CDP — same window, same
 open page — and the answer says `REATTACHED`. See RUNBOOK, *Recover a stranded
 login*. A session is a NAME; to open a directory by PATH use
 `stealthy call spawn_browser --arg user_data_dir=<path>`. A `spawn` with no
-`--session` is whatever `spawn_browser()` itself selects. Either way the
+`--session` is a disposable copy of `default`, never `default` itself. Either way the
 answer prints the `profile_selection` the backend actually made — role and
 directory — so you can see what you got rather than infer it.
 
@@ -573,15 +580,19 @@ uses the same selectors as the automatic sweep, so the preview matches `--apply`
 ## Preparing the `default` session
 
 1. Start the MCP server
-2. Call `spawn_browser()` with no `session` — or, from a shell,
-   `stealthy spawn --headed`
+2. Call `spawn_browser(session="default")` — or, from a shell,
+   `stealthy spawn --session default --headed`
 3. Sign in to your accounts in the browser that opens
-4. Close it — new sessions are seeded from it, and it is reused directly
+4. Close it with its session name — `close_instance(instance_id=...,
+   session="default")`, or `stealthy close <instance> --session default` — which
+   also refreshes the seed every other session is copied from
 
-That reaches `default` **only while `default` is free**; once a browser holds
-it, the same call gets a disposable copy of its seed instead. The
-`profile_selection` in the answer (`profile_role` + the directory) says which of
-the two you got — `default` or `clone`.
+A spawn with no `session` never reaches `default` (F-966): it is always a
+disposable copy of its seed, whether or not `default` is open, so closing your
+own browser cannot close the shared one. `close_instance` refuses the `default`
+and `fleet` browsers unless it is given that session's name. The
+`profile_selection` in the answer (`profile_role` + the directory) says which you
+got — `default`, or `clone`.
 
 ## Requirements
 

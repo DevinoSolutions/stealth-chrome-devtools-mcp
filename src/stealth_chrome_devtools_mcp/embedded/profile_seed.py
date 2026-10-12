@@ -111,6 +111,11 @@ RESERVED_NAMES = frozenset({"master", "master-snapshot"})
 # directory and a caller may not create a session of their own called it.
 DEFAULT_SESSION = "default"
 
+#: What ``seeded_from`` says of a clone that was copied from NOTHING (F-966): a
+#: fresh install had no seed, so the spawn started an empty profile. Not a
+#: session a caller could open, which is why it is not a name.
+NO_SEED = "none"
+
 # The words above, as a set no SPELLING may fold onto. Windows strips a
 # trailing dot or space from a path component, so `default.` is created as
 # `default` — a second way to the one directory the word names, through the one
@@ -228,6 +233,12 @@ def seed_name(source: Path, master: Path, snapshot: Path) -> str:
     return source.name
 
 
+def seed_label(source: Path, master: Path, snapshot: Path) -> str:
+    """What a marker's ``seeded_from`` says of a copy taken from *source*:
+    :func:`seed_name`, or :data:`NO_SEED` when *source* is not there (F-966)."""
+    return seed_name(source, master, snapshot) if source.exists() else NO_SEED
+
+
 def write_marker(
     target: Path, *, source: Path, source_kind: str, seeded_from: str
 ) -> dict[str, object]:
@@ -300,6 +311,8 @@ def provenance(profile: Path) -> dict[str, object]:
         if isinstance(source, str) and source
         else None
     )
+    if data.get("seeded_from") == NO_SEED:
+        changed = False  # copied from nothing, so there is nothing to have moved on
     return {
         "seeded_from": data.get("seeded_from") or UNKNOWN_SEED,
         "seeded_at": seeded_at if isinstance(seeded_at, str) else None,

@@ -36,6 +36,7 @@ from stealth_chrome_devtools_mcp.embedded import (
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: A pid that is really alive (this one), because ``process_exit.browser_is_alive``
 #: asks psutil about a browser whose handle is gone. A made-up pid reads as a
@@ -287,10 +288,36 @@ class TestAnAdoptedMasterIsOurs:
         monkeypatch.setattr(manager, "close_instance", closed)
         srv = patched_server(browser_manager=manager)
 
-        answer = await call_tool(srv, "close_instance", instance_id=instance_id)
+        answer = await call_tool(
+            srv, "close_instance", instance_id=instance_id, session="default"
+        )
 
         assert asked == ["after-default-close"]
         assert answer["seed_refreshed"] is True
+
+    async def test_closing_an_adopted_master_needs_the_session_named(
+        self, tmp_session_root, tmp_path, call_tool, patched_server, monkeypatch
+    ):
+        """F-966 for a RE-ATTACHED browser (F-888): the guard reads the profile
+        selection the adoption recorded, so it classifies a browser this backend
+        never launched exactly as one it did, and leaves it running."""
+        master = str(tmp_session_root["master"])
+        cleanup = _cleanup(tmp_path, live_backends={os.getpid()})
+        manager = BrowserManager()
+        instance_id = await _adopt_as_the_startup_pass_does(manager, cleanup, master)
+        closed: list[str] = []
+
+        async def close(instance_id):
+            closed.append(instance_id)
+            return True
+
+        monkeypatch.setattr(manager, "close_instance", close)
+        srv = patched_server(browser_manager=manager)
+
+        with pytest.raises(ToolError, match='session="default"'):
+            await call_tool(srv, "close_instance", instance_id=instance_id)
+
+        assert closed == []
 
     async def test_the_driven_snapshot_sees_the_adopted_master(
         self, tmp_session_root, tmp_path
@@ -327,24 +354,22 @@ class TestASpawnWhileWeDriveTheAdoptedMaster:
     async def test_an_unnamed_spawn_is_handed_the_live_jar_not_told_to_stop(
         self, tmp_session_root, tmp_path
     ):
-        """End to end through the two real halves the spawn path composes: the
-        re-attach question, then the resolver with the SAME driven witness. The
-        answer is a clone seeded from the master's LIVE jar, and nothing was
-        declined."""
-        master, cleanup, manager, _ = await self._adopted(tmp_session_root, tmp_path)
+        """The resolver with the SAME driven witness the spawn path hands it: the
+        answer is a clone seeded from the master's LIVE jar.
 
-        a, b, c, d, e, f = _witnesses(str(master))
-        with a, b, c, d, e, f:
-            held = await browser_reattach.adopt_held_profile(
-                manager, cleanup, str(master), reuse_ours=False
-            )
+        SOFT GOLDEN UPDATED for F-966: this node used to compose the re-attach
+        question in front of the resolver for a spawn naming nothing
+        (``reuse_ours=False``). That spawn no longer asks the re-attach at all
+        (``test_held_profile_handoff``), so the resolver is the whole answer."""
+        master, _cleanup_unused, manager, _ = await self._adopted(
+            tmp_session_root, tmp_path
+        )
+
         driven = await cookie_handoff.driven_profiles(manager)
         selection = await clone_storage.resolve_profile_selection(
             None, seed_from=None, driven=driven.holds
         )
 
-        assert held.declined is None
-        assert held.instance_id is None
         assert selection["profile_role"] == "clone"
         assert selection[clone_storage.LIVE_SEED_KEY] == str(master)
 

@@ -288,6 +288,28 @@ class TestScope:
         assert options.user_data_dir == str(stage.roots["master"])
         assert options.headless is False
 
+    async def test_the_default_relaunch_names_master_and_never_asks_the_resolver(
+        self, stage, monkeypatch
+    ):
+        """F-966: a spawn naming NOTHING is a clone, so a relaunch that carried
+        ``user_data_dir=None`` would turn the shared browser into a disposable
+        copy. It carries master explicitly and never reaches the resolver."""
+        from stealth_chrome_devtools_mcp.embedded import clone_storage
+
+        async def _never(*_a, **_k):
+            raise AssertionError("a relaunch went through the profile resolver")
+
+        monkeypatch.setattr(clone_storage, "resolve_profile_selection", _never)
+        _install(stage.manager, MASTER_ID, stage.roots["master"], headless=False)
+        _die(stage.manager, MASTER_ID)
+
+        await stage.health().check_once()
+
+        ((options, instance_id),) = stage.launches
+        assert instance_id == MASTER_ID
+        assert options.user_data_dir == str(stage.roots["master"])
+        assert options.auto_clone is False
+
     async def test_another_named_session_is_left_alone(self, stage):
         _install(stage.manager, "i-work", stage.roots["sessions"] / "work")
         _die(stage.manager, "i-work")

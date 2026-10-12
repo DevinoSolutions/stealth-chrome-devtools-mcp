@@ -582,7 +582,12 @@ class TestTheCopyContractIsUnchanged:
         )
 
         assert refused is None
-        assert target.exists() and list(target.iterdir()) == []
+        # SOFT GOLDEN UPDATED for F-966: the empty target used to carry nothing at
+        # all. It is the first-install clone now, so it carries its marker (what
+        # makes it a clone the quota and GC own, seeded from nothing) and no profile.
+        assert target.exists()
+        assert [p.name for p in target.iterdir()] == [MARKER]
+        assert profile_seed.read_marker(target)["seeded_from"] == profile_seed.NO_SEED
 
     def test_a_target_outside_the_clone_root_is_still_refused(self, seed_layout):
         with pytest.raises(ValueError, match="Refusing"):

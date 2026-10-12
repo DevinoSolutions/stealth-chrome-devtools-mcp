@@ -7,7 +7,7 @@ Google account and no Google request:
   ``/RotateCookies`` path, because the product's patterns name Google hosts. The
   oracle is the page's own ``fetch``: a blocked request REJECTS, a served one
   RESOLVES (the fixture server answers it, 404 or not);
-* the master (first unnamed spawn) is served; the clone (second unnamed spawn,
+* the master (``session="default"``) is served; the clone (an unnamed spawn,
   taken while the master is open) is blocked in its main frame, in a same-origin
   iframe, in a popup and in a tab opened afterwards;
 * a cookie in a browser this backend holds no object for crosses to a spawned
@@ -81,7 +81,7 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     new_tab = get_fn("new_tab")
-    master = await spawn(headless=True, **sandbox_kwargs())
+    master = await spawn(session="default", headless=True, **sandbox_kwargs())
     clone = None
     directories = []
     try:
@@ -127,7 +127,7 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
         for live in (clone and clone["instance_id"], master["instance_id"]):
             if live:
                 with contextlib.suppress(Exception):
-                    await close(instance_id=live)
+                    await close(instance_id=live, session="default")
         for directory in directories:
             await released(directory)
 

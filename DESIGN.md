@@ -386,6 +386,28 @@ backend sweep leaves these files out of its 50-file / 7-day rules. Breakpad stay
 disabled on purpose: crash dumps can hold cookie memory and may upload. The file is
 local evidence; only its path is logged or returned (`spawn_diagnostics["chrome_log"]`).
 
+### 2.9 A spawn that names nothing is a clone; `default` and `fleet` close only by name (F-966)
+
+2.1.27 answered `spawn_browser()` with `profile_role: "default"` whenever nothing held
+master, so a chat that asked for "a browser" was handed the one a human signs in to and
+then `close_instance`d it, taking every later clone's live seed with it. F-834 had called
+"unnamed lands on master when it is free" by design; it is not. Two rules, no setting:
+
+* `clone_storage.resolve_profile_selection(None)` is always a disposable clone: from the
+  seed, from master at rest when there is no seed, with a held master's live jar handed
+  over (F-914) -- and on a brand-new install, with neither, an EMPTY marked clone plus a
+  `seed_warning` naming `session="default"`. Only a request that NAMES the shared session
+  (`session="default"` or master's path) opens master, and only while nothing holds it.
+  `spawn_browser` therefore asks `adopt_held_profile` only for a directory the caller
+  named; F-931's re-attach of a stranded master for a nameless spawn was the same
+  hand-over by another door and is gone. A relaunch (heal, exit) carries its directory in
+  its `BrowserOptions` and never reaches the resolver, so it still reopens master.
+* `close_instance` refuses a `default` or `fleet` browser unless `session` names it.
+  The one classifier is `browser_health.shared_session_name` (F-964's relaunch scope),
+  fed by the profile selection a spawn or re-attach recorded; it does not look the
+  instance up (that discards a dead one). The heal closes through the same tool and passes
+  the name; every other instance ignores `session`.
+
 ## 3. The observability spine
 
 File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`

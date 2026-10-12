@@ -642,11 +642,17 @@ class TestTheDefaultSeedSetting:
     async def test_an_unnamed_spawn_on_a_free_shared_profile_is_unaffected(
         self, tmp_session_root, seeded_by_fleet
     ):
-        """The shared profile is opened itself, not copied, so a setting that
-        names a session that does not exist cannot break the common spawn."""
+        """A setting that names a session that does not exist cannot break the
+        common spawn: it falls back to the snapshot and says why.
+
+        SOFT GOLDEN UPDATED for F-966: this node's premise was that the unnamed
+        spawn OPENED the shared profile, so the setting was never consulted. It is
+        a clone now, so the setting IS consulted, and the guarantee under test —
+        the spawn still succeeds — holds through ``clone_seed``'s fallback."""
         selection = await _selection()
 
-        assert selection["profile_role"] == profile_seed.DEFAULT_SESSION
+        assert selection["profile_role"] == "clone"
+        assert "does not exist" in selection["seed_warning"]
 
     async def test_a_new_clone_is_copied_from_it_with_its_live_jar(
         self, tmp_session_root, seeded_by_fleet
@@ -680,7 +686,7 @@ class TestTheDefaultSeedSetting:
         await _selection(session="fleet")
         (fleet / COOKIE_JAR).parent.mkdir(parents=True, exist_ok=True)
         (fleet / COOKIE_JAR).write_bytes(LOGIN)
-        previous = await clone_storage.resolve_profile_selection(None, force_clone=True)
+        previous = await clone_storage.resolve_profile_selection(None)
 
         retry = await clone_storage._fallback_profile_selection(previous, attempt)
 
@@ -717,7 +723,7 @@ class TestTheDefaultSeedSetting:
     async def test_an_unnamed_clone_falls_back_when_the_seed_is_gone(
         self, tmp_session_root, seeded_by_fleet
     ):
-        forced = await clone_storage.resolve_profile_selection(None, force_clone=True)
+        forced = await clone_storage.resolve_profile_selection(None)
         assert "does not exist" in forced["seed_warning"]
         assert forced["profile_role"] == "clone"
 

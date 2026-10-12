@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### An unnamed `spawn_browser()` never opens the shared `default` browser, and `close_instance` will not close it unnamed (F-966)
+
+A chat (SafeMeet, backend 2.1.27) called `spawn_browser()` with no session twice; both answers
+were `profile_role: "default"` on `<root>/master`, the shared browser every other chat's copies
+are seeded from. It then called `close_instance` on them, which closed the shared browser, and
+every later copy lost its live seed. An unnamed spawn now ALWAYS gets a disposable copy and never
+opens `default`: from the seed when master is free (or from master at rest when there is no
+snapshot yet), with the live jar handed over when a browser this backend drives holds master, as
+before. Only `session="default"` (or master's own path) opens `default`. On a brand-new install
+(no seed, no master) the answer is a fresh empty profile with a `seed_warning` that names
+`spawn_browser(session="default")` as the way to sign in once; master is neither created nor
+opened. The F-931 rule that handed an unnamed spawn a re-attached `default` browser is gone with
+it.
+
+`close_instance` takes `session`. For a `default` or `fleet` instance it raises unless `session`
+is exactly that name, says other chats depend on it, gives the exact call, and leaves the browser
+alone; every other instance closes as before and `session` is ignored. The classifier is the one
+the heal and relaunch paths use, so it also covers a re-attached browser, and the in-process heal
+passes the session name (it still reopens `default` explicitly). `stealthy close --session NAME`
+passes it through. The tool count stays 97; the `tool_surface.json` golden is updated.
+
 ## 2.1.31
 
 ### `navigate(referrer=...)` no longer blocks the page and every navigation after it (F-965)

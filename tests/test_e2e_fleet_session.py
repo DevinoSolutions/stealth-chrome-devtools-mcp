@@ -147,7 +147,7 @@ async def test_the_fleet_is_shared_seeds_a_clone_and_survives_close(
         # 4. Closing the browser keeps the profile.
         await close(instance_id=clone_id)
         clone_id = None
-        await close(instance_id=fleet_id)
+        await close(instance_id=fleet_id, session="fleet")
         fleet_id = None
         await released(fleet_dir)
         assert fleet_dir.is_dir(), "close_instance deleted the fleet session"
@@ -156,7 +156,7 @@ async def test_the_fleet_is_shared_seeds_a_clone_and_survives_close(
         for iid in (clone_id, fleet_id):
             if iid is not None:
                 with contextlib.suppress(Exception):
-                    await close(instance_id=iid)
+                    await close(instance_id=iid, session="fleet")
         for directory in (clone_dir, fleet_dir):
             if directory is not None:
                 await released(directory)

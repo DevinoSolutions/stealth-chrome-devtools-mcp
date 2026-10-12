@@ -380,7 +380,7 @@ def test_in_flight_counters_return_to_zero_after_a_burst(doomed_manager):
 # ---------------------------------------------------------------------------
 
 
-async def test_concurrent_unnamed_selections_all_still_pick_master(tmp_session_root):
+async def test_concurrent_default_selections_all_still_pick_master(tmp_session_root):
     """Characterization, NOT the defect: the master branch is a LIVENESS check.
 
     ``_dir_unavailable``'s own docstring says ``_profile_has_running_browser`` is
@@ -391,9 +391,17 @@ async def test_concurrent_unnamed_selections_all_still_pick_master(tmp_session_r
     the close path, and a leaked one would silently force every later spawn to
     clone. What has to change is what happens to the two callers that then lose
     Chrome's own profile singleton.
+
+    SOFT GOLDEN UPDATED for F-966. This node used to spawn with NO session, and
+    three-of-three ``master`` was the reading for that too; the owner has ruled
+    that a spawn naming nothing is never the shared profile, so it now lands on
+    three distinct clones (``test_unnamed_spawn_never_opens_default``). What stays
+    true, and is what this race is about, is the shared session NAMED:
+    ``session="default"`` is master for every concurrent caller.
     """
+    landed = clone_storage.require_allowed_user_data_dir(None, "default")
     selections = await asyncio.gather(
-        *(clone_storage.resolve_profile_selection(None) for _ in range(3))
+        *(clone_storage.resolve_profile_selection(landed) for _ in range(3))
     )
     assert [s["profile_role"] for s in selections] == ["default"] * 3
     assert {s["user_data_dir"] for s in selections} == {
@@ -680,7 +688,9 @@ async def test_a_spawn_that_fails_every_attempt_leaks_no_protected_clone(
     assert not clone_storage._PROTECTED_CLONE_DIRS, "the fixture starts clean"
 
     with pytest.raises(Exception):
-        await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+        await call_tool(
+            srv, "spawn_browser", headless=True, sandbox=False, session="default"
+        )
 
     assert len(manager.dirs) == 3, f"attempted dirs: {manager.dirs}"
     assert manager.dirs[0] == str(master_race.dir)
@@ -776,7 +786,9 @@ async def test_a_spawn_that_loses_master_succeeds_on_its_second_attempt(
     )
     srv = patched_server(browser_manager=manager)
 
-    result = await call_tool(srv, "spawn_browser", headless=True, sandbox=False)
+    result = await call_tool(
+        srv, "spawn_browser", headless=True, sandbox=False, session="default"
+    )
 
     assert result["state"] == "active"
     assert len(manager.dirs) == 2, f"attempted dirs: {manager.dirs}"

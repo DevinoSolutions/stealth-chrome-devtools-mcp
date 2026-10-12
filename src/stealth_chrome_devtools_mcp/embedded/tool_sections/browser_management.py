@@ -104,15 +104,21 @@ async def spawn_browser(
         extra_headers (Dict[str, str]): Additional HTTP headers.
         session (Optional[str]): The NAME of a persistent browser session — THE
             one documented way to ask for a profile, and the only one to use.
-            Leave UNSET for normal use: an unnamed spawn gets a disposable copy
-            of the shared ``default`` session and deletes it as soon as the
-            browser closes, so you never manage or clean up sessions. Set it
-            only when the user has EXPLICITLY asked to keep a login: a named
+            Leave UNSET for normal use: an unnamed spawn ALWAYS gets a disposable
+            copy of the shared ``default`` session and deletes it as soon as the
+            browser closes, so you never manage or clean up sessions. It never
+            opens ``default`` itself, whether or not anything has it open (F-966),
+            so closing your instance cannot close the shared browser; on a
+            brand-new install with nothing to copy it starts EMPTY and says so in
+            ``seed_warning``. Set it only when the user has EXPLICITLY asked to
+            keep a login: a named
             session is NOT auto-cleaned and persists on disk indefinitely, so
             treat creating one as a deliberate, space-consuming action, and do
             not invent names. ``session="default"`` opens the SHARED session
             itself — the profile every new session is seeded from and the one a
-            human logs in to; it is reserved and is never a session of your own.
+            human logs in to; it is reserved and is never a session of your own,
+            and ``close_instance`` will not close its browser (or ``fleet``'s)
+            unless it is given that ``session`` name too.
             A session is a NAME, not a path: pass ``user_data_dir`` to open a
             directory by path.
             A named session is never deleted by close_instance, by the clone GC,
@@ -124,14 +130,14 @@ async def spawn_browser(
             neither by name: a new backend adopts the browsers it finds recorded
             at its own startup (same instance_id as before), and spawning with a
             session a live browser still holds re-attaches to THAT browser
-            instead of walking to a sibling directory — and since F-931 so does a
-            spawn naming NOTHING, which lands on ``default``. Either way the answer
+            instead of walking to a sibling directory. The answer then
             carries ``spawn_diagnostics["reattached"]: true`` plus the holder's
             pid, and the page is the one that was already open — not a fresh tab
-            on the same cookies. A spawn naming nothing is never handed a browser
-            THIS backend already drives, though: it asked for a browser of its
-            own, so it gets a new session copied from the seed, with that
-            browser's live cookies handed over. So to recover a logged-in browser whose backend
+            on the same cookies. A spawn naming NOTHING never re-attaches and is
+            never handed a browser that is already running (F-966): it asked for
+            a browser of its own, so it gets a disposable copy of the seed, with
+            the live cookies of the ``default`` session handed over when this
+            backend drives it. So to recover a logged-in browser whose backend
             died, just spawn with the same session. On that path the
             arguments that describe a LAUNCH cannot apply to a browser already
             running: headless, user_agent, viewport, proxy, browser_args,
@@ -148,8 +154,9 @@ async def spawn_browser(
             writing to carries none of them. Since F-915 that REFUSES the whole
             spawn rather than starting a new browser beside it. Nothing is
             created, that browser is left running and untouched, and the error
-            names the holder and both ways on — close it (``stealthy close``, or
-            stop the backend that owns it: RUNBOOK, "Recover a stranded login")
+            names the holder and both ways on — close it (``stealthy close
+            <instance> --session NAME``, or stop the backend that owns it:
+            RUNBOOK, "Recover a stranded login")
             and spawn again, or pass a free ``session`` name for a new session
             of your own.
         seed_from (Optional[str]): The NAME of an existing session to copy when
@@ -319,38 +326,30 @@ async def spawn_browser(
         # empty `Held` for every other case, including a live sibling backend's
         # browser, and never raises: an adoption that cannot happen costs this
         # spawn nothing but the reason it reports.
-        # It is asked about the directory this spawn WILL LAND ON, which for a
-        # caller who named nothing is the shared session (F-834/F-896) — and
-        # that is F-931: `require_allowed_user_data_dir` answers None there, so
-        # gating the re-attach on its answer meant `spawn_browser()` could
-        # never adopt the browser `spawn_browser(session="default")` adopts on
-        # the very same directory, and went to the resolver instead, where
-        # F-914 refuses a holder we do not drive. Two spellings of one profile
-        # with two outcomes is convention 4's second way, and the one that lost
-        # is the one the owner and every integration test makes.
-        # `master_profile_dir()` is READ, never re-decided: `clone_storage` is
-        # the one home for where the shared session lives. What it costs is one
-        # process-table walk on the unnamed path, which is exactly what the
-        # named path has always paid. `reuse_ours` is where the two spellings
-        # DO differ: naming nothing asks for a browser of one's own, so one we
-        # already drive there is the resolver's to copy, never the answer.
-        held = await rt.browser_reattach.adopt_held_profile(
-            rt.browser_manager,
-            rt.process_cleanup,
-            user_data_dir or str(rt.clone_storage.master_profile_dir()),
-            reuse_ours=bool(user_data_dir),
-            ignored_args=_launch_only_args(
-                headless=headless,
-                user_agent=user_agent,
-                viewport_width=viewport_width,
-                viewport_height=viewport_height,
-                proxy=proxy,
-                browser_args=browser_args,
-                timezone_id=timezone_id,
-                extra_headers=extra_headers,
-                sandbox=requested_sandbox,
-            ),
-        )
+        # Asked ONLY for a directory the caller NAMED. A spawn naming nothing
+        # asked for a browser of its own: it is always a clone (F-966), so there
+        # is no directory of the caller's to find a browser on. F-931 asked it
+        # about master instead, which handed a stranded `default` browser to
+        # whoever wanted "a browser" — the incident's shape by another door — and
+        # the holder of master is the resolver's to copy from or refuse, jar and
+        # all, exactly as when this backend drives it.
+        if user_data_dir:
+            held = await rt.browser_reattach.adopt_held_profile(
+                rt.browser_manager,
+                rt.process_cleanup,
+                user_data_dir,
+                ignored_args=_launch_only_args(
+                    headless=headless,
+                    user_agent=user_agent,
+                    viewport_width=viewport_width,
+                    viewport_height=viewport_height,
+                    proxy=proxy,
+                    browser_args=browser_args,
+                    timezone_id=timezone_id,
+                    extra_headers=extra_headers,
+                    sandbox=requested_sandbox,
+                ),
+            )
         if held.instance_id:
             record = await _adopted_instance_record(held.instance_id, block_resources)
             return {
@@ -751,12 +750,20 @@ async def list_instances() -> list[dict[str, Any]]:
     return result
 
 
-async def close_instance(instance_id: str) -> dict[str, bool | str | None]:
+async def close_instance(
+    instance_id: str, session: str | None = None
+) -> dict[str, bool | str | None]:
     """
     Close a browser instance.
 
     Args:
         instance_id (str): Browser instance ID.
+        session (Optional[str]): Leave UNSET for every instance you spawned
+            yourself. It is required ONLY to close the browser of the shared
+            ``default`` or ``fleet`` session, which other chats depend on, and
+            must then be exactly that session's name: without it the close is
+            REFUSED and the browser is left untouched. For any other instance it
+            is ignored.
 
     Returns:
         Dict[str, Union[bool, str, None]]: ``closed`` is the old boolean — True
@@ -772,6 +779,9 @@ async def close_instance(instance_id: str) -> dict[str, bool | str | None]:
     profile_selection = {}
     if isinstance(spawn_diagnostics, dict):
         profile_selection = spawn_diagnostics.get("profile_selection") or {}
+    rt.browser_health.require_shared_session_named(
+        instance_id, profile_selection, session
+    )
     should_refresh_snapshot = (
         profile_selection.get("profile_role") == rt.profile_seed.DEFAULT_SESSION
     )

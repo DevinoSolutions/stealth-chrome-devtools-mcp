@@ -446,22 +446,6 @@ def held_by(
     )
 
 
-async def _ours(manager: BrowserManager, user_data_dir: str) -> bool:
-    """True when THIS backend drives *user_data_dir*, or may be about to (F-931).
-
-    The in-flight count is read FIRST and the order is the proof: a spawn
-    registers its instance before it leaves the count, so a zero means every
-    Chrome we launched is in the table read after it, while one still in flight
-    has a Chrome and no instance, which only the count sees. ANY spawn counts —
-    nothing narrower is recorded — resolving toward not adopting (F-914).
-    """
-    if manager._spawns_in_flight:
-        return True
-    from stealth_chrome_devtools_mcp.embedded import cookie_handoff  # nodriver
-
-    return (await cookie_handoff.driven_profiles(manager)).holds(Path(user_data_dir))
-
-
 @dataclass(frozen=True)
 class Held:
     """What the spawn path's re-attach question answered.
@@ -474,8 +458,8 @@ class Held:
     instance_id: str | None = None
     # True when instance_id is a browser THIS backend was already driving.
     running: bool = False
-    # Why the re-attach was NOT taken; None when it was, when nothing held the
-    # directory, and when the holder is ours (F-931: left to the resolver).
+    # Why the re-attach was NOT taken; None when it was and when nothing held
+    # the directory.
     declined: str | None = None
 
 
@@ -485,7 +469,6 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
     user_data_dir: str,
     *,
     ignored_args: list[str] | None = None,
-    reuse_ours: bool = True,
 ) -> Held:
     """Re-attach to the live Chrome holding *user_data_dir*, or say why not.
 
@@ -506,11 +489,10 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
     the diagnostics rather than refused, because refusing over a viewport is the
     walk to ``<name>-2`` and the lost login all over again.
 
-    *reuse_ours* is False for a spawn that NAMED nothing (F-931): it asked for a
-    browser of its own, so a holder we drive or are still launching is never
-    adopted; only a STRANDED one is. The resolver then copies a holder that was
-    registered when this spawn began, jar handed over, and refuses any later one
-    (F-914, as before F-931). Asked on both exits: ``Refused`` or a candidate.
+    It is asked only for a directory the caller NAMED: a spawn naming nothing is
+    always a clone (F-966) and is never handed a running browser, so the holder
+    of the shared session is the resolver's to copy from, jar handed over, or to
+    refuse (F-914).
 
     Never raises.
     """
@@ -525,8 +507,6 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
                 new_instance_id=str(uuid.uuid4()),
             )
         except Refused as exc:
-            if not reuse_ours and await _ours(manager, user_data_dir):
-                return Held()
             # The rule working, and the ONE case a caller has to be told about:
             # their browser is alive, we did not touch it, and the remedy is to
             # stop the backend that owns it.
@@ -548,8 +528,6 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
             # Nothing holds it, or no witness could name a pid (Windows' bare
             # `lockfile`): the ordinary spawn. A browser FOUND and not taken
             # arrives as `Refused` above, never as this silent None.
-            return Held()
-        if not reuse_ours and await _ours(manager, user_data_dir):
             return Held()
         async with manager._lock:
             running = candidate.instance_id in manager._instances

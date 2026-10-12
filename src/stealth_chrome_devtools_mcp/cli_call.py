@@ -709,11 +709,19 @@ def cmd_nav(args: argparse.Namespace) -> int:
 
 
 def cmd_close(args: argparse.Namespace) -> int:
-    """`close <instance>` — thin sugar over ``close_instance``."""
+    """`close <instance> [--session NAME]` — thin sugar over ``close_instance``.
+
+    ``--session`` goes straight through, uninterpreted (F-966): the backend
+    decides whether the instance is the ``default`` or ``fleet`` browser, which
+    it will not close unless that session is named, and the CLI holds no second
+    opinion of its own."""
 
     async def body(url: str) -> None:
         instance_id = await _resolved(url, args, args.instance)
-        result = await _call(url, args, "close_instance", {"instance_id": instance_id})
+        arguments: dict[str, object] = {"instance_id": instance_id}
+        if args.session:
+            arguments["session"] = args.session
+        result = await _call(url, args, "close_instance", arguments)
         if wants_json(sys.stdout, explicit=args.json):
             _emit_json(result)
             return
@@ -891,7 +899,8 @@ def add_parsers(sub: SubParsers) -> None:
         default=None,
         metavar="NAME",
         help="persistent session NAME, not a path: keeps its cookies and "
-        "logins. `default` is the shared session new ones are copied from",
+        "logins. `default` is the shared session new ones are copied from; "
+        "with no --session you always get a disposable copy, never `default`",
     )
     spawn.add_argument(
         "--from",
@@ -923,6 +932,13 @@ def add_parsers(sub: SubParsers) -> None:
 
     close = sub.add_parser("close", parents=[shared], help="close an instance")
     close.add_argument("instance", help="instance id, or a unique prefix of one")
+    close.add_argument(
+        "--session",
+        default=None,
+        metavar="NAME",
+        help="required ONLY to close the shared `default` or `fleet` session's "
+        "browser (other chats depend on it): name it, or the close is refused",
+    )
     close.add_argument("--json", action="store_true", help="JSON output")
 
 

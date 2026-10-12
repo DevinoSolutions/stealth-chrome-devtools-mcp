@@ -294,7 +294,9 @@ class TestTheHeldSharedSession:
     async def test_an_unheld_shared_session_is_opened_exactly_as_before(
         self, tmp_session_root
     ):
-        selection = await _selection()
+        """SOFT GOLDEN UPDATED for F-966: "the shared session" is now the one
+        NAMED. ``_selection()`` passes no session, which is a clone."""
+        selection = await _selection(session="default")
 
         assert selection["profile_role"] == profile_seed.DEFAULT_SESSION
         assert selection["user_data_dir"] == str(tmp_session_root["master"])
@@ -333,7 +335,7 @@ class TestTheHeldSharedSession:
             ),
         )
 
-        selection = await _selection()
+        selection = await _selection(session="default")
 
         assert selection["profile_role"] == profile_seed.DEFAULT_SESSION
         assert selection["user_data_dir"] == str(master)
@@ -376,21 +378,19 @@ class TestTheNoSeedFallback:
 
 
 class TestAnUnnamedSpawnAsksTheSameQuestion:
-    """``spawn_browser()`` and ``spawn_browser(session="default")`` name one
-    profile, and until F-931 only the second one could re-attach to it.
+    """``spawn_browser(session="default")`` asks the F-888 re-attach about the
+    shared directory; ``spawn_browser()`` asks it NOTHING (F-966).
 
-    ``require_allowed_user_data_dir`` answers ``None`` when nothing was named,
-    and the F-888 re-attach was gated on that answer — so the call the owner
-    makes, and every integration test makes, went straight to the resolver,
-    where F-914 refuses a holder we do not drive. The named spelling of the
-    same directory was adopted. Two spellings of one profile with two outcomes
-    is convention 4's "second way", and the one that loses is the default.
-
-    The re-attach therefore has to be asked about the directory the SELECTION
-    will land on, which for an unnamed spawn is the shared session (F-834 /
-    F-896). These nodes drive the real tool and watch which directory the
-    re-attach is handed, because a gate that answers correctly and a body that
-    asks about something else would leave every pin above green.
+    SOFT GOLDEN UPDATED for F-966. F-931 made the two spellings ask the same
+    question, because ``spawn_browser()`` then LANDED on the shared profile and
+    two spellings of one profile with two outcomes was convention 4's "second
+    way". The owner has ruled that a spawn naming nothing never lands on
+    ``default`` — it is always a disposable clone — so the premise is gone: there
+    is no directory of the caller's for the re-attach to find a browser on, and
+    asking it about master handed a stranded ``default`` browser to whoever wanted
+    "a browser". The holder of master is the resolver's: copied with the jar
+    handed over, or refused by name (F-914). These nodes drive the real tool and
+    watch which directory the re-attach is handed.
     """
 
     def _manager(self) -> FakeBrowserManager:
@@ -437,27 +437,34 @@ class TestAnUnnamedSpawnAsksTheSameQuestion:
         await call_tool(srv, "spawn_browser", headless=True, sandbox=False, **kwargs)
         return asked, resolved
 
-    @pytest.mark.parametrize(
-        "kwargs", [{}, {"session": "default"}], ids=["unnamed", "default"]
-    )
-    async def test_both_spellings_ask_the_reattach_about_the_shared_directory(
-        self, call_tool, patched_server, monkeypatch, tmp_session_root, kwargs
+    async def test_the_named_spelling_asks_the_reattach_about_the_shared_directory(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
     ):
         asked, _ = await self._spawn(
             call_tool,
             patched_server,
             monkeypatch,
             held=browser_reattach.Held(),
-            **kwargs,
+            session="default",
         )
 
         assert asked == [str(tmp_session_root["master"])]
 
-    @pytest.mark.parametrize(
-        "kwargs", [{}, {"session": "default"}], ids=["unnamed", "default"]
-    )
-    async def test_both_spellings_adopt_the_holder_instead_of_selecting(
-        self, call_tool, patched_server, monkeypatch, kwargs
+    async def test_an_unnamed_spawn_never_asks_the_reattach(
+        self, call_tool, patched_server, monkeypatch, tmp_session_root
+    ):
+        asked, resolved = await self._spawn(
+            call_tool,
+            patched_server,
+            monkeypatch,
+            held=browser_reattach.Held(instance_id="i-adopted"),
+        )
+
+        assert asked == []
+        assert resolved == [None], "selection is where the holder is decided"
+
+    async def test_the_named_spelling_adopts_the_holder_instead_of_selecting(
+        self, call_tool, patched_server, monkeypatch
     ):
         """An adoption short-circuits selection, which is the whole point: the
         resolver is where F-914's refusal and F-871's walk live, and a browser
@@ -467,7 +474,7 @@ class TestAnUnnamedSpawnAsksTheSameQuestion:
             patched_server,
             monkeypatch,
             held=browser_reattach.Held(instance_id="i-adopted"),
-            **kwargs,
+            session="default",
         )
 
         assert resolved == []
@@ -485,8 +492,9 @@ class TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser:
     already open on it is the answer (F-888). A spawn that names nothing asks
     for a browser of its OWN — the fleet contract F-834 and F-914 build on — so
     for a holder we drive it is the resolver's job: a fresh copy with the
-    holder's jar handed over. What F-931 adds for an unnamed spawn is only the
-    holder we do NOT drive, the stranded one.
+    holder's jar handed over. What F-931 added for an unnamed spawn was the
+    holder we do NOT drive, the stranded one; F-966 took that back (see the two
+    nodes below), so the unnamed spawn is the resolver's in every case.
 
     Two shapes reach "ours", and both are driven here through the REAL
     ``adopt_held_profile`` and the real ``BrowserManager`` — only ``held_by``
@@ -634,11 +642,14 @@ class TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser:
         # production this shape is refused by F-914 (finding §8, residual 4).
         assert resolved == [None]
 
-    async def test_a_stranded_holder_is_still_re_attached(
+    async def test_a_stranded_holder_is_no_longer_re_attached(
         self, call_tool, patched_server, monkeypatch, tmp_session_root
     ):
-        """What F-931 is FOR, kept: a browser no spawn of ours is launching
-        and no instance of ours drives is adopted, not refused."""
+        """SOFT GOLDEN UPDATED for F-966: this was ``test_a_stranded_holder_is_
+        still_re_attached`` — "what F-931 is FOR". An unnamed spawn was handed
+        the stranded ``default`` browser itself, which is the incident's shape by
+        another door (the caller then closes it). It is now a clone, and the
+        stranded browser is the resolver's to copy from or refuse."""
         master = tmp_session_root["master"]
         answer, resolved, adoptions = await self._spawn(
             call_tool,
@@ -648,15 +659,19 @@ class TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser:
             holder=self._candidate("i-stranded", master),
         )
 
-        assert adoptions == ["i-stranded"]
-        assert answer["instance_id"] == "i-stranded"
-        assert resolved == []
+        assert adoptions == []
+        assert answer["instance_id"] == "i-new"
+        assert resolved == [None]
 
-    async def test_a_refusal_about_a_stranger_is_still_reported(
+    async def test_a_refusal_about_a_stranger_is_the_resolvers_to_report(
         self, call_tool, patched_server, monkeypatch, tmp_session_root
     ):
+        """SOFT GOLDEN UPDATED for F-966: ``reattach_declined`` was the re-attach's
+        word about a holder it was asked about; an unnamed spawn no longer asks, so
+        the refusal that reaches the caller is F-914's (``test_a_busy_master_we_do_
+        not_drive_is_refused``)."""
         master = tmp_session_root["master"]
-        answer, _, _ = await self._spawn(
+        answer, resolved, _ = await self._spawn(
             call_tool,
             patched_server,
             monkeypatch,
@@ -664,9 +679,8 @@ class TestAnUnnamedSpawnIsNeverHandedOurOwnBrowser:
             holder=browser_reattach.Refused("a sibling backend owns it"),
         )
 
-        assert answer["spawn_diagnostics"]["reattach_declined"] == (
-            "a sibling backend owns it"
-        )
+        assert "reattach_declined" not in answer["spawn_diagnostics"]
+        assert resolved == [None]
 
     async def test_the_named_spelling_keeps_f888s_answer(
         self, call_tool, patched_server, monkeypatch, tmp_session_root
