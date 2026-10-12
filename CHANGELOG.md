@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.32
 
 ### An unnamed `spawn_browser()` never opens the shared `default` browser, and `close_instance` will not close it unnamed (F-966)
 
