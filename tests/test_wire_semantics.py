@@ -310,10 +310,13 @@ async def _spawn(wire: RawStdioWire, *, profile: str | None = None) -> str:
     return _tool_payload(frame)["instance_id"]
 
 
-async def _close(wire: RawStdioWire, instance_id: str) -> None:
-    await _call(
-        wire, "close_instance", {"instance_id": instance_id}, timeout=OUTER_BOUND
-    )
+async def _close(
+    wire: RawStdioWire, instance_id: str, session: str | None = None
+) -> None:
+    arguments = {"instance_id": instance_id}
+    if session is not None:
+        arguments["session"] = session
+    await _call(wire, "close_instance", arguments, timeout=OUTER_BOUND)
 
 
 async def _navigate(wire: RawStdioWire, instance_id: str, url: str, **extra):
@@ -1342,8 +1345,15 @@ async def test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answer
             await _handshake(wire, capabilities={"roots": {"listChanged": False}})
 
             control_started = time.monotonic()
+            # SOFT GOLDEN UPDATED for F-966: the control used to be a spawn naming
+            # nothing, which landed on the shared profile and asked for no roots.
+            # A spawn naming nothing is a clone now (and asks), so the control is
+            # the shared profile BY NAME: the same premise — one instance already
+            # holding it, no round trip — and the second spawn below is the same
+            # auto-clone branch it always was.
             first_id = await wire.call_tool(
-                "spawn_browser", {"headless": True, "sandbox": False}
+                "spawn_browser",
+                {"session": "default", "headless": True, "sandbox": False},
             )
             first = await wire.response(first_id, SPAWN_BOUND)
             control_seconds = time.monotonic() - control_started
@@ -1390,7 +1400,7 @@ async def test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answer
 
             # The pipe was never the question, and still is not.
             await _call(wire, "list_instances", {})
-            await _close(wire, instance_id)
+            await _close(wire, instance_id, session="default")
         finally:
             await wire.aclose()
     assert not space["leftover_children"], space["leftover_children"]

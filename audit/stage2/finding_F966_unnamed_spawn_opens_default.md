@@ -121,6 +121,15 @@ session root, every spawn closed in `finally`).
   guarantee (the spawn still succeeds, with a `seed_warning`) is what the node now asserts.
 * `test_session_vocabulary.py` (F-896): `test_default_is_the_same_answer_as_naming_no_session` pinned
   the opposite of the ruling and is now `test_default_is_not_the_answer_to_naming_no_session`.
+* `test_wire_semantics.py::test_a_second_unnamed_spawn_is_bounded_when_roots_list_is_never_answered`
+  (F-790, transport lane, found by CI): its control spawn named nothing and relied on landing on the
+  shared profile, which asks no `roots/list`. A spawn naming nothing is a clone now and asks, so the
+  control is `session="default"` (same premise: one instance already holding the shared profile, no
+  round trip); the second, auto-clone spawn is unchanged and `_close` takes the session for it.
+* `test_e2e_seed_from_running_source.py::test_b_...` (found by CI on a root with no master): opening
+  `default` on a root with no master used to publish an EMPTY seed, which the node leaned on. It
+  publishes none now (see 3), so the node starts from a master that exists, the state its docstring
+  already describes.
 * E2E and integration tests that closed the `default` or `fleet` browser without `session`
   (`test_e2e_fleet_*`, `test_e2e_two_sessions_own_tabs`, `test_e2e_browser_health`,
   `test_e2e_seed_from_running_source`, `test_e2e_adopted_master_handoff`,
