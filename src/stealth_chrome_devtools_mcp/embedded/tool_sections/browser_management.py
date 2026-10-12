@@ -884,7 +884,7 @@ async def navigate(
         url (str): URL to navigate to.
         wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.
         timeout (int): Navigation timeout in ms (default 30000, max 60000). Most pages load in under 10s — only increase if you have evidence the page is slow. Values above 60000 are capped.
-        referrer (Optional[str]): Referrer URL.
+        referrer (Optional[str]): Referrer URL, sent exactly as given with this navigation only. It does not touch the tab's extra headers and is not remembered for later navigations.
 
     Returns:
         Dict[str, Any]: Navigation result with final URL and title.

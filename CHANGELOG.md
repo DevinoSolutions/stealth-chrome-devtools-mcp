@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### `navigate(referrer=...)` no longer blocks the page and every navigation after it (F-965)
+
+A `navigate` with a `referrer` to a site other than the referrer's own failed with
+`net::ERR_BLOCKED_BY_CLIENT` (the postify chat on 2026-10-12 could not open
+`app.usepostify.com/signup`; the uprank chat on 2026-10-01 could not even open `example.com`), and
+the tab then refused every later `navigate` too, with or without a referrer. The referrer was
+applied as a `Referer` extra header: Chrome cancels a request whose full-URL `Referer` its referrer
+policy would not send to that target, and the header stayed on the tab afterwards. It also replaced
+the whole extra-header set, so headers installed with `spawn_browser(extra_headers=...)` or
+`modify_headers` were silently dropped. The referrer is now sent as `Page.navigate`'s own
+`referrer`, exactly as given and for that one navigation only: the page's `document.referrer` is
+what the caller passed, a later navigation carries none, and the tab's extra headers are untouched.
+
 ## 2.1.30
 
 ### The default and fleet browsers are relaunched when they exit, and Chrome keeps its own log (F-964)
