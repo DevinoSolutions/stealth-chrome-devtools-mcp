@@ -115,8 +115,8 @@ def hand_over_or_refuse(
         "is no CDP connection of ours to read them through, and copying a "
         "profile Chrome is writing to carries no cookies at all — the jar is "
         "held open and skipped, and nothing can say afterwards what was lost. "
-        "Nothing was created. Close that browser (`stealthy close "
-        "<instance>`) and spawn again to get that session, or pass "
+        "Nothing was created. Close that browser (`stealthy close <instance> "
+        f"--session {name}`) and spawn again to get that session, or pass "
         "session=<a free name> (--session NAME from the CLI) for a NEW "
         f"session of your own — {_fresh_session_holds(name)}."
     )

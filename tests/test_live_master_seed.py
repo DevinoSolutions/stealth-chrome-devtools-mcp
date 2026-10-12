@@ -111,7 +111,10 @@ class TestTheResolver:
         assert selection[clone_storage.LIVE_SEED_KEY] == str(master)
 
     async def test_a_free_master_is_opened_and_no_clone_is_made(self, tmp_session_root):
-        selection = await clone_storage.resolve_profile_selection(None)
+        """SOFT GOLDEN UPDATED for F-966: master is opened by the session NAMED
+        ``default``; a spawn naming nothing is a clone even when master is free."""
+        landed = clone_storage.require_allowed_user_data_dir(None, "default")
+        selection = await clone_storage.resolve_profile_selection(landed)
         assert selection["profile_role"] == "default"
         assert profile_target.LIVE_PORT_KEY not in selection
 

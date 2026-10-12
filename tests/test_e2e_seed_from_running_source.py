@@ -301,7 +301,9 @@ async def test_b_the_default_session_hands_its_jar_over_while_it_is_open(
         for iid in (target, shared):
             if iid is not None:
                 with contextlib.suppress(Exception):
-                    await close(instance_id=iid)
+                    # `session` only matters to the shared one; any other
+                    # instance closes as before.
+                    await close(instance_id=iid, session="default")
         if target_dir is not None:
             await released(target_dir)
         await released(tmp_empty_root["master"])

@@ -192,12 +192,14 @@ async def _close_the_default_session(app_base, monkeypatch) -> _Close:
             "the probe cookie was never set, so this node would measure nothing"
         )
         observed.skips_before = _copy_skips()
-        observed.answer = await get_fn("close_instance")(instance_id=instance_id)
+        observed.answer = await get_fn("close_instance")(
+            instance_id=instance_id, session="default"
+        )
         observed.skips_after = _copy_skips()
         assert observed.answer["closed"] is True, observed.answer
     except BaseException:
         with contextlib.suppress(Exception):
-            await get_fn("close_instance")(instance_id=instance_id)
+            await get_fn("close_instance")(instance_id=instance_id, session="default")
         raise
     return observed
 

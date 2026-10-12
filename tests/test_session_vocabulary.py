@@ -246,13 +246,18 @@ class TestDefaultIsTheSharedSession:
         assert selection["profile_role"] == "default"
         assert Path(selection["user_data_dir"]) == tmp_session_root["master"]
 
-    async def test_default_is_the_same_answer_as_naming_no_session(
+    async def test_default_is_not_the_answer_to_naming_no_session(
         self, tmp_session_root
     ):
+        """SOFT GOLDEN UPDATED for F-966. This node pinned the opposite — F-896
+        said naming ``default`` and naming nothing were ONE answer, the shared
+        profile. The owner has ruled that a spawn naming nothing never opens it:
+        ``default`` is the shared profile, nothing is a disposable clone."""
         named = await _selection(session="default")
         unnamed = await _selection()
-        assert named["user_data_dir"] == unnamed["user_data_dir"]
-        assert named["profile_role"] == unnamed["profile_role"]
+        assert named["profile_role"] == "default"
+        assert unnamed["profile_role"] == "clone"
+        assert named["user_data_dir"] != unnamed["user_data_dir"]
 
     def test_default_never_creates_a_sessions_directory(self, tmp_session_root):
         clone_storage.require_allowed_user_data_dir(None, "default")
@@ -445,11 +450,11 @@ class TestNoUserFacingStringSaysTheOldWords:
         """
         offenders: list[str] = []
         selections = [
-            await _selection(),  # the shared session
+            await _selection(),  # nothing named: a disposable clone (F-966)
             await _selection(session="acme"),  # a named session
             await _selection(session="default"),  # the shared session, by name
             clone_storage._public_profile_selection(  # a disposable clone
-                await clone_storage.resolve_profile_selection(None, force_clone=True)
+                await clone_storage.resolve_profile_selection(None)
             ),
         ]
         roles = {selection["profile_role"] for selection in selections}

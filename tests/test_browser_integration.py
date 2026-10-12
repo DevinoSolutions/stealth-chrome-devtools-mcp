@@ -548,15 +548,17 @@ class TestAutoCloneDeletion:
         close = _get_fn("close_instance")
         dirs = tmp_session_root
 
-        # First spawn naming no session takes the shared `default` profile
-        # directly — `profile_role: "default"` since F-896, `"master"` before.
-        master_inst = await spawn(headless=True, **_sandbox_kwargs())
+        # The shared `default` profile is taken only by NAMING it
+        # (`profile_role: "default"` since F-896). A spawn naming no session
+        # never takes it (F-966), which is why this node names it.
+        master_inst = await spawn(session="default", headless=True, **_sandbox_kwargs())
         master_iid = master_inst["instance_id"]
         try:
             master_sel = master_inst["spawn_diagnostics"]["profile_selection"]
             assert master_sel["profile_role"] == "default", master_sel
 
-            # The shared profile is busy now → a second spawn must copy its seed.
+            # The shared profile is busy now → a spawn naming nothing copies its
+            # seed (and would whether or not it was busy, F-966).
             clone_inst = await spawn(headless=True, **_sandbox_kwargs())
             clone_iid = clone_inst["instance_id"]
             sel = clone_inst["spawn_diagnostics"]["profile_selection"]
@@ -578,7 +580,7 @@ class TestAutoCloneDeletion:
             # The shared profile's directory is never auto-deleted, even in use.
             assert dirs["master"].exists()
         finally:
-            await close(instance_id=master_iid)
+            await close(instance_id=master_iid, session="default")
 
         # It survives its own close too (only its seed is refreshed).
         assert dirs["master"].exists()

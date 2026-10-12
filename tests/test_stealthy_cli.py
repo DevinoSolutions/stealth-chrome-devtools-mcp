@@ -1230,6 +1230,18 @@ class TestNavAndCloseVerbs:
             {"instance_id": "e364c31b-1111"},
         )
 
+    def test_close_passes_the_session_it_is_told_to(self, responsive, recorder):
+        """F-966: closing the shared `default`/`fleet` browser is refused unless the
+        caller NAMES it, so `stealthy close --session NAME` must reach the tool, and
+        a plain `close` must not invent one."""
+        recorder.answers["list_instances"] = self.RECORDS
+        recorder.answers["close_instance"] = True
+        assert cli.main(["close", "e364", "--session", "default", "--json"]) == 0
+        assert recorder.calls[-1] == (
+            "close_instance",
+            {"instance_id": "e364c31b-1111", "session": "default"},
+        )
+
     def test_close_reports_a_seed_the_backend_could_not_refresh(
         self, responsive, recorder, capsys, monkeypatch
     ):

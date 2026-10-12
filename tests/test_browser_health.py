@@ -104,6 +104,7 @@ class _Stage:
         self.probe_results: dict[str, list[bool]] = {}
         self.probes: list[str] = []
         self.closes: list[str] = []
+        self.close_sessions: list[str | None] = []
         self.launches: list[tuple[BrowserOptions, str | None]] = []
         self.armed: list[tuple[str, str, object]] = []
         self.gate_held_during: list[str] = []
@@ -129,8 +130,9 @@ class _Stage:
         if queue and not queue.pop(0):
             raise ConnectionError("no answer")
 
-    async def close(self, instance_id: str) -> dict:
+    async def close(self, instance_id: str, session: str | None = None) -> dict:
         self.closes.append(instance_id)
+        self.close_sessions.append(session)
         if self._held():
             self.gate_held_during.append("close")
         data = self.manager._instances.pop(instance_id)
@@ -305,6 +307,40 @@ class TestScope:
 # ---------------------------------------------------------------------------
 
 
+class TestTheHealNamesTheSharedSession:
+    """F-966: ``close_instance`` refuses the ``default`` and ``fleet`` browsers
+    unless told which one, and the heal closes THROUGH it, so it must say."""
+
+    @pytest.mark.parametrize(
+        ("where", "session"),
+        [("master", "default"), ("fleet", "fleet"), ("work", None)],
+    )
+    async def test_the_close_is_told_which_session_and_the_relaunch_keeps_it(
+        self, stage, tmp_session_root, where, session
+    ):
+        directory = (
+            tmp_session_root["master"]
+            if where == "master"
+            else tmp_session_root["sessions"] / where
+        )
+        _install(stage.manager, "i-x", user_data_dir=str(directory))
+        stage.persistent.add("i-x")
+        stage.probe_results["i-x"] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.closes == ["i-x"]
+        assert stage.close_sessions == [session]
+        ((options, instance_id),) = stage.launches
+        assert instance_id == "i-x"
+        # The relaunch NAMES its directory, so it never goes through the resolver,
+        # where a spawn naming nothing is a clone (F-966): master stays master.
+        assert options.user_data_dir == str(directory)
+        assert options.auto_clone is False
+
+
 class TestTheHeal:
     async def test_it_keeps_the_instance_id_and_the_launch_shape(self, stage):
         _install(stage.manager, block_resources=["*.png"])
@@ -351,14 +387,16 @@ class TestTheHeal:
         racers: list[asyncio.Task[None]] = []
         close = health._close
 
-        async def close_while_a_spawn_races(instance_id: str) -> object:
+        async def close_while_a_spawn_races(
+            instance_id: str, session: str | None = None
+        ) -> object:
             # An EMPTY context, as another request's task has: the gate is
             # reentrant per context, and a copy of this one already holds it.
             racers.append(
                 asyncio.create_task(a_concurrent_spawn(), context=contextvars.Context())
             )
             await asyncio.sleep(0)  # the racer runs to the gate and waits there
-            return await close(instance_id)
+            return await close(instance_id, session)
 
         health._close = close_while_a_spawn_races
         await health.check_once()  # the second failure: heals

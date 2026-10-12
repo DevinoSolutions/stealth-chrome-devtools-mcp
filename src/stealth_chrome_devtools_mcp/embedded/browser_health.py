@@ -69,7 +69,7 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,6 +94,7 @@ from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: Seconds between two rounds of probes. A module constant on purpose: an unknown
 #: ``STEALTH_MCP_*`` key crashes ``get_settings()``, and the house rule is
@@ -131,7 +132,7 @@ _COMPONENT = "browser_health"
 _PROCESS_TYPE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 Probe = Callable[[str, list[str]], Awaitable[None]]
-Closer = Callable[[str], Awaitable[object]]
+Closer = Callable[[str, str | None], Awaitable[object]]
 Armer = Callable[[Tab, str, list[str] | None], Awaitable[object]]
 
 
@@ -353,15 +354,62 @@ def _is_persistent(instance_id: str) -> bool:
     return bool(entry) and browser_pid_registry.on_persistent_profile(entry)
 
 
+def shared_session_name(user_data_dir: str | None, *, auto_clone: bool) -> str | None:
+    """``default`` or ``fleet`` when a browser on *user_data_dir* is the browser
+    of one of the two shared sessions, else ``None``: a directory the caller
+    named (never an auto-clone) that ``fleet_session.lock_key`` -- the one mapping
+    from a directory to a session -- keys as one of the two.
+
+    THE classifier (F-964, and F-966's ``close_instance`` guard): the relaunch asks
+    whether it is one, the close asks which. Plain values, because the two read
+    them from different records of the same browser -- the options it launched
+    with, and the profile selection its spawn diagnostics carry (which survives a
+    re-attach, F-888) -- and the close must not look an instance up in a way that
+    discards a dead one."""
+    if not user_data_dir or auto_clone:
+        return None
+    key = fleet_session.lock_key(user_data_dir)
+    if key in (profile_seed.DEFAULT_SESSION, fleet_session.FLEET_SESSION):
+        return key
+    return None
+
+
+def require_shared_session_named(
+    instance_id: str, profile_selection: Mapping[str, object], session: str | None
+) -> None:
+    """Refuse to close the ``default`` or ``fleet`` browser unless the caller named
+    that session (F-966).
+
+    Those two are browsers other chats work in, and a chat that was handed one
+    by mistake (2.1.27 gave ``spawn_browser()`` the ``default`` browser) closed it
+    for all of them. Naming the session is the confirmation: it says the caller
+    knows what it is closing. The selection is the one the spawn recorded, which
+    ``close_instance`` already reads and which does not discard a dead browser the
+    way an instance lookup does. ``session`` is ignored for every other instance:
+    nothing there needs confirming, and rejecting it would break a caller that
+    always sends one."""
+    directory = profile_selection.get("user_data_dir")
+    shared = shared_session_name(
+        directory if isinstance(directory, str) else None,
+        auto_clone=profile_selection.get("profile_role") == "clone",
+    )
+    if shared is None or (session and fleet_session.session_key(session) == shared):
+        return
+    raise ToolError(
+        f"Instance {instance_id} is the {shared!r} session's browser, and other "
+        "chats depend on it, so it was NOT closed. If closing it is what you "
+        "mean, say so by naming the session: "
+        f'close_instance(instance_id="{instance_id}", session="{shared}"). '
+        "If you only wanted a browser of your own, spawn_browser() with no "
+        "session gives you a disposable one to close freely."
+    )
+
+
 def is_shared_session(options: BrowserOptions) -> bool:
-    """The ``default`` or ``fleet`` session's browser (F-964): a directory the
-    caller named (never an auto-clone) that ``fleet_session.lock_key`` -- the one
-    mapping from a directory to a session -- keys as one of the two."""
+    """The ``default`` or ``fleet`` session's browser (F-964)."""
     return (
-        bool(options.user_data_dir)
-        and not options.auto_clone
-        and fleet_session.lock_key(options.user_data_dir)
-        in (profile_seed.DEFAULT_SESSION, fleet_session.FLEET_SESSION)
+        shared_session_name(options.user_data_dir, auto_clone=options.auto_clone)
+        is not None
     )
 
 
@@ -595,7 +643,12 @@ class BrowserHealth:
         )
         gate = await directory_gate.hold(options.user_data_dir)
         try:
-            await self._close(instance_id)
+            # The close path refuses `default` and `fleet` unless told which one
+            # (F-966); a heal knows, from the options it is about to relaunch.
+            shared = shared_session_name(
+                options.user_data_dir, auto_clone=options.auto_clone
+            )
+            await self._close(instance_id, shared)
             if (
                 old_pid is not None
                 and not (await self._wait_exit(old_pid, EXIT_WAIT_SECONDS)).exited

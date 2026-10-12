@@ -90,6 +90,28 @@ class SeedSource(NamedTuple):
 #: session ever says where it came from.
 LIVE_SESSION_KIND = "explicit-session-live"
 
+#: The kind of a clone that was copied from NOTHING (F-966): a brand-new install
+#: has no seed and no shared profile, and a spawn that names no session is still
+#: a disposable clone, never ``default``. Its marker says ``seeded_from: none``.
+EMPTY_KIND = "empty-profile"
+
+#: What that caller is told, and the one way to the persistent profile it lacks.
+NO_SEED_WARNING = (
+    "There is no shared profile or seed yet, so this browser started EMPTY: it "
+    "holds no logins and is deleted when it closes. To keep a signed-in profile, "
+    'open one with spawn_browser(session="default"), sign in there, and close it '
+    'with close_instance(instance_id=..., session="default"): every later spawn '
+    "is then copied from it."
+)
+
+
+def empty_seed(path: Path, warning: str | None) -> tuple[SeedSource, bool, str]:
+    """``clone_storage._clone_seed``'s answer when there is nothing to copy: the
+    (absent) seed *path* as an :data:`EMPTY_KIND` source, not the owner's choice,
+    and *warning* (the configured seed's, if any) with :data:`NO_SEED_WARNING`."""
+    joined = " ".join(filter(None, (warning, NO_SEED_WARNING)))
+    return SeedSource(path, EMPTY_KIND), False, joined
+
 
 def _nothing_driven(_profile: Path) -> bool:
     """The fail-closed witness: this backend drives no browser anywhere.
@@ -302,8 +324,9 @@ def _default_source(
             "available would be of the live profile directory itself, which "
             "carries no cookies at all — the jar is held open and skipped, and "
             "nothing can say afterwards what was lost. Close the "
-            f"{default!r} session once (`stealthy close <instance>`); the seed "
-            "every later session is copied from is written when it closes, and "
+            f"{default!r} session once (`stealthy close <instance> --session "
+            f"{default}`); the seed every later session is copied from is "
+            "written when it closes, and "
             f"`stealthy spawn --session NAME` will work from then on, whether "
             f"{default!r} is open or not."
         )
@@ -384,7 +407,7 @@ def seed_source(
             "Chrome is writing to carries no cookies at all — the jar is held "
             "open and skipped, and nothing can say afterwards what was lost. "
             f"Close the {requested!r} session first (`stealthy close "
-            "<instance>`), or spawn it through this backend "
+            f"<instance> --session {requested}`), or spawn it through this backend "
             f"(`stealthy spawn --session {requested}`) and seed from it while "
             f"it runs, or seed from {default!r}, which the product keeps a "
             "separate copyable form of."

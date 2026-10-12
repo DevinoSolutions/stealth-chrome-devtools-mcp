@@ -207,7 +207,7 @@ async def _journey(launcher: str, space: dict[str, Any], base_url: str) -> None:
             await _call(
                 first,
                 "close_instance",
-                {"instance_id": iid},
+                {"instance_id": iid, "session": "fleet"},
                 CLOSE_TIMEOUT,
                 raise_on_error=False,
                 allow_fail=True,

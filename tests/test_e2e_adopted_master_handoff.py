@@ -123,7 +123,9 @@ async def test_a_clone_of_a_re_attached_master_carries_its_logins(
     chips_value = uuid.uuid4().hex[:12]
     loopback_secure_value = uuid.uuid4().hex[:12]
 
-    opened = await spawn(headless=True, **sandbox_kwargs())
+    # The master is opened by NAMING the shared session; a spawn naming nothing
+    # is a clone (F-966).
+    opened = await spawn(session="default", headless=True, **sandbox_kwargs())
     iid = opened["instance_id"]
     clone_id = None
     clone_dir = None
@@ -269,7 +271,7 @@ async def test_a_clone_of_a_re_attached_master_carries_its_logins(
         for instance in (clone_id, iid):
             if instance:
                 with contextlib.suppress(Exception):
-                    await close(instance_id=instance)
+                    await close(instance_id=instance, session="default")
         if not adopted_here and chrome_pid:
             with contextlib.suppress(Exception):
                 psutil.Process(chrome_pid).kill()

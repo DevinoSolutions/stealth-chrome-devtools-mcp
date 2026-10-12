@@ -182,7 +182,7 @@ async def test_a_shared_session_that_exits_is_relaunched_under_the_same_id(
         assert await eval_js(instance_id, "1+1") == 2
     finally:
         with contextlib.suppress(Exception):
-            await get_fn("close_instance")(instance_id=instance_id)
+            await get_fn("close_instance")(instance_id=instance_id, session="fleet")
         await released(profile)
 
 

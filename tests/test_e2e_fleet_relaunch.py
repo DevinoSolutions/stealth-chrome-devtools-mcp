@@ -176,7 +176,10 @@ async def _journey(launcher: str, space: dict[str, Any], base_url: str) -> None:
 
         # -- 1. chat A closes it, chat B asks for it ---------------------------
         closed = await _call(
-            chat_a, "close_instance", {"instance_id": first}, CLOSE_TIMEOUT
+            chat_a,
+            "close_instance",
+            {"instance_id": first, "session": "fleet"},
+            CLOSE_TIMEOUT,
         )
         assert closed.get("closed") is True, closed
         await _until_gone(fleet_dir)
@@ -231,7 +234,7 @@ async def _journey(launcher: str, space: dict[str, Any], base_url: str) -> None:
         await _call(
             chat_a,
             "close_instance",
-            {"instance_id": last},
+            {"instance_id": last, "session": "fleet"},
             CLOSE_TIMEOUT,
             raise_on_error=False,
             allow_fail=True,

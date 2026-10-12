@@ -282,7 +282,7 @@ def headless_mismatch(requested: bool, actual: bool | None) -> dict[str, object]
             "actual_headless": bool(actual),
             "warning": f"You asked for a {asked} browser but this session's running "
             f"browser is {got}; a running browser cannot change that. Close it "
-            "(close_instance) and spawn again to get the other.",
+            "(close_instance, naming the session) and spawn again to get the other.",
         }
     }
 

@@ -413,9 +413,6 @@ def _copy_profile_tree(
     permanently so if anything killed the process in that window, because the
     repair refresh is refused while the shared browser is open and every
     consumer tests ``exists()``, which an empty directory passes (F-925)."""
-    if not source.exists():
-        target.mkdir(parents=True, exist_ok=True)
-        return None
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
     if target.exists() and _profile_has_running_browser(target):
@@ -427,7 +424,7 @@ def _copy_profile_tree(
             staged,
             source=source,
             source_kind=source_kind,
-            seeded_from=profile_seed.seed_name(
+            seeded_from=profile_seed.seed_label(
                 source, master_profile_dir(), master_snapshot_dir()
             ),
         ),
@@ -457,6 +454,9 @@ def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
 
     if _profile_has_running_browser(master):
         result["seed_error"] = "default-in-use"
+        return result
+    if not master.exists():  # F-966: an EMPTY seed is no seed
+        result["seed_error"] = "default-missing"
         return result
 
     try:
@@ -792,23 +792,24 @@ def _clone_seed(
     if master_profile_dir().exists():
         seed = profile_source.SeedSource(master_profile_dir(), "live-default-fallback")
         return seed, False, warning
-    raise RuntimeError(
-        "No shared profile directory found — nothing to copy from. Spawn a "
-        "browser with no session first to create and populate the "
-        f"{profile_seed.DEFAULT_SESSION!r} session."
-    )
+    # F-966: a brand-new install. Still a clone, never `default`: start EMPTY.
+    return profile_source.empty_seed(master_snapshot_dir(), warning)
 
 
-async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per independent input to one selection)
+async def resolve_profile_selection(
     user_data_dir: str | None,
     *,
     seed_from: str | None = None,
-    force_clone: bool = False,
     override: profile_source.SeedSource | None = None,
     clone_suffix: str | None = None,
     driven: Callable[[Path], bool] = profile_source.NOTHING_DRIVEN,
 ) -> dict[str, Any]:
     """Which directory this spawn drives, and how it got there.
+
+    **A spawn that names no session is always a disposable clone (F-966)**:
+    ``user_data_dir`` None never opens ``default``, held or not — the browser a
+    human signed in to and other chats depend on. Only the shared session NAMED
+    opens master, and only when nothing holds it; a held one is copied, jar handed over.
 
     ``override`` is ``_fallback_profile_selection``'s (source, kind) pair a
     RETRY clones from, one ``SeedSource`` because a path and the word recorded
@@ -910,7 +911,7 @@ async def resolve_profile_selection(  # noqa: PLR0913  PERMANENT(one keyword per
     # different directory — `profile_target` argues it once for both.
     shared_hold = _profile_hold(master)
     if shared_hold is None:
-        if not force_clone:
+        if landed is not None:
             snapshot_result = _refresh_master_snapshot_if_safe("before-default-open")
             return {
                 "user_data_dir": str(master),
@@ -987,7 +988,6 @@ async def _fallback_profile_selection(
     final = attempt > 0
     return await resolve_profile_selection(
         None,
-        force_clone=True,
         override=profile_source.SeedSource(
             snapshot,
             "default-seed-final" if final else "default-seed-retry",

@@ -524,7 +524,7 @@ The one refusal here is a machine with **no seed yet AND `default` open**:
 ```
 the 'default' session has no copyable form yet and its browser is open, so
 there is nothing safe to seed from: … Close the 'default' session once
-(`stealthy close <instance>`); the seed every later session is copied from is
+(`stealthy close <instance> --session default`); the seed every later session is copied from is
 written when it closes, …
 ```
 
@@ -633,7 +633,8 @@ relaunched. Any other named session or disposable copy stays gone: call
 
 Closing a headed `default` or `fleet` window by hand is indistinguishable from a crash, so
 it comes back at the next round; use `close_instance` to close it for good (a deliberate
-close is never relaunched).
+close is never relaunched) -- naming the session, `session="default"` or `session="fleet"`
+(`stealthy close <instance> --session NAME`), because without it the close is refused (F-966).
 
 **Chrome's own log.** Every browser on a saved profile (named session or `default`; not a
 disposable copy) writes `chrome-<session>-<instance id>-<UTC time>.log` into the backend's

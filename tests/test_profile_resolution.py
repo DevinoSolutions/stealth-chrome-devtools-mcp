@@ -227,7 +227,12 @@ class TestCopyProfileTree:
         fake_source = dirs["root"] / "nonexistent"
         _copy_profile_tree(fake_source, target, dirs["sessions"], "test")
         assert target.exists()
-        assert len(list(target.iterdir())) == 0
+        # SOFT GOLDEN UPDATED for F-966: an empty profile is now published the
+        # way every copy is (built beside, one rename), so it carries its
+        # marker — `seeded_from: none` — and is a disposable clone the storage
+        # sweep can reclaim. It held NOTHING before and still holds nothing else.
+        assert [p.name for p in target.iterdir()] == [profile_seed.MARKER_NAME]
+        assert profile_seed.read_marker(target)["seeded_from"] == profile_seed.NO_SEED
 
     def test_double_pass_copy(self, tmp_session_root):
         """_copy_profile_tree does two passes of _copy_profile_delta."""
@@ -327,9 +332,13 @@ class TestNextAvailableExplicitDir:
 
 class TestResolveProfileSelection:
     @pytest.mark.asyncio
-    async def test_no_user_data_dir_uses_master(self, tmp_session_root):
+    async def test_the_default_session_uses_master(self, tmp_session_root):
+        """SOFT GOLDEN UPDATED for F-966: this node passed ``None`` and got master.
+        A spawn naming NOTHING is now a clone (``test_unnamed_spawn_never_opens_
+        default``), so master is what the shared session NAMED answers."""
         dirs = tmp_session_root
-        result = await _resolve_profile_selection(None)
+        landed = clone_storage.require_allowed_user_data_dir(None, "default")
+        result = await _resolve_profile_selection(landed)
         assert result["profile_role"] == "default"
         assert result["user_data_dir"] == str(dirs["master"])
 
@@ -426,11 +435,13 @@ class TestResolveProfileSelection:
             await _resolve_profile_selection(None)
 
     @pytest.mark.asyncio
-    async def test_no_master_no_snapshot_raises(self, tmp_empty_root):
-        """When no master and no snapshot exist, RuntimeError."""
-        # Master doesn't exist, and no snapshot — but master busy check
-        # will pass (no lock), so it tries to use master directly.
-        # Actually master dir doesn't exist, so it'll try to create it.
-        # Let's simulate: master doesn't exist + force_clone
-        with pytest.raises(RuntimeError, match="No shared profile"):
-            await _resolve_profile_selection(None, force_clone=True)
+    async def test_no_master_no_snapshot_starts_an_empty_clone(self, tmp_empty_root):
+        """SOFT GOLDEN UPDATED for F-966: this was a RuntimeError telling the
+        caller to "spawn a browser with no session first" to create ``default``
+        — the very spawn that must never open it. A brand-new install now gets a
+        fresh empty clone and a ``seed_warning`` (details in
+        ``test_unnamed_spawn_never_opens_default``)."""
+        result = await _resolve_profile_selection(None)
+        assert result["profile_role"] == "clone"
+        assert "seed_warning" in result
+        assert not tmp_empty_root["master"].exists()
