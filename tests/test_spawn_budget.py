@@ -388,3 +388,85 @@ def test_the_fixture_bound_sits_between_the_products_launch_budget_and_pytest_ti
     """240 s: past one stalled attempt and a retry (120 s + a spawn), under the
     300 s the release gate kills a node at, so the report is ours."""
     assert SHIPPED_LAUNCH_BUDGET < e2e_helpers.SPAWN_BOUND < 300
+
+
+# ---------------------------------------------------------------------------
+# F-969b: the deadline must hold when a cancel is swallowed
+# ---------------------------------------------------------------------------
+
+
+async def _body_whose_inner_wait_for_completes_as_the_deadline_fires() -> None:
+    """One post-launch step shaped like ``reconcile_launched_browser_version``: an
+    ``asyncio.wait_for`` around work that FINISHES in the same loop iteration the
+    phase's deadline fires in. The inner work blocks the loop for longer than the
+    budget and then returns, so its done-callback and the deadline's ``cancel()``
+    are both ready together, in that order. On Python 3.11 ``wait_for`` then
+    swallows the cancellation (gh-86296, fixed in 3.12), the phase carries on, and
+    the NEXT step (``_never``) hangs with nothing left to cut it short."""
+
+    async def inner() -> None:
+        time.sleep(SHORT_BUDGET * 2)  # noqa: ASYNC251  PERMANENT(the pin needs the loop blocked past the deadline, like a starved one)
+
+    await asyncio.wait_for(inner(), WAIT_BUDGET)
+    await _never()
+
+
+async def test_the_deadline_holds_when_an_inner_wait_for_swallows_the_cancel():
+    """THE F-969b pin: red on 3.11 against the ``asyncio.timeout``-only phase (the
+    CI cell that failed: Windows py3.11), where the phase never raises and the
+    next step hangs until ``WAIT_BUDGET`` cancels the whole thing."""
+
+    @spawn_budget.phase("post-launch setup", "POST_LAUNCH_BUDGET_SECONDS")
+    async def phase() -> None:
+        await _body_whose_inner_wait_for_completes_as_the_deadline_fires()
+
+    started = time.monotonic()
+    with pytest.raises(ToolError, match="post-launch setup stage"):
+        await asyncio.wait_for(phase(), WAIT_BUDGET)
+    assert time.monotonic() - started < WAIT_BUDGET / 2
+
+
+async def test_an_outer_cancellation_cancels_the_phase_and_waits_it_out():
+    reached = asyncio.Event()
+    finished = asyncio.Event()
+
+    @spawn_budget.phase("launch", "LAUNCH_BUDGET_SECONDS")
+    async def phase() -> None:
+        reached.set()
+        try:
+            await _never()
+        finally:
+            finished.set()
+
+    caller = asyncio.ensure_future(phase())
+    await asyncio.wait_for(reached.wait(), WAIT_BUDGET)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, WAIT_BUDGET)
+
+    assert finished.is_set(), (
+        "the phase's own cleanup did not run before the caller left"
+    )
+
+
+async def test_a_phase_that_swallows_every_cancel_still_ends_in_a_named_error(
+    monkeypatch,
+):
+    """A phase that ignores cancellation twice before it gives in is re-cancelled
+    until it ends, and the caller still gets the named error."""
+    seen = {"cancels": 0}
+
+    @spawn_budget.phase("launch", "LAUNCH_BUDGET_SECONDS")
+    async def stubborn() -> None:
+        while True:
+            try:
+                await _never()
+            except asyncio.CancelledError:
+                seen["cancels"] += 1
+                if seen["cancels"] >= 3:
+                    raise
+
+    monkeypatch.setattr(spawn_budget, "CANCEL_GRACE_SECONDS", 0.05)
+    with pytest.raises(ToolError, match="launch stage"):
+        await asyncio.wait_for(stubborn(), WAIT_BUDGET)
+    assert seen["cancels"] == 3
