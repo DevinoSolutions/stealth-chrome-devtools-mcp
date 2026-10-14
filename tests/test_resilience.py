@@ -107,6 +107,7 @@ import requests
 
 import fixture_routes as fr
 from e2e_helpers import (
+    bounded_spawn,
     eval_js,
     get_fn,
     integration_pytestmark,
@@ -143,7 +144,7 @@ async def instance():
     this ``finally`` is only the net that stops a failed node leaking Chrome."""
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
-    result = await spawn(headless=True, **sandbox_kwargs())
+    result = await bounded_spawn(spawn, headless=True, **sandbox_kwargs())
     iid = result["instance_id"]
     try:
         yield iid
@@ -282,7 +283,7 @@ async def _assert_close_leaves_nothing(iid: str) -> None:
 async def _assert_fresh_spawn_works(base: str) -> None:
     """A brand-new instance spawns, navigates, and closes after the fault."""
     spawn = get_fn("spawn_browser")
-    result = await spawn(headless=True, **sandbox_kwargs())
+    result = await bounded_spawn(spawn, headless=True, **sandbox_kwargs())
     fresh = result["instance_id"]
     try:
         await _assert_still_drivable(fresh, base)

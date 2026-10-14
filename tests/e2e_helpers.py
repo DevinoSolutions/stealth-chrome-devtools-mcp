@@ -111,6 +111,60 @@ def sandbox_kwargs() -> dict:
     return {"sandbox": False} if _needs_no_sandbox else {}
 
 
+# ── A spawn that stalls must name its await (F-969). ──
+# Below the 300 s pytest-timeout (release-gate.yml), so the node FAILS with this
+# report rather than being killed with a thread dump that cannot see a coroutine
+# (the 2026-10-14 publish gate's macOS node: the loop idle in ``select``, every
+# worker thread parked, nothing to say which await never returned). Above the
+# product's own bounds (spawn_budget: 120 s for a launch, so a stalled attempt
+# plus a retry that lands fits), so a healthy retry is never cut off by the test.
+SPAWN_BOUND = 240.0
+
+
+def _await_chain(coro: Any) -> list[str]:
+    """One line per frame of a suspended coroutine chain, outermost first, ending
+    at whatever it is awaiting that is not itself a coroutine."""
+    lines: list[str] = []
+    while coro is not None:
+        frame = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+        code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+        if frame is None or code is None:
+            lines.append(f"    awaiting {coro!r}")
+            break
+        lines.append(f"    {code.co_qualname} ({code.co_filename}:{frame.f_lineno})")
+        coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None)
+    return lines
+
+
+def pending_task_report() -> str:
+    """Every other pending asyncio task and the await each is parked on."""
+    here = asyncio.current_task()
+    blocks = []
+    for task in sorted(asyncio.all_tasks(), key=lambda t: t.get_name()):
+        if task is here or task.done():
+            continue
+        chain = _await_chain(task.get_coro())
+        blocks.append("\n".join([f"  task {task.get_name()}:", *chain]))
+    return "\n".join(blocks) or "  (no other pending task)"
+
+
+async def bounded_spawn(spawn, *, budget: float | None = None, **kwargs):
+    """``await spawn(**kwargs)``, or on overrun dump :func:`pending_task_report`,
+    cancel the spawn (the product reaps what it launched) and raise."""
+    bound = SPAWN_BOUND if budget is None else budget
+    task = asyncio.ensure_future(spawn(**kwargs))
+    await asyncio.wait({task}, timeout=bound)
+    if task.done():
+        return task.result()
+    report = pending_task_report()
+    task.cancel()
+    await asyncio.wait({task}, timeout=30.0)
+    raise TimeoutError(
+        f"spawn_browser did not answer within {bound:g}s; pending asyncio tasks:\n"
+        f"{report}"
+    )
+
+
 # ── Warmup: the first Chrome launch on CI is slow / flaky. Run once per session
 # (the guard makes every later call a no-op), driven by a tiny autouse fixture
 # each E2E module declares — keeps this file logic-only and dodges an unused

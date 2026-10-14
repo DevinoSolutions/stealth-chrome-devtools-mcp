@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### A browser that stalled after launching hung `spawn_browser()` for as long as the caller would wait (F-969)
+
+`spawn_browser()` awaited nodriver's `Browser.start` and then the post-launch setup with no bound. Both
+end in a reply from a Chrome that is already running (target discovery, the window size, the dynamic-hook
+setup), and nodriver gives a CDP transaction no deadline, so a Chrome that stalled at that point left the
+tool call waiting indefinitely and the Chrome running beside it. On 2026-10-14 the v2.1.33 publish gate's
+macOS cell sat in exactly that state until pytest-timeout ended it at 300 s: one node out of 277, the event
+loop idle, every worker thread parked, one live child process. It is rare (one failure against 82 passes in the macOS
+integration jobs since 2026-10-07) and not new: the unbounded awaits predate F-967.
+
+Each of the three phases (`_launch_browser`, `_apply_post_launch`, `_setup_dynamic_hooks`) now has a named
+budget, in the new `embedded/spawn_budget.py`: 120 s for the launch, 60 s for each post-launch phase, both
+several times the slowest spawn measured in CI. Past it the phase is cancelled and a `ToolError` names the
+stage and the budget ("Browser spawn stalled in the launch stage: no answer within 120 s"). That failure takes
+the path every other spawn failure takes: the Chrome that was launched is killed by its own pid
+(`spawn_leak`), a held `Browser` is stopped, its record and disposable clone go with
+`kill_browser_process`, and the tool body's `_SPAWN_ATTEMPTS` loop retries on a fresh clone. There is no
+second teardown. A healthy spawn costs what it always did.
+
+For the integration suite, the `instance` fixture and `_assert_fresh_spawn_works` in
+`tests/test_resilience.py` go through `e2e_helpers.bounded_spawn` (240 s, under the gate's 300 s): on overrun
+it prints every pending asyncio task and the await it is parked on, so a recurrence names its cause.
+
 ## 2.1.33
 
 ### A burst of concurrent `spawn_browser()` calls froze the shared backend for ~106 s, and a proxy then killed it while it owned every chat's browser (F-967)

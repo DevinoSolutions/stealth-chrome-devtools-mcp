@@ -34,6 +34,7 @@ import json
 import os
 import re
 import socket
+import time
 from pathlib import Path
 from types import GeneratorType, SimpleNamespace
 from typing import Any, ClassVar
@@ -43,6 +44,7 @@ import nodriver.cdp.network as cdp_network
 import nodriver.cdp.page as cdp_page
 import nodriver.cdp.runtime as cdp_runtime
 import nodriver.cdp.target as cdp_target
+import psutil
 from nodriver.core.connection import ProtocolException
 from nodriver.core.util import get_registered_instances
 
@@ -2031,6 +2033,107 @@ class LaunchedBrowser:
         self.config = config
         self._process = SimpleNamespace(pid=pid, returncode=None)
         self._process_pid = pid
+
+
+class FakeChrome:
+    """A ``psutil.Process`` double for one Chromium-family process (F-919)."""
+
+    def __init__(self, pid, user_data_dir, create_time, *, stubborn=False):
+        self.pid = pid
+        self.info = {"pid": pid, "name": "chrome.exe"}
+        self._cmdline = ["chrome.exe", f"--user-data-dir={user_data_dir}", "--headless"]
+        self._create_time = create_time
+        self.stubborn = stubborn
+        self.alive = True
+        self.terminate_calls = 0
+
+    def _check(self):
+        if not self.alive:
+            raise psutil.NoSuchProcess(self.pid)
+
+    def name(self):
+        self._check()
+        return self.info["name"]
+
+    def cmdline(self):
+        self._check()
+        return list(self._cmdline)
+
+    def create_time(self):
+        self._check()
+        return self._create_time
+
+    def terminate(self):
+        self._check()
+        self.terminate_calls += 1
+        if not self.stubborn:
+            self.alive = False
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        if self.alive:
+            raise psutil.TimeoutExpired(timeout, pid=self.pid)
+
+
+class ProcessTable:
+    """The OS, as far as ``process_cleanup``'s psutil reads are concerned."""
+
+    def __init__(self, monkeypatch, registry):
+        self.procs: dict[int, FakeChrome] = {}
+        self.iter_calls = 0
+        self._registry = registry
+        monkeypatch.setattr(psutil, "process_iter", self._iter)
+        monkeypatch.setattr(psutil, "pid_exists", self._exists)
+        monkeypatch.setattr(psutil, "Process", self._process)
+
+    def _iter(self, attrs=None):
+        self.iter_calls += 1
+        return [proc for proc in self.procs.values() if proc.alive]
+
+    def _exists(self, pid):
+        return pid in self.procs and self.procs[pid].alive
+
+    def _process(self, pid):
+        proc = self.procs.get(pid)
+        if proc is None or not proc.alive:
+            raise psutil.NoSuchProcess(pid)
+        return proc
+
+    def launch(
+        self, pid, user_data_dir, *, attempt=None, create_time=None, stubborn=False
+    ):
+        """Start a Chrome, and — when an *attempt* owns it — register it with
+        nodriver the way ``Browser.start`` does before it polls.
+
+        ``attempt=None`` is a browser this backend did not launch: a real Chrome
+        already on the directory, or a sibling of another kind.
+
+        The stamped config is a bare sentinel rather than a ``uc.Config``:
+        ``launched_pid`` compares it by IDENTITY and never reads a field of it,
+        so building the real thing here would add a Chrome-executable lookup and
+        prove nothing. The node that needs a real one builds it through the real
+        ``_launch_browser``.
+        """
+        proc = FakeChrome(
+            pid,
+            user_data_dir,
+            time.time() if create_time is None else create_time,
+            stubborn=stubborn,
+        )
+        self.procs[pid] = proc
+        if attempt is not None:
+            attempt.config = object()
+            self._registry.add(LaunchedBrowser(attempt.config, pid))
+        return proc
+
+    def alive_on(self, user_data_dir):
+        marker = f"--user-data-dir={user_data_dir}"
+        return sorted(
+            proc.pid
+            for proc in self.procs.values()
+            if proc.alive and marker in proc._cmdline
+        )
 
 
 # ---------------------------------------------------------------------------
