@@ -63,6 +63,21 @@ terminating every live browser session is the verb's purpose, not a side effect
 to guard against). :func:`clear_stale` is the composition that puts the rule in
 front of the act, and it is the one a cold start calls.
 
+**Slow is not wedged (F-967).** Condition 2 below treats a backend of our OWN
+identity as "adoptable or wedged" and leaves it evictable, and on 2026-10-14 that
+was the kill: a backend working flat out — its event loop held by synchronous
+profile copies, answering no probe for ~106 s — was condemned by its proxies,
+survived their 60 s of patience unanswered, and was terminated by the cold-start
+lock's winner while it owned the shared and fleet browsers and ten chats'
+clones. Its replacement was terminated the same way 51 s after it started. The
+witness a starved prober cannot fake is the backend's own loop stamp
+(``backend_liveness.silence``): an identity-matching backend that is alive, owns a
+live browser and was heard from within :data:`STARVED_CEILING_SECONDS` is slow,
+not wedged, and is spared at the KILL site only (the bind site stepping aside
+from it would spawn a second backend beside it). A backend silent past the
+ceiling, one that never stamped, and one that owns no browser are evicted exactly
+as before.
+
 A leaf: ``browser_pid_registry`` (the record's own home, for its own reader) and
 psutil. Every other collaborator arrives as an argument — the backend-identity
 check, the pid liveness checks, the reuse gate and the record's own entry are
@@ -102,6 +117,13 @@ _logger = logging.getLogger("stealth.proxy")
 TERMINATE_GRACE_SECONDS = 5
 PORT_RELEASE_SECONDS = 5
 PORT_RELEASE_POLL_SECONDS = 0.1
+
+#: How long a backend of our own identity may have been silent (no loop stamp) and
+#: still be read as busy rather than wedged, while it owns a live browser. Far
+#: past the ~106 s the F-967 incident froze a loop for, and short enough that a
+#: truly dead loop — which stamps never again — is evicted within minutes. Past
+#: it, or with no stamp at all, the old rule applies unchanged.
+STARVED_CEILING_SECONDS = 300.0
 
 
 def pid_on_port(port: int, *, is_ours: Callable[[object], bool]) -> int | None:
@@ -152,6 +174,10 @@ def terminate(
     if not isinstance(pid, int):
         return False
 
+    # F-967: this kill left no trace — a backend that vanished with no shutdown
+    # line could not be attributed to anything. Every caller (the operator verbs
+    # included) passes through here, so this is the one line that names it.
+    _logger.warning("terminating our backend pid %d on port %d", pid, port)
     try:
         proc = psutil.Process(pid)
         proc.terminate()
@@ -207,13 +233,14 @@ def owned_browsers(
     ]
 
 
-def protected(
+def protected(  # noqa: PLR0913  PERMANENT(function interface)
     entry: BackendEntry | None,
     *,
     state_dir: Path,
     identity_matches: Callable[[BackendEntry | None], bool],
     is_ours: Callable[[object], bool],
     is_running: Callable[[int], bool],
+    silence: Callable[[], float | None] | None = None,
 ) -> list[int]:
     """The live browsers that make ``entry``'s backend UNEVICTABLE — empty when
     it may be terminated and bound over.
@@ -225,7 +252,10 @@ def protected(
        in which case the caller never reached eviction — or wedged, and
        terminating a wedged backend of our own is the recovery both the
        ``restart`` verb and the cold-start lock exist to perform. Protecting it
-       would turn a wedge into a permanent one;
+       would turn a wedge into a permanent one. **Unless ``silence`` is given
+       (F-967, the KILL site only) and says it was heard from within**
+       :data:`STARVED_CEILING_SECONDS`: slow, not wedged, so it falls through to
+       conditions 3 and 4 like a stranger. ``None`` from it is no evidence;
     3. its recorded pid is a live backend OF OURS (``is_ours``, the same
        predicate eviction already trusts to never touch the wrong process). A
        record naming a dead or recycled pid describes nothing that can be
@@ -243,8 +273,12 @@ def protected(
     LOGGED, and a count of browsers is the only evidence that makes it auditable
     afterwards. ``bool(...)`` at the call site is the predicate.
     """
-    if entry is None or identity_matches(entry):
+    if entry is None:
         return []
+    if identity_matches(entry):
+        quiet = silence() if silence is not None else None
+        if quiet is None or quiet > STARVED_CEILING_SECONDS:
+            return []
     pid = entry.get("pid")
     if not is_ours(pid):
         return []
@@ -317,5 +351,10 @@ def clear_stale(
             len(spared),
         )
         return spared
+    _logger.warning(
+        "evicting the backend on port %d: it is not reusable and no live "
+        "browser keeps it (F-967)",
+        port,
+    )
     terminate_backend()
     return []

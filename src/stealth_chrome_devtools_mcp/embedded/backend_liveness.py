@@ -122,6 +122,32 @@ def probe_recorded(
     return best
 
 
+def silence(path: Path, port: int) -> float | None:
+    """How long ago the backend on ``port`` last stamped its own loop turning,
+    however long that is, or ``None`` when there is no stamp that speaks for
+    the process recorded there (F-889 (b), F-967).
+
+    The AGE with no upper bound: :func:`self_report` bounds it at
+    :data:`HEARTBEAT_STALE_SECONDS` because a stamp older than that no longer
+    says "starved", and the eviction rule reads it unbounded because a backend
+    last heard from 53 s ago is still a process that was alive, owns browsers and
+    can be told apart from one silent for an hour. ``None`` for every case
+    :func:`self_report` lists — no entry, no sidecar, unreadable, a stamp by
+    another pid — and for a stamp in the FUTURE beyond the same bound, which is
+    a clock that moved and not a backend that spoke."""
+    entry = backend_registry.backend_on_port(backend_registry.read_record(path), port)
+    if entry is None:
+        return None
+    stamp = backend_registry.read_heartbeat(path, port)
+    at = stamp.get(backend_registry.HEARTBEAT_AT)
+    if isinstance(at, bool) or not isinstance(at, int | float):
+        return None
+    if stamp.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
+        return None
+    age = time.time() - float(at)
+    return age if age >= -HEARTBEAT_STALE_SECONDS else None
+
+
 def self_report(path: Path, port: int) -> float | None:
     """How long ago the backend on ``port`` last said its own event loop was
     turning, or ``None`` when it has not said so recently enough to be evidence
@@ -155,6 +181,7 @@ def self_report(path: Path, port: int) -> float | None:
     predecessor on that port, not a claim by the process recorded there), and a
     stamp further than :data:`HEARTBEAT_STALE_SECONDS` from now IN EITHER
     DIRECTION — a clock that jumped forward is not a backend that is alive.
+    Those first four are :func:`silence`'s; the bound is this function's.
 
     ``time.time()`` and not ``time.monotonic()`` deliberately: the writer and
     the reader are DIFFERENT PROCESSES, and monotonic clocks are not comparable
@@ -162,17 +189,8 @@ def self_report(path: Path, port: int) -> float | None:
     symmetric bound above turns into "no evidence" — falling back to the
     confirmation phase, i.e. to exactly today's behaviour.
     """
-    entry = backend_registry.backend_on_port(backend_registry.read_record(path), port)
-    if entry is None:
-        return None
-    stamp = backend_registry.read_heartbeat(path, port)
-    at = stamp.get(backend_registry.HEARTBEAT_AT)
-    if isinstance(at, bool) or not isinstance(at, int | float):
-        return None
-    if stamp.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
-        return None
-    age = time.time() - float(at)
-    return age if abs(age) <= HEARTBEAT_STALE_SECONDS else None
+    age = silence(path, port)
+    return age if age is not None and age <= HEARTBEAT_STALE_SECONDS else None
 
 
 def stamp(path: Path, port: int, pid: int) -> bool:

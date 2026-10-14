@@ -344,15 +344,19 @@ def _terminate_backend(port: int) -> bool:
     )
 
 
-def _protecting_browsers(port: int) -> list[int]:
+def _protecting_browsers(port: int, *, starved: bool = False) -> list[int]:
     """The live browsers that make the backend on ``port`` UNEVICTABLE (F-886),
-    empty when it may be terminated and bound over."""
+    empty when it may be terminated and bound over. ``starved`` (the KILL site's
+    alone, F-967) adds its loop stamp as a witness: slow is not wedged."""
     return backend_eviction.protected(
         backend_registry.backend_on_port(_read_server_state(), port),
         state_dir=STATE_DIR,
         identity_matches=_identity_matches,
         is_ours=_is_our_backend,
         is_running=psutil.pid_exists,
+        silence=lambda: (
+            backend_liveness.silence(SERVER_STATE_FILE, port) if starved else None
+        ),
     )
 
 
@@ -367,7 +371,7 @@ def _clear_stale_backend(port: int) -> list[int]:
     return backend_eviction.clear_stale(
         port,
         reusable=lambda: _same_identity_backend_ready(port, patience=0.0),
-        protecting=lambda: _protecting_browsers(port),
+        protecting=lambda: _protecting_browsers(port, starved=True),
         terminate_backend=lambda: _terminate_backend(port),
     )
 

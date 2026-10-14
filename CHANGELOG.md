@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+### A burst of concurrent `spawn_browser()` calls froze the shared backend for ~106 s, and a proxy then killed it while it owned every chat's browser (F-967)
+
+On 2026-10-14 (2.1.32) about ten chats called `spawn_browser()` with no session at once. Each one
+copies the ~100 MB / 666-file seed, and `clone_storage.resolve_profile_selection` did that copy,
+the seed freshen and a process-table walk (one `cmdline()` read per `chrome.exe`, 80-200 of them)
+directly on the event loop, so the copies ran one after another and the backend answered nothing
+for 106 s: no tool call, no probe, no heartbeat. Every proxy's watchdog condemned it, and a proxy's
+heal then terminated it (a TerminateProcess leaves no shutdown line) while it owned the shared
+browser, the fleet browser and about a dozen clones. The replacement was killed the same way a
+minute later, and the third backend re-attached what it could and reaped the rest.
+
+Two fixes, because it was two defects.
+
+* **The event loop is never held by a spawn.** The blocking work of profile selection (the clone
+  copy, the seed freshen, the named-session copy, the `default` open's refresh, every hold walk, and
+  the same in a retry's fallback selection) runs on worker threads through the new
+  `embedded/profile_offload.py`, at most three at a time. A cancelled or failed selection waits its
+  worker out (a thread cannot be interrupted) and only then removes what the worker built and
+  releases what it reserved, so cancellation can no longer leave a complete, marked clone that
+  nothing owns and that the sweep protection shields for the life of the process. The clone
+  directory is still protected before it is copied, and choosing it and protecting it are one step
+  under a lock now that the choice runs on a thread. `directory_gate`, whose holds are per-context,
+  stays on the loop. The protected-clone registry moved to `embedded/clone_protection.py` and the
+  roots-based seed name to `embedded/client_roots.py` (verbatim; `clone_storage.py` stood at exactly
+  1000 of its 1000 lines and now has headroom); the old names are re-bound in `clone_storage`.
+* **A proxy no longer kills a backend that is starved but alive and owns browsers.** The kill site
+  (`singleton._clear_stale_backend`) now spares an identity-matching backend of ours that owns a
+  live browser while its loop heartbeat is no more than 300 s old (`backend_eviction.protected`'s
+  new `silence` witness, from `backend_liveness.silence`). Past 300 s it is a wedge and is
+  evicted as before; a backend that owns no browser is evicted as before; the operator verbs
+  (`stop`, `restart`) and the port-bind site are unchanged. `backend_eviction.terminate` and
+  `clear_stale` now log the pid, the port and the reason, which is what this incident could not
+  show.
+
+Not moved, and named in `audit/stage2/finding_F967_clone_copy_blocks_event_loop.md`: the saved-tab
+removal on a named session, the manager-lock discard in `list_instances`, the failed-spawn teardown
+and the cookie translation in the hand-off.
+
 ## 2.1.32
 
 ### An unnamed `spawn_browser()` never opens the shared `default` browser, and `close_instance` will not close it unnamed (F-966)
