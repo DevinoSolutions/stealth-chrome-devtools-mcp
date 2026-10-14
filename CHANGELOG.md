@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.34
 
 ### A browser that stalled after launching hung `spawn_browser()` for as long as the caller would wait (F-969)
 
