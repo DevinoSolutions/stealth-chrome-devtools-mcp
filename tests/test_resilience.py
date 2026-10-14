@@ -589,6 +589,11 @@ async def _assert_hang_times_out(instance, base: str, wait_until: str) -> None:
     url = f"{base}/fault/hang-before-headers?token={token}"
 
     await _arm(base, token)
+    # The product's deadline runs from the CALL, so the lower bound below is
+    # measured from here. ``_terminal``'s clock starts after the fixture has
+    # seen the request, which on a loaded runner is late by however long Chrome
+    # took to send it (F-970).
+    called = time.monotonic()
     running = asyncio.ensure_future(
         navigate(
             instance_id=instance,
@@ -603,6 +608,7 @@ async def _assert_hang_times_out(instance, base: str, wait_until: str) -> None:
             running,
             f"navigate(wait_until={wait_until!r}) at a hang-before-headers route",
         )
+        since_call = time.monotonic() - called
     finally:
         running.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -612,8 +618,8 @@ async def _assert_hang_times_out(instance, base: str, wait_until: str) -> None:
     assert outcome == "raised", (
         f"a route that never answered produced a SUCCESS: {value!r}"
     )
-    assert elapsed >= NAV_TIMEOUT_MS / 1000, (
-        f"the tool gave up after {elapsed:.2f}s, before its own {NAV_TIMEOUT_MS}ms "
+    assert since_call >= NAV_TIMEOUT_MS / 1000, (
+        f"the tool gave up after {since_call:.2f}s, before its own {NAV_TIMEOUT_MS}ms "
         "deadline — the deadline is not what ended it"
     )
     assert elapsed < OUTER_BOUND

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### The hang-timeout test measured the navigate deadline from the wrong moment (F-970)
+
+`_assert_hang_times_out` in `tests/test_resilience.py` asserted that the tool waited at least its own
+`NAV_TIMEOUT_MS` before giving up, but timed that wait from the moment the fixture server saw the request,
+while the product's deadline runs from the call. On a loaded Windows runner Chrome sent the request late, the
+tool correctly timed out 4 s after the call, and the test measured 1.84 s and failed (CI run 38589181013,
+`test_load_wait_against_a_hang_times_out_with_the_pinned_message`). The lower bound is now measured from the
+call. Test-only; no product change. No other node had this shape.
+
 ## 2.1.34
 
 ### A browser that stalled after launching hung `spawn_browser()` for as long as the caller would wait (F-969)
