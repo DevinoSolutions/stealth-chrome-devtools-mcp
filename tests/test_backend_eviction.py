@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -653,3 +654,278 @@ class TestTheReportNamesTheDecisionTaken:
             "backend stale (source changed), evicting" in r.getMessage()
             for r in caplog.records
         )
+
+
+# ── F-967: a backend that is slow is not a backend that is dead ──────────────
+class TestAStarvedBackendThatOwnsBrowsersIsNotEvicted:
+    """2026-10-14, backend 38760 on 2.1.32. Ten chats spawned at once and each
+    spawn froze the backend's event loop for the whole of a profile copy
+    (F-967), so for ~106 s it answered no probe. Its proxies' watchdogs
+    condemned it ("confirmed unusable" x32), every proxy healed through
+    ``ensure_server_running``, and the lock winner — after ``REUSE_PATIENCE``'s
+    60 s of unanswered probes — reached ``_clear_stale_backend``, whose
+    ``protected`` rule is IDENTITY-gated: a backend of OUR OWN identity is
+    "adoptable or wedged", and a wedged one is terminated. So a backend that was
+    working flat out, last heard from 53 s earlier, and owning the shared and
+    fleet browsers plus every chat's clone was killed by a proxy. Its successor,
+    72908, was killed the same way 51 s later.
+
+    The kill site now asks the one witness a starved prober cannot fake — the
+    backend's own loop stamp — and a process of ours that is alive, owns live
+    browsers and was heard from within ``STARVED_CEILING_SECONDS`` is slow, not
+    wedged. Everything the old rule did for a TRULY wedged backend is unchanged:
+    no stamp, a stamp older than the ceiling, or no live browser, and it is
+    terminated exactly as before.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _probes(self, monkeypatch):
+        monkeypatch.setattr(singleton, "_is_our_backend", _is_ours)
+        monkeypatch.setattr(singleton.psutil, "pid_exists", lambda pid: True)
+        monkeypatch.setattr(
+            singleton, "_same_identity_backend_ready", lambda port, **kw: False
+        )
+
+    @staticmethod
+    def _stamp(state_dir, *, age, pid=STRANGER_PID):
+        backend_registry.stamp_heartbeat(
+            state_dir / "server.json", port=PORT, pid=pid, at=time.time() - age
+        )
+
+    def _kill_recorder(self, monkeypatch):
+        killed = []
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: killed.append(port)
+        )
+        return killed
+
+    def test_a_silent_but_recent_backend_with_browsers_is_spared(
+        self, isolated_state, monkeypatch
+    ):
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=53.0)  # the incident's own number
+        killed = self._kill_recorder(monkeypatch)
+
+        assert singleton._clear_stale_backend(PORT) == [BROWSER_PID]
+        assert killed == [], "a starved backend that owns live browsers was killed"
+
+    def test_the_cold_start_lock_spawns_nothing_beside_it(
+        self, isolated_state, monkeypatch, caplog
+    ):
+        @contextmanager
+        def fake_lock():
+            yield True
+
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=53.0)
+        calls = []
+        monkeypatch.setattr(singleton, "_exclusive_lock", fake_lock)
+        monkeypatch.setattr(singleton, "_find_running_server", lambda: None)
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: calls.append(("kill", port))
+        )
+        monkeypatch.setattr(
+            singleton,
+            "_start_server_process",
+            lambda port: calls.append(("start", port)),
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+
+        with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+            singleton._start_backend_holding_lock(PORT)
+
+        assert calls == []
+        [rec] = [r for r in caplog.records if "refusing to evict" in r.getMessage()]
+        assert "1 live browser(s)" in rec.getMessage()
+
+    def test_a_backend_silent_past_the_ceiling_is_a_wedge_and_is_evicted(
+        self, isolated_state, monkeypatch
+    ):
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=backend_eviction.STARVED_CEILING_SECONDS + 60.0)
+        killed = self._kill_recorder(monkeypatch)
+
+        assert singleton._clear_stale_backend(PORT) == []
+        assert killed == [PORT]
+
+    def test_a_backend_that_never_stamped_is_evicted_as_before(
+        self, isolated_state, monkeypatch
+    ):
+        """A 2.1.9 backend writes no stamp: no evidence is today's behaviour."""
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        killed = self._kill_recorder(monkeypatch)
+
+        assert singleton._clear_stale_backend(PORT) == []
+        assert killed == [PORT]
+
+    def test_a_stamp_by_another_pid_is_no_evidence(self, isolated_state, monkeypatch):
+        """A leftover from a predecessor on that port speaks for nobody."""
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=5.0, pid=STRANGER_PID + 1)
+        killed = self._kill_recorder(monkeypatch)
+
+        assert singleton._clear_stale_backend(PORT) == []
+        assert killed == [PORT]
+
+    def test_a_starved_backend_that_owns_no_browser_is_still_replaced(
+        self, isolated_state, monkeypatch
+    ):
+        """The browsers are the only state a backend holds that cannot be
+        rebuilt by reconnecting; an idle one has nothing to lose."""
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        self._stamp(isolated_state, age=53.0)
+        killed = self._kill_recorder(monkeypatch)
+
+        assert singleton._clear_stale_backend(PORT) == []
+        assert killed == [PORT]
+
+    def test_a_dead_pid_is_not_spared_by_its_old_stamp(
+        self, isolated_state, monkeypatch
+    ):
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=5.0)
+        monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: False)
+        killed = self._kill_recorder(monkeypatch)
+
+        assert singleton._clear_stale_backend(PORT) == []
+        assert killed == [PORT]
+
+    def test_the_bind_site_does_not_step_aside_from_a_starved_backend(
+        self, isolated_state, monkeypatch
+    ):
+        """The refusal belongs at the KILL site only. At the bind site it would
+        make every proxy spawn a SECOND backend on a fresh port beside the
+        starved one — the herd, and a split of the fleet's browsers."""
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=53.0)
+        monkeypatch.setattr(singleton, "_port_is_foreign_held", lambda port: False)
+        picked = {}
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.proxy_forwarder.bindable_port",
+            lambda target, force_new: picked.update(force_new=force_new) or target,
+        )
+
+        assert singleton._select_backend_port(PORT) == PORT
+        assert picked == {"force_new": False}
+
+    def test_the_operator_verbs_stay_unconditional(self, isolated_state, monkeypatch):
+        """`restart` terminates whatever is on the port it selected; the
+        operator asking IS the authority the rule otherwise supplies."""
+
+        @contextmanager
+        def fake_lock():
+            yield True
+
+        _record_stranger(isolated_state, digest=OUR_DIGEST)
+        _write_browsers(isolated_state)
+        self._stamp(isolated_state, age=5.0)
+        calls = []
+        monkeypatch.setattr(singleton, "_exclusive_lock", fake_lock)
+        monkeypatch.setattr(singleton, "_port_is_foreign_held", lambda port: False)
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.proxy_forwarder.bindable_port",
+            lambda target, force_new: target,
+        )
+        monkeypatch.setattr(
+            singleton, "_terminate_backend", lambda port: calls.append(("kill", port))
+        )
+        monkeypatch.setattr(
+            singleton,
+            "_start_server_process",
+            lambda port: calls.append(("start", port)),
+        )
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
+
+        singleton.restart_backend()
+
+        assert calls == [("kill", PORT), ("start", PORT)]
+
+
+class TestProtectedWithAWitness:
+    """The rule's own contract: the witness only ever ADDS protection, and only
+    to an identity-matching backend (a foreign one is protected regardless)."""
+
+    def _protected(self, tmp_path, entry, **overrides):
+        kwargs = {
+            "state_dir": tmp_path,
+            "identity_matches": _identity_matches,
+            "is_ours": _is_ours,
+            "is_running": lambda pid: True,
+            "silence": lambda: 53.0,
+        }
+        kwargs.update(overrides)
+        return backend_eviction.protected(entry, **kwargs)
+
+    def test_ours_within_the_ceiling_with_a_browser_is_protected(self, tmp_path):
+        _write_browsers(tmp_path)
+        assert self._protected(tmp_path, _entry(digest=OUR_DIGEST)) == [BROWSER_PID]
+
+    def test_the_ceiling_is_inclusive_of_its_own_value(self, tmp_path):
+        _write_browsers(tmp_path)
+        at = backend_eviction.STARVED_CEILING_SECONDS
+        assert self._protected(
+            tmp_path, _entry(digest=OUR_DIGEST), silence=lambda: at
+        ) == [BROWSER_PID]
+        assert (
+            self._protected(
+                tmp_path, _entry(digest=OUR_DIGEST), silence=lambda: at + 0.1
+            )
+            == []
+        )
+
+    def test_no_evidence_is_no_protection(self, tmp_path):
+        _write_browsers(tmp_path)
+        assert (
+            self._protected(tmp_path, _entry(digest=OUR_DIGEST), silence=lambda: None)
+            == []
+        )
+
+    def test_a_stranger_stays_protected_without_any_witness(self, tmp_path):
+        _write_browsers(tmp_path)
+        assert self._protected(tmp_path, _entry(), silence=None) == [BROWSER_PID]
+        assert self._protected(tmp_path, _entry(), silence=lambda: None) == [
+            BROWSER_PID
+        ]
+
+
+class TestTheKillNamesItself:
+    """The incident's gap in evidence: ``terminate`` wrote nothing, so a backend
+    that vanished with no shutdown line could not be attributed. Every kill now
+    says who it killed, on which port, in the proxy log."""
+
+    def test_terminate_logs_the_pid_and_the_port(self, monkeypatch, caplog):
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            backend_eviction.psutil, "Process", MagicMock(return_value=MagicMock())
+        )
+        with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+            backend_eviction.terminate(
+                PORT,
+                pid_on_port=lambda port: 777,
+                recorded_pid=None,
+                is_ours=lambda pid: False,
+                is_healthy=lambda port: False,
+            )
+        [rec] = [r for r in caplog.records if "terminating" in r.getMessage()]
+        assert "777" in rec.getMessage() and str(PORT) in rec.getMessage()
+
+    def test_an_eviction_says_why_it_went_ahead(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="stealth.proxy"):
+            backend_eviction.clear_stale(
+                PORT,
+                reusable=lambda: False,
+                protecting=list,
+                terminate_backend=lambda: None,
+            )
+        [rec] = [r for r in caplog.records if "evicting" in r.getMessage()]
+        assert f"port {PORT}" in rec.getMessage()
+        assert "no live browser" in rec.getMessage()

@@ -20,22 +20,24 @@ internal-only helpers keep theirs.
 """
 
 import asyncio
+import functools
 import hashlib
 import itertools
 import os
 import re
-import threading
-import urllib.parse
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import (
+    client_roots,
+    clone_protection,
     clone_trash,
     fleet_session,
     profile_copy,
     profile_lock,
+    profile_offload,
     profile_seed,
     profile_source,
     profile_target,
@@ -116,49 +118,14 @@ def clone_is_auto(clone_dir: Path) -> bool:
 
 
 # ── Authoritative in-flight / live clone protection ──────────────────────────
-# The storage-cap sweep picks reclaim targets from on-disk markers, but a clone
-# becomes a valid target the instant its marker is written — which happens BEFORE
-# its browser launches and is tracked. During that window the filesystem liveness
-# heuristic (`_profile_has_running_browser`) reports "not running", so a
-# concurrent or startup sweep could delete a live-but-not-yet-attached clone out
-# from under the spawning browser (a silent, unlogged session loss). We therefore
-# register every clone dir the spawn flow is about to write — before the marker
-# exists — and clear it on close. The sweep skips any protected dir regardless of
-# what the filesystem heuristic reports. Guarded by a lock because the sweep runs
-# on a worker thread (`asyncio.to_thread`) while spawns run on the event loop.
-_PROTECTED_CLONE_DIRS: set = set()
-_PROTECTED_CLONE_DIRS_LOCK = threading.Lock()
-
-
-def _normalize_clone_path(path) -> str:
-    """Case/separator-normalized absolute path for protected-set membership."""
-    return os.path.normcase(os.path.abspath(str(path)))
-
-
-def _protect_clone_dir(path) -> None:
-    """Shield a clone dir from the storage-cap sweep while it is in flight or
-    live. Call BEFORE the clone's marker is written and keep it protected until
-    the owning instance has closed."""
-    with _PROTECTED_CLONE_DIRS_LOCK:
-        _PROTECTED_CLONE_DIRS.add(_normalize_clone_path(path))
-
-
-def _release_clone_dir(path) -> None:
-    """Drop sweep protection for a clone dir once its instance has closed."""
-    with _PROTECTED_CLONE_DIRS_LOCK:
-        _PROTECTED_CLONE_DIRS.discard(_normalize_clone_path(path))
-
-
-def _clone_dir_is_protected(path) -> bool:
-    """True while a clone dir is registered as in-flight or live (sweep-exempt)."""
-    with _PROTECTED_CLONE_DIRS_LOCK:
-        return _normalize_clone_path(path) in _PROTECTED_CLONE_DIRS
-
-
-def _clear_protected_clone_dirs() -> None:
-    """Drop all sweep protection. For test isolation and full-shutdown cleanup."""
-    with _PROTECTED_CLONE_DIRS_LOCK:
-        _PROTECTED_CLONE_DIRS.clear()
+# The registry that exempts an in-flight or live clone from the storage-cap sweep
+# is `clone_protection`'s (F-967); these are the names the tree has always called.
+_PROTECTED_CLONE_DIRS = clone_protection.PROTECTED
+_normalize_clone_path = clone_protection.normalize
+_protect_clone_dir = clone_protection.protect
+_release_clone_dir = clone_protection.release
+_clone_dir_is_protected = clone_protection.is_protected
+_clear_protected_clone_dirs = clone_protection.clear
 
 
 def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
@@ -487,46 +454,8 @@ def _snapshot_needs_refresh() -> bool:
     return profile_seed.needs_refresh(master_profile_dir(), master_snapshot_dir())
 
 
-def _root_to_path(root: Any) -> str | None:
-    value = getattr(root, "uri", None) or root
-    value = str(value)
-    if value.startswith("file://"):
-        parsed = urllib.parse.urlparse(value)
-        return urllib.parse.unquote(
-            parsed.path.lstrip("/") if os.name == "nt" else parsed.path
-        )
-    return value or None
-
-
 async def _client_session_seed() -> str:
-    configured = (
-        get_settings().stealth_chrome_profile_key or get_settings().browser_profile_key
-    )
-    if configured:
-        return configured
-
-    roots = []
-    try:
-        from fastmcp.server.dependencies import get_context
-
-        # F-790: bound this OPTIONAL server->client round trip (see settings.py).
-        bound = get_settings().client_roots_timeout_seconds
-        listed = await asyncio.wait_for(get_context().list_roots(), bound)
-        roots = [path for path in (_root_to_path(r) for r in listed) if path]
-    except Exception as e:
-        message = str(e) or f"{type(e).__name__} awaiting roots/list"
-        debug_logger.log_warning("server", "_client_session_seed", message)
-        roots = []
-
-    if roots:
-        return "|".join(sorted(roots))
-
-    return (
-        get_settings().codex_workspace
-        or get_settings().claude_project_dir
-        or get_settings().pwd
-        or os.getcwd()
-    )
+    return await client_roots.session_seed()
 
 
 async def _clone_profile_dir_for_session(clone_root: Path) -> Path:
@@ -584,7 +513,7 @@ def _next_available_explicit_dir(requested: Path, *, fresh: bool = False) -> Pat
         stamp = f"{stamp}-{_attempt_token()}"
     for suffix in (*range(2, 100), stamp):
         candidate = requested.with_name(f"{requested.name}-{suffix}")
-        if not _dir_unavailable(candidate) and not (fresh and candidate.exists()):
+        if not (fresh and candidate.exists()) and not _dir_unavailable(candidate):
             return candidate
     return requested.with_name(f"{requested.name}-{stamp}")
 
@@ -796,6 +725,125 @@ def _clone_seed(
     return profile_source.empty_seed(master_snapshot_dir(), warning)
 
 
+def _resolve_explicit(
+    explicit: Path,
+    seed_from: str | None,
+    clone_root: Path,
+    driven: Callable[[Path], bool],
+    made: list[Path],
+) -> dict[str, Any]:
+    """A NAMED directory's answer, SYNCHRONOUS on purpose (F-967): the hold walk,
+    the walk to ``<name>-N``, the seed read and the copy are one decision, so they
+    run as one unit on a worker thread. ``made`` is told what this call created."""
+    # The requested path (inside clone_root) is held by a running browser, and
+    # what happens next is `profile_target`'s rule — the walk to `<name>-N` is
+    # CONDITIONAL since F-915 and its module docstring is where that is argued.
+    # What stays here is the walk's own REPORT (F-871) and the holder as this
+    # copy's source.
+    walk: dict[str, Any] = profile_target.existing_fields(explicit)
+    handed_over: profile_source.SeedSource | None = None
+    if _is_relative_to(explicit, clone_root):
+        hold = _profile_hold(explicit)
+        if hold is not None:
+            holder = profile_target.hand_over_or_refuse(
+                explicit, hold, _roots(), driven=driven
+            )
+            requested = explicit
+            explicit = _next_available_explicit_dir(explicit, fresh=True)
+            walk = {
+                "requested_user_data_dir": str(requested),
+                "walked_to": str(explicit),
+                "walk_reason": hold.reason,
+            }
+            handed_over = profile_source.SeedSource(
+                holder, profile_source.LIVE_SESSION_KIND, holder
+            )
+    live_seed: dict[str, Any] = {}
+    if not explicit.exists() and _is_relative_to(explicit, clone_root):
+        # `handed_over or`: a held session EXISTS, which `require_new_session`
+        # refuses earlier, so a hand-over never drops a caller's `seed_from`.
+        # `_for_copy`, never `_seed_source`: that owns the freshen and the
+        # AUTHORITATIVE hold check, which a hand-off copying from the holder
+        # does not need. F-952: no `seed_from` means the configured seed.
+        seed = handed_over or _seed_source_for_copy(
+            fleet_session.default_seed(seed_from, str(explicit)), driven
+        )
+        _require_copied(
+            _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
+        )
+        made.append(explicit)
+        # F-898: the copy could not reach a jar Chrome holds open. `seed.live`
+        # and NOT `seed.kind` — for `default` the copy source (the seed) and the
+        # live source (the shared profile) are different directories, and
+        # reading the kind is how `--from default` got no hand-off at all
+        # (review M1). Stamped inside the branch that copied, the only place
+        # that knows a copy happened.
+        live_seed = _live_seed_fields(seed)
+    explicit.parent.mkdir(parents=True, exist_ok=True)
+    return {
+        "user_data_dir": str(explicit),
+        "profile_role": "explicit",
+        "clone_source": None,
+        **walk,
+        **live_seed,
+    }
+
+
+def _resolve_shared(
+    master: Path, landed: str | None, driven: Callable[[Path], bool]
+) -> tuple[dict[str, Any] | None, tuple[Path | None, int | None]]:
+    """The shared profile's half, on a worker (F-967): ``default``'s own answer
+    when it is named and free, else the live source a clone's jar comes from. ONE
+    hold read — F-914 needs the REASON as well as the fact."""
+    master.parent.mkdir(parents=True, exist_ok=True)
+    shared_hold = _profile_hold(master)
+    if shared_hold is not None:
+        return None, profile_target.shared_live_source(
+            master, shared_hold, _roots(), driven
+        )
+    if landed is None:
+        return None, (None, None)
+    opened = {
+        "user_data_dir": str(master),
+        "profile_role": profile_seed.DEFAULT_SESSION,
+        "clone_source": None,
+        **_refresh_master_snapshot_if_safe("before-default-open"),
+    }
+    return opened, (None, None)
+
+
+def _choose_clone_dir(
+    base_clone: Path, clone_suffix: str | None, clone_root: Path
+) -> Path:
+    clone_root.mkdir(parents=True, exist_ok=True)
+    if clone_suffix:
+        return _unique_clone_dir(base_clone, clone_suffix)
+    return _available_clone_dir(base_clone)
+
+
+def _prepare_clone(  # noqa: PLR0913  PERMANENT(function interface)
+    clone: Path,
+    clone_root: Path,
+    override: profile_source.SeedSource | None,
+    driven: Callable[[Path], bool],
+    shared_live: tuple[Path | None, int | None],
+    made: list[Path],
+) -> dict[str, Any]:
+    """Freshen, choose, copy: one worker unit (F-967), so the AUTHORITATIVE hold
+    read stays adjacent to the copy."""
+    _refresh_snapshot_if_stale()
+    seed, configured, warning = _clone_seed(override, driven)
+    if shared_live[0] is not None and not configured:
+        # The hand-off's source is the SHARED profile, the copy's is whichever
+        # answered above (F-898 review M1: `live` is a third fact, not a flag on
+        # `kind`). It outranks one `override` carried from a previous attempt; a
+        # configured seed session (F-952) brings its own live jar instead.
+        seed = seed._replace(live=shared_live[0], live_port=shared_live[1])
+    selection = _copy_clone_from_source(seed, clone, clone_root)
+    made.append(clone)
+    return {**selection, "seed_warning": warning} if warning else selection
+
+
 async def resolve_profile_selection(
     user_data_dir: str | None,
     *,
@@ -825,6 +873,10 @@ async def resolve_profile_selection(
     ``profile_target.hand_over_or_refuse``: one rule, two call sites. Only the
     copy's SOURCE differs: a named holder is its own (no closed form exists);
     the shared session's is the seed, and only the jar comes live.
+
+    **Nothing here blocks the event loop (F-967)**: the walks and the copy run on
+    worker threads through ``profile_offload``, which also owns what a cancelled
+    or failed call leaves behind.
     """
     master = master_profile_dir()
     clone_root = clone_root_dir()
@@ -851,109 +903,49 @@ async def resolve_profile_selection(
         else Path(landed)
     )
 
+    made: list[Path] = []  # what this call built
+    held: list[Path] = []  # what it reserved
+    discard = functools.partial(clone_protection.discard, made, held)
     if explicit is not None:
-        # The requested path (inside clone_root) is held by a running browser,
-        # and what happens next is `profile_target`'s rule — the walk to
-        # `<name>-N` is CONDITIONAL since F-915 and its module docstring is
-        # where that is argued. What stays here is the walk's own REPORT
-        # (F-871) and the holder as this copy's source.
-        walk: dict[str, Any] = profile_target.existing_fields(explicit)
-        handed_over: profile_source.SeedSource | None = None
-        if _is_relative_to(explicit, clone_root):
-            hold = _profile_hold(explicit)
-            if hold is not None:
-                holder = profile_target.hand_over_or_refuse(
-                    explicit, hold, _roots(), driven=driven
-                )
-                requested = explicit
-                explicit = _next_available_explicit_dir(explicit, fresh=True)
-                walk = {
-                    "requested_user_data_dir": str(requested),
-                    "walked_to": str(explicit),
-                    "walk_reason": hold.reason,
-                }
-                handed_over = profile_source.SeedSource(
-                    holder, profile_source.LIVE_SESSION_KIND, holder
-                )
-        live_seed: dict[str, Any] = {}
-        if not explicit.exists() and _is_relative_to(explicit, clone_root):
-            # `handed_over or`: a held session EXISTS, which `require_new_session`
-            # refuses earlier, so a hand-over never drops a caller's `seed_from`.
-            # `_for_copy`, never `_seed_source`: that owns the freshen and the
-            # AUTHORITATIVE hold check, which a hand-off copying from the holder
-            # does not need. F-952: no `seed_from` means the configured seed.
-            seed = handed_over or _seed_source_for_copy(
-                fleet_session.default_seed(seed_from, str(explicit)), driven
-            )
-            _require_copied(
-                _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
-            )
-            # F-898: the copy could not reach a jar Chrome holds open.
-            # `seed.live` and NOT `seed.kind` — for `default` the copy source
-            # (the seed) and the live source (the shared profile) are different
-            # directories, and reading the kind is how `--from default` got no
-            # hand-off at all (review M1). Stamped inside the branch that
-            # copied, the only place that knows a copy happened.
-            live_seed = _live_seed_fields(seed)
-        explicit.parent.mkdir(parents=True, exist_ok=True)
-        return {
-            "user_data_dir": str(explicit),
-            "profile_role": "explicit",
-            "clone_source": None,
-            **walk,
-            **live_seed,
-        }
-
-    master.parent.mkdir(parents=True, exist_ok=True)
-    # ONE hold read (F-914 needs the REASON as well as the fact; a second walk
-    # of the process table would be a second answer to one question). The
-    # shared session being OPEN is the same rule the named branch asks about a
-    # different directory — `profile_target` argues it once for both.
-    shared_hold = _profile_hold(master)
-    if shared_hold is None:
-        if landed is not None:
-            snapshot_result = _refresh_master_snapshot_if_safe("before-default-open")
-            return {
-                "user_data_dir": str(master),
-                "profile_role": profile_seed.DEFAULT_SESSION,
-                "clone_source": None,
-                **snapshot_result,
-            }
-        shared_live = live_port = None
-    else:
-        shared_live, live_port = profile_target.shared_live_source(
-            master, shared_hold, _roots(), driven
+        return await profile_offload.run(
+            _resolve_explicit,
+            explicit,
+            seed_from,
+            clone_root,
+            driven,
+            made,
+            discard=discard,
         )
 
-    base_clone = await _clone_profile_dir_for_session(clone_root)
-    clone = (
-        _unique_clone_dir(base_clone, clone_suffix)
-        if clone_suffix
-        else _available_clone_dir(base_clone)
+    opened, shared_live = await profile_offload.run(
+        _resolve_shared, master, landed, driven
     )
-    clone_root.mkdir(parents=True, exist_ok=True)
+    if opened is not None:
+        return opened
+
+    base_clone = await _clone_profile_dir_for_session(clone_root)
+    clone = await profile_offload.run(
+        clone_protection.reserve,
+        functools.partial(_choose_clone_dir, base_clone, clone_suffix, clone_root),
+        held,
+        discard=discard,
+    )
     # Backstop against unbounded bloat: a non-blocking background sweep (idle
     # clones over the cap, idle named profiles over theirs) before adding
     # another. The clone about to be written has no marker, so is never a target.
     spawn_background_sweep("pre-clone")
-
-    _refresh_snapshot_if_stale()
-
-    seed, configured, warning = _clone_seed(override, driven)
-    if shared_live is not None and not configured:
-        # The hand-off's source is the SHARED profile, the copy's is whichever
-        # answered above (F-898 review M1: `live` is a third fact, not a flag on
-        # `kind`). It outranks one `override` carried from a previous attempt;
-        # a configured seed session (F-952) brings its own live jar instead.
-        seed = seed._replace(live=shared_live, live_port=live_port)
-
-    # Shield this clone from the storage-cap sweep BEFORE its marker is written:
-    # the marker makes it a reclaim target while its browser has not launched
-    # yet, so the sweep could delete it from under the spawn. Released when the
-    # instance closes (or when this spawn attempt fails).
-    _protect_clone_dir(clone)
-    selection = _copy_clone_from_source(seed, clone, clone_root)
-    return {**selection, "seed_warning": warning} if warning else selection
+    # Shielded from that sweep since `clone_protection.reserve`, BEFORE its marker is
+    # written; released when the instance closes, or when this attempt fails.
+    return await profile_offload.run(
+        _prepare_clone,
+        clone,
+        clone_root,
+        override,
+        driven,
+        shared_live,
+        made,
+        discard=discard,
+    )
 
 
 async def _fallback_profile_selection(
@@ -973,18 +965,22 @@ async def _fallback_profile_selection(
     shared = profile_seed.DEFAULT_SESSION
     role = previous_selection.get("profile_role")
     same = previous_selection.get("user_data_dir")
-    if role == "explicit" or (role == shared and _profile_hold(Path(same)) is None):
+    # F-967: both questions below walk the process table, so neither runs on the loop.
+    if role == "explicit" or (
+        role == shared and await profile_offload.run(_profile_hold, Path(same)) is None
+    ):
         return dict(previous_selection)
     if role not in ("clone", shared):
         return None
 
     snapshot = master_snapshot_dir()
     # F-952: a configured seed session needs no snapshot, and wins over it.
-    if (
-        not snapshot.exists()
-        and fleet_session.clone_seed(_seed_source, driven)[0] is None
-    ):
-        return None
+    if not snapshot.exists():
+        configured = await profile_offload.run(
+            fleet_session.clone_seed, _seed_source, driven
+        )
+        if configured[0] is None:
+            return None
     final = attempt > 0
     return await resolve_profile_selection(
         None,
