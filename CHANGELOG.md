@@ -9,8 +9,8 @@ end in a reply from a Chrome that is already running (target discovery, the wind
 setup), and nodriver gives a CDP transaction no deadline, so a Chrome that stalled at that point left the
 tool call waiting indefinitely and the Chrome running beside it. On 2026-10-14 the v2.1.33 publish gate's
 macOS cell sat in exactly that state until pytest-timeout ended it at 300 s: one node out of 277, the event
-loop idle, every worker thread parked, one live child process. It is rare (one failure against 82 passes in the macOS
-integration jobs since 2026-10-07) and not new: the unbounded awaits predate F-967.
+loop idle, every worker thread parked, one live child process. It is rare (the same node failed the same way on the 2.1.28 release gate on
+2026-10-10, before F-967 existed, and passed its rerun) and not new: the unbounded awaits predate F-967.
 
 Each of the three phases (`_launch_browser`, `_apply_post_launch`, `_setup_dynamic_hooks`) now has a named
 budget, in the new `embedded/spawn_budget.py`: 120 s for the launch, 60 s for each post-launch phase, both

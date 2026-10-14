@@ -1,6 +1,6 @@
 # F-969 — `spawn_browser` awaits a running Chrome with no deadline: a stall after launch hangs the call and leaves the Chrome running
 
-**Severity:** Medium (rare: one failure in ~87 macOS integration jobs; the cost per occurrence is an unbounded hang
+**Severity:** Medium (rare, but at least twice in five days on the macOS integration cell (2.1.28 and 2.1.33 release gates); the cost per occurrence is an unbounded hang
 of one tool call plus a live orphan Chrome). Seen 2026-10-14 in the v2.1.33 publish gate (run 38554874913, attempt
 1, macOS/ARM64).
 **Files:** `embedded/spawn_budget.py` (new), `embedded/browser_manager.py` (`_launch_browser`,
@@ -18,8 +18,9 @@ Tests: `tests/test_spawn_budget.py` (new, 11), `tests/e2e_helpers.py` (`bounded_
 `tests/test_resilience.py::test_tab_closed_under_a_running_tool_has_one_terminal_outcome` errored AT SETUP with
 "Failed: Timeout (>300.0s) from pytest-timeout" on the macOS/ARM64 integration cell of the publish gate. Setup is
 the `instance` fixture: one `spawn_browser(headless=True, **sandbox_kwargs())`. The other 276 selected nodes passed,
-and Linux and Windows passed the same node. The node had passed in the 82 macOS integration jobs read back to
-2026-10-07, including four runs on F-967's code.
+and Linux and Windows passed the same node. The node had passed in the 82 macOS integration job logs the census could read (latest attempt of each run, back to
+2026-10-07), including four runs on F-967's code; §2 records that this undercounts, since a failed first attempt
+with a green rerun is invisible to it.
 
 The pytest-timeout thread dump (`publish-2133-macos-integration.log` lines 574-635) is the evidence:
 
@@ -54,9 +55,16 @@ when the await ENDS, so the Chrome stays running beside the hung call.
 
 **Attribution, stated plainly.** The exact await the CI spawn was parked on is not known: the thread dump cannot see
 a coroutine and nothing logged it (§4 fixes that for the next occurrence). That it is one of these three is the
-inference from §1; none of them is F-967's code, and F-967 is not implicated by anything in the dump. The census
-(§3) cannot separate "F-967 made it likelier" from chance: 1 failure in 5 F-967-era runs against 0 in 78 before,
-which is a 5-in-83 (about 6%) chance of landing there at random.
+inference from §1; none of them is F-967's code, and F-967 is not implicated by anything in the dump.
+
+**The hang predates F-967.** The release log records the same node failing the same way on 2026-10-10: attempt 1 of
+the 2.1.28 release gate (release PR #209, merged at 24b4ec3) failed on macOS in
+`test_resilience::test_tab_closed_under_a_running_tool...` with a 300 s setup timeout in an unnamed in-process spawn,
+and its full rerun was green (source: the release log, taken from the release owner; this census could not see it,
+because the jobs API serves only the latest attempt of a run, so a failed attempt 1 with a green rerun reads as a
+pass). Two occurrences in the macOS integration cell in five days, one before and one after F-967, with the same
+signature, settle H3: the earlier "1 in 5 F-967-era runs" figure is a small-sample coincidence and not evidence
+against F-967, and the true rate is higher than the 1-in-83 the latest-attempt census shows.
 
 ## 3. The budgets, and the evidence for their size
 
