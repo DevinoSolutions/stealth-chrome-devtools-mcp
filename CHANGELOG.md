@@ -21,6 +21,14 @@ the path every other spawn failure takes: the Chrome that was launched is killed
 `kill_browser_process`, and the tool body's `_SPAWN_ATTEMPTS` loop retries on a fresh clone. There is no
 second teardown. A healthy spawn costs what it always did.
 
+On Python 3.11 the bound could be silently lost: `asyncio.wait_for` there swallows a cancellation that arrives in
+the same loop iteration its inner work completes (gh-86296, fixed in 3.12), the post-launch phase is full of
+`wait_for`s, and the first version of the bound delivered its expiry as exactly one `cancel()` through
+`asyncio.timeout`. A swallowed one left the phase running past its budget with nothing left to fire, so the next stalled
+exchange hung unbounded (the Windows py3.11 cell of the 2.1.34 gate caught it). The phase now runs as a child task the
+caller waits on with `asyncio.wait`, is re-cancelled every 2 s until it ends (at most five times), and the `ToolError`
+is raised whatever it did; a cancelled caller cancels the child the same way.
+
 For the integration suite, the `instance` fixture and `_assert_fresh_spawn_works` in
 `tests/test_resilience.py` go through `e2e_helpers.bounded_spawn` (240 s, under the gate's 300 s): on overrun
 it prints every pending asyncio task and the await it is parked on, so a recurrence names its cause.

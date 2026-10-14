@@ -37,12 +37,25 @@ relaunch (F-963) reach the same three and neither can forget it. The budget is
 named by its constant and read when the phase RUNS, so a test patches the one
 module attribute.
 
+**The deadline is a child task, not ``asyncio.timeout`` (F-969b).** On Python
+3.11 ``asyncio.wait_for`` swallows a cancellation that arrives in the same loop
+iteration its inner work completes (gh-86296, fixed in 3.12), and the post-launch
+phase is full of them (``reconcile_launched_browser_version``, the rotation
+guard). ``asyncio.timeout`` delivers its expiry as exactly one ``cancel()``, so a
+swallowed one left the phase running past its budget with the deadline spent and
+nothing left to fire: the next stalled exchange hung unbounded, and the Windows
+py3.11 cell of the 2.1.34 gate caught it. So the phase runs as a child, the
+caller waits on it with ``asyncio.wait`` (which cannot swallow anything), and on
+expiry the child is re-cancelled every ``CANCEL_GRACE_SECONDS`` until it ends.
+The ``ToolError`` is raised whatever the child did, and an outer cancellation of
+the caller cancels the child the same way, so it is never left running.
+
 **Why a whole phase and not each ``send``.** ``_apply_post_launch`` is six CDP
 exchanges and every one of them is bounded by the phase's budget, which is no
 looser than bounding each: a phase that would have taken longer than its budget
 by summing six healthy sends is not a healthy phase. Cancelling a send is safe
 because ``cdp_transport`` protects the connection's listener from exactly that
-(F-883 B1), which is also why this can use the plain ``asyncio.timeout``.
+(F-883 B1).
 
 A leaf: asyncio and ``tool_errors`` only.
 """
@@ -52,6 +65,7 @@ import functools
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
 
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 _P = ParamSpec("_P")
@@ -65,6 +79,28 @@ LAUNCH_BUDGET_SECONDS = 120.0
 #: setup) may take. Every exchange in them is a local round trip to a Chrome that
 #: already answered ``/json/version``.
 POST_LAUNCH_BUDGET_SECONDS = 60.0
+
+#: How long a cancelled phase gets to end before it is cancelled again. A swallowed
+#: cancel is a one-off, so the second one lands; this only paces the retries.
+CANCEL_GRACE_SECONDS = 2.0
+
+#: How many cancels a phase is given before it is abandoned (logged, still named
+#: in the error). A phase that ignores this many is not one more cancel will end.
+CANCEL_ATTEMPTS = 5
+
+
+async def _end(child: "asyncio.Future[object]") -> bool:
+    """Cancel *child* until it is done, at most ``CANCEL_ATTEMPTS`` times; say
+    whether it ended. Never raises what the child raised: the caller is already
+    reporting something else."""
+    for _ in range(CANCEL_ATTEMPTS):
+        child.cancel()
+        await asyncio.wait({child}, timeout=CANCEL_GRACE_SECONDS)
+        if child.done():
+            if not child.cancelled():
+                child.exception()  # retrieved: it is not what the caller reports
+            return True
+    return False
 
 
 def phase(
@@ -81,16 +117,26 @@ def phase(
         @functools.wraps(fn)
         async def bounded(*args: _P.args, **kwargs: _P.kwargs) -> _T:
             budget: float = globals()[budget_name]
+            child = asyncio.ensure_future(fn(*args, **kwargs))
             try:
-                async with asyncio.timeout(budget) as scope:
-                    return await fn(*args, **kwargs)
-            except TimeoutError:
-                if not scope.expired():
-                    raise
-                raise ToolError(
-                    f"Browser spawn stalled in the {stage} stage: no answer within "
-                    f"{budget:g} s. The Chrome it launched is stopped; spawn again."
-                ) from None
+                await asyncio.wait({child}, timeout=budget)
+            except BaseException:
+                # The caller was cancelled: the phase must not outlive it.
+                await _end(child)
+                raise
+            if child.done():
+                return child.result()
+            if not await _end(child):
+                debug_logger.log_warning(
+                    "spawn_budget",
+                    stage,
+                    f"the {stage} stage ignored {CANCEL_ATTEMPTS} cancellations "
+                    "and was abandoned",
+                )
+            raise ToolError(
+                f"Browser spawn stalled in the {stage} stage: no answer within "
+                f"{budget:g} s. The Chrome it launched is stopped; spawn again."
+            )
 
         return bounded
 

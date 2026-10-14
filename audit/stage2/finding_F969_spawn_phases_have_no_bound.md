@@ -107,9 +107,8 @@ phase that a retry then clears turns a 300 s kill into ~125 s and a pass.
 ### 4.1 Product (`embedded/spawn_budget.py`)
 
 `phase(stage, budget_name)` is a decorator applied to `_launch_browser`, `_apply_post_launch` and
-`_setup_dynamic_hooks`. It runs the phase under `asyncio.timeout(budget)`; an expiry of THAT deadline (not a
-`TimeoutError` the phase raised itself, checked with `scope.expired()`) becomes a `ToolError` naming the stage and
-the budget. The budget is looked up by constant name when the phase runs, so a test patches one module attribute.
+`_setup_dynamic_hooks`. It first ran the phase under `asyncio.timeout(budget)`; §8 explains why it no longer does. An expiry of the
+deadline (not a `TimeoutError` the phase raised itself) becomes a `ToolError` naming the stage and the budget. The budget is looked up by constant name when the phase runs, so a test patches one module attribute.
 
 It is a decorator rather than a wrapper at the call site so the bound travels with the method: `spawn_browser` and
 the heal's relaunch (F-963, `spawn_browser(options, instance_id=)`) reach the same three. `browser_manager.py` is
@@ -192,3 +191,36 @@ export's `src` and `__file__` of `browser_manager` and `spawn_budget` printed an
 * Bound `browser_reattach`'s adoption connect (`cdp_attach`) the same way if it ever shows this shape; it is outside the
   three spawn phases (a delegated headed launch, `desktop_launch.launch_and_attach`, IS inside `_launch_browser`) and
   was not implicated.
+
+## 8. The bound was lost on Python 3.11 (found by the 2.1.34 gate, fixed in F-969b)
+
+`requires-python` is `>=3.11`. The first version of `phase` used `asyncio.timeout`, whose expiry is exactly ONE
+`task.cancel()`. On 3.11 `asyncio.wait_for` swallows a cancellation that arrives in the same loop iteration its inner
+work completes (gh-86296; 3.12 rebuilt `wait_for` on `asyncio.timeout`). `_apply_post_launch` is full of them
+(`reconcile_launched_browser_version`, the rotation guard). A cancel swallowed there left the phase running on, the
+deadline spent and nothing left to fire it, so the next stalled exchange hung unbounded: the original defect, back.
+
+**Evidence.** The 2.1.34 release gate (PR #221, run 38571793997) went red on Windows py3.11 on
+`test_a_post_launch_exchange_that_never_answers_...`: no 0.3 s `ToolError`, the test's own 30 s `wait_for` ended it,
+and the CancelledError surfaced from the stalled `set_window_size`. Every other cell passed, #220's own gate was
+32/32. **Confirmed deterministically**, not statistically: `test_the_deadline_holds_when_an_inner_wait_for_swallows_the_cancel`
+runs a `wait_for` around work that blocks the loop past the budget and then returns, so the work's done-callback and
+the deadline's `cancel()` are ready in the same iteration, in that order (the waiter is already resolved, so
+`cancel()` only sets `_must_cancel`, which `wait_for` then eats), and a stalled step follows. It fails on 3.11 against
+the `asyncio.timeout` phase and passes on 3.13 (where the same code is correct). The slow Windows runner reaches the
+same shape because its loop is held past the 0.3 s budget by the synchronous work before the first `wait_for`
+(that mechanism for the CI run is inferred, not captured). Locally the node itself never failed on 3.11 against the old
+phase (0 in 40 runs), which is why the pin is built to land the race rather than to wait for it.
+
+**Fix.** `phase` runs the function as a child task and waits on it with `asyncio.wait({child}, timeout=budget)`, which
+cannot swallow a cancellation. On expiry it re-cancels the child every `CANCEL_GRACE_SECONDS` (2 s) until it is done,
+at most `CANCEL_ATTEMPTS` (5) times, then raises the named `ToolError` whatever the child did (an abandoned child is
+logged). A cancellation of the CALLER cancels the child the same way and re-raises, so a phase never outlives its
+caller. Still one home and no teardown of its own: the `ToolError` reaches `spawn_browser`'s handler as before.
+
+**Pins** (`tests/test_spawn_budget.py`): the swallow pin above, `test_an_outer_cancellation_cancels_the_phase_and_waits_it_out`
+and `test_a_phase_that_swallows_every_cancel_still_ends_in_a_named_error`. RED, out of tree, labelled: `git archive`
+of origin/main (caec4e6) plus the new test file, `uv run --isolated --python 3.11`, `__file__` confirmed to be the
+export's, `__pycache__` cleared: the swallow pin FAILS (12 pass, 1 fail); the stubborn-child pin hangs until
+pytest-timeout (it needs a `CANCEL_GRACE_SECONDS` the old phase lacks, stubbed there). GREEN: the three pins and the
+whole file under both 3.11 and 3.13.
