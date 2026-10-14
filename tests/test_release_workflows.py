@@ -14,6 +14,7 @@ later that the required check was green while a lane never ran.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -515,3 +516,38 @@ def test_the_canary_is_not_wired_into_the_gate(gate_jobs):
         assert "canary" not in str(job.get("needs", "")), (
             f"gate job {name!r} needs the canary"
         )
+
+
+# ---------------------------------------------------------------------------
+# One way to name an action: a full commit SHA (F-971).
+# ---------------------------------------------------------------------------
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _third_party_uses(path: Path) -> list[str]:
+    """Every `uses:` ref in a workflow that is not a local `./` action."""
+    refs: list[str] = []
+    for job in _jobs(path).values():
+        if "uses" in job:
+            refs.append(job["uses"])
+        refs.extend(step["uses"] for step in job.get("steps", []) if "uses" in step)
+    return [ref for ref in refs if not ref.startswith("./")]
+
+
+def test_every_third_party_action_is_pinned_to_a_full_sha():
+    """A floating tag is a second way to name an action, and it hides a stale fix.
+
+    `DevinoSolutions/artifact@v1` stayed on a commit with no retries and no
+    fallback for the `mc` binary after v1.2.1 fixed both, so every upload step
+    failed when dl.min.io began answering 410 (F-971). Pinning by SHA makes the
+    version a reviewed change instead of whatever the tag points at today.
+    """
+    floating = {
+        f"{path.name}: {ref}"
+        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for ref in _third_party_uses(path)
+        if not _FULL_SHA.match(ref.partition("@")[2])
+    }
+    assert not floating, (
+        f"these actions are not pinned to a 40-hex commit SHA: {sorted(floating)}"
+    )

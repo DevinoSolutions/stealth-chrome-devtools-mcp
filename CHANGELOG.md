@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### CI artifact steps no longer depend on the floating `DevinoSolutions/artifact@v1` tag (F-971)
+
+Every `DevinoSolutions/artifact/upload` and `download` step used the floating tag `v1`, which still pointed
+at a commit with no retries and with dl.min.io as the only source for the `mc` binary. MinIO archived the
+project and dl.min.io now answers `410 Gone` for good, so when the org mirror blipped on 2026-10-14 every
+upload step in a gate run failed with "Could not download the MinIO client: HTTP 410", though the tests
+themselves had passed. v1.2.1 retries with backoff and falls back to the GitHub release assets, checked
+against a pinned sha256; the `v1` tag was never moved to it. All 22 refs are now pinned to the v1.2.1 commit
+by full SHA like every other action here, and `test_every_third_party_action_is_pinned_to_a_full_sha` fails
+on any third-party `uses:` that is not.
+
 ## 2.1.34
 
 ### A browser that stalled after launching hung `spawn_browser()` for as long as the caller would wait (F-969)

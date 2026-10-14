@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download the gated dist artifact (no rebuild)
-        uses: DevinoSolutions/artifact/download@v1
+        uses: DevinoSolutions/artifact/download@44df16680dcb504375db03d284d75808db18e4ed # v1.2.1
         with:
           name: dist
 
