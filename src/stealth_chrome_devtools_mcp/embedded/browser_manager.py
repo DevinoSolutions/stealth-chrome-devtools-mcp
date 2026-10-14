@@ -23,6 +23,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     navigation_milestone,
     page_storage,
     process_exit,
+    spawn_budget,
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
@@ -478,6 +479,7 @@ class BrowserManager:
 
         return launch_args, browser_executable, stealth_warnings
 
+    @spawn_budget.phase("launch", "LAUNCH_BUDGET_SECONDS")
     async def _launch_browser(
         self,
         options: BrowserOptions,
@@ -485,17 +487,12 @@ class BrowserManager:
         launch_args: list[str],
         attempt: spawn_leak.Attempt,
     ) -> Browser:
-        """Start the browser and return the live ``Browser``: normally by building
-        the ``uc.Config`` here, but when this backend cannot show windows a headed
-        launch is delegated to the user's desktop and attached to (F-810). Kept
-        minimal — only the fallible starts live here — so the orchestrator captures
-        the handle immediately and can tear it down if a later phase raises. Both
-        starts below are nodriver's ``Browser.start``, so the seam goes in ahead
-        of the branch: its 2.75 s connect window is a loop count Chrome routinely
-        misses, and ours is the budget that decides (F-834 stage 2). *attempt* is
-        stamped BEFORE the fallible await and never returned, because the failure
-        it identifies the launched Chrome for is that await's (F-919); the
-        delegated branch leaves it unstamped; its own kill is best-effort (F-924)."""
+        """Start the browser and return the live ``Browser`` — nodriver's
+        ``Browser.start``, or a headed launch delegated to the user's desktop when
+        this backend cannot show windows (F-810). Only the fallible starts live
+        here, so the orchestrator holds what exists and can tear it down;
+        ``browser_connect`` goes in first (F-834 stage 2), *attempt* is stamped
+        BEFORE the fallible await (F-919, F-924) and the call is bounded (F-969)."""
         browser_connect.install()
         if not options.auto_clone:
             login_persistence.remove_saved_tabs(options.user_data_dir)
@@ -514,6 +511,7 @@ class BrowserManager:
         attempt.config = config
         return await uc.start(config=config)
 
+    @spawn_budget.phase("post-launch setup", "POST_LAUNCH_BUDGET_SECONDS")
     async def _apply_post_launch(  # noqa: PLR0913  PERMANENT(function interface)
         self,
         browser: Browser,
@@ -773,6 +771,7 @@ class BrowserManager:
 
         return instance
 
+    @spawn_budget.phase("dynamic-hook setup", "POST_LAUNCH_BUDGET_SECONDS")
     async def _setup_dynamic_hooks(self, tab: Tab, instance_id: str) -> bool:
         """Setup dynamic hook system for browser instance."""
         try:

@@ -501,8 +501,8 @@ async def reconcile_launched_browser_version(tab: Tab, executable: str) -> str |
     the pending send and degrades to ``None`` through the guard below, leaving
     the memo exactly as the pre-launch probe left it.
 
-    The unbounded awaits that FOLLOW this one in ``_apply_post_launch`` are
-    untouched here: they are pre-existing and belong to their own finding.
+    The awaits that FOLLOW this one in ``_apply_post_launch`` are bounded by the
+    phase's own budget (``spawn_budget``, F-969), not by anything here.
     """
     try:
         version = await asyncio.wait_for(
