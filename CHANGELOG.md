@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.33
 
 ### A burst of concurrent `spawn_browser()` calls froze the shared backend for ~106 s, and a proxy then killed it while it owned every chat's browser (F-967)
 
