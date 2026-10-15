@@ -9,9 +9,18 @@ at a commit with no retries and with dl.min.io as the only source for the `mc` b
 project and dl.min.io now answers `410 Gone` for good, so when the org mirror blipped on 2026-10-14 every
 upload step in a gate run failed with "Could not download the MinIO client: HTTP 410", though the tests
 themselves had passed. v1.2.1 retries with backoff and falls back to the GitHub release assets, checked
-against a pinned sha256; the `v1` tag was never moved to it. All 22 refs are now pinned to the v1.2.1 commit
+against a pinned sha256; the `v1` tag had not been moved to it (it was moved on 2026-10-14, after this change). All 22 refs are now pinned to the v1.2.1 commit
 by full SHA like every other action here, and `test_every_third_party_action_is_pinned_to_a_full_sha` fails
 on any third-party `uses:` that is not.
+
+### The hang-timeout test measured the navigate deadline from the wrong moment (F-970)
+
+`_assert_hang_times_out` in `tests/test_resilience.py` asserted that the tool waited at least its own
+`NAV_TIMEOUT_MS` before giving up, but timed that wait from the moment the fixture server saw the request,
+while the product's deadline runs from the call. On a loaded Windows runner Chrome sent the request late, the
+tool correctly timed out 4 s after the call, and the test measured 1.84 s and failed (CI run 38589181013,
+`test_load_wait_against_a_hang_times_out_with_the_pinned_message`). The lower bound is now measured from the
+call. Test-only; no product change. No other node had this shape.
 
 ## 2.1.34
 
