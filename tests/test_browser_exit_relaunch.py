@@ -16,6 +16,7 @@ directory" witness are the keyword seams the module offers.
 
 import asyncio
 import contextvars
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -90,11 +91,11 @@ def _install(manager: BrowserManager, instance_id: str, directory, **options):
     manager._instances[instance_id]["spawn_diagnostics"] = diagnostics
 
 
-def _die(manager: BrowserManager, instance_id: str) -> None:
+def _die(manager: BrowserManager, instance_id: str, returncode: int = 1) -> None:
     """The browser process is gone and nobody asked: what a crash looks like to
     ``browser_is_alive``."""
     browser = manager._instances[instance_id]["browser"]
-    browser._process = SimpleNamespace(poll=lambda: 1, returncode=1)
+    browser._process = SimpleNamespace(poll=lambda: returncode, returncode=returncode)
 
 
 class _Stage:
@@ -152,6 +153,9 @@ class _Stage:
     async def own_ok(self, _browser) -> None:
         return None
 
+    async def capture(self, **facts) -> str:
+        return "cpu(3.0s: browser=0.00s)"
+
     async def forensics(self, **facts) -> str:
         self.forensics_calls.append(facts)
         return f"uptime={facts['uptime_seconds']:.0f}s machine(chromium_processes=3)"
@@ -164,6 +168,7 @@ class _Stage:
             "own_check": self.own_ok,
             "persistent": lambda iid: iid in self.persistent,
             "forensics": self.forensics,
+            "capture": self.capture,
             "holder": lambda _dir: self.holder,
             "clock": lambda: self.now,
         }
@@ -662,3 +667,219 @@ class TestTheGateIsHeld:
         await racing
 
         assert stage.launches == []
+
+
+# ---------------------------------------------------------------------------
+# F-993: the EXIT CODE of an unexpected exit, to tell an external kill from a crash
+# ---------------------------------------------------------------------------
+
+A_PID_THAT_IS_THERE = os.getpid()
+A_PID_THAT_IS_NOT = 2**22 + 7
+
+
+def _adopt(manager: BrowserManager, instance_id: str) -> FakeBrowser:
+    """A browser this backend did not launch (F-888 re-attach): no process object,
+    only a pid."""
+    browser = manager._instances[instance_id]["browser"]
+    browser._process = None
+    browser._process_pid = A_PID_THAT_IS_THERE
+    return browser
+
+
+class TestTheExitCodeIsInTheRelaunchLine:
+    @pytest.mark.parametrize(
+        ("code", "shown"),
+        [
+            (3221225794, "exit_code=3221225794 (0xC0000142)"),
+            (1, "exit_code=1"),
+            (0, "exit_code=0"),
+            (-9, "exit_code=-9 (signal 9)"),
+        ],
+    )
+    async def test_a_launched_browser_reports_its_process_return_code(
+        self, stage, log, code, shown
+    ):
+        _die(stage.manager, FLEET_ID, returncode=code)
+
+        await stage.health().check_once()
+
+        (line,) = [w for w in log.at("warning") if "exited unexpectedly" in w]
+        assert shown in line
+        assert line.endswith("; relaunching")
+
+    async def test_the_code_is_inside_the_parenthesis_with_the_other_facts(
+        self, stage, log
+    ):
+        _die(stage.manager, FLEET_ID, returncode=7)
+
+        await stage.health().check_once()
+
+        (line,) = [w for w in log.at("warning") if "exited unexpectedly" in w]
+        assert "uptime=" in line and "; exit_code=7)" in line
+
+    async def test_the_cooldown_refusal_carries_it_too(self, stage, log):
+        health = stage.health()
+        health._last_heal[FLEET_ID] = stage.now
+        _die(stage.manager, FLEET_ID, returncode=5)
+
+        await health.check_once()
+
+        assert any("exit_code=5" in e for e in log.at("error"))
+
+    async def test_an_exit_with_no_code_to_read_says_so(self, stage, log):
+        browser = stage.manager._instances[FLEET_ID]["browser"]
+        browser._process = None
+        browser._process_pid = A_PID_THAT_IS_NOT
+
+        await stage.health().check_once()
+
+        (line,) = [w for w in log.at("warning") if "exited unexpectedly" in w]
+        assert "exit_code=unavailable (" in line
+
+
+class TestAnAdoptedBrowserIsWatchedFromTheFirstRound:
+    """A browser re-attached after a backend restart (F-888) has no process object,
+    and the default and fleet sessions are usually THAT kind. A handle held from the
+    first probe round is what keeps its exit code readable after it dies."""
+
+    @pytest.fixture()
+    def handles(self):
+        class Handles:
+            def __init__(self) -> None:
+                self.opened: list[int] = []
+                self.released: list[int] = []
+                self.read: list[tuple[object, int | None]] = []
+                self.next = 100
+
+            def hold(self, pid: int) -> int:
+                self.opened.append(pid)
+                self.next += 1
+                return self.next
+
+            def release(self, handle: int) -> None:
+                self.released.append(handle)
+
+            def status(self, browser: object, handle: int | None) -> str:
+                self.read.append((browser, handle))
+                return f"exit_code=handle-{handle}"
+
+        return Handles()
+
+    def _health(self, stage, handles, **overrides):
+        return stage.health(
+            hold_exit=handles.hold,
+            release_exit=handles.release,
+            exit_status=handles.status,
+            **overrides,
+        )
+
+    async def test_the_handle_is_taken_at_a_round_and_read_at_the_exit(
+        self, stage, handles, log
+    ):
+        browser = _adopt(stage.manager, FLEET_ID)
+        health = self._health(stage, handles)
+
+        await health.check_once()  # the browser is alive: a handle is taken
+        assert handles.opened == [A_PID_THAT_IS_THERE]
+
+        browser._process_pid = A_PID_THAT_IS_NOT  # ...and the browser dies
+        await health.check_once()
+
+        ((read_browser, read_handle),) = handles.read
+        assert read_browser is browser and read_handle == 101
+        (line,) = [w for w in log.at("warning") if "exited unexpectedly" in w]
+        assert "exit_code=handle-101" in line
+
+    async def test_the_handle_is_released_once_the_code_is_read(self, stage, handles):
+        browser = _adopt(stage.manager, FLEET_ID)
+        health = self._health(stage, handles)
+        await health.check_once()
+
+        browser._process_pid = A_PID_THAT_IS_NOT
+        await health.check_once()
+
+        assert handles.released == [101]
+
+    async def test_a_round_does_not_take_a_second_handle_for_the_same_browser(
+        self, stage, handles
+    ):
+        _adopt(stage.manager, FLEET_ID)
+        health = self._health(stage, handles)
+
+        for _ in range(3):
+            await health.check_once()
+
+        assert handles.opened == [A_PID_THAT_IS_THERE] and handles.released == []
+
+    async def test_a_new_browser_under_the_same_id_replaces_the_old_handle(
+        self, stage, handles
+    ):
+        browser = _adopt(stage.manager, FLEET_ID)
+        health = self._health(stage, handles)
+        await health.check_once()
+
+        browser._process_pid = os.getppid()  # another live process, same instance id
+        await health.check_once()
+
+        assert handles.opened == [A_PID_THAT_IS_THERE, os.getppid()]
+        assert handles.released == [101]
+
+    async def test_a_browser_that_is_closed_on_purpose_gives_its_handle_back(
+        self, stage, handles
+    ):
+        _adopt(stage.manager, FLEET_ID)
+        health = self._health(stage, handles)
+        await health.check_once()
+
+        stage.manager._instances.pop(FLEET_ID)  # close_instance popped it
+        stage.persistent.discard(FLEET_ID)
+        await health.check_once()
+
+        assert handles.released == [101]
+        assert handles.read == []  # nobody asked for a code: it was not an exit
+
+    async def test_release_all_gives_every_handle_back_at_shutdown(
+        self, stage, handles
+    ):
+        _adopt(stage.manager, FLEET_ID)
+        health = self._health(stage, handles)
+        await health.check_once()
+
+        health.release_exit_handles()
+        health.release_exit_handles()  # idempotent
+
+        assert handles.released == [101]
+
+    async def test_a_launched_browser_needs_no_handle(self, stage, handles):
+        await self._health(stage, handles).check_once()  # a FakeBrowser with _process
+
+        assert handles.opened == []
+
+    async def test_a_persistent_browser_that_is_not_a_shared_session_is_not_watched(
+        self, stage, handles, tmp_session_root
+    ):
+        work = tmp_session_root["sessions"] / "work"
+        _install(stage.manager, "i-work", work)
+        stage.persistent.add("i-work")
+        stage.manager._instances.pop(FLEET_ID)
+        stage.persistent.discard(FLEET_ID)
+        _adopt(stage.manager, "i-work")
+
+        await self._health(stage, handles).check_once()
+
+        assert handles.opened == []
+
+    async def test_a_handle_that_could_not_be_opened_is_not_fatal(self, stage, handles):
+        browser = _adopt(stage.manager, FLEET_ID)
+        health = stage.health(
+            hold_exit=lambda _pid: None,
+            release_exit=handles.release,
+            exit_status=handles.status,
+        )
+
+        await health.check_once()
+        browser._process_pid = A_PID_THAT_IS_NOT
+        await health.check_once()
+
+        assert handles.read == [(browser, None)]
+        assert [iid for _o, iid in stage.launches] == [FLEET_ID]

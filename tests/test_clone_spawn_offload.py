@@ -14,9 +14,15 @@ selection is blocked on disk or on the process table, the loop keeps turning.**
 The seams are production code patched at the module attribute —
 ``profile_copy.copy_delta`` (the copy), ``clone_storage._profile_hold`` and
 ``_profile_has_running_browser`` (the walks) — so what is measured is the real
-``resolve_profile_selection`` and not a model of it. The instrument is a ticker
-task: it asks the loop for a 10 ms nap in a loop and records the longest gap
-between two ticks, which is exactly "how long was the loop unavailable".
+``resolve_profile_selection`` and not a model of it.
+
+The instrument is a rendezvous, not a stopwatch (F-997). The stand-in for "the
+disk is slow" blocks until the event loop has turned ``TURNS_REQUIRED`` times
+while it waited. Off the loop that takes a few milliseconds; ON the loop the
+turns cannot happen, so the stand-in gives up after ``RENDEZVOUS_GRACE`` and the
+pin fails. The verdict is "did the loop turn while the work was blocked", which a
+slow runner cannot change: the first version asserted ``max gap < 0.2 s`` and a
+loaded macOS cell measured 0.28 s and 0.30 s on code that never blocked the loop.
 
 Every wait is wrapped in ``asyncio.wait_for`` with a named budget: a regression
 here must FAIL, never hang the suite (no global pytest timeout exists).
@@ -46,42 +52,72 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 #: copy is two passes, so one copy costs 2x this plus ``RETRY_SETTLE_SECONDS``.
 SLOW = 0.25
 
-#: The longest the loop may be unavailable between two ticks. An order of
-#: magnitude under one copy (~0.7 s), an order of magnitude over scheduler noise
-#: on a loaded CI runner, so neither a regression nor a busy machine decides it.
-LOOP_STALL_BUDGET = 0.2
+#: How many loop turns the stand-in for slow work waits to see before it lets go.
+TURNS_REQUIRED = 3
+
+#: How long the stand-in waits for those turns before it concludes the loop is
+#: blocked by IT. A loop that is merely busy turns long before this; one that
+#: cannot turn at all is the defect. It is paid once per failing test.
+RENDEZVOUS_GRACE = 10.0
 
 #: Hard stop for any await in this module: a hang is a failure, not a timeout.
 WAIT_BUDGET = 60.0
 
 
-class Ticker:
-    """Measures how long the event loop was unavailable."""
+class LoopWitness:
+    """Whether the event loop kept turning while slow work was blocked.
+
+    ``block()`` is the stand-in for slow disk or a slow process-table walk: it
+    holds its caller until the loop has turned ``TURNS_REQUIRED`` more times. Run
+    on a worker thread it returns after a few ms; run on the loop it cannot see a
+    single turn, times out, and is counted in ``starved``. After the first
+    timeout it returns at once, so a regression costs ``RENDEZVOUS_GRACE`` once.
+    """
 
     def __init__(self) -> None:
-        self.max_gap = 0.0
-        self.ticks = 0
+        self.blocks = 0
+        self.starved = 0
+        self._turns = 0
+        self._turned = threading.Condition()
         self._stop = False
         self._task: asyncio.Task | None = None
 
-    async def _run(self) -> None:
-        last = time.perf_counter()
-        while not self._stop:
-            await asyncio.sleep(0.01)
-            now = time.perf_counter()
-            self.max_gap = max(self.max_gap, now - last)
-            self.ticks += 1
-            last = now
+    def block(self) -> None:
+        with self._turned:
+            self.blocks += 1
+            if self.starved:
+                return
+            wanted = self._turns + TURNS_REQUIRED
+            if not self._turned.wait_for(
+                lambda: self._turns >= wanted, timeout=RENDEZVOUS_GRACE
+            ):
+                self.starved += 1
 
-    async def __aenter__(self) -> "Ticker":
+    async def _run(self) -> None:
+        while not self._stop:
+            await asyncio.sleep(0.005)
+            with self._turned:
+                self._turns += 1
+                self._turned.notify_all()
+
+    async def __aenter__(self) -> "LoopWitness":
         self._task = asyncio.ensure_future(self._run())
-        await asyncio.sleep(0.05)  # let it take its first measurements
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
         self._stop = True
         assert self._task is not None
         await self._task
+
+    def assert_loop_stayed_free(self, what: str) -> None:
+        assert self.blocks, (
+            f"the slow stand-in never ran: nothing was measured ({what})"
+        )
+        assert not self.starved, (
+            f"the event loop could not turn while {what} was blocked (waited "
+            f"{RENDEZVOUS_GRACE:.0f}s for {TURNS_REQUIRED} turns) — it ran on the "
+            "loop (F-967)"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -101,10 +137,17 @@ def _hermetic(monkeypatch):
 
 
 class SlowCopy:
-    """``profile_copy.copy_delta`` made slow, and a witness to who ran it."""
+    """``profile_copy.copy_delta`` made slow, and a witness to who ran it.
 
-    def __init__(self, monkeypatch, *, delay: float = SLOW) -> None:
+    Slow is ``delay`` seconds by default; with a ``witness`` it is "until the loop
+    has turned" instead (:class:`LoopWitness`), which is what the loop pins use.
+    """
+
+    def __init__(
+        self, monkeypatch, *, delay: float = SLOW, witness: LoopWitness | None = None
+    ) -> None:
         self.delay = delay
+        self.witness = witness
         self.started = threading.Event()
         self.finished = threading.Event()
         self.threads: set[int] = set()
@@ -127,7 +170,11 @@ class SlowCopy:
             self.correlation.append(logging_setup.correlation_id_var.get())
         self.started.set()
         try:
-            time.sleep(self.delay)  # blocking, exactly like the disk is
+            # Blocking, exactly like the disk is.
+            if self.witness is not None:
+                self.witness.block()
+            else:
+                time.sleep(self.delay)
             self._real(source, target)
         finally:
             with self._lock:
@@ -148,16 +195,13 @@ async def test_concurrent_clone_spawns_keep_the_loop_turning(
     tmp_session_root, monkeypatch
 ):
     """THE defect: four concurrent unnamed spawns, each copying slowly. On the
-    loop that is four ~0.7 s freezes; off it, the loop never notices."""
-    copy = SlowCopy(monkeypatch)
-    async with Ticker() as ticker:
+    loop that is four freezes; off it, the loop never notices."""
+    async with LoopWitness() as witness:
+        copy = SlowCopy(monkeypatch, witness=witness)
         selections = await _resolve_many(4)
 
-    assert ticker.max_gap < LOOP_STALL_BUDGET, (
-        f"the event loop was unavailable for {ticker.max_gap:.2f}s while four "
-        f"clones were copied (budget {LOOP_STALL_BUDGET}s) — the copy ran on it (F-967)"
-    )
-    assert ticker.ticks > 10, "the ticker never got to run"
+    witness.assert_loop_stayed_free("four clones were copied")
+    assert witness.blocks >= 4, "every clone's copy should have been measured"
     assert threading.get_ident() not in copy.threads, "the copy ran on the loop"
     # What the offload must not change: four distinct, reserved, marked clones.
     dirs = {s["user_data_dir"] for s in selections}
@@ -207,22 +251,20 @@ async def test_a_slow_process_table_walk_does_not_freeze_the_loop(
     """The walks are the other cost: every unnamed spawn asks who holds master,
     and with 80-200 chrome.exe that is a `cmdline()` read per process."""
 
-    def slow_walk(directory):
-        time.sleep(0.4)
+    async with LoopWitness() as witness:
 
-    monkeypatch.setattr(clone_storage, "_profile_hold", slow_walk)
-    monkeypatch.setattr(
-        clone_storage,
-        "_profile_has_running_browser",
-        lambda directory: bool(slow_walk(directory)),
-    )
-    async with Ticker() as ticker:
+        def slow_walk(directory):
+            witness.block()
+
+        monkeypatch.setattr(clone_storage, "_profile_hold", slow_walk)
+        monkeypatch.setattr(
+            clone_storage,
+            "_profile_has_running_browser",
+            lambda directory: bool(slow_walk(directory)),
+        )
         await _resolve_many(3)
 
-    assert ticker.max_gap < LOOP_STALL_BUDGET, (
-        f"the loop was unavailable for {ticker.max_gap:.2f}s inside a process-table "
-        "walk (F-967)"
-    )
+    witness.assert_loop_stayed_free("a process-table walk")
 
 
 async def test_a_named_session_copy_keeps_the_loop_turning(
@@ -230,19 +272,16 @@ async def test_a_named_session_copy_keeps_the_loop_turning(
 ):
     """The explicit branch copies too: a NEW named session is created from the
     seed, on the loop until F-967."""
-    SlowCopy(monkeypatch)
     landed = clone_storage.require_allowed_user_data_dir("f967-named")
-    async with Ticker() as ticker:
+    async with LoopWitness() as witness:
+        SlowCopy(monkeypatch, witness=witness)
         selection = await asyncio.wait_for(
             clone_storage.resolve_profile_selection(landed), WAIT_BUDGET
         )
 
     assert selection["profile_role"] == "explicit"
     assert (Path(selection["user_data_dir"]) / profile_seed.MARKER_NAME).is_file()
-    assert ticker.max_gap < LOOP_STALL_BUDGET, (
-        f"the loop was unavailable for {ticker.max_gap:.2f}s while a named session "
-        "was copied (F-967)"
-    )
+    witness.assert_loop_stayed_free("a named session was copied")
 
 
 async def test_the_shared_session_open_keeps_the_loop_turning(
@@ -250,28 +289,21 @@ async def test_the_shared_session_open_keeps_the_loop_turning(
 ):
     """``session="default"`` freshens the seed from master before it opens it
     (`before-default-open`), a whole-profile copy, and asks who holds master."""
-    SlowCopy(monkeypatch)
     landed = clone_storage.require_allowed_user_data_dir(None, "default")
-    async with Ticker() as ticker:
+    async with LoopWitness() as witness:
+        SlowCopy(monkeypatch, witness=witness)
         selection = await asyncio.wait_for(
             clone_storage.resolve_profile_selection(landed), WAIT_BUDGET
         )
 
     assert selection["profile_role"] == profile_seed.DEFAULT_SESSION
     assert selection["seed_refreshed"] is True, "the freshen did not run"
-    assert ticker.max_gap < LOOP_STALL_BUDGET, (
-        f"the loop was unavailable for {ticker.max_gap:.2f}s while the seed was "
-        "freshened (F-967)"
-    )
+    witness.assert_loop_stayed_free("the seed was freshened")
 
 
 async def test_a_retry_selection_keeps_the_loop_turning(tmp_session_root, monkeypatch):
     """F-834's retry asks who holds the directory the failed attempt drove, and a
     clone-role retry re-clones: same cost, same rule, both doors."""
-    SlowCopy(monkeypatch)
-    monkeypatch.setattr(
-        clone_storage, "_profile_hold", lambda directory: time.sleep(0.4)
-    )
     shared = {
         "user_data_dir": str(clone_storage.master_profile_dir()),
         "profile_role": profile_seed.DEFAULT_SESSION,
@@ -280,7 +312,11 @@ async def test_a_retry_selection_keeps_the_loop_turning(tmp_session_root, monkey
         "user_data_dir": str(tmp_session_root["sessions"] / "failed-attempt"),
         "profile_role": "clone",
     }
-    async with Ticker() as ticker:
+    async with LoopWitness() as witness:
+        SlowCopy(monkeypatch, witness=witness)
+        monkeypatch.setattr(
+            clone_storage, "_profile_hold", lambda directory: witness.block()
+        )
         retried_shared = await asyncio.wait_for(
             clone_storage._fallback_profile_selection(shared, 0), WAIT_BUDGET
         )
@@ -290,10 +326,8 @@ async def test_a_retry_selection_keeps_the_loop_turning(tmp_session_root, monkey
 
     assert retried_shared is not None and retried_clone is not None
     assert retried_clone["profile_role"] == "clone"
-    assert ticker.max_gap < LOOP_STALL_BUDGET, (
-        f"the loop was unavailable for {ticker.max_gap:.2f}s inside a retry selection "
-        "(F-967)"
-    )
+    witness.assert_loop_stayed_free("a retry selection")
+    assert witness.blocks >= 2, "both the hold walk and the re-clone's copy count"
 
 
 async def test_copies_are_parallel_but_bounded(tmp_session_root, monkeypatch):

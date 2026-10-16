@@ -18,6 +18,74 @@ that tab first, which is the state the close wanted. The six-browser fleet test 
 unrepaired fault and failed on it in CI run 38919791742. A `ProtocolException` saying `No target with given id`
 is now treated as closed and logged at debug level; every other failure in that loop still warns.
 
+### Two timing pins no longer decide on the runner's clock (F-997)
+
+`test_a_retry_selection_keeps_the_loop_turning` (F-967) asserted that the event loop's longest gap stayed under 0.2 s and failed on a loaded macOS cell at 0.28 s and 0.30 s on code that never blocked the loop; `test_a_healthy_spawn_is_not_cut_off` (F-969) ran a healthy spawn under 0.3 s phase budgets and failed on Windows py3.11 with "stalled in the post-launch setup stage" (its sibling failed the same way on release/2.1.34). The loop pins now block the stand-in for slow disk until the loop has turned three times and fail only if it cannot (a verdict a slow runner cannot change), and the spawn pins give every phase a test does not stall an ample 20 s budget, so only the phase under test can time out. Test-only; both still fail against the defects they guard (blocking work back on the loop; no bound, a wrong budget, a zero budget).
+
+### `set_cookie` without a `url` read a cached page address, and the settings-page bound was too short for a loaded machine (F-995)
+
+`release-gate / integration (macOS/ARM64)` went red on `main` and on pull requests from 2026-10-16 04:55Z: 5 of
+the 8 runs on the macOS image that ships Chrome 155 (20261012.601, first seen 04:28Z) failed, while the runs
+sampled on the earlier image (20260828.587, Chrome 152) all passed. Two independent causes, told apart by the
+runner's core count.
+
+`set_cookie` with neither `url` nor `domain` took the cookie's url from `tab.url`, nodriver's cached
+`TargetInfo`, which is only as fresh as the last `Target.targetInfoChanged` event. Right after a `navigate` it
+could still be `about:blank`, and Chrome refused the cookie: "URL must have scheme http or https [code: -32602]".
+It now asks Chrome (`Target.getTargets`, through `tab_identity.refreshed`, the same read `get_active_tab` and
+`list_instances` use), bounded by the usual CDP budget, and only when the caller gave neither `url` nor
+`domain`. The failing nodes (runs 38882922648 and 38890560391, `tests/test_e2e_cookie_listener.py`) left their
+browsers open, which turned one failure into three: the fleet node's `list_instances` timed out on those two
+browsers, and the re-attach node found them in the pid record (their `create_time`, 10:59:21Z, is the cookie
+nodes' own failure time). The cookie nodes' setup now closes its browser when it fails.
+
+`login_persistence.PREF_TIMEOUT_SECONDS` was 8 s. On the 3-vCPU macOS cell, with three named spawns in flight at
+once, one or two of them overran it in each of runs 38853069247, 38897999560 and 38898031227, so the spawn logged
+"setting session.restore_on_startup took over 8.0s" and that named session's session cookies would not survive
+its close; the same wave on the 5-vCPU cell finished in 7.7 s with no overrun, so the exchange is slow under
+contention, not hung. The bound is now 20 s, and it is ONE deadline for the exchange and the close of its tab
+together (the exchange gets 85 % of it, the close the rest; after a timed-out exchange the close is given exactly that held-back share rather than a figure read off the clock, which on Windows ticks in 15.6 ms steps and let a stuck pair overrun), so a stuck exchange followed by a stuck close costs
+20 s and not 40 inside the 60 s post-launch phase it shares with the rotation guard, the version reconcile, the tab
+overrides and window sizing; a test reads the timeouts handed to `wait_for` and holds the sum. No 3-vCPU timing of
+the exchange exists behind the number, so the timeout warning now names the stage it stalled in (opening the tab,
+loading `chrome://settings`, waiting for the bindings, reading, writing, re-reading), and the next overrun says
+where.
+
+### A frozen long-lived browser is now captured before the heal kills it (F-993)
+
+The six hard freezes of `default` and `fleet` (2026-10-11..13: `/json` answering, `Runtime.evaluate` dead in
+every tab, sometimes a force kill that did not end the process for seconds) are still unexplained, because
+everything the sampler keeps (threads, handles, GDI, RSS) stayed flat across the onset and the heal destroyed
+the process before anyone could look at it. At the FIRST failed probe of an incident, before anything is closed
+or killed, `browser_health` now starts a capture as a task beside the loop (the first-miss WARNING says
+`evidence@probe1(capturing)`; the round, and the two-minute spacing of the heal, are not delayed, and two
+browsers frozen together are captured together). The record arrives on its own WARNING and on the `healing it`
+ERROR line that reaches Sentry, labelled `evidence@probe1(...)` because it is about two minutes older than the
+heal: the CPU-time delta of the browser and its renderers over 3 s (spinning or blocked), `psutil` status, thread
+count and priority class, whether `Browser.getVersion` answers a FRESH connection within 5 s, and the timing of
+each probe step (`createTarget=..ms attachToTarget=..ms`). Counts only; no URL, title or cookie. Just before the
+heal the loop waits for it for at most 10 s, so it normally lands before the kill and never holds the heal longer.
+On Windows it also writes a **minidump** of the browser process to `<log dir>/freeze-dumps/` through
+`MiniDumpWriteDump` (`dbghelp.dll`, ctypes), so the UI thread's stack and the handles it waits on can be read in
+WinDbg after the fact. The type is thread stacks + handle data + thread info + process thread data + unloaded
+modules + memory info and **no heap** (1.4-1.6 MB measured on a fresh Chrome, against ~600 MB for the full-memory
+dump `rundll32 comsvcs.dll, MiniDump` always writes, which Defender also blocks). It runs on its own thread under a
+45 s budget so a stuck write cannot hold the health loop; two dumps asked together are written one behind the
+other instead of the second being skipped; never below 2 GB free. The dump of an incident that **reaches the
+heal** is renamed `...-healed.dmp` and kept ahead of benign ones: rotation evicts unhealed dumps first and keeps
+2 healed plus 1 unhealed, and a browser that is slow but alive takes at most one unhealed dump per 30 minutes (a
+dump it was refused is taken at the heal if the incident then heals). A pid is opened only after its start time
+matches the registry record, so a reused pid is never dumped; a failure, a skip (`skipped: platform` off Windows)
+or a late write is words in the record, never an exception. `STEALTH_MCP_LOG_DIR` relocates the dumps with the
+logs, so it must not point at a synced or shared folder. Thresholds, order and the heal are unchanged.
+
+A shared-session browser that **exited** (F-964) now has its exit code in the relaunch line
+(`exited unexpectedly (...; exit_code=15)`), which separates an outside `TerminateProcess` (1, 15), a crash
+(`0xC0000005`) and an initialisation failure (`0xC0000142`): nodriver's process object for a browser this
+backend launched, and for one it re-attached after a restart (which `default` and `fleet` usually are, and which
+has no process object) a Windows handle held since the first probe round, since Windows keeps an exit code only
+while a handle is open. See the RUNBOOK section on F-963 for reading the record.
+
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
 `filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller
