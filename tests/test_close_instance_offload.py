@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import psutil
 import pytest
+from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded import process_exit
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -296,6 +297,74 @@ async def test_close_instance_bounds_hung_tab_close():
     # Phase-2 bounded the hung tab close at ~2s; without the fix it would run
     # until the outer guard cancels at 15s (raising TimeoutError above instead).
     assert elapsed < 10.0, f"close_instance took {elapsed:.1f}s — tab close unbounded"
+
+
+def _tab_close_warnings(since: int, instance_id: str) -> list[str]:
+    return [
+        w["message"]
+        for w in debug_logger._warnings[since:]
+        if f"Failed to close tab for {instance_id}" in w["message"]
+    ]
+
+
+async def _close_with_tab_send_failing(instance_id: str, error: Exception):
+    """close_instance on an instance whose one tab's CDP close raises ``error``."""
+    manager = BrowserManager()
+    browser, _instance = _seed_manager(manager, instance_id)
+    browser.tabs = [SimpleNamespace(target=SimpleNamespace(target_id="T-1"))]
+
+    async def _send(*_a, **_kw):
+        raise error
+
+    browser.connection.send = _send
+    before = len(debug_logger._warnings)
+    assert await manager.close_instance(instance_id) is True
+    return _tab_close_warnings(before, instance_id)
+
+
+@pytest.mark.asyncio
+async def test_a_tab_chrome_already_dropped_is_closed_not_a_warning():
+    """F-996: ``Target.closeTarget`` on a tab Chrome already dropped answers
+    ``No target with given id found [code: -32602]``. That is the state the
+    close wanted, so it is not a WARNING (CI run 38919791742 counted it as a
+    fault and failed the six-browser fleet test). The exception is built by
+    nodriver's own constructor from the CDP error object, as the listener does.
+    """
+    gone = ProtocolException(
+        {"code": -32602, "message": "No target with given id found"}
+    )
+    assert str(gone) == "No target with given id found [code: -32602]"
+
+    assert await _close_with_tab_send_failing("gone-tab-1", gone) == []
+
+
+@pytest.mark.asyncio
+async def test_the_gone_tab_answer_is_recognised_without_its_code():
+    """F-996: the same CDP failure also reaches us with no code at all (F-828
+    saw that for a stale node), so the wording is what is matched."""
+    gone = ProtocolException({"message": "No target with given id found"})
+
+    assert await _close_with_tab_send_failing("gone-tab-2", gone) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Same code, a different refusal: still a fault worth a warning.
+        ProtocolException({"code": -32602, "message": "Invalid parameters"}),
+        ProtocolException({"code": -32000, "message": "Target closed"}),
+        RuntimeError("connection reset"),
+    ],
+    ids=["same-code-other-message", "other-protocol-failure", "not-protocol"],
+)
+async def test_any_other_tab_close_failure_still_warns(error):
+    """F-996 control: only the gone-tab answer is absorbed; every other failure
+    in the tab-close loop still logs the WARNING it logged before."""
+    warnings = await _close_with_tab_send_failing("other-tab-1", error)
+
+    assert len(warnings) == 1, warnings
+    assert str(error) in warnings[0]
 
 
 @pytest.mark.asyncio
