@@ -167,17 +167,22 @@ def _stealth_blocked_args() -> dict:
     }
 
 
-# F-992: ``--enable-blink-features`` takes a LIST, so ``AutomationControlled`` is
-# matched as a list ENTRY, not as a prefix of the whole argument: a prefix match let
-# ``=Foo,AutomationControlled`` through (Chrome then exposes navigator.webdriver) and
-# dropped ``=AutomationControlled,Foo`` whole, taking the caller's ``Foo`` with it.
+# F-992: ``--enable-blink-features`` takes a COMMA-separated list, so
+# ``AutomationControlled`` is matched as a list ENTRY, not as a prefix of the whole
+# argument: a prefix match let ``=Foo,AutomationControlled`` through (Chrome then
+# exposes navigator.webdriver) and dropped ``=AutomationControlled,Foo`` whole, taking
+# the caller's ``Foo`` with it. The split is Chrome's own (``FeaturesFromSwitch``:
+# split on "," only, each entry trimmed): ``;`` and inner spaces are part of a name,
+# so ``Foo;AutomationControlled`` is one unknown name to Chrome and is left alone.
+# Surviving entries are kept verbatim and in order, under the caller's own spelling of
+# the switch (Chrome's argv scan is case-sensitive, so re-casing it would change
+# whether the kept features are applied at all).
 # ``--disable-blink-features=AutomationControlled`` is deliberately NOT stripped: it is
 # the caller's explicit choice and makes navigator.webdriver false, even though the
 # flag is itself a detectable one.
 _ENABLE_BLINK_FEATURES = "--enable-blink-features="
 _BLOCKED_BLINK_FEATURES = {"AutomationControlled": "explicit automation marker"}
 _BLOCKED_BLINK_FEATURES_LOWER = {n.lower(): n for n in _BLOCKED_BLINK_FEATURES}
-_BLINK_FEATURE_SEPARATORS = re.compile(r"[,;\s]+")
 
 
 def _strip_blocked_blink_features(
@@ -187,24 +192,27 @@ def _strip_blocked_blink_features(
 
     Returns ``(kept_arg, reason, removed)``: ``reason`` is None when the argument is
     not a feature list or lists nothing blocked (``kept_arg`` is then ``arg``
-    unchanged); otherwise ``kept_arg`` is the list without the blocked entries, or
-    None when nothing else was listed, and ``removed`` names (canonically cased)
-    what was taken out. Entries are split on ``,``/``;``/whitespace and the kept
-    ones are rejoined with ``,``.
+    unchanged); otherwise ``kept_arg`` is the argument, in the caller's spelling of
+    the switch, with the blocked entries removed, or None when nothing else was
+    listed, and ``removed`` names (canonically cased) what was taken out. Entries
+    are split on ``,`` only and compared trimmed and case-insensitively.
     """
-    if not arg.strip().lower().startswith(_ENABLE_BLINK_FEATURES):
+    text = arg.strip()
+    if not text.lower().startswith(_ENABLE_BLINK_FEATURES):
         return arg, None, []
-    value = arg.strip()[len(_ENABLE_BLINK_FEATURES) :]
-    entries = [e for e in _BLINK_FEATURE_SEPARATORS.split(value) if e]
+    name_and_eq = text[: len(_ENABLE_BLINK_FEATURES)]
+    entries = text[len(_ENABLE_BLINK_FEATURES) :].split(",")
     removed = [
-        _BLOCKED_BLINK_FEATURES_LOWER[e.lower()]
+        _BLOCKED_BLINK_FEATURES_LOWER[e.strip().lower()]
         for e in entries
-        if e.lower() in _BLOCKED_BLINK_FEATURES_LOWER
+        if e.strip().lower() in _BLOCKED_BLINK_FEATURES_LOWER
     ]
     if not removed:
         return arg, None, []
-    kept = [e for e in entries if e.lower() not in _BLOCKED_BLINK_FEATURES_LOWER]
-    kept_arg = _ENABLE_BLINK_FEATURES + ",".join(kept) if kept else None
+    kept = [
+        e for e in entries if e.strip().lower() not in _BLOCKED_BLINK_FEATURES_LOWER
+    ]
+    kept_arg = name_and_eq + ",".join(kept) if any(e.strip() for e in kept) else None
     return kept_arg, _BLOCKED_BLINK_FEATURES[removed[0]], list(dict.fromkeys(removed))
 
 

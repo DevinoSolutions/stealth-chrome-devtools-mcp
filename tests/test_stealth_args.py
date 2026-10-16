@@ -214,9 +214,21 @@ class TestFilterStealthArgs:
                 "--enable-blink-features=Foo, automationcontrolled ,Bar",
                 "--enable-blink-features=Foo,Bar",
             ),
+            # Chrome splits on "," only: ";" is part of a (single, unknown) name.
+            (
+                "--enable-blink-features=Foo;Bar,AutomationControlled",
+                "--enable-blink-features=Foo;Bar",
+            ),
+            # The caller's own spelling of the switch is kept: Chrome's argv scan is
+            # case-sensitive, so re-emitting it lowercase would ACTIVATE the features.
             (
                 "--ENABLE-BLINK-FEATURES=Foo,AUTOMATIONCONTROLLED",
-                "--enable-blink-features=Foo",
+                "--ENABLE-BLINK-FEATURES=Foo",
+            ),
+            # Surviving entries are kept verbatim, in order.
+            (
+                "--enable-blink-features=Foo Bar,AutomationControlled, Baz",
+                "--enable-blink-features=Foo Bar, Baz",
             ),
         ],
     )
@@ -247,6 +259,9 @@ class TestFilterStealthArgs:
         args = [
             "--enable-blink-features=Foo,Bar",
             "--enable-blink-features=AutomationControlledSomethingElse",
+            # ";" does not separate: Chrome sees one unknown name, so nothing is blocked.
+            "--enable-blink-features=Foo;AutomationControlled",
+            "--enable-blink-features=Foo AutomationControlled",
         ]
         clean, warnings = filter_stealth_args(args)
         assert clean == args
@@ -254,7 +269,8 @@ class TestFilterStealthArgs:
 
     def test_disable_blink_features_automation_controlled_is_deliberately_kept(self):
         # A caller's explicit choice (it makes navigator.webdriver false), even
-        # though the flag is itself detectable. Not stripped; see the module docstring.
+        # though the flag is itself detectable. Not stripped; see the F-992 comment block above
+        # _ENABLE_BLINK_FEATURES in platform_utils.py.
         arg = "--disable-blink-features=AutomationControlled"
         clean, warnings = filter_stealth_args([arg])
         assert clean == [arg]
