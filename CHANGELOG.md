@@ -24,7 +24,7 @@ once, one or two of them overran it in each of runs 38853069247, 38897999560 and
 "setting session.restore_on_startup took over 8.0s" and that named session's session cookies would not survive
 its close; the same wave on the 5-vCPU cell finished in 7.7 s with no overrun, so the exchange is slow under
 contention, not hung. The bound is now 20 s, and it is ONE deadline for the exchange and the close of its tab
-together (the exchange gets 85 % of it, the close the rest), so a stuck exchange followed by a stuck close costs
+together (the exchange gets 85 % of it, the close the rest; after a timed-out exchange the close is given exactly that held-back share rather than a figure read off the clock, which on Windows ticks in 15.6 ms steps and let a stuck pair overrun), so a stuck exchange followed by a stuck close costs
 20 s and not 40 inside the 60 s post-launch phase it shares with the rotation guard, the version reconcile, the tab
 overrides and window sizing; a test reads the timeouts handed to `wait_for` and holds the sum. No 3-vCPU timing of
 the exchange exists behind the number, so the timeout warning now names the stage it stalled in (opening the tab,

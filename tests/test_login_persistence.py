@@ -12,6 +12,7 @@ behavior against a real Chrome is ``tests/test_e2e_login_persistence.py``.
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import nodriver as uc
 import pytest
@@ -313,8 +314,15 @@ class TestSessionRestoreBounded:
         """The exchange never answers AND the tab will not close: the two waits
         together may not exceed ``PREF_TIMEOUT_SECONDS``. Read from the timeouts
         the code hands ``wait_for`` rather than from a wall clock, so a loaded
-        runner cannot move it."""
-        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.2)
+        runner cannot move it.
+
+        The loop's clock is replaced by one that reads a Windows tick (15.6 ms)
+        LOW once the exchange has been cut off — what ``loop.time()`` really does
+        there (CI run 38909588568: granted ``[0.17, 0.044]`` against a 0.2
+        bound). A close bound read off that clock overruns; one that is the
+        held-back share by construction does not, on any platform."""
+        pref = 0.2
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", pref)
         granted: list[float] = []
         real_wait_for = asyncio.wait_for
 
@@ -322,7 +330,27 @@ class TestSessionRestoreBounded:
             granted.append(timeout)
             return await real_wait_for(awaitable, timeout)
 
-        monkeypatch.setattr(login_persistence.asyncio, "wait_for", spy)
+        class LaggingClock:
+            """The first read is the start; every later one is a tick short of
+            the exchange's whole bound."""
+
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def time(self) -> float:
+                self.reads += 1
+                if self.reads == 1:
+                    return 1000.0
+                return 1000.0 + pref * (1 - login_persistence.TAB_CLOSE_SHARE) - 0.0156
+
+        clock = LaggingClock()
+        monkeypatch.setattr(
+            login_persistence,
+            "asyncio",
+            SimpleNamespace(
+                sleep=asyncio.sleep, wait_for=spy, get_running_loop=lambda: clock
+            ),
+        )
 
         class Stuck(FakeTab):
             async def evaluate(self, script, await_promise=False):
@@ -338,7 +366,8 @@ class TestSessionRestoreBounded:
             is False
         )
         assert len(granted) == 2, granted
-        assert sum(granted) <= 0.2 + 1e-9, granted
+        # Float epsilon only: 0.17 + 0.03 is not exactly 0.2 in binary.
+        assert sum(granted) <= pref + 1e-9, granted
 
     @pytest.mark.parametrize(
         ("browser_factory", "stage"),

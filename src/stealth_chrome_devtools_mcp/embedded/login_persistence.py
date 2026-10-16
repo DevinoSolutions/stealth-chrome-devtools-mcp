@@ -127,18 +127,20 @@ RESTORE_CONTINUE = 1
 #: Upper bound on the whole settings-page exchange. ``chrome://settings`` is the
 #: slowest page a spawn touches; a hang here must cost seconds, not the spawn.
 #:
-#: Sized for a machine with no cores to spare, because a timeout here is not
-#: free: the pref stays unset and a named session's session cookies do not
-#: survive its close (F-995). Measured on the 3-vCPU macOS gate cell, three named
-#: spawns in flight at once, Chrome 155: one or two of the three overran 8 s on
-#: each of runs 38853069247, 38897999560 and 38898031227, while the same spawns
-#: on the 5-vCPU cell (runs 38882922648, 38890560391) finished the whole wave
-#: in 7.7 s, none overrunning — so the exchange is slow under contention, not
-#: hung, and a longer bound is what lets it finish. It is ONE deadline for the
-#: exchange and the close of its tab together, so the worst this module costs
-#: the spawn's post-launch phase (``spawn_budget.POST_LAUNCH_BUDGET_SECONDS``,
-#: shared with the rotation guard, the version reconcile, the tab overrides and
-#: window sizing) is this number, not twice it.
+#: 20 s, and there is NO 3-vCPU measurement of the exchange behind it. What is
+#: known (F-995): on the 3-vCPU macOS gate cell, three named spawns in flight at
+#: once, Chrome 155, one or two of the three overran the previous 8 s in each of
+#: runs 38853069247, 38897999560 and 38898031227, while the same spawns on the
+#: 5-vCPU cell (runs 38882922648, 38890560391) finished the whole wave in 7.7 s,
+#: none overrunning — so the exchange is slow under contention rather than hung.
+#: How slow is not known; if the warning below still fires, READ THE STAGE IT
+#: NAMES (it says which await stalled) before moving this number. A timeout is
+#: not free: the pref stays unset and a named session's session cookies do not
+#: survive its close. It is ONE deadline for the exchange and the close of its
+#: tab together, so the worst this module costs the spawn's post-launch phase
+#: (``spawn_budget.POST_LAUNCH_BUDGET_SECONDS``, shared with the rotation guard,
+#: the version reconcile, the tab overrides and window sizing) is this number,
+#: not twice it.
 PREF_TIMEOUT_SECONDS = 20.0
 
 #: The fraction of ``PREF_TIMEOUT_SECONDS`` held back for closing the settings
@@ -319,11 +321,13 @@ async def ensure_session_restore(browser: Browser) -> bool:
     deadline = loop.time() + PREF_TIMEOUT_SECONDS
     close_share = PREF_TIMEOUT_SECONDS * TAB_CLOSE_SHARE
     exchange_bound = PREF_TIMEOUT_SECONDS - close_share
+    timed_out = False
     try:
         return await asyncio.wait_for(
             _set_restore_pref(browser, tab_box, stage), exchange_bound
         )
     except TimeoutError:
+        timed_out = True
         where = stage[-1] if stage else "starting"
         debug_logger.log_warning(
             "login_persistence",
@@ -339,40 +343,17 @@ async def ensure_session_restore(browser: Browser) -> bool:
         )
     finally:
         for tab in tab_box:
-            # Never less than the held-back share: a timer that fires late must
-            # not leave a bound of zero, which ``wait_for`` would refuse to try.
-            close_bound = max(deadline - loop.time(), close_share)
+            # An exchange that ran out of time has spent exactly its own bound,
+            # so what is left IS the held-back share: stated, not read off a
+            # clock that can tick a whole quantum late (Windows' is ~15.6 ms,
+            # which made a stuck pair overrun the deadline). An exchange that
+            # ended early leaves the rest of the deadline, never less than the
+            # share, because ``wait_for`` refuses to try a bound of zero.
+            close_bound = (
+                close_share if timed_out else max(deadline - loop.time(), close_share)
+            )
             try:
                 await asyncio.wait_for(tab.close(), close_bound)
-            except Exception as err:  # noqa: BLE001  PERMANENT(F-937): a tab that will not close is a warning
-                debug_logger.log_warning(
-                    "login_persistence",
-                    "ensure_session_restore",
-                    f"could not close the settings tab: {err!r}",
-                )
-    return False
-    tab_box: list[SettingsTab] = []
-    try:
-        return await asyncio.wait_for(
-            _set_restore_pref(browser, tab_box), PREF_TIMEOUT_SECONDS
-        )
-    except TimeoutError:
-        debug_logger.log_warning(
-            "login_persistence",
-            "ensure_session_restore",
-            f"setting {RESTORE_PREF} took over {PREF_TIMEOUT_SECONDS}s; "
-            "session cookies may not survive a close",
-        )
-    except Exception as err:  # noqa: BLE001  PERMANENT(F-937): any CDP failure is a warning, never a failed spawn
-        debug_logger.log_warning(
-            "login_persistence",
-            "ensure_session_restore",
-            f"could not set {RESTORE_PREF}: {err}",
-        )
-    finally:
-        for tab in tab_box:
-            try:
-                await asyncio.wait_for(tab.close(), PREF_TIMEOUT_SECONDS)
             except Exception as err:  # noqa: BLE001  PERMANENT(F-937): a tab that will not close is a warning
                 debug_logger.log_warning(
                     "login_persistence",
