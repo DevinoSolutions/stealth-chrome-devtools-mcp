@@ -305,9 +305,12 @@ def _this_host() -> str:
 
 def _pid_alive(pid: int) -> bool:
     """Whether *pid* is running. A pid we cannot ask about counts as alive:
-    the profile is then not SHOWN free, which is the survivable answer."""
+    the profile is then not SHOWN free, which is the survivable answer. A process
+    that has EXITED is not running (F-998), though it is still listed: it is the
+    lock's owner in the window between a browser's death and its reaping, and
+    reading it as a holder walked a relaunch of ``fleet`` to ``fleet-2``."""
     try:
-        return psutil.pid_exists(pid)
+        return psutil.pid_exists(pid) and not browser_cmdline.has_exited(pid)
     except (psutil.Error, OSError) as error:
         debug_logger.log_warning(
             "profile_lock",

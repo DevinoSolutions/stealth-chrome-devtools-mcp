@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### A relaunch of `fleet` right after its browser was killed walked to `fleet-2` (F-998)
+
+`spawn_browser(session="fleet")` is meant to come back on the same directory after the browser is closed or
+killed, and never to walk to `<name>-2`. When the Chrome process was SIGKILLed and the spawn arrived before
+the kernel and this backend had finished with it, the spawn answered `fleet-2`, seeded from the dead browser,
+with `cookie_handoff_error: "the source browser is no longer driven by this backend"`: the session name was
+substituted and the login lost. A killed browser is first tearing down (it has released its memory, so its
+command line already reads empty, and its state is still running) and then a zombie until its parent collects
+it, and `psutil.pid_exists` is True throughout. In that window the `SingletonLock` naming its pid read as a live
+holder (`profile_lock._pid_alive`), while the backend's own view of the instance (asyncio's `returncode`) still
+said alive. "Held, and we drive the holder" is the rule that walks and hands over the jar, so it walked, and the
+hand-off then found nothing to read from. Chromium itself treats a lock whose owner cannot answer as orphaned;
+a process that has exited, in either state, is now read the same way, by one witness
+(`browser_cmdline.has_exited`) shared by `profile_lock._pid_alive` and `browser_cmdline._still_running`.
+The relaunch lands on `fleet` itself, with the login on disk. Seen in 2 of the last 40 Linux transport CI runs
+(`test_the_fleet_comes_back_after_every_way_of_losing_it`); reproduced on real Chromium under CPU contention,
+and pinned hermetically with a real zombie (`tests/test_fleet_relaunch.py`).
+
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
 `filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller

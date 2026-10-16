@@ -33,7 +33,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from fakes import FakeBrowserManager, held_profile, write_singleton
+from fakes import FakeBrowserManager, a_zombie, held_profile, write_singleton
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     clone_storage,
@@ -147,6 +147,87 @@ class TestProfileHold:
     def test_lock_naming_a_dead_pid_is_not_a_hold(self, tmp_path):
         write_singleton(tmp_path, f"{socket.gethostname()}-{dead_pid()}")
         assert profile_lock.profile_hold(tmp_path, no_pids) is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows has no zombies and no lock")
+    def test_lock_naming_a_zombie_is_not_a_hold(self, tmp_path):
+        """F-998. The owner of a SIGKILLed browser's lock is a zombie until its
+        parent reaps it; ``pid_exists`` is True for it, and Chromium's own answer
+        for a lock whose owner cannot answer is orphaned. A real zombie."""
+        with a_zombie() as pid:
+            assert psutil.pid_exists(pid), "the premise: the pid is still listed"
+            write_singleton(tmp_path, f"{socket.gethostname()}-{pid}")
+            assert profile_lock.profile_hold(tmp_path, no_pids) is None
+
+    @staticmethod
+    def _psutil_says(monkeypatch, *, status, cmdline):
+        """A pid that ``pid_exists`` lists and whose ``status``/``cmdline`` reads
+        answer (or raise) what is given."""
+        monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
+
+        def _read(what):
+            def read(_self):
+                if isinstance(what, BaseException):
+                    raise what
+                return what
+
+            return read
+
+        monkeypatch.setattr(
+            psutil,
+            "Process",
+            type(
+                "_Process",
+                (),
+                {
+                    "__init__": lambda self, _pid: None,
+                    "status": _read(status),
+                    "cmdline": _read(cmdline),
+                },
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "cmdline"),
+        [
+            pytest.param(psutil.STATUS_ZOMBIE, [], id="a zombie"),
+            pytest.param(psutil.ZombieProcess(9), [], id="a read of it raises"),
+            pytest.param(
+                psutil.STATUS_RUNNING, [], id="tearing down: its argv is already empty"
+            ),
+        ],
+    )
+    def test_an_exited_process_is_not_running_on_either_question(
+        self, monkeypatch, status, cmdline
+    ):
+        """The two "is this pid still there" readers -- the lock owner's and an
+        unreadable tree member's -- share one witness for a process that has
+        exited but is still listed, here by what psutil answers rather than by a
+        platform that can make one."""
+        self._psutil_says(monkeypatch, status=status, cmdline=cmdline)
+
+        assert profile_lock._pid_alive(9) is False
+        assert browser_cmdline._still_running(9) is False
+
+    @pytest.mark.parametrize(
+        ("status", "cmdline"),
+        [
+            pytest.param(psutil.AccessDenied(9), [], id="status unreadable"),
+            pytest.param(psutil.NoSuchProcess(9), [], id="gone between the reads"),
+            pytest.param(psutil.STATUS_RUNNING, ["chrome"], id="running"),
+            pytest.param(psutil.STATUS_SLEEPING, ["chrome"], id="sleeping"),
+            pytest.param(
+                psutil.STATUS_RUNNING, psutil.AccessDenied(9), id="argv unreadable"
+            ),
+        ],
+    )
+    def test_only_an_exited_process_is_called_dead(self, monkeypatch, status, cmdline):
+        """The direction F-871 fixed stays: a pid that is listed and that we
+        cannot show to have exited -- unreadable, vanished between the two reads,
+        or running -- is still HELD."""
+        self._psutil_says(monkeypatch, status=status, cmdline=cmdline)
+
+        assert profile_lock._pid_alive(9) is True
+        assert browser_cmdline._still_running(9) is True
 
     def test_lock_naming_a_live_pid_is_a_hold(self, tmp_path):
         held_profile(tmp_path)

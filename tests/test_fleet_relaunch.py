@@ -22,15 +22,19 @@ Hermetic: no Chrome, no real session root, no real process table.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 
-from fakes import FakeBrowser
+from fakes import FakeBrowser, a_zombie
 from stealth_chrome_devtools_mcp.embedded import (
     browser_reattach,
     clone_storage,
@@ -49,6 +53,30 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
 from stealth_chrome_devtools_mcp.embedded.tool_sections import browser_management
 
 RELAUNCH = 'spawn_browser(session="fleet")'
+
+#: Bound at import, before ``_Spawns`` replaces it: F-998 needs the real witness.
+_REAL_HELD_BY = browser_reattach.held_by
+
+
+@contextlib.contextmanager
+def _a_process_with_no_argv(monkeypatch):
+    """The pid of a RUNNING process whose command line psutil reads as empty,
+    which is what a SIGKILLed Chrome is between releasing its memory and
+    becoming a zombie. The state cannot be held open on purpose, so the one read
+    is replaced for that one pid; everything else about the process is real."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    real = psutil.Process.cmdline
+
+    def cmdline(self):
+        return [] if self.pid == child.pid else real(self)
+
+    monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+    try:
+        yield child.pid
+    finally:
+        monkeypatch.setattr(psutil.Process, "cmdline", real)
+        child.kill()
+        child.wait()
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +264,48 @@ class TestTheBrowserDiedOnItsOwn:
         assert _on(manager, fleet) == ["i-1"], "the corpse was not discarded"
         assert s.walked == [None]
         assert not (tmp_session_root["sessions"] / "fleet-2").exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows has no zombies and no lock")
+    @pytest.mark.parametrize("state", ["a zombie", "tearing down"])
+    async def test_a_dead_browser_the_kernel_has_not_finished_with_does_not_walk_it(
+        self, spawns, tmp_session_root, monkeypatch, state
+    ):
+        """F-998. A SIGKILLed Chrome is listed for a moment after it is dead --
+        first tearing down (its memory is released, so its argv reads empty, and
+        its state is still running), then a ZOMBIE until the backend's child
+        watcher reaps it -- and its ``SingletonLock`` names that pid, which
+        ``pid_exists`` answers True for. The backend has not noticed the death
+        either (asyncio sets ``returncode`` only after the reap, so the manager
+        still lists it alive), which together read as "a browser we drive holds
+        the directory" -- and the spawn walked to ``fleet-2`` with a hand-off from
+        a corpse. Real lock, real pid, the REAL ``held_by`` and resolver; only
+        the launch is replaced. (Measured on real Chromium: 11 of 12 journeys
+        before, 3 of 12 with the zombie alone read as exited, 0 of 20 with both.)"""
+        fleet = await _fleet(tmp_session_root)
+        manager = BrowserManager()
+        _running(manager, "i-killed", fleet)  # poll() is None: not yet noticed
+        s = spawns(manager, fleet)
+        monkeypatch.setattr(browser_reattach, "held_by", _REAL_HELD_BY)
+
+        with contextlib.ExitStack() as stack:
+            if state == "a zombie":
+                pid = stack.enter_context(a_zombie())
+            else:
+                pid = stack.enter_context(_a_process_with_no_argv(monkeypatch))
+            here = profile_lock._this_host()
+            (fleet / profile_lock.LOCK_NAME).symlink_to(f"{here}-{pid}")
+            answer = await s.spawn()
+
+        assert answer["instance_id"] == "i-1", "relaunched, not handed the corpse"
+        assert "already_running" not in answer
+        selection = answer["spawn_diagnostics"]["profile_selection"]
+        assert profile_seed.same_dir(Path(selection["user_data_dir"]), fleet), selection
+        assert not [k for k in ("walked_to", "walk_reason") if k in selection], (
+            selection
+        )
+        assert s.walked == [None]
+        assert not (tmp_session_root["sessions"] / "fleet-2").exists()
+        assert "seed_warning" not in answer, "no hand-off was attempted"
 
     async def test_the_lock_files_a_death_leaves_do_not_refuse_or_walk_it(
         self, tmp_session_root
