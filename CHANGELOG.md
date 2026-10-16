@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.35
 
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
