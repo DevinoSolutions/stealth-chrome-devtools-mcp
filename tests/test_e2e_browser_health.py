@@ -21,6 +21,7 @@ Only the node's tmp root and a tmp browser record are touched.
 import asyncio
 import contextlib
 import re
+import sys
 import uuid
 from pathlib import Path
 
@@ -139,9 +140,27 @@ async def test_a_named_session_is_healed_under_the_same_instance_id(
 _CHROME_LOG_NAME = re.compile(r"chrome-fleet-[0-9a-f]{8}-\d{8}T\d{6}Z\.log")
 
 
+class _Recorder:
+    """``debug_logger`` as ``browser_health`` sees it: passes every call through and
+    keeps the warnings."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.warnings: list[str] = []
+
+    def log_warning(self, component, method, message, *args, **kwargs):
+        self.warnings.append(str(message))
+        return self._real.log_warning(component, method, message, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 async def test_a_shared_session_that_exits_is_relaunched_under_the_same_id(
-    fixture_app_server, tmp_empty_root
+    fixture_app_server, tmp_empty_root, monkeypatch
 ):
+    recorder = _Recorder(browser_health.debug_logger)
+    monkeypatch.setattr(browser_health, "debug_logger", recorder)
     spawn = get_fn("spawn_browser")
     manager = tool_runtime.browser_manager
 
@@ -167,6 +186,11 @@ async def test_a_shared_session_that_exits_is_relaunched_under_the_same_id(
         )
         await health.check_once()
 
+        # F-993: the exit code of the browser we just killed is in the relaunch line
+        # (psutil's kill is TerminateProcess(pid, 15) on Windows, SIGKILL elsewhere)
+        (line,) = [w for w in recorder.warnings if "exited unexpectedly" in w]
+        assert re.search(r"exit_code=(15|-9)\b", line), line
+
         live = [i.instance_id for i in await manager.list_instances()]
         assert live == [instance_id], "the same id, and no second instance"
         new_browser = await _browser_of(instance_id)
@@ -180,6 +204,76 @@ async def test_a_shared_session_that_exits_is_relaunched_under_the_same_id(
         assert _CHROME_LOG_NAME.fullmatch(second_log.name), second_log.name
         await browser_health.probe_browser(new_browser.websocket_url, [])
         assert await eval_js(instance_id, "1+1") == 2
+    finally:
+        with contextlib.suppress(Exception):
+            await get_fn("close_instance")(instance_id=instance_id, session="fleet")
+        await released(profile)
+
+
+async def test_the_first_failed_probe_captures_the_real_browser_before_any_heal(
+    fixture_app_server, tmp_empty_root, monkeypatch
+):
+    """F-993 on a real Chrome: a probe that fails once (the freeze, simulated at the
+    probe seam) makes the REAL capture sample the real process tree, ask a fresh
+    connection, and (Windows) write a readable dump -- and nothing is closed."""
+    recorder = _Recorder(browser_health.debug_logger)
+    monkeypatch.setattr(browser_health, "debug_logger", recorder)
+    spawn = get_fn("spawn_browser")
+    manager = tool_runtime.browser_manager
+    spawned = await spawn(session="fleet", headless=True, **sandbox_kwargs())
+    instance_id = spawned["instance_id"]
+    profile = Path(spawned["spawn_diagnostics"]["profile_selection"]["user_data_dir"])
+    closes: list[str] = []
+
+    async def close(iid: str, session: str | None = None) -> dict:
+        closes.append(iid)
+        return {}
+
+    async def frozen(_url: str, steps: list[str]) -> None:
+        steps.append("evaluate")
+        raise TimeoutError
+
+    try:
+        health = browser_health.BrowserHealth(
+            manager,
+            close=close,
+            arm_interception=tool_runtime.network_interceptor.setup_interception,
+            probe=frozen,
+        )
+        await health.check_once()
+
+        (first,) = [w for w in recorder.warnings if "probe 1 failed" in w]
+        assert closes == [], "the first failure heals nothing"
+        assert first.endswith("evidence@probe1(capturing)"), first
+        # the capture runs beside the round: wait for ITS own log line
+        data = await manager.get_instance(instance_id)
+        await asyncio.wait_for(
+            asyncio.gather(*health._incidents._tasks.values()), timeout=90
+        )
+        (line,) = [w for w in recorder.warnings if "evidence@probe1(cpu(" in w]
+        assert "cpu(3.0s: browser=" in line, line
+        assert "process(status=" in line and "threads=" in line, line
+        assert "fresh_cdp(Browser.getVersion: answered in " in line, line
+        if sys.platform == "win32":
+            dump = Path(re.search(r"minidump\((.+?\.dmp) \(", line).group(1))
+            assert dump.parent.name == "freeze-dumps" and dump.stat().st_size > 0
+            assert dump.read_bytes()[:4] == b"MDMP"
+        else:
+            assert "minidump(skipped: platform)" in line, line
+        for forbidden in ("http", "about:blank", "cookie"):
+            assert forbidden not in line.split("evidence@probe1(")[1].lower(), forbidden
+
+        # the incident reaches the heal: its dump is kept ahead of benign ones
+        pid, label, _problem = health._incident_target(instance_id, data)
+        evidence = await health._incidents.before_heal(
+            instance_id, pid=pid, label=label
+        )
+        if sys.platform == "win32":
+            healed = Path(re.search(r"dump_kept\((.+?)\)", evidence).group(1))
+            assert healed.name.endswith("-healed.dmp") and healed.exists()
+            assert not dump.exists()
+        else:
+            assert "dump_kept" not in evidence, evidence
     finally:
         with contextlib.suppress(Exception):
             await get_fn("close_instance")(instance_id=instance_id, session="fleet")
