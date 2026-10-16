@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### `close_instance` warned about a tab Chrome had already closed (F-996)
+
+`close_instance` closes each tab over CDP before it closes the browser, and logged a WARNING
+(`Failed to close tab for <instance>: No target with given id found [code: -32602]`) when Chrome had dropped
+that tab first, which is the state the close wanted. The six-browser fleet test counts any such warning as an
+unrepaired fault and failed on it in CI run 38919791742. A `ProtocolException` saying `No target with given id`
+is now treated as closed and logged at debug level; every other failure in that loop still warns.
 ### A relaunch of `fleet` right after its browser was killed walked to `fleet-2` (F-998)
 
 `spawn_browser(session="fleet")` is meant to come back on the same directory after the browser is closed or
