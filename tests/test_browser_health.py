@@ -17,6 +17,7 @@ import asyncio
 import contextvars
 import json
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -112,6 +113,11 @@ class _Stage:
         self.launch_error: BaseException | None = None
         self.close_kills = True
         self.waits: list[tuple[int | None, float]] = []
+        # F-993: every seam the heal touches, in the order it touched them.
+        self.events: list[str] = []
+        self.captures: list[dict] = []
+        self.capture_record = "cpu(3.0s: browser=0.00s) minidump(skipped: platform)"
+        self.capture_error: BaseException | None = None
         monkeypatch.setattr(manager, "spawn_browser", self._spawn)
 
     def _held(self) -> bool:
@@ -125,6 +131,7 @@ class _Stage:
             if d["browser"].websocket_url == url
         )
         self.probes.append(iid)
+        self.events.append("probe")
         queue = self.probe_results.get(iid, [])
         steps.append("evaluate")
         if queue and not queue.pop(0):
@@ -132,6 +139,7 @@ class _Stage:
 
     async def close(self, instance_id: str, session: str | None = None) -> dict:
         self.closes.append(instance_id)
+        self.events.append("close")
         self.close_sessions.append(session)
         if self._held():
             self.gate_held_during.append("close")
@@ -143,6 +151,7 @@ class _Stage:
 
     async def _spawn(self, options: BrowserOptions, *, instance_id: str | None = None):
         self.launches.append((options, instance_id))
+        self.events.append("spawn")
         if self._held():
             self.gate_held_during.append("spawn")
         if self.launch_error is not None:
@@ -162,12 +171,21 @@ class _Stage:
         return self.manager._instances[instance_id]["instance"]
 
     async def arm(self, tab, instance_id, block_resources):
+        self.events.append("arm")
         self.armed.append((tab.target.target_id, instance_id, block_resources))
+
+    async def capture(self, **facts) -> str:
+        self.events.append("capture")
+        self.captures.append(facts)
+        if self.capture_error is not None:
+            raise self.capture_error
+        return self.capture_record
 
     async def forensics(self, **facts) -> str:
         return f"uptime={facts['uptime_seconds']:.0f}s targets(page=1 other=0)"
 
     async def wait_exit(self, pid, timeout):
+        self.events.append("wait")
         self.waits.append((pid, timeout))
         return SimpleNamespace(exited=self.close_kills)
 
@@ -182,6 +200,7 @@ class _Stage:
             "own_check": self.own_ok,
             "persistent": lambda iid: iid in self.persistent,
             "forensics": self.forensics,
+            "capture": self.capture,
             "browser_pid": lambda _process, _pid: OLD_PID,
             "wait_exit": self.wait_exit,
             "clock": lambda: self.now,
@@ -875,3 +894,181 @@ class TestSpawnUnderAGivenId:
             "instance_id"
         ]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ---------------------------------------------------------------------------
+# 7. F-993: the frozen state is captured at the first failed probe, before any heal
+# ---------------------------------------------------------------------------
+
+
+class TestTheFrozenStateIsCaptured:
+    async def test_it_is_taken_once_per_incident_and_before_the_heal(self, stage, log):
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        assert stage.events == ["probe", "capture"]  # first failure: nothing closed
+
+        await health.check_once()
+        # the heal's own order, with no second capture in it
+        assert stage.events == [
+            "probe",
+            "capture",
+            "probe",
+            "close",
+            "wait",
+            "spawn",
+            "arm",
+            "probe",
+        ]
+
+    async def test_the_record_rides_the_one_first_failure_warning(self, stage, log):
+        stage.probe_results[INSTANCE_ID] = [False]
+
+        await stage.health().check_once()
+
+        (warning,) = log.at("warning")  # still ONE line: the existing home, no second
+        assert "probe 1 failed" in warning
+        assert f"evidence({stage.capture_record})" in warning
+
+    async def test_the_heal_error_line_carries_it_for_sentry(self, stage, log):
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        (error,) = log.at("error")
+        assert "healing it" in error
+        assert f"evidence({stage.capture_record})" in error
+
+    async def test_it_is_handed_the_browser_pid_a_label_and_a_fresh_connection_check(
+        self, stage
+    ):
+        stage.probe_results[INSTANCE_ID] = [False]
+
+        await stage.health().check_once()
+
+        (facts,) = stage.captures
+        assert facts["pid"] == OLD_PID
+        assert facts["label"].startswith("freeze-")
+        assert facts["label"].endswith(f"-{INSTANCE_ID[:8]}")
+        assert callable(facts["answers"])
+
+    async def test_a_healthy_browser_costs_no_capture(self, stage):
+        health = stage.health()
+
+        for _ in range(3):
+            await health.check_once()
+
+        assert stage.captures == []
+
+    async def test_a_pass_between_failures_ends_the_incident(self, stage):
+        stage.probe_results[INSTANCE_ID] = [False, True, False]
+        health = stage.health()
+
+        for _ in range(3):
+            await health.check_once()
+
+        assert len(stage.captures) == 2
+        assert stage.closes == []
+
+    async def test_a_failure_after_a_heal_is_a_new_incident_with_its_own_capture(
+        self, stage
+    ):
+        stage.probe_results[INSTANCE_ID] = [False] * 6
+        health = stage.health()
+
+        await health.check_once()  # incident 1: capture
+        await health.check_once()  # heals
+        stage.probe_results[INSTANCE_ID] = [False] * 3
+        await health.check_once()  # the relaunched browser fails at once: incident 2
+        await health.check_once()  # inside the cooldown: warned, not healed again
+        await health.check_once()
+
+        assert len(stage.captures) == 2
+        assert len(stage.closes) == 1
+
+    async def test_a_capture_that_raises_costs_the_heal_nothing(self, stage, log):
+        stage.capture_error = RuntimeError("dump blew up")
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        (warning,) = log.at("warning")
+        assert "evidence(capture unavailable (RuntimeError))" in warning
+        assert stage.closes == [INSTANCE_ID]
+        assert [iid for _o, iid in stage.launches] == [INSTANCE_ID]
+
+    async def test_a_capture_that_hangs_is_bounded_and_the_loop_goes_on(
+        self, stage, monkeypatch, log
+    ):
+        monkeypatch.setattr(browser_health, "CAPTURE_TIMEOUT_SECONDS", 0.05)
+
+        async def hangs(**_facts):
+            await asyncio.Event().wait()
+
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health(capture=hangs)
+
+        await asyncio.wait_for(health.check_once(), timeout=5)
+        await asyncio.wait_for(health.check_once(), timeout=5)
+
+        (warning,) = log.at("warning")
+        assert "evidence(capture unavailable (TimeoutError))" in warning
+        assert stage.closes == [INSTANCE_ID]
+
+    async def test_the_thresholds_and_the_cooldown_are_unchanged(self):
+        assert browser_health.FAILURES_BEFORE_HEAL == 2
+        assert browser_health.PROBE_INTERVAL_SECONDS == 120
+        assert browser_health.PROBE_TIMEOUT_SECONDS == 15
+        assert browser_health.HEAL_COOLDOWN_SECONDS == 900
+        assert browser_health.EXIT_WAIT_SECONDS == 15
+
+    async def test_a_clone_is_not_captured(self, stage):
+        stage.persistent.clear()
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+
+        assert stage.captures == []
+
+
+class TestTheProbeStepTimings:
+    async def test_the_first_failure_line_carries_the_timings(self, stage, log):
+        async def slow_probe(_url: str, steps: list[str]) -> None:
+            steps.append("createTarget")
+            await asyncio.sleep(0.02)
+            steps.append("evaluate")
+            raise ConnectionError("no answer")
+
+        await stage.health(probe=slow_probe).check_once()
+
+        (warning,) = log.at("warning")
+        assert re.search(
+            r"steps\(connect=\d+ms createTarget=\d+ms evaluate=\d+ms\)", warning
+        ), warning
+
+    async def test_the_failure_wording_the_heal_decides_on_is_unchanged(
+        self, stage, log
+    ):
+        stage.probe_results[INSTANCE_ID] = [False]
+
+        await stage.health().check_once()
+
+        (warning,) = log.at("warning")
+        assert "probe 1 failed (ConnectionError at evaluate)" in warning
+
+
+class TestTheFreshConnectionCheck:
+    async def test_it_asks_browser_get_version_over_a_new_connection(self, chrome):
+        await browser_health.fresh_browser_version(chrome.url)
+
+        assert chrome.methods == ["Browser.getVersion"]
+
+    async def test_an_unreachable_endpoint_raises_for_the_capture_to_name(self):
+        with pytest.raises(OSError):
+            await browser_health.fresh_browser_version("ws://127.0.0.1:1/devtools/x")

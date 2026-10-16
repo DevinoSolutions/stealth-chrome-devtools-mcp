@@ -599,6 +599,8 @@ the **same `instance_id`**. The backend log (`backend-<pid>.log`, logger
 
 * `probe 1 failed (...); uptime=... targets(...) tree(...) chromium_processes=... free_ram=...`
   (WARNING) — the first miss, with counts only (never a URL or title).
+  It ends with `steps(connect=..ms createTarget=..ms ...)` (where the 15 s went) and, on
+  the first miss of an incident, `evidence(...)` (F-993, below).
 * `... healing it` (ERROR, also sent to Sentry) — the second miss; the heal follows,
   then `healed (relaunched under the same id)` (INFO). A heal is attempted at most once
   per 15 minutes per instance.
@@ -611,6 +613,29 @@ the **same `instance_id`**. The backend log (`backend-<pid>.log`, logger
 Disposable clones are never probed. Chats that held a tab in the instance find it gone:
 the first one to use a page tool takes the new browser's tab and the others call
 `new_tab`.
+
+**What is captured before the heal (F-993).** The cause of the long-lived freezes is still
+unknown, and it can only be read from the browser *while* it is frozen, so the first failed
+probe of an incident (before anything is closed or killed) records, once:
+
+* `evidence(cpu(3.0s: browser=.. renderers=.. (N total, M busy) other=..) process(status=..
+  threads=.. priority=..) fresh_cdp(Browser.getVersion: ...) minidump(...))` on that WARNING
+  line, repeated on the `healing it` ERROR line. `browser=0.00s` over 3 s means the browser
+  process is **blocked**, not spinning; `fresh_cdp ... no answer` means even a new connection
+  gets nothing; `priority=` shows whether the renderers were throttled to `idle`.
+* On Windows, a **minidump** of the browser process in `~/.stealth-mcp/logs/freeze-dumps/`
+  (or under `STEALTH_MCP_LOG_DIR`): `freeze-<session>-<id>-<UTC time>.dmp`. Thread stacks,
+  handle data and thread info, no heap (1.4-1.6 MB measured on a fresh Chrome, against ~600 MB
+  for a full-memory dump; the `minidump(...)` text gives the size). At most **2** are kept, oldest deleted; none is written below 2 GB free, and a
+  write that has not finished in 45 s is abandoned for the loop (the line says so). Open it in
+  WinDbg with Chrome's public symbol server and run `~*k` and `!handle`: the UI thread's stack
+  and what it waits on are what the freeze was. A slow-but-alive browser also produces one,
+  so a later benign episode can displace the freeze's dump: copy it out first. It is **local
+  evidence** like Chrome's own log -- stack memory can hold fragments of page data -- so share
+  its path, never the file. Other platforms say `minidump(skipped: platform)`.
+* `exited unexpectedly (...; exit_code=N)` on the F-964 line: `exit_code=1` is an outside
+  `TerminateProcess`, `0xC0000005`-style codes are crashes, `0xC0000142` an initialisation
+  failure; `unavailable (...)` says why a code could not be read.
 
 ### The default or fleet browser exited and came back (F-964)
 Symptom: the shared `default` or `fleet` browser vanished (its window closed, its tools

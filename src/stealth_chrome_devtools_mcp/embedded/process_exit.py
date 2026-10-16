@@ -111,6 +111,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -120,6 +121,7 @@ import psutil
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # the ladder's rungs are callables, typed but never imported
+    import ctypes
     from collections.abc import Callable
 
 # How long a browser we have asked to close may take to go on its own before we
@@ -420,3 +422,124 @@ def report(instance_id: str, waited: Exited) -> None:
             f"exited_unaided={waited.exited} after {waited.seconds:.3f}s "
             f"({waited.reason})",
         )
+
+
+# ---------------------------------------------------------------------------
+# The exit code (F-993)
+# ---------------------------------------------------------------------------
+#
+# On 2026-10-15 ``default`` and ``fleet`` exited together twice with no crash dump,
+# no WER event and no line in Chrome's own log, and "browser process is not running"
+# was all the backend could say. The exit code separates an external
+# ``TerminateProcess`` (1, or whatever the killer passed) from a crash
+# (``0xC0000005``...) from an initialisation failure (``0xC0000142``).
+#
+# A browser this backend LAUNCHED keeps it: nodriver holds the asyncio process, and
+# ``returncode`` is read WITHOUT collecting anything (the POSIX paragraph above is
+# about ``wait()``; this reads a field asyncio already set). A browser it ADOPTED
+# after a restart (F-888) -- which is what ``default`` and ``fleet`` usually are -- has
+# no such object and, once dead, no one to ask: Windows keeps an exit code only for as
+# long as some handle to the process is open. So ``browser_health`` holds one from the
+# first probe round and reads it when the exit is noticed. Off Windows an adopted
+# browser is not our child and its status is not ours to collect: ``unavailable``,
+# said so.
+
+_SYNCHRONIZE = 0x00100000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259  # GetExitCodeProcess' answer for a process that has not exited
+_BYTE = (
+    0xFF  # an exit code above it is shown in hex too: Windows tools print NTSTATUS so
+)
+_NO_CODE = "no process object with an exit code, and no process handle was held"
+
+
+def _kernel32() -> ctypes.CDLL:
+    """A private ``kernel32`` with typed signatures: the handle is a 64-bit pointer,
+    and the shared ``windll`` functions would truncate it to a C int."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel.GetExitCodeProcess.restype = wintypes.BOOL
+    return kernel
+
+
+def hold_exit_handle(pid: int) -> int | None:
+    """A handle to *pid* that outlives it, so its exit code stays readable; ``None``
+    off Windows or when the process cannot be opened. Release it with
+    :func:`release_exit_handle`. Never raises."""
+    if sys.platform != "win32":
+        return None
+    try:
+        handle = _kernel32().OpenProcess(
+            _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+    except (OSError, AttributeError):
+        return None
+    return int(handle) if handle else None
+
+
+def release_exit_handle(handle: int) -> None:
+    """Close a handle :func:`hold_exit_handle` returned. Never raises."""
+    if sys.platform != "win32" or not handle:
+        return
+    with contextlib.suppress(OSError, AttributeError):
+        _kernel32().CloseHandle(handle)
+
+
+def _exit_code_of_handle(handle: int) -> int | None:
+    """The exit code behind *handle*, or ``None`` while the process still runs."""
+    import ctypes
+    from ctypes import wintypes
+
+    code = wintypes.DWORD()
+    if not _kernel32().GetExitCodeProcess(handle, ctypes.byref(code)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return None if code.value == _STILL_ACTIVE else code.value
+
+
+def _describe_exit_code(code: int) -> str:
+    """``exit_code=1``, ``exit_code=-9 (signal 9)``, ``exit_code=3221225794
+    (0xC0000142)``: the number, plus the form each platform's tools print it in."""
+    if code < 0:
+        return f"exit_code={code} (signal {-code})"
+    if code > _BYTE:
+        return f"exit_code={code} (0x{code:08X})"
+    return f"exit_code={code}"
+
+
+def exit_status(
+    browser: object | None,
+    handle: int | None,
+    *,
+    read: Callable[[int], int | None] = _exit_code_of_handle,
+) -> str:
+    """``exit_code=...`` for a browser that exited, or why it is unavailable.
+
+    The process object nodriver holds answers first (``Browser._process``, whose
+    ``returncode`` asyncio set); the handle :func:`hold_exit_handle` took answers
+    when there is none or it never got a code. Never raises: this is a log line in
+    the middle of a relaunch.
+    """
+    code = getattr(getattr(browser, "_process", None), "returncode", None)
+    if code is None and handle is not None:
+        try:
+            code = read(handle)
+        except Exception as err:  # noqa: BLE001  PERMANENT(F-993: a log line may not fail a relaunch)
+            return (
+                f"exit_code=unavailable ({type(err).__name__} reading the process "
+                "handle)"
+            )
+        if code is None:
+            return "exit_code=unavailable (the process handle reports it still active)"
+    if code is None:
+        return f"exit_code=unavailable ({_NO_CODE})"
+    return _describe_exit_code(int(code))

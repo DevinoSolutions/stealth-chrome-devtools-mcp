@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### A frozen long-lived browser is now captured before the heal kills it (F-993)
+
+The six hard freezes of `default` and `fleet` (2026-10-11..13: `/json` answering, `Runtime.evaluate` dead in
+every tab, sometimes a force kill that did not end the process for seconds) are still unexplained, because
+everything the sampler keeps (threads, handles, GDI, RSS) stayed flat across the onset and the heal destroyed
+the process before anyone could look at it. At the FIRST failed probe of an incident, before anything is closed
+or killed, `browser_health` now records, once, on the same WARNING line F-963 already writes (and again on the
+`healing it` ERROR line that reaches Sentry): the CPU-time delta of the browser and its renderers over 3 s
+(spinning or blocked), `psutil` status, thread count and priority class, whether `Browser.getVersion` answers a
+FRESH connection within 5 s, and the timing of each probe step (`createTarget=..ms attachToTarget=..ms`).
+Counts only; no URL, title or cookie. On Windows it also writes a **minidump** of the browser process to
+`<log dir>/freeze-dumps/` through `MiniDumpWriteDump` (`dbghelp.dll`, ctypes), so the UI thread's stack and the
+handles it waits on can be read in WinDbg after the fact. The type is thread stacks + handle data + thread
+info + process thread data + unloaded modules + memory info and **no heap** (1.4-1.6 MB measured on a fresh
+Chrome, against ~600 MB for the full-memory dump `rundll32 comsvcs.dll, MiniDump` always writes, which Defender
+also blocks). It runs on its own thread under a 45 s budget so a stuck write cannot hold the health loop, one at
+a time, never below 2 GB free, at most **2** dumps kept (the oldest deleted); a failure, a skip
+(`skipped: platform` off Windows) or a late write is words in the record, never an exception. A slow-but-alive
+episode also produces one, so copy a freeze's dump out before the next. The whole capture is bounded
+at 60 s and cannot raise into the loop; thresholds, order and the heal are unchanged.
+
+A shared-session browser that **exited** (F-964) now has its exit code in the relaunch line
+(`exited unexpectedly (...; exit_code=15)`), which separates an outside `TerminateProcess` (1, 15), a crash
+(`0xC0000005`) and an initialisation failure (`0xC0000142`): nodriver's process object for a browser this
+backend launched, and for one it re-attached after a restart (which `default` and `fleet` usually are, and which
+has no process object) a Windows handle held since the first probe round, since Windows keeps an exit code only
+while a handle is open. See the RUNBOOK section on F-963 for reading the record.
+
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
 `filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller
