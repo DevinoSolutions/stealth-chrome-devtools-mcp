@@ -355,8 +355,15 @@ async def test_the_gone_tab_answer_is_recognised_without_its_code():
         ProtocolException({"code": -32602, "message": "Invalid parameters"}),
         ProtocolException({"code": -32000, "message": "Target closed"}),
         RuntimeError("connection reset"),
+        # The wording from something that is not a CDP reply is not Chrome saying so.
+        RuntimeError("No target with given id found"),
     ],
-    ids=["same-code-other-message", "other-protocol-failure", "not-protocol"],
+    ids=[
+        "same-code-other-message",
+        "other-protocol-failure",
+        "not-protocol",
+        "gone-wording-not-protocol",
+    ],
 )
 async def test_any_other_tab_close_failure_still_warns(error):
     """F-996 control: only the gone-tab answer is absorbed; every other failure
