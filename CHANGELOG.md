@@ -112,6 +112,14 @@ as gone only when `/proc/<pid>/exe` is also `FileNotFoundError` (the link was re
 samples and unreadable on every sample of a dying browser); a zombie counts everywhere; anything else, including
 `PermissionError` on the link, and any platform but Linux for the empty-argv half, stays held.
 
+### The F-866 real-process test read its marker file before the child had written it (F-994)
+
+`test_the_spawned_backend_has_no_redirector_no_job_and_no_console` polled until the child's marker file
+existed and then unpacked its two lines at once, so a child that had created the file but not yet filled
+it failed the test with `ValueError: not enough values to unpack (expected 2, got 0)` (one pre-push run on
+2026-10-16; a retry passed). The child now writes `<marker>.tmp` and `os.replace()`s it into place, and the
+test polls until the file holds both lines, treating a transient Windows `PermissionError` on the open as "not ready" too, and failing with what it last read on timeout. Test-only change.
+
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
 `filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller
