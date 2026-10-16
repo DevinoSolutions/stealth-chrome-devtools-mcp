@@ -453,9 +453,10 @@ _BYTE = (
 _NO_CODE = "no process object with an exit code, and no process handle was held"
 
 
-def _kernel32() -> ctypes.CDLL:
-    """A private ``kernel32`` with typed signatures: the handle is a 64-bit pointer,
-    and the shared ``windll`` functions would truncate it to a C int."""
+def kernel32() -> ctypes.CDLL:
+    """A private ``kernel32`` with typed signatures (``freeze_capture`` uses it too):
+    a handle is a 64-bit pointer, and the shared ``windll`` functions would truncate
+    it to a C int."""
     import ctypes
     from ctypes import wintypes
 
@@ -479,7 +480,7 @@ def hold_exit_handle(pid: int) -> int | None:
     if sys.platform != "win32":
         return None
     try:
-        handle = _kernel32().OpenProcess(
+        handle = kernel32().OpenProcess(
             _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
         )
     except (OSError, AttributeError):
@@ -492,7 +493,7 @@ def release_exit_handle(handle: int) -> None:
     if sys.platform != "win32" or not handle:
         return
     with contextlib.suppress(OSError, AttributeError):
-        _kernel32().CloseHandle(handle)
+        kernel32().CloseHandle(handle)
 
 
 def _exit_code_of_handle(handle: int) -> int | None:
@@ -501,7 +502,7 @@ def _exit_code_of_handle(handle: int) -> int | None:
     from ctypes import wintypes
 
     code = wintypes.DWORD()
-    if not _kernel32().GetExitCodeProcess(handle, ctypes.byref(code)):
+    if not kernel32().GetExitCodeProcess(handle, ctypes.byref(code)):
         raise ctypes.WinError(ctypes.get_last_error())
     return None if code.value == _STILL_ACTIVE else code.value
 

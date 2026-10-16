@@ -600,7 +600,7 @@ the **same `instance_id`**. The backend log (`backend-<pid>.log`, logger
 * `probe 1 failed (...); uptime=... targets(...) tree(...) chromium_processes=... free_ram=...`
   (WARNING) — the first miss, with counts only (never a URL or title).
   It ends with `steps(connect=..ms createTarget=..ms ...)` (where the 15 s went) and, on
-  the first miss of an incident, `evidence(...)` (F-993, below).
+  the first miss of an incident, `evidence@probe1(capturing)` (F-993, below).
 * `... healing it` (ERROR, also sent to Sentry) — the second miss; the heal follows,
   then `healed (relaunched under the same id)` (INFO). A heal is attempted at most once
   per 15 minutes per instance.
@@ -616,26 +616,46 @@ the first one to use a page tool takes the new browser's tab and the others call
 
 **What is captured before the heal (F-993).** The cause of the long-lived freezes is still
 unknown, and it can only be read from the browser *while* it is frozen, so the first failed
-probe of an incident (before anything is closed or killed) records, once:
+probe of an incident (before anything is closed or killed) starts a capture, once. It runs as
+a task **beside** the probe loop: the first-miss WARNING says `evidence@probe1(capturing)` and
+the round, and the two-minute spacing of the heal, are not delayed by it. The record arrives on
+its own WARNING (logger `browser_health`, `<id>: evidence@probe1(...)`) the moment it finishes,
+and is repeated on the `healing it` ERROR line. Just before the heal the loop waits for the
+capture for at most 10 s, so it normally lands before the kill and never holds the heal longer.
+The ERROR line labels it `evidence@probe1(...)` because it was taken at the FIRST failed probe,
+about two minutes before the heal, not at the heal.
 
-* `evidence(cpu(3.0s: browser=.. renderers=.. (N total, M busy) other=..) process(status=..
-  threads=.. priority=..) fresh_cdp(Browser.getVersion: ...) minidump(...))` on that WARNING
-  line, repeated on the `healing it` ERROR line. `browser=0.00s` over 3 s means the browser
-  process is **blocked**, not spinning; `fresh_cdp ... no answer` means even a new connection
-  gets nothing; `priority=` shows whether the renderers were throttled to `idle`.
-* On Windows, a **minidump** of the browser process in `~/.stealth-mcp/logs/freeze-dumps/`
-  (or under `STEALTH_MCP_LOG_DIR`): `freeze-<session>-<id>-<UTC time>.dmp`. Thread stacks,
-  handle data and thread info, no heap (1.4-1.6 MB measured on a fresh Chrome, against ~600 MB
-  for a full-memory dump; the `minidump(...)` text gives the size). At most **2** are kept, oldest deleted; none is written below 2 GB free, and a
-  write that has not finished in 45 s is abandoned for the loop (the line says so). Open it in
-  WinDbg with Chrome's public symbol server and run `~*k` and `!handle`: the UI thread's stack
-  and what it waits on are what the freeze was. A slow-but-alive browser also produces one,
-  so a later benign episode can displace the freeze's dump: copy it out first. It is **local
-  evidence** like Chrome's own log -- stack memory can hold fragments of page data -- so share
-  its path, never the file. Other platforms say `minidump(skipped: platform)`.
+* `evidence@probe1(cpu(3.0s: browser=.. renderers=.. (N total, M busy) other=..) process(status=..
+  threads=.. priority=..) fresh_cdp(Browser.getVersion: ...) minidump(...))`. `browser=0.00s`
+  over 3 s means the browser process is **blocked**, not spinning; `fresh_cdp ... no answer`
+  means even a new connection gets nothing; `priority=` shows whether the renderers were
+  throttled to `idle`. `capture skipped: <why>` replaces it when the pid is not the browser we
+  recorded (gone, or its start time differs: a reused pid is never opened).
+* On Windows, a **minidump** of the browser process in `~/.stealth-mcp/logs/freeze-dumps/`:
+  `freeze-<session>-<id>-<UTC time>.dmp`. Thread stacks, handle data and thread info, no heap
+  (1.4-1.6 MB measured on a fresh Chrome, against ~600 MB for a full-memory dump; the
+  `minidump(...)` text gives the size). When the incident **reaches the heal** its dump is
+  renamed `...-healed.dmp` (`dump_kept(<path>)` on the ERROR line). Rotation deletes unhealed
+  dumps first: **2 healed dumps are kept, plus 1 unhealed**, so a later benign episode cannot
+  push out the dump of a real freeze, and the total never exceeds 3. A browser that is slow but
+  alive again within a few minutes takes at most one unhealed dump per **30 minutes**
+  (`the last unhealed dump of this browser was Ns ago (minimum 1800s)` in the record); if that
+  incident then heals, the dump it was refused is taken at the heal (`minidump_at_heal(...)`).
+  Two browsers frozen together are dumped one after the other inside the 45 s budget rather than
+  the second being skipped; a dump still being written after that is recorded as skipped, with
+  the wait it was given. None is written below 2 GB free, and a write that has not finished in
+  45 s is abandoned for the loop (the line says so). Open it in WinDbg with Chrome's public
+  symbol server and run `~*k` and `!handle`: the UI thread's stack and what it waits on are what
+  the freeze was. It is **local evidence** like Chrome's own log -- stack memory can hold
+  fragments of page data -- so share its path, never the file. Other platforms say
+  `minidump(skipped: platform)`.
+* `STEALTH_MCP_LOG_DIR` relocates the dumps with the logs. It must not point at a synced or
+  shared folder (OneDrive, Dropbox, a network share): a dump would be uploaded and shared with
+  whoever can read that folder.
 * `exited unexpectedly (...; exit_code=N)` on the F-964 line: `exit_code=1` is an outside
   `TerminateProcess`, `0xC0000005`-style codes are crashes, `0xC0000142` an initialisation
-  failure; `unavailable (...)` says why a code could not be read.
+  failure; `unavailable (...)` says why a code could not be read. The handle that makes the
+  code readable is opened only after the pid's start time matches the registry record.
 
 ### The default or fleet browser exited and came back (F-964)
 Symptom: the shared `default` or `fleet` browser vanished (its window closed, its tools

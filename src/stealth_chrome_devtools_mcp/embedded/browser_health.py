@@ -57,16 +57,16 @@ window gets it back at the next round: the loop cannot tell that from a crash.
 written once on the first failed probe (WARNING) and again when the heal fires
 (ERROR, which reaches Sentry through ``debug_logger``).
 
-**F-993: the frozen state is captured BEFORE the heal can kill it.** At the first
-failed probe of an incident (it ends when a probe passes or the heal fires)
-:mod:`freeze_capture` takes a CPU-time delta, process facts, a fresh-connection
-``Browser.getVersion`` and, on Windows, a bounded minidump. The record rides that same
-WARNING line and the heal's ERROR line -- the existing home, not a second one -- under
-:data:`CAPTURE_TIMEOUT_SECONDS`, and never raises into the loop; thresholds and the
-heal are untouched. Each failed probe's line also times its steps. A shared-session
-browser that EXITED has its exit code in the relaunch line
-(:func:`process_exit.exit_status`): nodriver's process object, or for a browser
-re-attached after a restart a handle held since the first round.
+**F-993: the frozen state is captured BEFORE the heal can kill it.** The first failed
+probe of an incident starts :class:`freeze_capture.Incidents`' capture as a TASK (CPU
+delta, process facts, a fresh-connection ``Browser.getVersion``, on Windows a bounded
+minidump), so the round is not delayed. The first-failure WARNING says
+``evidence@probe1(capturing)``, the record is logged when it finishes, and just before
+the heal the ERROR line (it reaches Sentry) carries it, waited for at most
+:data:`freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS`; the dump of an incident that
+heals is kept ahead of benign ones. It never raises into the loop, and a pid is opened
+only once its create time matches the registry entry. A shared-session browser that
+EXITED has its exit code in the relaunch line (:func:`process_exit.exit_status`).
 """
 
 import asyncio
@@ -130,11 +130,6 @@ EXIT_WAIT_SECONDS = 15
 
 #: The bound on the forensics a failure writes. They are best effort.
 FORENSICS_TIMEOUT_SECONDS = 10
-
-#: The bound on the whole F-993 capture: the 3 s CPU window and the 5 s fresh
-#: connection run together, then the dump gets its own budget. It must stay under
-#: the probe interval, so a capture never makes the next round late.
-CAPTURE_TIMEOUT_SECONDS = 60
 
 _OPEN_TIMEOUT_SECONDS = 5.0
 _EXPECTED_SUM = 2  # what `1+1` evaluates to
@@ -504,6 +499,8 @@ class BrowserHealth:
         shared: Callable[[BrowserOptions], bool] = is_shared_session,
         holder: Callable[[str], str | None] = holder_of,
         capture: Callable[..., Awaitable[str]] = freeze_capture.capture,
+        dump_now: Callable[..., Awaitable[str]] = freeze_capture.dump_now,
+        mark_healed: Callable[[str], str | None] = freeze_capture.mark_healed,
         hold_exit: Callable[[int], int | None] = process_exit.hold_exit_handle,
         release_exit: Callable[[int], None] = process_exit.release_exit_handle,
         exit_status: Callable[
@@ -523,17 +520,21 @@ class BrowserHealth:
         self._clock = clock
         self._shared = shared
         self._holder = holder
-        self._capture = capture
+        self._incidents = freeze_capture.Incidents(
+            capture=capture,
+            dump_now=dump_now,
+            mark_healed=mark_healed,
+            clock=clock,
+            log=lambda line: debug_logger.log_warning(_COMPONENT, "capture", line),
+        )
         self._hold_exit = hold_exit
         self._release_exit_handle = release_exit
         self._exit_status = exit_status
         self.stopping = False
         self._failures: dict[str, int] = {}
         self._last_heal: dict[str, float] = {}
-        # F-993: the record of the incident in progress, by instance (its presence IS
-        # "already captured"); and, per adopted shared-session browser, the
-        # (pid, handle) that keeps its exit code readable.
-        self._evidence: dict[str, str] = {}
+        # F-993: per adopted shared-session browser, the (pid, handle) that keeps
+        # its exit code readable.
         self._exit_handles: dict[str, tuple[int, int]] = {}
 
     async def run(self) -> None:
@@ -571,14 +572,14 @@ class BrowserHealth:
         tracked = (
             set(self._failures)
             | set(self._last_heal)
-            | set(self._evidence)
+            | self._incidents.tracked()
             | set(self._exit_handles)
         )
         for gone in tracked:
             if gone not in scoped:
                 self._failures.pop(gone, None)
                 self._last_heal.pop(gone, None)
-                self._evidence.pop(gone, None)
+                self._incidents.forget(gone)
                 self._release_exit(gone)
         for instance_id in scoped:
             try:
@@ -609,7 +610,7 @@ class BrowserHealth:
         failure = await self._failure_of(data["browser"], steps)
         steps.finish()
         if failure is None:
-            self._evidence.pop(instance_id, None)  # the incident, if any, is over
+            self._incidents.end(instance_id)  # the incident, if any, is over
             if self._failures.pop(instance_id, 0):
                 debug_logger.log_info(
                     _COMPONENT, "probe", f"{instance_id} answers probes again"
@@ -619,11 +620,8 @@ class BrowserHealth:
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
         count = self._failures[instance_id] = self._failures.get(instance_id, 0) + 1
-        if instance_id not in self._evidence:
-            # F-993: the first failed probe of the incident, before anything is closed.
-            self._evidence[instance_id] = await self._capture_evidence(
-                instance_id, data
-            )
+        if not self._incidents.has(instance_id):
+            self._begin_incident(instance_id, data)  # F-993: a task, not an await
         facts = await self._facts(
             instance_id, data["browser"], data["instance"].created_at
         )
@@ -632,9 +630,10 @@ class BrowserHealth:
             f"{_log_note(data.get('spawn_diagnostics'))}"
             f"; steps({freeze_capture.describe_steps(steps)})"
         )
-        evidence = f"{label}; evidence({self._evidence[instance_id]})"
         if count < FAILURES_BEFORE_HEAL:
-            debug_logger.log_warning(_COMPONENT, "probe", evidence)
+            debug_logger.log_warning(
+                _COMPONENT, "probe", f"{label}; evidence@probe1(capturing)"
+            )
             return
         since = self._clock() - self._last_heal.get(instance_id, -HEAL_COOLDOWN_SECONDS)
         if since < HEAL_COOLDOWN_SECONDS:
@@ -645,39 +644,58 @@ class BrowserHealth:
                 f"{HEAL_COOLDOWN_SECONDS}s",
             )
             return
+        pid, dump_label, _problem = self._incident_target(instance_id, data)
+        evidence = await self._incidents.before_heal(
+            instance_id, pid=pid, label=dump_label
+        )
         debug_logger.log_error(
-            _COMPONENT, "probe", HungBrowserError(f"{evidence}; healing it")
+            _COMPONENT, "probe", HungBrowserError(f"{label}; {evidence}; healing it")
         )
         self._last_heal[instance_id] = self._clock()
-        self._failures[instance_id] = 0
-        self._evidence.pop(instance_id, None)  # what comes next is a new incident
+        self._failures[instance_id] = 0  # what comes next is a new incident
         await self._heal(instance_id)
 
-    async def _capture_evidence(self, instance_id: str, data: dict[str, object]) -> str:
-        """The F-993 record for a browser that just failed its first probe: the
-        :mod:`freeze_capture` line, or why there is none. Bounded by
-        :data:`CAPTURE_TIMEOUT_SECONDS`; never raises, so nothing here can stand
-        between a hung browser and its heal."""
-        browser = data["browser"]
-        entry = process_cleanup.browser_processes.get(instance_id) or {}
-        directory = getattr(data.get("options"), "user_data_dir", None)
-        key = chrome_log.session_key(directory) if directory else "browser"
+    def _incident_target(
+        self, instance_id: str, data: dict[str, object]
+    ) -> tuple[int | None, str, str | None]:
+        """(pid, dump label, why that pid may not be opened) for *instance_id*.
+        Never raises: it stands in front of the heal as well as the capture."""
+        key = instance_id[:8]
         try:
-            return await asyncio.wait_for(
-                self._capture(
-                    pid=self._browser_pid(
-                        getattr(browser, "_process", None),
-                        entry.get("pid") or getattr(browser, "_process_pid", None),
-                    ),
-                    label=f"freeze-{key}-{instance_id[:8]}",
-                    answers=lambda: fresh_browser_version(
-                        getattr(browser, "websocket_url", None)
-                    ),
+            browser = data["browser"]
+            entry = process_cleanup.browser_processes.get(instance_id) or {}
+            pid = self._browser_pid(
+                getattr(browser, "_process", None),
+                entry.get("pid") or getattr(browser, "_process_pid", None),
+            )
+            directory = getattr(data.get("options"), "user_data_dir", None)
+            session = chrome_log.session_key(directory) if directory else "browser"
+            problem = freeze_capture.identity_problem(entry, pid)
+        except Exception as error:  # noqa: BLE001  PERMANENT(F-993: evidence is best effort and must not stand between a hung browser and its heal)
+            return None, f"freeze-browser-{key}", f"{type(error).__name__} finding it"
+        return pid, f"freeze-{session}-{key}", problem
+
+    def _begin_incident(self, instance_id: str, data: dict[str, object]) -> None:
+        """Start the F-993 capture of a browser that just failed its first probe.
+        Returns at once, so nothing here can delay a heal."""
+        try:
+            pid, label, problem = self._incident_target(instance_id, data)
+            browser = data["browser"]
+            self._incidents.begin(
+                instance_id,
+                pid=pid,
+                label=label,
+                answers=lambda: fresh_browser_version(
+                    getattr(browser, "websocket_url", None)
                 ),
-                CAPTURE_TIMEOUT_SECONDS,
+                problem=problem,
             )
         except Exception as error:  # noqa: BLE001  PERMANENT(F-993: evidence is best effort and must not stand between a hung browser and its heal)
-            return f"capture unavailable ({type(error).__name__})"
+            debug_logger.log_warning(
+                _COMPONENT,
+                "capture",
+                f"{instance_id}: not started ({type(error).__name__})",
+            )
 
     def _watch_exit(self, instance_id: str, data: dict[str, object]) -> None:
         """Hold a process handle on a shared-session browser this backend did NOT
@@ -686,18 +704,32 @@ class BrowserHealth:
         process object keeps the code. Never raises."""
         try:
             browser = data["browser"]
-            if getattr(browser, "_process", None) is not None:
-                return
             options = data["options"]
-            if not isinstance(options, BrowserOptions) or not self._shared(options):
-                return
-            pid = self._browser_pid(None, getattr(browser, "_process_pid", None))
+            watched = (
+                getattr(browser, "_process", None) is None
+                and isinstance(options, BrowserOptions)
+                and self._shared(options)
+            )
+            pid = (
+                self._browser_pid(None, getattr(browser, "_process_pid", None))
+                if watched
+                else None
+            )
             held = self._exit_handles.get(instance_id)
             if held is not None and held[0] == pid:
                 return
-            self._release_exit(instance_id)
-            handle = self._hold_exit(pid) if pid is not None else None
-            if handle is not None and pid is not None:
+            self._release_exit(instance_id)  # a stale handle goes whatever comes next
+            if pid is None:
+                return
+            entry = process_cleanup.browser_processes.get(instance_id) or {}
+            problem = freeze_capture.identity_problem(entry, pid)
+            if problem is not None:
+                debug_logger.log_warning(
+                    _COMPONENT, "exit_handle", f"{instance_id}: not held: {problem}"
+                )
+                return
+            handle = self._hold_exit(pid)
+            if handle is not None:
                 self._exit_handles[instance_id] = (pid, handle)
         except Exception as error:  # noqa: BLE001  PERMANENT(F-993: a diagnostic handle may not fail a probe round)
             debug_logger.log_warning(
@@ -714,6 +746,10 @@ class BrowserHealth:
         """Give every held process handle back (shutdown). Idempotent."""
         for instance_id in list(self._exit_handles):
             self._release_exit(instance_id)
+
+    def cancel_captures(self) -> None:
+        """Stop every capture still running (shutdown)."""
+        self._incidents.cancel_all()
 
     def _read_exit_status(self, instance_id: str, browser: object | None) -> str:
         """``exit_code=...`` for a browser that exited, taking and releasing the
@@ -952,6 +988,7 @@ async def stop() -> None:
     if _health is not None:
         _health.stopping = True  # F-964: a browser that dies in shutdown stays dead
         _health.release_exit_handles()
+        _health.cancel_captures()
     if task is None or task.done():
         return
     task.cancel()

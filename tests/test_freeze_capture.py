@@ -123,8 +123,8 @@ class TestTheFreshConnection:
 # ---------------------------------------------------------------------------
 
 
-def _dump(directory: Path, name: str, age: float) -> Path:
-    path = directory / f"{name}.dmp"
+def _dump(directory: Path, name: str, age: float, *, healed: bool = False) -> Path:
+    path = directory / f"{name}{'-healed' if healed else ''}.dmp"
     path.write_bytes(b"MDMP")
     stamp = time.time() - age
     os.utime(path, (stamp, stamp))
@@ -132,19 +132,42 @@ def _dump(directory: Path, name: str, age: float) -> Path:
 
 
 class TestRotation:
-    def test_it_keeps_the_newest_two_and_deletes_the_rest(self, tmp_path):
-        oldest = _dump(tmp_path, "a", 400)
-        older = _dump(tmp_path, "b", 300)
-        newer = _dump(tmp_path, "c", 200)
-        newest = _dump(tmp_path, "d", 100)
+    def test_it_keeps_the_newest_two_healed_and_deletes_the_rest(self, tmp_path):
+        oldest = _dump(tmp_path, "a", 400, healed=True)
+        older = _dump(tmp_path, "b", 300, healed=True)
+        newer = _dump(tmp_path, "c", 200, healed=True)
+        newest = _dump(tmp_path, "d", 100, healed=True)
 
         freeze_capture.rotate(tmp_path)
 
         assert not oldest.exists() and not older.exists()
         assert newer.exists() and newest.exists()
 
-    def test_the_default_is_two(self):
+    def test_an_unhealed_dump_is_evicted_before_a_healed_one(self, tmp_path):
+        """The dump of an incident that REACHED THE HEAL is the one that matters; a
+        later benign episode's dump, however much newer, must not push it out."""
+        healed_old = _dump(tmp_path, "heal-1", 900, healed=True)
+        healed_new = _dump(tmp_path, "heal-2", 800, healed=True)
+        benign_old = _dump(tmp_path, "benign-1", 20)
+        benign_new = _dump(tmp_path, "benign-2", 10)
+
+        freeze_capture.rotate(tmp_path)
+
+        assert healed_old.exists() and healed_new.exists()
+        assert not benign_old.exists()
+        assert benign_new.exists()  # one unhealed is kept, the newest
+
+    def test_unhealed_dumps_are_capped_at_one_whatever_the_healed_count(self, tmp_path):
+        for index, age in enumerate((300, 200, 100)):
+            _dump(tmp_path, f"b{index}", age)
+
+        freeze_capture.rotate(tmp_path)
+
+        assert [p.name for p in tmp_path.iterdir()] == ["b2.dmp"]
+
+    def test_the_defaults_are_two_healed_and_one_unhealed(self):
         assert freeze_capture.MAX_DUMPS == 2
+        assert freeze_capture.MAX_UNHEALED == 1
 
     def test_it_leaves_other_files_alone(self, tmp_path):
         keep = tmp_path / "notes.txt"
@@ -168,6 +191,38 @@ class TestRotation:
 
     def test_a_missing_directory_is_not_an_error(self, tmp_path):
         freeze_capture.rotate(tmp_path / "nope")
+
+
+class TestMarkHealed:
+    def test_the_newest_unhealed_dump_of_the_label_is_renamed(self, tmp_path):
+        older = _dump(tmp_path, "freeze-fleet-abc-1", 300)
+        newest = _dump(tmp_path, "freeze-fleet-abc-2", 100)
+
+        kept = freeze_capture.mark_healed("freeze-fleet-abc", tmp_path)
+
+        assert kept == str(tmp_path / "freeze-fleet-abc-2-healed.dmp")
+        assert (tmp_path / "freeze-fleet-abc-2-healed.dmp").exists()
+        assert not newest.exists()
+        assert older.exists()  # the one unhealed dump a benign episode may keep
+
+    def test_another_browsers_dump_is_not_touched(self, tmp_path):
+        mine = _dump(tmp_path, "freeze-fleet-abc-1", 100)
+        theirs = _dump(tmp_path, "freeze-default-xyz-1", 50)
+
+        freeze_capture.mark_healed("freeze-fleet-abc", tmp_path)
+
+        assert theirs.exists() and not mine.exists()
+        assert (tmp_path / "freeze-fleet-abc-1-healed.dmp").exists()
+
+    def test_no_dump_is_none_not_an_error(self, tmp_path):
+        assert freeze_capture.mark_healed("freeze-x", tmp_path) is None
+        assert freeze_capture.mark_healed("freeze-x", tmp_path / "nope") is None
+
+    def test_an_already_healed_dump_is_not_renamed_again(self, tmp_path):
+        _dump(tmp_path, "freeze-x-1", 100, healed=True)
+
+        assert freeze_capture.mark_healed("freeze-x", tmp_path) is None
+        assert (tmp_path / "freeze-x-1-healed.dmp").exists()
 
 
 class TestTheDumpLivesUnderTheLogDir:
@@ -308,8 +363,36 @@ class TestMinidump:
             release.set()
             await asyncio.sleep(0.2)
 
-        assert second == "skipped: an earlier dump is still being written"
+        assert second.startswith("skipped: an earlier dump was still being written")
+        assert "0.1s" in second  # the wait it gave, so the record says WHY
         assert calls == [1]
+
+    async def test_two_dumps_asked_together_are_written_one_behind_the_other(
+        self, tmp_path
+    ):
+        """``default`` and ``fleet`` freeze together: BOTH get a dump, serially (one
+        dbghelp writer at a time), and the loop is never blocked."""
+        order: list = []
+
+        def slow(pid: int, path: Path) -> None:
+            order.append(("start", pid))
+            time.sleep(0.15)
+            path.write_bytes(b"MDMP")
+            order.append(("end", pid))
+
+        first, second = await asyncio.gather(
+            freeze_capture.write_minidump(
+                1, tmp_path, "a", budget=5.0, platform="win32", write=slow
+            ),
+            freeze_capture.write_minidump(
+                2, tmp_path, "b", budget=5.0, platform="win32", write=slow
+            ),
+        )
+
+        # both were WRITTEN; rotation then keeps the one unhealed dump, the newer
+        assert [p.name for p in tmp_path.iterdir()] == ["b.dmp"]
+        assert str(tmp_path / "a.dmp") in first and str(tmp_path / "b.dmp") in second
+        assert [e[0] for e in order] == ["start", "end", "start", "end"]
 
     async def test_a_nearly_full_disk_skips_the_dump(self, tmp_path, monkeypatch):
         monkeypatch.setattr(freeze_capture, "MIN_FREE_BYTES", 2**62)
@@ -322,7 +405,7 @@ class TestMinidump:
         assert line.startswith("skipped: only ") and "free" in line
         assert calls == []
 
-    async def test_four_dumps_leave_two(self, tmp_path):
+    async def test_four_unhealed_dumps_leave_one(self, tmp_path):
         for index in range(4):
             await freeze_capture.write_minidump(
                 1, tmp_path, f"freeze-{index}", platform="win32", write=_writer()
@@ -330,10 +413,17 @@ class TestMinidump:
             stamp = time.time() - (10 - index)
             os.utime(tmp_path / f"freeze-{index}.dmp", (stamp, stamp))
 
-        assert sorted(p.name for p in tmp_path.iterdir()) == [
-            "freeze-2.dmp",
-            "freeze-3.dmp",
-        ]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["freeze-3.dmp"]
+
+    async def test_dump_now_names_the_file_by_label_and_utc_stamp(self, tmp_path):
+        line = await freeze_capture.dump_now(
+            7, "freeze-fleet-abc", directory=tmp_path, platform="win32", write=_writer()
+        )
+
+        (written,) = tmp_path.iterdir()
+        assert written.name.startswith("freeze-fleet-abc-")
+        assert written.name.endswith("Z.dmp")
+        assert str(written) in line
 
     def test_the_type_has_thread_stacks_handle_data_and_no_heap(self):
         """Pins the choice (see the module docstring): Normal already carries every
@@ -570,6 +660,108 @@ class TestCapture:
 
         for forbidden in ("http", "title", "cookie", "ws://"):
             assert forbidden not in record.lower()
+
+
+class TestIncidents:
+    def _incidents(self, now: list[float], records: list[str], log: list[str]):
+        async def capture(**facts) -> str:
+            records.append(facts["label"] + ":" + str(facts["skip_dump"]))
+            return "record"
+
+        async def dump_now(pid, label, **_k) -> str:
+            return f"late({pid},{label})"
+
+        return freeze_capture.Incidents(
+            capture=capture,
+            dump_now=dump_now,
+            mark_healed=lambda label: f"{label}-healed.dmp",
+            clock=lambda: now[0],
+            log=log.append,
+        )
+
+    async def test_begin_returns_at_once_and_the_task_logs_its_record(self):
+        records: list[str] = []
+        log: list[str] = []
+        incidents = self._incidents([0.0], records, log)
+
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        assert incidents.has("i") and records == []  # not run yet: begin did not await
+        await asyncio.sleep(0.01)
+
+        assert records == ["l:None"]
+        assert log == ["i: evidence@probe1(record)"]
+
+    async def test_a_second_begin_in_the_same_incident_does_nothing(self):
+        records: list[str] = []
+        incidents = self._incidents([0.0], records, [])
+
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await asyncio.sleep(0.01)
+
+        assert len(records) == 1
+
+    async def test_a_pid_that_may_not_be_touched_is_recorded_not_captured(self):
+        records: list[str] = []
+        log: list[str] = []
+        incidents = self._incidents([0.0], records, log)
+
+        incidents.begin("i", pid=1, label="l", answers=lambda: None, problem="reused")
+        await asyncio.sleep(0.01)
+
+        assert records == []
+        assert log == ["i: evidence@probe1(capture skipped: reused)"]
+
+    async def test_the_dump_is_withheld_inside_the_interval_and_taken_at_the_heal(self):
+        now = [0.0]
+        records: list[str] = []
+        incidents = self._incidents(now, records, [])
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await asyncio.sleep(0.01)
+        incidents.end("i")
+        now[0] = 60.0
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await asyncio.sleep(0.01)
+
+        said = await incidents.before_heal("i", pid=1, label="l")
+
+        assert records[0] == "l:None" and records[1].startswith("l:the last unhealed")
+        assert said == (
+            "evidence@probe1(record); minidump_at_heal(late(1,l)); dump_kept(l-healed.dmp)"
+        )
+
+    async def test_a_mark_that_raises_is_said_so_and_the_heal_goes_on(self):
+        def broken(_label: str) -> str | None:
+            raise OSError("locked")
+
+        incidents = freeze_capture.Incidents(
+            capture=lambda **_k: asyncio.sleep(0, "r"),
+            dump_now=lambda *_a, **_k: asyncio.sleep(0, "x"),
+            mark_healed=broken,
+            clock=lambda: 0.0,
+            log=lambda _line: None,
+        )
+
+        said = await incidents.before_heal("i", pid=1, label="l")
+
+        assert said == "evidence@probe1(none); dump_not_marked_healed(OSError)"
+
+    async def test_no_incident_is_said_so_and_still_marks_what_there_is(self):
+        incidents = self._incidents([0.0], [], [])
+
+        said = await incidents.before_heal("i", pid=1, label="l")
+
+        assert said == "evidence@probe1(none); dump_kept(l-healed.dmp)"
+
+    async def test_forget_drops_the_spacing_too_and_end_keeps_it(self):
+        incidents = self._incidents([0.0], [], [])
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await asyncio.sleep(0.01)
+
+        incidents.end("i")
+        assert "i" in incidents.tracked()
+        incidents.forget("i")
+        assert "i" not in incidents.tracked()
 
 
 def test_the_module_is_a_leaf_that_imports_no_server_and_no_browser_health():

@@ -242,9 +242,16 @@ async def test_the_first_failed_probe_captures_the_real_browser_before_any_heal(
         )
         await health.check_once()
 
-        (line,) = [w for w in recorder.warnings if "probe 1 failed" in w]
+        (first,) = [w for w in recorder.warnings if "probe 1 failed" in w]
         assert closes == [], "the first failure heals nothing"
-        assert "evidence(cpu(3.0s: browser=" in line, line
+        assert first.endswith("evidence@probe1(capturing)"), first
+        # the capture runs beside the round: wait for ITS own log line
+        data = await manager.get_instance(instance_id)
+        await asyncio.wait_for(
+            asyncio.gather(*health._incidents._tasks.values()), timeout=90
+        )
+        (line,) = [w for w in recorder.warnings if "evidence@probe1(cpu(" in w]
+        assert "cpu(3.0s: browser=" in line, line
         assert "process(status=" in line and "threads=" in line, line
         assert "fresh_cdp(Browser.getVersion: answered in " in line, line
         if sys.platform == "win32":
@@ -254,7 +261,19 @@ async def test_the_first_failed_probe_captures_the_real_browser_before_any_heal(
         else:
             assert "minidump(skipped: platform)" in line, line
         for forbidden in ("http", "about:blank", "cookie"):
-            assert forbidden not in line.split("evidence(")[1].lower(), forbidden
+            assert forbidden not in line.split("evidence@probe1(")[1].lower(), forbidden
+
+        # the incident reaches the heal: its dump is kept ahead of benign ones
+        pid, label, _problem = health._incident_target(instance_id, data)
+        evidence = await health._incidents.before_heal(
+            instance_id, pid=pid, label=label
+        )
+        if sys.platform == "win32":
+            healed = Path(re.search(r"dump_kept\((.+?)\)", evidence).group(1))
+            assert healed.name.endswith("-healed.dmp") and healed.exists()
+            assert not dump.exists()
+        else:
+            assert "dump_kept" not in evidence, evidence
     finally:
         with contextlib.suppress(Exception):
             await get_fn("close_instance")(instance_id=instance_id, session="fleet")

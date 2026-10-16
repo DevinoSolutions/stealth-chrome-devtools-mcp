@@ -8,20 +8,27 @@ The six hard freezes of `default` and `fleet` (2026-10-11..13: `/json` answering
 every tab, sometimes a force kill that did not end the process for seconds) are still unexplained, because
 everything the sampler keeps (threads, handles, GDI, RSS) stayed flat across the onset and the heal destroyed
 the process before anyone could look at it. At the FIRST failed probe of an incident, before anything is closed
-or killed, `browser_health` now records, once, on the same WARNING line F-963 already writes (and again on the
-`healing it` ERROR line that reaches Sentry): the CPU-time delta of the browser and its renderers over 3 s
-(spinning or blocked), `psutil` status, thread count and priority class, whether `Browser.getVersion` answers a
-FRESH connection within 5 s, and the timing of each probe step (`createTarget=..ms attachToTarget=..ms`).
-Counts only; no URL, title or cookie. On Windows it also writes a **minidump** of the browser process to
-`<log dir>/freeze-dumps/` through `MiniDumpWriteDump` (`dbghelp.dll`, ctypes), so the UI thread's stack and the
-handles it waits on can be read in WinDbg after the fact. The type is thread stacks + handle data + thread
-info + process thread data + unloaded modules + memory info and **no heap** (1.4-1.6 MB measured on a fresh
-Chrome, against ~600 MB for the full-memory dump `rundll32 comsvcs.dll, MiniDump` always writes, which Defender
-also blocks). It runs on its own thread under a 45 s budget so a stuck write cannot hold the health loop, one at
-a time, never below 2 GB free, at most **2** dumps kept (the oldest deleted); a failure, a skip
-(`skipped: platform` off Windows) or a late write is words in the record, never an exception. A slow-but-alive
-episode also produces one, so copy a freeze's dump out before the next. The whole capture is bounded
-at 60 s and cannot raise into the loop; thresholds, order and the heal are unchanged.
+or killed, `browser_health` now starts a capture as a task beside the loop (the first-miss WARNING says
+`evidence@probe1(capturing)`; the round, and the two-minute spacing of the heal, are not delayed, and two
+browsers frozen together are captured together). The record arrives on its own WARNING and on the `healing it`
+ERROR line that reaches Sentry, labelled `evidence@probe1(...)` because it is about two minutes older than the
+heal: the CPU-time delta of the browser and its renderers over 3 s (spinning or blocked), `psutil` status, thread
+count and priority class, whether `Browser.getVersion` answers a FRESH connection within 5 s, and the timing of
+each probe step (`createTarget=..ms attachToTarget=..ms`). Counts only; no URL, title or cookie. Just before the
+heal the loop waits for it for at most 10 s, so it normally lands before the kill and never holds the heal longer.
+On Windows it also writes a **minidump** of the browser process to `<log dir>/freeze-dumps/` through
+`MiniDumpWriteDump` (`dbghelp.dll`, ctypes), so the UI thread's stack and the handles it waits on can be read in
+WinDbg after the fact. The type is thread stacks + handle data + thread info + process thread data + unloaded
+modules + memory info and **no heap** (1.4-1.6 MB measured on a fresh Chrome, against ~600 MB for the full-memory
+dump `rundll32 comsvcs.dll, MiniDump` always writes, which Defender also blocks). It runs on its own thread under a
+45 s budget so a stuck write cannot hold the health loop; two dumps asked together are written one behind the
+other instead of the second being skipped; never below 2 GB free. The dump of an incident that **reaches the
+heal** is renamed `...-healed.dmp` and kept ahead of benign ones: rotation evicts unhealed dumps first and keeps
+2 healed plus 1 unhealed, and a browser that is slow but alive takes at most one unhealed dump per 30 minutes (a
+dump it was refused is taken at the heal if the incident then heals). A pid is opened only after its start time
+matches the registry record, so a reused pid is never dumped; a failure, a skip (`skipped: platform` off Windows)
+or a late write is words in the record, never an exception. `STEALTH_MCP_LOG_DIR` relocates the dumps with the
+logs, so it must not point at a synced or shared folder. Thresholds, order and the heal are unchanged.
 
 A shared-session browser that **exited** (F-964) now has its exit code in the relaunch line
 (`exited unexpectedly (...; exit_code=15)`), which separates an outside `TerminateProcess` (1, 15), a crash

@@ -42,24 +42,41 @@ evidence of the same kind as Chrome's own log (:mod:`chrome_log`): stack memory 
 still hold a fragment of whatever a thread was handling, so it is never uploaded and
 the record carries its PATH only.
 
-*Bounded three ways.* Off the event loop, on its own daemon thread (a pool thread
-would block interpreter exit if the write never returned); a time budget
-(:data:`DUMP_BUDGET_SECONDS`), after which the loop moves on and the record says the
-dump had not finished; and at most one dump at a time -- a write that is stuck in the
-kernel must not pile up behind itself. It is written to ``<name>.dmp.partial`` and
-renamed on success, so a half-written file is never mistaken for evidence. Disk is
-bounded too: at most :data:`MAX_DUMPS` kept (the oldest deleted), and no dump at all
-below :data:`MIN_FREE_BYTES` free. They live in ``<log dir>/freeze-dumps/``, a
+*Bounded.* Off the event loop, on its own daemon thread (a pool thread would block
+interpreter exit if the write never returned); a time budget
+(:data:`DUMP_BUDGET_SECONDS`) covering the wait for its turn AND the write, after which
+the loop moves on and the record says why; and one dump at a time -- two browsers that
+freeze together are dumped one behind the other inside their budgets, and a write stuck
+in the kernel makes the next give up when its own budget is spent instead of piling up.
+It is written to ``<name>.dmp.partial`` and renamed on success, so a half-written file
+is never mistaken for evidence. No dump at all below :data:`MIN_FREE_BYTES` free.
+They live in ``<log dir>/freeze-dumps/`` (``STEALTH_MCP_LOG_DIR`` relocates them), a
 subdirectory ``logging_setup.prune_old_logs`` neither counts nor sweeps.
+
+*Retention protects the one that mattered.* A dump of an incident that reaches the
+heal is renamed ``...-healed.dmp`` (:func:`mark_healed`); a slow-but-alive episode never
+is. Rotation keeps the newest :data:`MAX_DUMPS` healed ones and only the newest
+:data:`MAX_UNHEALED` unhealed one, deleting the unhealed first, so a run of benign
+episodes cannot push a freeze's dump out. :class:`Incidents` also spaces a browser's
+unhealed dumps :data:`DUMP_MIN_INTERVAL_SECONDS` apart; a heal that finds its dump was
+withheld takes one at that moment, because a heal is the freeze.
 
 *Other platforms* record ``skipped: platform``.
 
 **3. The exit code** of a browser that exited is :mod:`process_exit`'s
 (:func:`process_exit.exit_status`), not this module's.
 
-A leaf: ``psutil``, ``ctypes`` and stdlib, ``browser_cmdline`` (is a pid a renderer)
-and ``logging_setup`` (the log dir). It imports neither ``browser_health`` (which
-imports it) nor ``server``; the fresh-connection check arrives as an argument.
+**Running beside the probe loop, not inside it.** :class:`Incidents` runs the capture
+as a task started at the first failed probe, so the loop keeps its two-minute spacing
+and two browsers are captured concurrently; the heal waits for that task at most
+:data:`HEAL_WAITS_FOR_CAPTURE_SECONDS`, which is how the record still lands before the
+kill whenever it can (it started two minutes earlier, and a dump is seconds).
+
+A leaf: ``psutil``, ``ctypes`` and stdlib, ``browser_cmdline`` (is a pid a renderer),
+``process_exit`` (the kernel32 bindings) and ``logging_setup`` (the log dir). It
+imports neither ``browser_health`` (which imports it) nor ``server``; the
+fresh-connection check, the pid-identity verdict and the log writer arrive as
+arguments.
 Every fact is gathered independently, so one that cannot be read does not cost the
 others, and nothing here raises into the caller.
 """
@@ -70,13 +87,18 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import browser_cmdline, logging_setup
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    logging_setup,
+    process_exit,
+)
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 
 #: How long the CPU-time delta is taken over. Long enough to tell a spinning
 #: process from a blocked one on a 15.6 ms Windows timer, short enough to leave the
@@ -89,14 +111,28 @@ FRESH_ANSWER_TIMEOUT_SECONDS = 5.0
 #: How long the loop waits for the dump to be written before it moves on.
 DUMP_BUDGET_SECONDS = 45.0
 
-#: The most dumps kept; the oldest is deleted when a newer one lands.
+#: How long the heal waits for the capture task it is about to outrun: it started a
+#: probe interval earlier, so this is the tail of a slow dump, never the whole of one.
+HEAL_WAITS_FOR_CAPTURE_SECONDS = 10.0
+
+#: The bound on one whole capture (the CPU window and the fresh connection run
+#: together, then the dump has its own budget). Under the probe interval.
+CAPTURE_TIMEOUT_SECONDS = 60
+
+#: Healed dumps kept (the oldest deleted); an unhealed one is kept only until a
+#: newer one lands.
 MAX_DUMPS = 2
+MAX_UNHEALED = 1
+
+#: The least time between two UNHEALED dumps of one browser.
+DUMP_MIN_INTERVAL_SECONDS = 1800.0
 
 #: No dump is started with less than this free on the volume.
 MIN_FREE_BYTES = 2 * 2**30
 
 DUMP_DIR_NAME = "freeze-dumps"
 _DUMP_SUFFIX = ".dmp"
+_HEALED_SUFFIX = "-healed.dmp"
 _PARTIAL_SUFFIX = ".dmp.partial"
 
 # MINIDUMP_TYPE bits (minidumpapiset.h): Win32 API values that cannot change.
@@ -122,6 +158,7 @@ _RENDERER = "renderer"
 _BROWSER = "browser"
 _OTHER = "other"
 _BUSY_SECONDS = 0.01  # under a timer tick: not "busy"
+_QUEUE_POLL_SECONDS = 0.05
 
 #: Held by the dump's thread for as long as it runs, so a stuck write is never
 #: joined by a second one.
@@ -249,25 +286,61 @@ def dump_directory() -> Path:
     return logging_setup.resolve_log_dir() / DUMP_DIR_NAME
 
 
-def rotate(directory: Path, keep: int = MAX_DUMPS, *, keep_partial: str = "") -> None:
-    """Keep the newest *keep* dumps and delete the rest, and sweep any partial file
-    other than *keep_partial* (the one being written). Never raises."""
+def rotate(
+    directory: Path,
+    keep: int = MAX_DUMPS,
+    *,
+    keep_unhealed: int = MAX_UNHEALED,
+    keep_partial: str = "",
+) -> None:
+    """Keep the newest *keep* healed dumps and the newest *keep_unhealed* unhealed
+    ones, delete the rest, and sweep any partial file other than *keep_partial* (the
+    one being written). Never raises."""
     try:
         entries = list(directory.iterdir())
     except OSError:
         return
-    dumps: list[tuple[float, str, Path]] = []
+    healed: list[tuple[float, str, Path]] = []
+    unhealed: list[tuple[float, str, Path]] = []
     for path in entries:
         if path.name.endswith(_PARTIAL_SUFFIX):
             if path.name != keep_partial:
                 with contextlib.suppress(OSError):
                     path.unlink()
         elif path.name.endswith(_DUMP_SUFFIX):
+            group = healed if path.name.endswith(_HEALED_SUFFIX) else unhealed
             with contextlib.suppress(OSError):
-                dumps.append((path.stat().st_mtime, path.name, path))
-    for _mtime, _name, stale in sorted(dumps, reverse=True)[keep:]:
-        with contextlib.suppress(OSError):
-            stale.unlink()
+                group.append((path.stat().st_mtime, path.name, path))
+    for group, limit in ((healed, keep), (unhealed, keep_unhealed)):
+        for _mtime, _name, stale in sorted(group, reverse=True)[limit:]:
+            with contextlib.suppress(OSError):
+                stale.unlink()
+
+
+def mark_healed(label: str, directory: Path | None = None) -> str | None:
+    """Rename the newest unhealed dump of *label* to ``...-healed.dmp``, so rotation
+    keeps it ahead of every benign episode's. The new path, or ``None`` when there is
+    none. Never raises."""
+    folder = directory or dump_directory()
+    try:
+        mine = [
+            (path.stat().st_mtime, path.name, path)
+            for path in folder.iterdir()
+            if path.name.startswith(f"{label}-")
+            and path.name.endswith(_DUMP_SUFFIX)
+            and not path.name.endswith(_HEALED_SUFFIX)
+        ]
+        if not mine:
+            return None
+        newest = max(mine)[2]
+        target = newest.with_name(
+            newest.name.removesuffix(_DUMP_SUFFIX) + _HEALED_SUFFIX
+        )
+        newest.replace(target)
+        rotate(folder)
+    except OSError:
+        return None
+    return str(target)
 
 
 def _write_with_dbghelp(pid: int, path: Path) -> None:
@@ -279,11 +352,7 @@ def _write_with_dbghelp(pid: int, path: Path) -> None:
     import msvcrt
     from ctypes import wintypes
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel.OpenProcess.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel = process_exit.kernel32()  # OpenProcess / CloseHandle, typed once there
     kernel.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
     kernel.GetSystemDirectoryW.restype = wintypes.UINT
     system = ctypes.create_unicode_buffer(260)
@@ -382,9 +451,15 @@ async def write_minidump(  # noqa: PLR0913  PERMANENT(F-993: the budget, platfor
     had not finished within *budget*. Never raises; never blocks the loop."""
     if platform != "win32":
         return "skipped: platform"
-    if not _dump_running.acquire(blocking=False):
-        return "skipped: an earlier dump is still being written"
     loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while not _dump_running.acquire(blocking=False):  # another browser's dump: queue
+        if loop.time() >= deadline:
+            return (
+                "skipped: an earlier dump was still being written after waiting "
+                f"{budget:.1f}s"
+            )
+        await asyncio.sleep(_QUEUE_POLL_SECONDS)
     done: asyncio.Future[tuple[Path, int]] = loop.create_future()
     started = time.monotonic()
     final = directory / f"{name}{_DUMP_SUFFIX}"
@@ -407,7 +482,7 @@ async def write_minidump(  # noqa: PLR0913  PERMANENT(F-993: the budget, platfor
         _dump_running.release()
         return f"failed: {type(error).__name__}: {error}"
     try:
-        path, size = await asyncio.wait_for(done, budget)
+        path, size = await asyncio.wait_for(done, max(deadline - loop.time(), 0.05))
     except Exception as error:  # noqa: BLE001  PERMANENT(F-993: a failed, skipped or late dump is recorded, never raised into the health loop)
         return _explain(error, budget, final)
     return (
@@ -419,6 +494,24 @@ async def write_minidump(  # noqa: PLR0913  PERMANENT(F-993: the budget, platfor
 # ---------------------------------------------------------------------------
 # Probe step timings
 # ---------------------------------------------------------------------------
+
+
+def identity_problem(entry: Mapping[str, object], pid: int | None) -> str | None:
+    """Why *pid* may not be opened for the browser recorded in *entry*, or ``None``
+    (F-993): it is not the recorded pid, or its create time is not the recorded one,
+    i.e. the pid was reused. The rule is ``process_cleanup``'s own (one home); an
+    entry with no pid or no create time recorded has nothing to contradict."""
+    recorded = entry.get("pid")
+    if pid is None or recorded is None:
+        return None
+    if recorded != pid:
+        return f"pid {pid} is not the recorded browser pid {recorded}"
+    stored = entry.get("create_time")
+    if not process_cleanup._fallback_pid_identity_ok(
+        pid, stored if isinstance(stored, float) else None
+    ):
+        return f"pid {pid} is gone or not the process recorded (start time differs)"
+    return None
 
 
 class TimedSteps(list[str]):
@@ -487,10 +580,12 @@ async def capture(  # noqa: PLR0913  PERMANENT(F-993: one keyword seam per exter
     platform: str = sys.platform,
     write: Writer | None = None,
     snapshot: Callable[[int], Snapshot] = cpu_snapshot,
+    skip_dump: str | None = None,
 ) -> str:
     """One line of counts about a browser that stopped answering, then (Windows) a
     minidump of it. *label* names the dump file; *answers* is the fresh-connection
-    ``Browser.getVersion`` check, which this module cannot import."""
+    ``Browser.getVersion`` check, which this module cannot import; *skip_dump* is the
+    reason the caller withholds the dump, recorded in its place."""
 
     if pid is None:
         window: Awaitable[str] = _unavailable("no pid")
@@ -517,16 +612,198 @@ async def capture(  # noqa: PLR0913  PERMANENT(F-993: one keyword seam per exter
             if name == "fresh_cdp"
             else f"{name}({text})"
         )
-    if pid is None:
+    if skip_dump is not None:
+        dump = f"skipped: {skip_dump}"
+    elif pid is None:
         dump = "skipped: no pid"
     else:
-        stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        dump = await write_minidump(
+        dump = await dump_now(
             pid,
-            directory or dump_directory(),
-            f"{label}-{stamp}",
+            label,
+            directory=directory,
             budget=dump_budget,
             platform=platform,
             write=write,
         )
     return " ".join([*shown, f"minidump({dump})"])
+
+
+async def dump_now(  # noqa: PLR0913  PERMANENT(F-993: the same keyword seams as write_minidump)
+    pid: int,
+    label: str,
+    *,
+    directory: Path | None = None,
+    budget: float = DUMP_BUDGET_SECONDS,
+    platform: str = sys.platform,
+    write: Writer | None = None,
+) -> str:
+    """:func:`write_minidump` into the dump directory under ``<label>-<UTC stamp>``."""
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return await write_minidump(
+        pid,
+        directory or dump_directory(),
+        f"{label}-{stamp}",
+        budget=budget,
+        platform=platform,
+        write=write,
+    )
+
+
+# ---------------------------------------------------------------------------
+# One incident at a time, per browser
+# ---------------------------------------------------------------------------
+
+
+class Incidents:
+    """The capture of each browser's CURRENT incident, run beside the probe loop.
+
+    ``begin`` (the first failed probe) starts the capture as a task and returns at
+    once; ``end`` (a probe passed, or the browser is gone) cancels it;
+    ``before_heal`` waits for it for at most :data:`HEAL_WAITS_FOR_CAPTURE_SECONDS`,
+    takes the dump a rate limit withheld, and marks the dump healed. Nothing here
+    raises into the caller, and the record is logged by ``log`` the moment the task
+    finishes."""
+
+    def __init__(
+        self,
+        *,
+        capture: Callable[..., Awaitable[str]],
+        dump_now: Callable[..., Awaitable[str]],
+        mark_healed: Callable[[str], str | None],
+        clock: Callable[[], float],
+        log: Callable[[str], None],
+    ) -> None:
+        self._capture = capture
+        self._dump_now = dump_now
+        self._mark_healed = mark_healed
+        self._clock = clock
+        self._log = log
+        self._tasks: dict[str, asyncio.Task[str]] = {}
+        self._running: set[asyncio.Task[str]] = set()  # strong refs, until done
+        self._last_dump: dict[str, float] = {}
+        self._withheld: set[str] = set()
+
+    def has(self, instance_id: str) -> bool:
+        """Is this browser's current incident already being captured?"""
+        return instance_id in self._tasks
+
+    def tracked(self) -> set[str]:
+        return set(self._tasks) | set(self._last_dump)
+
+    def begin(
+        self,
+        instance_id: str,
+        *,
+        pid: int | None,
+        label: str,
+        answers: Callable[[], Awaitable[None]],
+        problem: str | None = None,
+    ) -> None:
+        """Start the capture of a new incident. *problem* is why this pid may not be
+        touched at all (it is not the browser we recorded); it is recorded instead."""
+        if instance_id in self._tasks:
+            return
+        if problem is not None:
+            job = _skipped(instance_id, problem, self._log)
+        else:
+            now = self._clock()
+            last = self._last_dump.get(instance_id)
+            skip = None
+            if last is not None and now - last < DUMP_MIN_INTERVAL_SECONDS:
+                skip = (
+                    f"the last unhealed dump of this browser was {now - last:.0f}s "
+                    f"ago (minimum {DUMP_MIN_INTERVAL_SECONDS:.0f}s)"
+                )
+                self._withheld.add(instance_id)
+            else:
+                self._last_dump[instance_id] = now
+            job = self._run(instance_id, pid, label, answers, skip)
+        task = asyncio.create_task(job)
+        self._tasks[instance_id] = task
+        self._running.add(task)
+        task.add_done_callback(self._running.discard)
+
+    async def _run(
+        self,
+        instance_id: str,
+        pid: int | None,
+        label: str,
+        answers: Callable[[], Awaitable[None]],
+        skip: str | None,
+    ) -> str:
+        try:
+            record = await asyncio.wait_for(
+                self._capture(pid=pid, label=label, answers=answers, skip_dump=skip),
+                CAPTURE_TIMEOUT_SECONDS,
+            )
+        except Exception as error:  # noqa: BLE001  PERMANENT(F-993: evidence is best effort and must not stand between a hung browser and its heal)
+            record = f"capture unavailable ({type(error).__name__})"
+        self._log(f"{instance_id}: evidence@probe1({record})")
+        return record
+
+    def end(self, instance_id: str) -> None:
+        """The incident is over without a heal (a probe passed) or the browser is
+        gone: stop the capture. Its dump, if written, stays unhealed. The spacing
+        between unhealed dumps is kept for a browser that is still there."""
+        task = self._tasks.pop(instance_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._withheld.discard(instance_id)
+
+    def forget(self, instance_id: str) -> None:
+        """A browser that is gone: no incident and no spacing to keep."""
+        self.end(instance_id)
+        self._last_dump.pop(instance_id, None)
+
+    def cancel_all(self) -> None:
+        """Shutdown: stop every capture still running."""
+        for task in list(self._running):
+            task.cancel()
+
+    async def before_heal(
+        self, instance_id: str, *, pid: int | None, label: str
+    ) -> str:
+        """What the heal's ERROR line says about the incident, taken now: the
+        capture's record (waited for at most :data:`HEAL_WAITS_FOR_CAPTURE_SECONDS`),
+        the dump a rate limit withheld, and where the healed dump is kept."""
+        task = self._tasks.pop(instance_id, None)
+        parts = []
+        if task is None:
+            parts.append("evidence@probe1(none)")
+        else:
+            try:
+                record = await asyncio.wait_for(
+                    asyncio.shield(task), HEAL_WAITS_FOR_CAPTURE_SECONDS
+                )
+            except TimeoutError:
+                waited = f"{HEAL_WAITS_FOR_CAPTURE_SECONDS:.0f}s"
+                record = f"still capturing; the heal waits {waited} and no longer"
+            except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
+                record = f"capture unavailable ({type(error).__name__})"
+            parts.append(f"evidence@probe1({record})")
+        if instance_id in self._withheld and pid is not None:
+            self._withheld.discard(instance_id)
+            try:
+                late = await self._dump_now(
+                    pid, label, budget=HEAL_WAITS_FOR_CAPTURE_SECONDS
+                )
+            except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
+                late = f"failed: {type(error).__name__}"
+            parts.append(f"minidump_at_heal({late})")
+        self._last_dump.pop(instance_id, None)  # this dump is healed: spacing resets
+        try:
+            kept = await asyncio.wait_for(
+                asyncio.to_thread(self._mark_healed, label),
+                HEAL_WAITS_FOR_CAPTURE_SECONDS,
+            )
+        except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
+            parts.append(f"dump_not_marked_healed({type(error).__name__})")
+            kept = None
+        if kept:
+            parts.append(f"dump_kept({kept})")
+        return "; ".join(parts)
+
+
+async def _skipped(instance_id: str, problem: str, log: Callable[[str], None]) -> str:
+    log(f"{instance_id}: evidence@probe1(capture skipped: {problem})")
+    return f"capture skipped: {problem}"
