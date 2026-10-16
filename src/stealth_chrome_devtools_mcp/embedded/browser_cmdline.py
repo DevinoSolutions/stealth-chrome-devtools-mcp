@@ -14,14 +14,18 @@ through ``merge_browser_args`` while nodriver appends its own with ``=``.
 
 A leaf: ``psutil``, stdlib ``socket``, and ``browser_pid_registry`` for the two
 things it must not re-spell — what a usable port is, and how two paths are
-compared. It decides NOTHING: every judgement is ``browser_reattach``'s and
-``profile_lock``'s, its two consumers since F-931.
+compared. It states FACTS and decides nothing: every judgement is
+``browser_reattach``'s and ``profile_lock``'s, its two consumers since F-931
+(``command_line_is_gone`` is the last of them, and it is a fact about the
+command line too).
 """
 
 from __future__ import annotations
 
 import socket
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psutil
@@ -203,12 +207,90 @@ def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
     return Members(tuple(found), tuple(unreadable))
 
 
+#: Whether an EMPTY command line can be told from a live browser, which is a
+#: Linux-only measurement (F-998): see :func:`command_line_is_gone`. False
+#: elsewhere, and there only a zombie counts as gone.
+_EXE_WITNESS = sys.platform.startswith("linux")
+
+
+def _exe_is_gone(pid: int) -> bool:
+    """Whether ``/proc/<pid>/exe`` is definitely gone: ``FileNotFoundError`` (or
+    its ``ESRCH`` twin) and nothing else. A readable link, ``PermissionError`` or
+    any other error is "not shown gone", which the caller reads as HELD."""
+    try:
+        Path(f"{getattr(psutil, 'PROCFS_PATH', '/proc')}/{pid}/exe").readlink()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def command_line_is_gone(pid: int) -> bool:
+    """Whether *pid* is still LISTED but can no longer be a running browser
+    (F-998). A browser that has been killed spends a moment in one of two states,
+    and ``psutil.pid_exists`` is True for both:
+
+    * a ZOMBIE, which has exited and waits for its parent's ``wait()``. This
+      backend is that parent, and collects it only when its child watcher gets to
+      run. Its ``status`` says so, on every platform;
+    * TEARING DOWN, which has already released its address space — the first thing
+      a dying process does — and so reads an EMPTY command line, with no error,
+      while the kernel finishes with its threads and files. **Linux only, and only
+      with a second fact:** an empty command line is NOT enough, because a LIVE
+      browser has one too. ``/usr/bin/chromium`` and Google's launcher are
+      ``#!/bin/sh`` scripts that ``exec`` the real binary under the same pid, and
+      across that ``execve`` the pid reads an empty argv while running, before
+      ``SingletonLock`` exists (measured on Chromium 155, 40 launches under CPU
+      contention: the browser pid read empty while alive in 11 of them, and the
+      production ``profile_hold`` showed the profile free in 2 of 11,194 live polls
+      with the first version of this function, against 0 of 11,033 before F-998).
+      What separates the two is the executable link: ``/proc/<pid>/exe`` stayed
+      readable (and ``maps`` non-empty) on 81 of 81 live mid-exec samples, and was
+      unreadable on every sample of a dying browser, because the dying process has
+      no address space left to name an executable from. So an empty command line
+      is gone only when ``/proc/<pid>/exe`` is also ``FileNotFoundError``;
+      ``PermissionError``, a readable link or any other outcome is HELD.
+
+    Off Linux only the zombie half applies. The exec-window measurement is
+    Linux-only (Chrome on macOS is a direct binary, which was not measured, and
+    Windows has no zombies and never reaches ``profile_lock._pid_alive``: Chrome
+    writes no ``SingletonLock`` there, and a killed process is simply no longer
+    listed), so nothing licenses reading an empty argv as dead there.
+
+    Known limit, not fixable here: on Linux the leader of a still-running
+    multithreaded process reads ``Z`` once its own thread has exited (a main
+    thread that calls ``pthread_exit``), which this reads as gone. Chrome does not
+    do that. Holding a zombie that has more than one thread was tried and fails:
+    a SIGKILLed Chrome keeps ``num_threads`` above 1 while its other threads
+    finish, and 12 of 20 runs of the fleet journey walked to ``fleet-2`` again.
+
+    Neither state can hold a profile or answer Chrome's singleton socket. The ONE
+    witness of the two "is this pid still there" questions below and
+    ``profile_lock._pid_alive``. (``process_exit._has_exited`` asks a related
+    question of a process the backend is WAITING on and cannot answer this one:
+    it does not see a teardown.)
+
+    A pid that vanished between the listing and this read is gone, which is True;
+    one we cannot ask about (``AccessDenied``) stays HELD, never called dead."""
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return True
+        return _EXE_WITNESS and not process.cmdline() and _exe_is_gone(pid)
+    except psutil.NoSuchProcess:  # incl. ZombieProcess: reaped or reaping
+        return True
+    except (psutil.Error, OSError, ValueError):
+        return False
+
+
 def _still_running(pid: int) -> bool:
     """Whether *pid* is still there. A pid we cannot ask about counts as
     running, which resolves toward HELD — ``profile_lock._pid_alive``'s
-    direction, for the same reason."""
+    direction, for the same reason. A pid whose command line has gone is not still
+    there (F-998)."""
     try:
-        return psutil.pid_exists(pid)
+        return psutil.pid_exists(pid) and not command_line_is_gone(pid)
     except (psutil.Error, OSError):
         return True
 

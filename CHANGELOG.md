@@ -78,6 +78,32 @@ backend launched, and for one it re-attached after a restart (which `default` an
 has no process object) a Windows handle held since the first probe round, since Windows keeps an exit code only
 while a handle is open. See the RUNBOOK section on F-963 for reading the record.
 
+### A relaunch of `fleet` right after its browser was killed walked to `fleet-2` (F-998)
+
+`spawn_browser(session="fleet")` is meant to come back on the same directory after the browser is closed or
+killed, and never to walk to `<name>-2`. When the Chrome process was SIGKILLed and the spawn arrived before
+the kernel and this backend had finished with it, the spawn answered `fleet-2`, seeded from the dead browser,
+with `cookie_handoff_error: "the source browser is no longer driven by this backend"`: the session name was
+substituted and the login lost. A killed browser is first tearing down (it has released its memory, so its
+command line already reads empty, and its state is still running) and then a zombie until its parent collects
+it, and `psutil.pid_exists` is True throughout. In that window the `SingletonLock` naming its pid read as a live
+holder (`profile_lock._pid_alive`), while the backend's own view of the instance (asyncio's `returncode`) still
+said alive. "Held, and we drive the holder" is the rule that walks and hands over the jar, so it walked, and the
+hand-off then found nothing to read from. A pid in either state is now read as not running, by one witness
+(`browser_cmdline.command_line_is_gone`) shared by `profile_lock._pid_alive` and `browser_cmdline._still_running`.
+The relaunch lands on `fleet` itself, with the login on disk. Seen in 2 of the last 40 Linux transport CI runs
+(`test_the_fleet_comes_back_after_every_way_of_losing_it`); reproduced on real Chromium under CPU contention,
+and pinned hermetically with a real zombie (`tests/test_fleet_relaunch.py`).
+
+The witness is deliberately narrow, because the opposite mistake is two browsers on one profile. An EMPTY
+command line is not by itself a dead process: Chromium's and Chrome's launchers are `#!/bin/sh` scripts that
+`exec` the real binary under the same pid, and across that `execve` a LIVE browser reads an empty argv, before
+its lock exists (measured on real Chromium 155: 11 of 40 launches; a first version of this fix that trusted it
+showed a live profile free in 2 of 11,194 polls, against 0 of 11,033 before). On Linux an empty argv now counts
+as gone only when `/proc/<pid>/exe` is also `FileNotFoundError` (the link was readable on 81 of 81 live mid-exec
+samples and unreadable on every sample of a dying browser); a zombie counts everywhere; anything else, including
+`PermissionError` on the link, and any platform but Linux for the empty-argv half, stays held.
+
 ### The F-866 real-process test read its marker file before the child had written it (F-994)
 
 `test_the_spawned_backend_has_no_redirector_no_job_and_no_console` polled until the child's marker file
