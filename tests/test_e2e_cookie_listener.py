@@ -27,6 +27,7 @@ three different CDP commands and only the first was reported:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -77,7 +78,10 @@ async def _instance_on_a_page_with_a_cookie(base: str) -> tuple[str, callable]:
         await navigate_and_settle(iid, f"{base}/interactions.html")
         assert await set_cookie(instance_id=iid, name=_COOKIE_NAME, value=_COOKIE_VALUE)
     except BaseException:
-        await close(instance_id=iid)
+        # The close is best effort: a failure of its own must not replace the
+        # exception that says what actually went wrong.
+        with contextlib.suppress(Exception):
+            await close(instance_id=iid)
         raise
     return iid, close
 

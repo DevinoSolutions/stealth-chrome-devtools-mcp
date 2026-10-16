@@ -23,8 +23,13 @@ nodes' own failure time). The cookie nodes' setup now closes its browser when it
 once, one or two of them overran it in each of runs 38853069247, 38897999560 and 38898031227, so the spawn logged
 "setting session.restore_on_startup took over 8.0s" and that named session's session cookies would not survive
 its close; the same wave on the 5-vCPU cell finished in 7.7 s with no overrun, so the exchange is slow under
-contention, not hung. The bound is now 20 s; the exchange and the close of its tab each get one, inside the 60 s
-post-launch phase budget, and a test holds that relation.
+contention, not hung. The bound is now 20 s, and it is ONE deadline for the exchange and the close of its tab
+together (the exchange gets 85 % of it, the close the rest), so a stuck exchange followed by a stuck close costs
+20 s and not 40 inside the 60 s post-launch phase it shares with the rotation guard, the version reconcile, the tab
+overrides and window sizing; a test reads the timeouts handed to `wait_for` and holds the sum. No 3-vCPU timing of
+the exchange exists behind the number, so the timeout warning now names the stage it stalled in (opening the tab,
+loading `chrome://settings`, waiting for the bindings, reading, writing, re-reading), and the next overrun says
+where.
 
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 

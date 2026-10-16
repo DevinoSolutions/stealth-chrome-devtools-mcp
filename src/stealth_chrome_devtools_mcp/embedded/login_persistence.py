@@ -134,10 +134,17 @@ RESTORE_CONTINUE = 1
 #: each of runs 38853069247, 38897999560 and 38898031227, while the same spawns
 #: on the 5-vCPU cell (runs 38882922648, 38890560391) finished the whole wave
 #: in 7.7 s, none overrunning — so the exchange is slow under contention, not
-#: hung, and a longer bound is what lets it finish. The exchange and the close
-#: of its tab each get one bound, and both sit inside
-#: ``spawn_budget.POST_LAUNCH_BUDGET_SECONDS``.
+#: hung, and a longer bound is what lets it finish. It is ONE deadline for the
+#: exchange and the close of its tab together, so the worst this module costs
+#: the spawn's post-launch phase (``spawn_budget.POST_LAUNCH_BUDGET_SECONDS``,
+#: shared with the rotation guard, the version reconcile, the tab overrides and
+#: window sizing) is this number, not twice it.
 PREF_TIMEOUT_SECONDS = 20.0
+
+#: The fraction of ``PREF_TIMEOUT_SECONDS`` held back for closing the settings
+#: tab when the exchange itself runs out of time. A close is one CDP call and is
+#: normally instant; it only needs enough to be tried.
+TAB_CLOSE_SHARE = 0.15
 
 #: Chrome's saved-tabs directories under a profile's ``Default``. Not a login.
 SAVED_TABS_DIRS = ("Sessions", "Sessions_Encrypted")
@@ -259,18 +266,27 @@ async def _await_settings_bindings(tab: SettingsTab) -> None:
         await asyncio.sleep(_READY_POLL_SECONDS)
 
 
-async def _set_restore_pref(browser: Browser, tab_box: list[SettingsTab]) -> bool:
+async def _set_restore_pref(
+    browser: Browser, tab_box: list[SettingsTab], stage: list[str]
+) -> bool:
     """The body of :func:`ensure_session_restore`. The tab is opened on
     ``about:blank`` and put into *tab_box* BEFORE it navigates, so the caller can
-    close it even when this coroutine is cancelled mid-await."""
+    close it even when this coroutine is cancelled mid-await. The last entry of
+    *stage* names the await it is in, so a timeout can say where it stalled."""
+    stage.append("opening the settings tab")
     tab = await tab_open.open_tab(browser, "about:blank")
     tab_box.append(tab)
+    stage.append("loading chrome://settings")
     await tab.get("chrome://settings")
+    stage.append("waiting for the settings bindings")
     await _await_settings_bindings(tab)
+    stage.append("reading the pref")
     current = await tab.evaluate(_GET_PREF, await_promise=True)
     if current == RESTORE_CONTINUE:
         return True
+    stage.append("writing the pref")
     accepted = await tab.evaluate(_SET_PREF, await_promise=True)
+    stage.append("re-reading the pref")
     current = await tab.evaluate(_GET_PREF, await_promise=True)
     if accepted is True and current == RESTORE_CONTINUE:
         return True
@@ -287,10 +303,54 @@ async def ensure_session_restore(browser: Browser) -> bool:
     """Set ``session.restore_on_startup`` to ``1`` through ``chrome://settings``
     and report whether it is ``1`` afterwards. Idempotent: it reads first and
     writes only when the value differs. Never raises, never takes longer than
-    ``PREF_TIMEOUT_SECONDS`` (a CDP await that never resolves is not an
-    exception), and always closes the settings tab it opened."""
+    ``PREF_TIMEOUT_SECONDS`` IN TOTAL (a CDP await that never resolves is not an
+    exception), and always closes the settings tab it opened.
+
+    One deadline covers the exchange AND the close of its tab: the exchange gets
+    ``1 - TAB_CLOSE_SHARE`` of it, and the close gets whatever is left, so a
+    stuck exchange followed by a stuck close still costs one bound and not two
+    (F-995: this runs inside the spawn's post-launch phase, whose own budget
+    turns an overrun into a failed spawn)."""
     if get_settings().no_persist_session_cookies:
         return False
+    tab_box: list[SettingsTab] = []
+    stage: list[str] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + PREF_TIMEOUT_SECONDS
+    close_share = PREF_TIMEOUT_SECONDS * TAB_CLOSE_SHARE
+    exchange_bound = PREF_TIMEOUT_SECONDS - close_share
+    try:
+        return await asyncio.wait_for(
+            _set_restore_pref(browser, tab_box, stage), exchange_bound
+        )
+    except TimeoutError:
+        where = stage[-1] if stage else "starting"
+        debug_logger.log_warning(
+            "login_persistence",
+            "ensure_session_restore",
+            f"setting {RESTORE_PREF} stalled while {where} and was cut off "
+            f"after {exchange_bound:.1f}s; session cookies may not survive a close",
+        )
+    except Exception as err:  # noqa: BLE001  PERMANENT(F-937): any CDP failure is a warning, never a failed spawn
+        debug_logger.log_warning(
+            "login_persistence",
+            "ensure_session_restore",
+            f"could not set {RESTORE_PREF}: {err}",
+        )
+    finally:
+        for tab in tab_box:
+            # Never less than the held-back share: a timer that fires late must
+            # not leave a bound of zero, which ``wait_for`` would refuse to try.
+            close_bound = max(deadline - loop.time(), close_share)
+            try:
+                await asyncio.wait_for(tab.close(), close_bound)
+            except Exception as err:  # noqa: BLE001  PERMANENT(F-937): a tab that will not close is a warning
+                debug_logger.log_warning(
+                    "login_persistence",
+                    "ensure_session_restore",
+                    f"could not close the settings tab: {err!r}",
+                )
+    return False
     tab_box: list[SettingsTab] = []
     try:
         return await asyncio.wait_for(
