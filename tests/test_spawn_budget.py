@@ -78,6 +78,12 @@ AMPLE_BUDGET = 20.0
 #: open across the loop for a budget to be able to cut it off.
 HEALTHY_LATENCY = 0.02
 
+#: How long a phase that swallows its cancels has, after its deadline, to end.
+#: The real phase re-cancels every ``CANCEL_GRACE_SECONDS`` (patched to 0.05 s
+#: there), so it ends in a fraction of a second; this is the bound a regression
+#: hits instead of a hang.
+PHASE_END_BUDGET = 10.0
+
 #: Hard stop for any await on a stalled path: a hang is a failure, not a timeout.
 WAIT_BUDGET = 30.0
 
@@ -533,6 +539,7 @@ async def test_a_phase_that_swallows_every_cancel_still_ends_in_a_named_error(
     """A phase that ignores cancellation twice before it gives in is re-cancelled
     until it ends, and the caller still gets the named error."""
     seen = {"cancels": 0}
+    released = False
     stall_budget(monkeypatch, "LAUNCH_BUDGET_SECONDS")
 
     @spawn_budget.phase("launch", "LAUNCH_BUDGET_SECONDS")
@@ -542,10 +549,24 @@ async def test_a_phase_that_swallows_every_cancel_still_ends_in_a_named_error(
                 await _never()
             except asyncio.CancelledError:
                 seen["cancels"] += 1
-                if seen["cancels"] >= 3:
+                if seen["cancels"] >= 3 or released:
                     raise
 
     monkeypatch.setattr(spawn_budget, "CANCEL_GRACE_SECONDS", 0.05)
+    # `asyncio.wait`, not `wait_for`: wait_for would add a cancel of its own and
+    # then wait out a phase that swallows it, which is the hang under test. Against
+    # a phase that cancels once (asyncio.timeout alone) the third cancel never
+    # comes, so the bound has to be ours.
+    caller = asyncio.ensure_future(stubborn())
+    done, _ = await asyncio.wait({caller}, timeout=PHASE_END_BUDGET)
+    if not done:
+        released = True  # let the stubborn body give in so nothing leaks
+        caller.cancel()
+        await asyncio.wait({caller}, timeout=WAIT_BUDGET)
+        pytest.fail(
+            f"the phase was still running {PHASE_END_BUDGET:g}s after its deadline "
+            f"({seen['cancels']} cancels delivered): it is not re-cancelled until it ends"
+        )
     with pytest.raises(ToolError, match="launch stage"):
-        await asyncio.wait_for(stubborn(), WAIT_BUDGET)
+        caller.result()
     assert seen["cancels"] == 3
