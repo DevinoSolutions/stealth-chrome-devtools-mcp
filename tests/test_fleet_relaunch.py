@@ -59,22 +59,33 @@ _REAL_HELD_BY = browser_reattach.held_by
 
 
 @contextlib.contextmanager
-def _a_process_with_no_argv(monkeypatch):
-    """The pid of a RUNNING process whose command line psutil reads as empty,
-    which is what a SIGKILLed Chrome is between releasing its memory and
-    becoming a zombie. The state cannot be held open on purpose, so the one read
-    is replaced for that one pid; everything else about the process is real."""
+def _a_process_tearing_down(monkeypatch):
+    """The pid of a RUNNING process in the state a SIGKILLed Chrome is in between
+    releasing its address space and becoming a zombie: its command line reads empty
+    AND ``/proc/<pid>/exe`` is gone. The state cannot be held open on purpose, so
+    those two reads are replaced for that one pid (the kernel's own measured answer,
+    see ``browser_cmdline.command_line_is_gone``); everything else is real. An empty
+    argv alone is NOT this state: a live browser has one across the sh launcher's
+    ``exec``, which ``tests/test_profile_lock.py`` pins."""
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    real = psutil.Process.cmdline
+    real_cmdline = psutil.Process.cmdline
+    real_readlink = Path.readlink
 
     def cmdline(self):
-        return [] if self.pid == child.pid else real(self)
+        return [] if self.pid == child.pid else real_cmdline(self)
+
+    def readlink(self):
+        if str(self).replace("\\", "/").endswith(f"/{child.pid}/exe"):
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_readlink(self)
 
     monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+    monkeypatch.setattr(Path, "readlink", readlink)
     try:
         yield child.pid
     finally:
-        monkeypatch.setattr(psutil.Process, "cmdline", real)
+        monkeypatch.setattr(psutil.Process, "cmdline", real_cmdline)
+        monkeypatch.setattr(Path, "readlink", real_readlink)
         child.kill()
         child.wait()
 
@@ -266,7 +277,19 @@ class TestTheBrowserDiedOnItsOwn:
         assert not (tmp_session_root["sessions"] / "fleet-2").exists()
 
     @pytest.mark.skipif(os.name == "nt", reason="Windows has no zombies and no lock")
-    @pytest.mark.parametrize("state", ["a zombie", "tearing down"])
+    @pytest.mark.parametrize(
+        "state",
+        [
+            "a zombie",
+            pytest.param(
+                "tearing down",
+                marks=pytest.mark.skipif(
+                    not sys.platform.startswith("linux"),
+                    reason="the empty-argv witness is Linux-only (F-998)",
+                ),
+            ),
+        ],
+    )
     async def test_a_dead_browser_the_kernel_has_not_finished_with_does_not_walk_it(
         self, spawns, tmp_session_root, monkeypatch, state
     ):
@@ -280,7 +303,7 @@ class TestTheBrowserDiedOnItsOwn:
         the directory" -- and the spawn walked to ``fleet-2`` with a hand-off from
         a corpse. Real lock, real pid, the REAL ``held_by`` and resolver; only
         the launch is replaced. (Measured on real Chromium: 11 of 12 journeys
-        before, 3 of 12 with the zombie alone read as exited, 0 of 20 with both.)"""
+        before, 3 of 12 with the zombie alone read as exited, 0 with both.)"""
         fleet = await _fleet(tmp_session_root)
         manager = BrowserManager()
         _running(manager, "i-killed", fleet)  # poll() is None: not yet noticed
@@ -291,7 +314,7 @@ class TestTheBrowserDiedOnItsOwn:
             if state == "a zombie":
                 pid = stack.enter_context(a_zombie())
             else:
-                pid = stack.enter_context(_a_process_with_no_argv(monkeypatch))
+                pid = stack.enter_context(_a_process_tearing_down(monkeypatch))
             here = profile_lock._this_host()
             (fleet / profile_lock.LOCK_NAME).symlink_to(f"{here}-{pid}")
             answer = await s.spawn()
