@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### `close_instance` warned about a tab Chrome had already closed (F-996)
+
+`close_instance` closes each tab over CDP before it closes the browser, and logged a WARNING
+(`Failed to close tab for <instance>: No target with given id found [code: -32602]`) when Chrome had dropped
+that tab first, which is the state the close wanted. The six-browser fleet test counts any such warning as an
+unrepaired fault and failed on it in CI run 38919791742. A `ProtocolException` saying `No target with given id`
+is now treated as closed and logged at debug level; every other failure in that loop still warns.
+
 ### Two timing pins no longer decide on the runner's clock (F-997)
 
 `test_a_retry_selection_keeps_the_loop_turning` (F-967) asserted that the event loop's longest gap stayed under 0.2 s and failed on a loaded macOS cell at 0.28 s and 0.30 s on code that never blocked the loop; `test_a_healthy_spawn_is_not_cut_off` (F-969) ran a healthy spawn under 0.3 s phase budgets and failed on Windows py3.11 with "stalled in the post-launch setup stage" (its sibling failed the same way on release/2.1.34). The loop pins now block the stand-in for slow disk until the loop has turned three times and fail only if it cannot (a verdict a slow runner cannot change), and the spawn pins give every phase a test does not stall an ample 20 s budget, so only the phase under test can time out. Test-only; both still fail against the defects they guard (blocking work back on the loop; no bound, a wrong budget, a zero budget).
