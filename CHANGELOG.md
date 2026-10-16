@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
+
+`filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller
+passing `--enable-blink-features=Foo,AutomationControlled` got through untouched and Chrome then exposed
+`navigator.webdriver = true`, while `=AutomationControlled,Foo` was dropped whole and took the caller's `Foo`
+with it (as did `=AutomationControlledSomethingElse`, a different feature). The list is now matched by entry,
+comma-separated and case-insensitively, as Chrome reads it (`;` is part of a name, so `Foo;AutomationControlled`
+is one unknown feature and is left alone): `AutomationControlled` is removed, the other entries are kept
+verbatim under the caller's own spelling of the switch (`--enable-blink-features=Foo`), and a list holding nothing else is dropped as before.
+The warning says what was removed and what was kept. `--disable-blink-features=AutomationControlled` is
+deliberately not stripped: it is the caller's explicit choice and makes `navigator.webdriver` false, though the
+flag is itself detectable.
+
 ### CI artifact steps no longer depend on the floating `DevinoSolutions/artifact@v1` tag (F-971)
 
 Every `DevinoSolutions/artifact/upload` and `download` step used the floating tag `v1`, which still pointed
