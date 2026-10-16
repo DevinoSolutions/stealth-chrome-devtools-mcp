@@ -30,6 +30,7 @@ See ``audit/stage2/plan_RELEASE_FIX_F.md``.
 from __future__ import annotations
 
 import pytest
+from nodriver.core.connection import ProtocolException
 
 from fakes import (
     FakeAttachedTab,
@@ -39,6 +40,7 @@ from fakes import (
     fake_target,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
@@ -201,6 +203,70 @@ async def test_close_tab_reports_an_unknown_tab_id_unchanged(manager_and_browser
 
     assert await manager.close_tab(INSTANCE_ID, "T-nope") is False
     assert browser.connection.send_calls == []
+
+
+# ---------------------------------------------------------------------------
+# F-996 — close_tab: a tab Chrome already dropped is a closed tab
+# ---------------------------------------------------------------------------
+
+
+def _close_target_answers(browser, error):
+    def _raise(_name):
+        raise error
+
+    browser.connection._cdp_responses["close_target"] = _raise
+
+
+def _close_tab_warnings(since):
+    return [
+        w["message"]
+        for w in debug_logger._warnings[since:]
+        if w["method"] == "close_tab"
+    ]
+
+
+async def test_close_tab_of_a_target_chrome_already_dropped_is_closed(
+    manager_and_browser,
+):
+    """``Target.closeTarget`` answers ``No target with given id found`` for a tab
+    Chrome dropped first: the state the close wanted. It is ``True`` (``False``
+    would be the lying failure F-775b removed), the active-tab pointer is
+    repointed as after any close, and nothing is logged as a WARNING."""
+    manager, browser, tracked = manager_and_browser
+    _close_target_answers(
+        browser,
+        ProtocolException({"code": -32602, "message": "No target with given id found"}),
+    )
+    before = len(debug_logger._warnings)
+
+    assert await manager.close_tab(INSTANCE_ID, TRACKED["target_id"]) is True
+
+    active = await manager.get_active_tab(INSTANCE_ID)
+    assert active is not tracked
+    assert manager._get_tab_target_id(active) == OTHER["target_id"]
+    assert _close_tab_warnings(before) == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProtocolException({"code": -32602, "message": "Invalid parameters"}),
+        RuntimeError("No target with given id found"),
+    ],
+    ids=["other-protocol-failure", "gone-wording-not-protocol"],
+)
+async def test_close_tab_any_other_failure_still_warns_and_is_false(
+    manager_and_browser, error
+):
+    """F-996 control: only the gone-target answer is absorbed."""
+    manager, browser, tracked = manager_and_browser
+    _close_target_answers(browser, error)
+    before = len(debug_logger._warnings)
+
+    assert await manager.close_tab(INSTANCE_ID, TRACKED["target_id"]) is False
+
+    assert len(_close_tab_warnings(before)) == 1
+    assert manager._instances[INSTANCE_ID]["tab"] is tracked
 
 
 # ---------------------------------------------------------------------------
