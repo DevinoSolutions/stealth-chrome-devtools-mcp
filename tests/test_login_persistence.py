@@ -285,6 +285,19 @@ class TestFinalArgv:
 
 
 class TestSessionRestoreBounded:
+    def test_the_exchange_and_the_close_of_its_tab_both_fit_the_spawn_phase(self):
+        """F-995: the bound was sized from the worst a loaded cell does, and what
+        keeps it honest is its place in the spawn phase it runs inside — the
+        exchange and the close of its tab each get one bound, and the phase's
+        own budget must outlast both, or the phase would cut a spawn off in the
+        middle of a bound this module is still entitled to."""
+        from stealth_chrome_devtools_mcp.embedded import spawn_budget
+
+        assert (
+            2 * login_persistence.PREF_TIMEOUT_SECONDS
+            < spawn_budget.POST_LAUNCH_BUDGET_SECONDS
+        )
+
     async def test_an_evaluate_that_never_resolves_times_out_and_closes_the_tab(
         self, monkeypatch
     ):

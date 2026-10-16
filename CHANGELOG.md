@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### `set_cookie` without a `url` read a cached page address, and the settings-page bound was too short for a loaded machine (F-995)
+
+`release-gate / integration (macOS/ARM64)` went red on `main` and on pull requests from 2026-10-16 04:55Z: 5 of
+the 8 runs on the macOS image that ships Chrome 155 (20261012.601, first seen 04:28Z) failed, while the runs
+sampled on the earlier image (20260828.587, Chrome 152) all passed. Two independent causes, told apart by the
+runner's core count.
+
+`set_cookie` with neither `url` nor `domain` took the cookie's url from `tab.url`, nodriver's cached
+`TargetInfo`, which is only as fresh as the last `Target.targetInfoChanged` event. Right after a `navigate` it
+could still be `about:blank`, and Chrome refused the cookie: "URL must have scheme http or https [code: -32602]".
+It now asks Chrome (`Target.getTargets`, through `tab_identity.refreshed`, the same read `get_active_tab` and
+`list_instances` use), bounded by the usual CDP budget, and only when the caller gave neither `url` nor
+`domain`. The failing nodes (runs 38882922648 and 38890560391, `tests/test_e2e_cookie_listener.py`) left their
+browsers open, which turned one failure into three: the fleet node's `list_instances` timed out on those two
+browsers, and the re-attach node found them in the pid record (their `create_time`, 10:59:21Z, is the cookie
+nodes' own failure time). The cookie nodes' setup now closes its browser when it fails.
+
+`login_persistence.PREF_TIMEOUT_SECONDS` was 8 s. On the 3-vCPU macOS cell, with three named spawns in flight at
+once, one or two of them overran it in each of runs 38853069247, 38897999560 and 38898031227, so the spawn logged
+"setting session.restore_on_startup took over 8.0s" and that named session's session cookies would not survive
+its close; the same wave on the 5-vCPU cell finished in 7.7 s with no overrun, so the exchange is slow under
+contention, not hung. The bound is now 20 s; the exchange and the close of its tab each get one, inside the 60 s
+post-launch phase budget, and a test holds that relation.
+
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
 `filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller

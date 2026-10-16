@@ -126,7 +126,18 @@ RESTORE_CONTINUE = 1
 
 #: Upper bound on the whole settings-page exchange. ``chrome://settings`` is the
 #: slowest page a spawn touches; a hang here must cost seconds, not the spawn.
-PREF_TIMEOUT_SECONDS = 8.0
+#:
+#: Sized for a machine with no cores to spare, because a timeout here is not
+#: free: the pref stays unset and a named session's session cookies do not
+#: survive its close (F-995). Measured on the 3-vCPU macOS gate cell, three named
+#: spawns in flight at once, Chrome 155: one or two of the three overran 8 s on
+#: each of runs 38853069247, 38897999560 and 38898031227, while the same spawns
+#: on the 5-vCPU cell (runs 38882922648, 38890560391) finished the whole wave
+#: in 7.7 s, none overrunning — so the exchange is slow under contention, not
+#: hung, and a longer bound is what lets it finish. The exchange and the close
+#: of its tab each get one bound, and both sit inside
+#: ``spawn_budget.POST_LAUNCH_BUDGET_SECONDS``.
+PREF_TIMEOUT_SECONDS = 20.0
 
 #: Chrome's saved-tabs directories under a profile's ``Default``. Not a login.
 SAVED_TABS_DIRS = ("Sessions", "Sessions_Encrypted")
