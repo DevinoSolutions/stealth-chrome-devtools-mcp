@@ -989,10 +989,18 @@ class TestTheFrozenStateIsCaptured:
         the first-failure line only says it is being captured. The order is the
         design's, not the interpreter's: a capture that finishes instantly (stage's
         does) still logs after the line that announces it, because the task starts
-        right after that line with nothing awaited between."""
+        right after that line with nothing awaited between. The forensics gatherer
+        here SUSPENDS (the real one does: a thread hop and a websocket), which is what
+        lets an incident started BEFORE it finish AHEAD of the line that announces it,
+        so a capture moved back before the facts goes red on every interpreter."""
         stage.probe_results[INSTANCE_ID] = [False]
 
-        await stage.health().check_once()
+        async def suspends(**facts) -> str:
+            for _ in range(30):
+                await asyncio.sleep(0)
+            return await stage.forensics(**facts)
+
+        await stage.health(forensics=suspends).check_once()
         await _settled()
 
         warnings = log.at("warning")

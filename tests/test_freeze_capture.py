@@ -763,6 +763,38 @@ class TestIncidents:
         assert "minidump_at_heal(skipped: reused)" in said
         assert "late(" not in said
 
+    async def test_a_withheld_dump_that_never_returns_is_cut_and_the_heal_goes_on(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(freeze_capture, "HEAL_WAITS_FOR_CAPTURE_SECONDS", 0.05)
+        monkeypatch.setattr(freeze_capture, "_DUMP_OUTER_GRACE_SECONDS", 0.05)
+        now = [0.0]
+
+        async def hangs(*_a, **_k) -> str:
+            await asyncio.Event().wait()
+            return ""
+
+        incidents = freeze_capture.Incidents(
+            capture=lambda **_k: asyncio.sleep(0, "r"),
+            dump_now=hangs,
+            mark_healed=lambda label: f"{label}-healed.dmp",
+            clock=lambda: now[0],
+            log=lambda _line: None,
+        )
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await _finished(incidents)
+        incidents.end("i")
+        now[0] = 60.0
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await _finished(incidents)
+
+        said = await asyncio.wait_for(
+            incidents.before_heal("i", pid=1, label="l"), timeout=5
+        )
+
+        assert "minidump_at_heal(failed: TimeoutError)" in said
+        assert "dump_kept(l-healed.dmp)" in said
+
     async def test_a_mark_that_raises_is_said_so_and_the_heal_goes_on(self):
         def broken(_label: str) -> str | None:
             raise OSError("locked")

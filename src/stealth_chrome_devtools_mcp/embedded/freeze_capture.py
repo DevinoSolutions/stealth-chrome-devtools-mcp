@@ -115,6 +115,10 @@ DUMP_BUDGET_SECONDS = 45.0
 #: probe interval earlier, so this is the tail of a slow dump, never the whole of one.
 HEAL_WAITS_FOR_CAPTURE_SECONDS = 10.0
 
+#: Slack on top of the dump's own budget for the heal's outer ``wait_for``, so a dump
+#: that keeps its budget says why itself and only one that does not return is cut.
+_DUMP_OUTER_GRACE_SECONDS = 2.0
+
 #: The bound on one whole capture (the CPU window and the fresh connection run
 #: together, then the dump has its own budget). Under the probe interval.
 CAPTURE_TIMEOUT_SECONDS = 60
@@ -794,8 +798,11 @@ class Incidents:
                 late = f"skipped: {problem}"
             else:
                 try:
-                    late = await self._dump_now(
-                        pid, label, budget=HEAL_WAITS_FOR_CAPTURE_SECONDS
+                    late = await asyncio.wait_for(
+                        self._dump_now(
+                            pid, label, budget=HEAL_WAITS_FOR_CAPTURE_SECONDS
+                        ),
+                        HEAL_WAITS_FOR_CAPTURE_SECONDS + _DUMP_OUTER_GRACE_SECONDS,
                     )
                 except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
                     late = f"failed: {type(error).__name__}"

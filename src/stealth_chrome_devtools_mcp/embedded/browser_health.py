@@ -743,7 +743,7 @@ class BrowserHealth:
     def _release_exit(self, instance_id: str) -> None:
         held = self._exit_handles.pop(instance_id, None)
         if held is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # PERMANENT(F-993: best-effort)
                 self._release_exit_handle(held[1])
 
     def release_exit_handles(self) -> None:
