@@ -130,8 +130,11 @@ def test_the_child_env_names_the_venv_exactly_when_the_redirector_is_bypassed(
 # ---------------------------------------------------------------------------
 
 _CHILD = """\
-import pathlib, sys, time
-pathlib.Path(sys.argv[1]).write_text(sys.prefix + "\\n" + sys.executable, encoding="utf-8")
+import os, pathlib, sys, time
+marker = pathlib.Path(sys.argv[1])
+tmp = marker.with_name(marker.name + ".tmp")
+tmp.write_text(sys.prefix + "\\n" + sys.executable, encoding="utf-8")
+os.replace(tmp, marker)  # F-994: the marker appears whole or not at all
 time.sleep(120)
 """
 
@@ -143,6 +146,58 @@ k = ctypes.windll.kernel32
 k.FreeConsole()
 print("console" if k.AttachConsole(int(sys.argv[1])) else "no-console")
 """
+
+
+def _read_marker(marker, timeout: float = 30.0, interval: float = 0.05) -> list[str]:
+    """Poll until ``marker`` exists AND holds its two lines (F-994).
+
+    ``exists()`` alone is not enough: a writer that creates the file before
+    writing it (or a slow cold-start/OneDrive disk) leaves a window in which the
+    file is there and empty. On timeout the failure shows what was last read.
+    """
+    deadline = time.monotonic() + timeout
+    seen: str | None = None
+    while True:
+        try:
+            seen = marker.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            seen = None
+        else:
+            lines = seen.splitlines()
+            if len(lines) == 2:
+                return lines
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(interval)
+    pytest.fail(
+        f"child never wrote a complete marker within {timeout}s; last read: {seen!r}"
+    )
+
+
+def test_the_marker_poll_waits_out_a_file_that_exists_before_it_is_written(tmp_path):
+    """F-994 pin: the writer creates the file empty, then fills it later."""
+    import threading
+
+    marker = tmp_path / "child.txt"
+    marker.write_text("", encoding="utf-8")
+
+    def _fill():
+        time.sleep(0.3)
+        marker.write_text("prefix\nexecutable", encoding="utf-8")
+
+    t = threading.Thread(target=_fill)
+    t.start()
+    try:
+        assert _read_marker(marker, timeout=10) == ["prefix", "executable"]
+    finally:
+        t.join()
+
+
+def test_the_marker_poll_fails_with_what_it_read_on_timeout(tmp_path):
+    marker = tmp_path / "child.txt"
+    marker.write_text("only-one-line", encoding="utf-8")
+    with pytest.raises(pytest.fail.Exception, match="only-one-line"):
+        _read_marker(marker, timeout=0.3)
 
 
 def _in_job(pid: int) -> bool:
@@ -185,11 +240,7 @@ def test_the_spawned_backend_has_no_redirector_no_job_and_no_console(
     pid = recorded["pid"]
     proc = psutil.Process(pid)
     try:
-        deadline = time.monotonic() + 30
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert marker.exists(), "child never started"
-        prefix, executable = marker.read_text(encoding="utf-8").splitlines()
+        prefix, executable = _read_marker(marker)
 
         # The recorded pid IS the interpreter that serves: no redirector child.
         assert proc.children() == []
