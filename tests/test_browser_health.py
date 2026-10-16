@@ -1418,6 +1418,29 @@ class TestAPidIsOpenedOnlyAfterItsIdentityIsVerified:
 
         assert [c["pid"] for c in stage.captures] == [mine.pid]
 
+    async def test_a_pid_reused_before_the_heal_is_not_dumped_at_the_heal(
+        self, stage, monkeypatch, log
+    ):
+        """The withheld dump is taken minutes after the identity was first checked:
+        it is checked again, and a pid that is no longer the recorded browser is named
+        in the record instead of being opened."""
+        mine = psutil.Process()
+        self._entry(monkeypatch, pid=mine.pid, create_time=mine.create_time())
+        stage.probe_results[INSTANCE_ID] = [False, True, False, False]
+        health = stage.health(browser_pid=lambda _p, _pid: mine.pid)
+
+        for round_ in range(4):
+            if round_ == 3:  # the pid changes hands before the heal
+                self._entry(
+                    monkeypatch, pid=mine.pid, create_time=mine.create_time() + 600
+                )
+            await health.check_once()
+            await _settled()
+
+        assert stage.late_dumps == []
+        (error,) = log.at("error")
+        assert "minidump_at_heal(skipped: " in error and "start time" in error
+
     async def test_the_recorded_pid_is_not_the_one_found_is_skipped(
         self, stage, monkeypatch, log
     ):

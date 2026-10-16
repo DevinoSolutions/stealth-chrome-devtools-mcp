@@ -644,9 +644,9 @@ class BrowserHealth:
                 f"{HEAL_COOLDOWN_SECONDS}s",
             )
             return
-        pid, dump_label, _problem = self._incident_target(instance_id, data)
+        pid, dump_label, problem = self._incident_target(instance_id, data)
         evidence = await self._incidents.before_heal(
-            instance_id, pid=pid, label=dump_label
+            instance_id, pid=pid, label=dump_label, problem=problem
         )
         debug_logger.log_error(
             _COMPONENT, "probe", HungBrowserError(f"{label}; {evidence}; healing it")

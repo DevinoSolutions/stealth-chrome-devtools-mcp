@@ -352,10 +352,21 @@ class TestMinidump:
             release.wait(30)
             path.write_bytes(b"late")
 
+        # A loaded machine can still be finishing the PREVIOUS test's dump thread (the
+        # lock is process-wide) or be slow to start this one's: wait for each, so the
+        # 0.05 s budgets below measure the queue and not the scheduler.
+        for _ in range(200):
+            if not freeze_capture._dump_running.locked():
+                break
+            await asyncio.sleep(0.05)
         try:
             await freeze_capture.write_minidump(
                 1, tmp_path, "a", budget=0.05, platform="win32", write=stuck
             )
+            for _ in range(200):
+                if calls:
+                    break
+                await asyncio.sleep(0.05)
             second = await freeze_capture.write_minidump(
                 2, tmp_path, "b", budget=0.05, platform="win32", write=stuck
             )
@@ -729,6 +740,21 @@ class TestIncidents:
         assert said == (
             "evidence@probe1(record); minidump_at_heal(late(1,l)); dump_kept(l-healed.dmp)"
         )
+
+    async def test_a_withheld_dump_is_not_taken_for_a_pid_that_may_not_be_opened(self):
+        now = [0.0]
+        incidents = self._incidents(now, [], [])
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await asyncio.sleep(0.01)
+        incidents.end("i")
+        now[0] = 60.0
+        incidents.begin("i", pid=1, label="l", answers=lambda: None)
+        await asyncio.sleep(0.01)
+
+        said = await incidents.before_heal("i", pid=1, label="l", problem="reused")
+
+        assert "minidump_at_heal(skipped: reused)" in said
+        assert "late(" not in said
 
     async def test_a_mark_that_raises_is_said_so_and_the_heal_goes_on(self):
         def broken(_label: str) -> str | None:

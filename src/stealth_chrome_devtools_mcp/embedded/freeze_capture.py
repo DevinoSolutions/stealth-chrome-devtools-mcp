@@ -761,11 +761,18 @@ class Incidents:
             task.cancel()
 
     async def before_heal(
-        self, instance_id: str, *, pid: int | None, label: str
+        self,
+        instance_id: str,
+        *,
+        pid: int | None,
+        label: str,
+        problem: str | None = None,
     ) -> str:
         """What the heal's ERROR line says about the incident, taken now: the
         capture's record (waited for at most :data:`HEAL_WAITS_FOR_CAPTURE_SECONDS`),
-        the dump a rate limit withheld, and where the healed dump is kept."""
+        the dump a rate limit withheld, and where the healed dump is kept. *problem*
+        is why *pid* may not be opened now (minutes have passed since the first
+        failure; it may no longer be the browser recorded): that dump is not taken."""
         task = self._tasks.pop(instance_id, None)
         parts = []
         if task is None:
@@ -783,12 +790,15 @@ class Incidents:
             parts.append(f"evidence@probe1({record})")
         if instance_id in self._withheld and pid is not None:
             self._withheld.discard(instance_id)
-            try:
-                late = await self._dump_now(
-                    pid, label, budget=HEAL_WAITS_FOR_CAPTURE_SECONDS
-                )
-            except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
-                late = f"failed: {type(error).__name__}"
+            if problem is not None:
+                late = f"skipped: {problem}"
+            else:
+                try:
+                    late = await self._dump_now(
+                        pid, label, budget=HEAL_WAITS_FOR_CAPTURE_SECONDS
+                    )
+                except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
+                    late = f"failed: {type(error).__name__}"
             parts.append(f"minidump_at_heal({late})")
         self._last_dump.pop(instance_id, None)  # this dump is healed: spacing resets
         try:
