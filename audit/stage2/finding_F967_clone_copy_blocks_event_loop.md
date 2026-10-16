@@ -158,8 +158,11 @@ meet the microsecond window between `replace_tree`'s two renames. Bounded by
 
 ## 6. Tests
 
-`tests/test_clone_spawn_offload.py` (new, 12). A ticker task samples the loop; each test bounds the
-largest gap by `LOOP_STALL_BUDGET` (0.2 s) and every wait by `asyncio.wait_for(WAIT_BUDGET)`:
+`tests/test_clone_spawn_offload.py` (new, 12). A `LoopWitness` (F-997) replaces the stopwatch
+the first version used (longest gap under 0.2 s, which a loaded CI runner broke on correct code):
+the stand-in for slow disk or a slow walk blocks until the loop has turned three times and fails
+the test only if the loop cannot turn within 10 s, and every wait is bounded by
+`asyncio.wait_for(WAIT_BUDGET)`:
 concurrent clone spawns keep the loop turning; the reservation exists before the copy starts; the
 correlation id reaches the worker; a slow process-table walk, a named-session copy, the `default`
 open and a retry selection each keep the loop turning; copies run in parallel but never more than

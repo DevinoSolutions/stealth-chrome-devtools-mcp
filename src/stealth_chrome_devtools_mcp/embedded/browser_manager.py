@@ -27,6 +27,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
+    tab_close,
     tab_identity,
     tab_open,
     tool_errors,
@@ -853,11 +854,7 @@ class BrowserManager:
                             close = uc.cdp.target.close_target(tab.target.target_id)
                             await asyncio.wait_for(browser.connection.send(close), 2.0)
                         except Exception as tab_err:
-                            debug_logger.log_warning(
-                                "browser_manager",
-                                "close_instance",
-                                f"Failed to close tab for {instance_id}: {tab_err}",
-                            )
+                            tab_close.log_failure(instance_id, tab_err)  # F-996
             except Exception as tabs_err:
                 debug_logger.log_warning(
                     "browser_manager",
