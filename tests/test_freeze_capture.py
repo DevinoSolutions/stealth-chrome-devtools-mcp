@@ -673,6 +673,13 @@ class TestCapture:
             assert forbidden not in record.lower()
 
 
+async def _finished(incidents: freeze_capture.Incidents) -> None:
+    """Wait until every capture the incidents started has run to its end, whatever
+    the interpreter's number of loop iterations per await (``wait_for`` took one more
+    on 3.11): a fixed ``sleep`` raced it."""
+    await asyncio.gather(*incidents._running, return_exceptions=True)
+
+
 class TestIncidents:
     def _incidents(self, now: list[float], records: list[str], log: list[str]):
         async def capture(**facts) -> str:
@@ -697,7 +704,7 @@ class TestIncidents:
 
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
         assert incidents.has("i") and records == []  # not run yet: begin did not await
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
 
         assert records == ["l:None"]
         assert log == ["i: evidence@probe1(record)"]
@@ -708,7 +715,7 @@ class TestIncidents:
 
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
 
         assert len(records) == 1
 
@@ -718,7 +725,7 @@ class TestIncidents:
         incidents = self._incidents([0.0], records, log)
 
         incidents.begin("i", pid=1, label="l", answers=lambda: None, problem="reused")
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
 
         assert records == []
         assert log == ["i: evidence@probe1(capture skipped: reused)"]
@@ -728,11 +735,11 @@ class TestIncidents:
         records: list[str] = []
         incidents = self._incidents(now, records, [])
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
         incidents.end("i")
         now[0] = 60.0
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
 
         said = await incidents.before_heal("i", pid=1, label="l")
 
@@ -745,11 +752,11 @@ class TestIncidents:
         now = [0.0]
         incidents = self._incidents(now, [], [])
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
         incidents.end("i")
         now[0] = 60.0
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
 
         said = await incidents.before_heal("i", pid=1, label="l", problem="reused")
 
@@ -782,7 +789,7 @@ class TestIncidents:
     async def test_forget_drops_the_spacing_too_and_end_keeps_it(self):
         incidents = self._incidents([0.0], [], [])
         incidents.begin("i", pid=1, label="l", answers=lambda: None)
-        await asyncio.sleep(0.01)
+        await _finished(incidents)
 
         incidents.end("i")
         assert "i" in incidents.tracked()

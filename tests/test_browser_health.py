@@ -547,7 +547,9 @@ class TestBounded:
 
         await asyncio.wait_for(health.check_once(), timeout=5)
 
-        (warning,) = log.at("warning")
+        # the capture's own record is logged when ITS task ends, which can fall inside
+        # this round (3.11 does): the probe's line is the one named
+        (warning,) = [w for w in log.at("warning") if "probe 1 failed" in w]
         assert "TimeoutError at evaluate" in warning
 
     async def test_a_forensics_gatherer_that_hangs_does_not_block_the_heal(
@@ -924,8 +926,11 @@ class TestSpawnUnderAGivenId:
 
 
 async def _settled() -> None:
-    """Let a capture task that is not waiting on anything run to its end."""
-    for _ in range(5):
+    """Let a capture task that is not waiting on anything run to its end. How many loop
+    iterations that takes differs by interpreter (3.11's ``wait_for`` spends one more),
+    so the yields are generous: a task with nothing to wait on ends in the first few
+    and the rest cost nothing."""
+    for _ in range(50):
         await asyncio.sleep(0)
 
 
