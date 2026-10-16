@@ -22,15 +22,19 @@ Hermetic: no Chrome, no real session root, no real process table.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 
-from fakes import FakeBrowser
+from fakes import FakeBrowser, a_zombie
 from stealth_chrome_devtools_mcp.embedded import (
     browser_reattach,
     clone_storage,
@@ -49,6 +53,41 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
 from stealth_chrome_devtools_mcp.embedded.tool_sections import browser_management
 
 RELAUNCH = 'spawn_browser(session="fleet")'
+
+#: Bound at import, before ``_Spawns`` replaces it: F-998 needs the real witness.
+_REAL_HELD_BY = browser_reattach.held_by
+
+
+@contextlib.contextmanager
+def _a_process_tearing_down(monkeypatch):
+    """The pid of a RUNNING process in the state a SIGKILLed Chrome is in between
+    releasing its address space and becoming a zombie: its command line reads empty
+    AND ``/proc/<pid>/exe`` is gone. The state cannot be held open on purpose, so
+    those two reads are replaced for that one pid (the kernel's own measured answer,
+    see ``browser_cmdline.command_line_is_gone``); everything else is real. An empty
+    argv alone is NOT this state: a live browser has one across the sh launcher's
+    ``exec``, which ``tests/test_profile_lock.py`` pins."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    real_cmdline = psutil.Process.cmdline
+    real_readlink = Path.readlink
+
+    def cmdline(self):
+        return [] if self.pid == child.pid else real_cmdline(self)
+
+    def readlink(self):
+        if str(self).replace("\\", "/").endswith(f"/{child.pid}/exe"):
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_readlink(self)
+
+    monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+    monkeypatch.setattr(Path, "readlink", readlink)
+    try:
+        yield child.pid
+    finally:
+        monkeypatch.setattr(psutil.Process, "cmdline", real_cmdline)
+        monkeypatch.setattr(Path, "readlink", real_readlink)
+        child.kill()
+        child.wait()
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +275,60 @@ class TestTheBrowserDiedOnItsOwn:
         assert _on(manager, fleet) == ["i-1"], "the corpse was not discarded"
         assert s.walked == [None]
         assert not (tmp_session_root["sessions"] / "fleet-2").exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows has no zombies and no lock")
+    @pytest.mark.parametrize(
+        "state",
+        [
+            "a zombie",
+            pytest.param(
+                "tearing down",
+                marks=pytest.mark.skipif(
+                    not sys.platform.startswith("linux"),
+                    reason="the empty-argv witness is Linux-only (F-998)",
+                ),
+            ),
+        ],
+    )
+    async def test_a_dead_browser_the_kernel_has_not_finished_with_does_not_walk_it(
+        self, spawns, tmp_session_root, monkeypatch, state
+    ):
+        """F-998. A SIGKILLed Chrome is listed for a moment after it is dead --
+        first tearing down (its memory is released, so its argv reads empty, and
+        its state is still running), then a ZOMBIE until the backend's child
+        watcher reaps it -- and its ``SingletonLock`` names that pid, which
+        ``pid_exists`` answers True for. The backend has not noticed the death
+        either (asyncio sets ``returncode`` only after the reap, so the manager
+        still lists it alive), which together read as "a browser we drive holds
+        the directory" -- and the spawn walked to ``fleet-2`` with a hand-off from
+        a corpse. Real lock, real pid, the REAL ``held_by`` and resolver; only
+        the launch is replaced. (Measured on real Chromium: 11 of 12 journeys
+        before, 3 of 12 with the zombie alone read as exited, 0 with both.)"""
+        fleet = await _fleet(tmp_session_root)
+        manager = BrowserManager()
+        _running(manager, "i-killed", fleet)  # poll() is None: not yet noticed
+        s = spawns(manager, fleet)
+        monkeypatch.setattr(browser_reattach, "held_by", _REAL_HELD_BY)
+
+        with contextlib.ExitStack() as stack:
+            if state == "a zombie":
+                pid = stack.enter_context(a_zombie())
+            else:
+                pid = stack.enter_context(_a_process_tearing_down(monkeypatch))
+            here = profile_lock._this_host()
+            (fleet / profile_lock.LOCK_NAME).symlink_to(f"{here}-{pid}")
+            answer = await s.spawn()
+
+        assert answer["instance_id"] == "i-1", "relaunched, not handed the corpse"
+        assert "already_running" not in answer
+        selection = answer["spawn_diagnostics"]["profile_selection"]
+        assert profile_seed.same_dir(Path(selection["user_data_dir"]), fleet), selection
+        assert not [k for k in ("walked_to", "walk_reason") if k in selection], (
+            selection
+        )
+        assert s.walked == [None]
+        assert not (tmp_session_root["sessions"] / "fleet-2").exists()
+        assert "seed_warning" not in answer, "no hand-off was attempted"
 
     async def test_the_lock_files_a_death_leaves_do_not_refuse_or_walk_it(
         self, tmp_session_root
