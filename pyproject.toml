@@ -55,7 +55,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp"
+Homepage = "https://stealthly.io"
 Repository = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp"
 Issues = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp/issues"
 
