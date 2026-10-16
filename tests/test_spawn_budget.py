@@ -32,6 +32,7 @@ table is ``fakes.ProcessTable`` and ``pid_file`` is under ``tmp_path``.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,10 +60,23 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 #: The shipped ceilings, read before the autouse fixture lowers them.
 SHIPPED_LAUNCH_BUDGET = spawn_budget.LAUNCH_BUDGET_SECONDS
 
-#: What the patched budgets are lowered to: long enough that a healthy double
-#: finishes well inside it, short enough that a stall costs the suite a fraction
-#: of a second.
+#: The budget of the ONE phase a test stalls on purpose. A stall never answers, so
+#: all this has to do is elapse: a loaded runner can only make it elapse later,
+#: never produce a different outcome. It costs the suite a fraction of a second.
 SHORT_BUDGET = 0.3
+
+#: The budget of every phase a test does NOT stall (F-997). A phase that is meant
+#: to answer must never be the one a slow runner cuts off, or the stage the error
+#: names is the runner's choice and not the test's (the Windows py3.11 failures:
+#: "stalled in the post-launch setup stage" on a healthy spawn, and a regex that
+#: wanted "post-launch setup" and read "launch"). Under WAIT_BUDGET so a phase
+#: wired to the wrong constant fails fast, in the wrong stage's words.
+AMPLE_BUDGET = 20.0
+
+#: How long a healthy double takes to answer, per phase. Small, because it is
+#: slept (a slow runner only lengthens it), and nonzero, so a phase has to be held
+#: open across the loop for a budget to be able to cut it off.
+HEALTHY_LATENCY = 0.02
 
 #: Hard stop for any await on a stalled path: a hang is a failure, not a timeout.
 WAIT_BUDGET = 30.0
@@ -89,8 +103,8 @@ def pid_file(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _short_budgets(monkeypatch):
-    monkeypatch.setattr(spawn_budget, "LAUNCH_BUDGET_SECONDS", SHORT_BUDGET)
-    monkeypatch.setattr(spawn_budget, "POST_LAUNCH_BUDGET_SECONDS", SHORT_BUDGET)
+    monkeypatch.setattr(spawn_budget, "LAUNCH_BUDGET_SECONDS", AMPLE_BUDGET)
+    monkeypatch.setattr(spawn_budget, "POST_LAUNCH_BUDGET_SECONDS", AMPLE_BUDGET)
     monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
     monkeypatch.setattr(spawn_contention, "contention_hint", lambda n: None)
     monkeypatch.setattr(google_rotation_guard, "arm", _no_arm)
@@ -106,6 +120,26 @@ def _short_budgets(monkeypatch):
 
 async def _no_arm(browser) -> None:
     return None
+
+
+def stall_budget(monkeypatch, name: str) -> None:
+    """Make *name* the one short budget: the phase a test stalls on purpose."""
+    monkeypatch.setattr(spawn_budget, name, SHORT_BUDGET)
+
+
+def tighten_after_post_launch(monkeypatch) -> None:
+    """``_apply_post_launch`` and ``_setup_dynamic_hooks`` share one budget, so a
+    test that stalls the second must not leave the first on a short one: wrap the
+    first so the short budget starts only once it has answered. The real, bounded
+    phase still runs inside the wrapper, under the ample budget."""
+    real = BrowserManager._apply_post_launch
+
+    async def then_tighten(self, *args, **kwargs):
+        result = await real(self, *args, **kwargs)
+        stall_budget(monkeypatch, "POST_LAUNCH_BUDGET_SECONDS")
+        return result
+
+    monkeypatch.setattr(BrowserManager, "_apply_post_launch", then_tighten)
 
 
 async def _never() -> None:
@@ -132,6 +166,15 @@ class LiveTab(StalledTab):
         return None
 
 
+class AnsweringTab(StalledTab):
+    """A healthy Chrome's tab: it answers, after a real turn of the loop. A double
+    that answers without ever awaiting finishes inside the first step of its phase
+    and could not tell a budget that cuts a phase off from one that does not."""
+
+    async def set_window_size(self, **_kwargs) -> None:
+        await asyncio.sleep(HEALTHY_LATENCY)
+
+
 class LaunchedChrome:
     """A launched nodriver ``Browser`` as ``spawn_browser`` holds it: the live
     process, the caller's ``config`` verbatim and a tab. ``stop`` is counted."""
@@ -147,7 +190,9 @@ class LaunchedChrome:
         self.stops += 1
 
 
-def stalling_start(monkeypatch, table, registry, pids, *, tab=None, stall=True):
+def stalling_start(
+    monkeypatch, table, registry, pids, *, tab=None, stall=True, latency=0.0
+):
     """Replace ``nodriver.start`` with a Chrome that LAUNCHES (a live process in
     the table, registered with nodriver the way ``Browser.start`` registers it
     before it polls) and then either never answers (``stall``) or hands back a
@@ -163,6 +208,8 @@ def stalling_start(monkeypatch, table, registry, pids, *, tab=None, stall=True):
         registry.add(browser if tab is not None else LaunchedBrowser(config, pid))
         if stall:
             await _never()
+        if latency:
+            await asyncio.sleep(latency)
         return browser
 
     monkeypatch.setattr(nodriver, "start", start)
@@ -231,10 +278,13 @@ async def test_a_launch_that_never_answers_fails_in_a_named_stage_and_reaps_its_
     monkeypatch, table, registry, pid_file, tmp_path
 ):
     options = clone_options(tmp_path)
+    stall_budget(monkeypatch, "LAUNCH_BUDGET_SECONDS")
     stalling_start(monkeypatch, table, registry, [6001])
     manager = BrowserManager()
 
-    with pytest.raises(Exception, match=r"launch stage.*0\.3 s"):
+    with pytest.raises(
+        Exception, match=rf"launch stage.*{re.escape(f'{SHORT_BUDGET:g}')} s"
+    ):
         await spawn(manager, options)
 
     # THE one reap (spawn_leak): the Chrome nodriver launched, by its own pid.
@@ -248,12 +298,15 @@ async def test_a_post_launch_exchange_that_never_answers_stops_and_forgets_the_b
     monkeypatch, table, registry, pid_file, tmp_path
 ):
     options = clone_options(tmp_path)
+    stall_budget(monkeypatch, "POST_LAUNCH_BUDGET_SECONDS")
     browsers = stalling_start(
         monkeypatch, table, registry, [6002], tab=StalledTab(), stall=False
     )
     manager = BrowserManager()
 
-    with pytest.raises(Exception, match=r"post-launch setup stage.*0\.3 s"):
+    with pytest.raises(
+        Exception, match=rf"post-launch setup stage.*{re.escape(f'{SHORT_BUDGET:g}')} s"
+    ):
         await spawn(manager, options)
 
     assert [held.stops for held in browsers] == [1], "the held Browser was not stopped"
@@ -269,11 +322,15 @@ async def test_a_dynamic_hook_setup_that_never_answers_is_bounded_too(
     monkeypatch, table, registry, pid_file, tmp_path
 ):
     options = clone_options(tmp_path)
+    tighten_after_post_launch(monkeypatch)
     stalling_start(monkeypatch, table, registry, [6003], tab=LiveTab(), stall=False)
     monkeypatch.setattr(dynamic_hook_system, "setup_interception", _never_with_args)
     manager = BrowserManager()
 
-    with pytest.raises(Exception, match=r"dynamic-hook setup stage.*0\.3 s"):
+    with pytest.raises(
+        Exception,
+        match=rf"dynamic-hook setup stage.*{re.escape(f'{SHORT_BUDGET:g}')} s",
+    ):
         await spawn(manager, options)
 
     assert table.alive_on(options.user_data_dir) == []
@@ -287,9 +344,21 @@ async def _never_with_args(*_args, **_kwargs) -> None:
 async def test_a_healthy_spawn_is_not_cut_off(
     monkeypatch, table, registry, pid_file, tmp_path
 ):
-    """The budgets are ceilings: a Chrome that answers promptly costs what it costs."""
+    """The budgets are ceilings: a Chrome that answers promptly costs what it costs.
+
+    Every budget is the ample one (the autouse fixture): what is pinned is not
+    "this spawn took under N ms", which a loaded runner decides, but that a spawn
+    which answers is never turned into the stall error, however the budget is read."""
     options = clone_options(tmp_path)
-    stalling_start(monkeypatch, table, registry, [6004], tab=LiveTab(), stall=False)
+    stalling_start(
+        monkeypatch,
+        table,
+        registry,
+        [6004],
+        tab=AnsweringTab(),
+        stall=False,
+        latency=HEALTHY_LATENCY,
+    )
     monkeypatch.setattr(dynamic_hook_system, "setup_interception", _answers_with_args)
     manager = BrowserManager()
 
@@ -300,7 +369,7 @@ async def test_a_healthy_spawn_is_not_cut_off(
 
 
 async def _answers_with_args(*_args, **_kwargs) -> None:
-    return None
+    await asyncio.sleep(HEALTHY_LATENCY)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +390,7 @@ async def test_a_timed_out_attempt_is_retried_and_leaves_nothing_behind(
     )
     launched: list[str] = []
     pids = iter((7001, 7002, 7003))
+    stall_budget(monkeypatch, "LAUNCH_BUDGET_SECONDS")
 
     async def start(config=None, **_kwargs):
         pid = next(pids)
@@ -328,6 +398,10 @@ async def test_a_timed_out_attempt_is_retried_and_leaves_nothing_behind(
         table.procs[pid] = FakeChrome(pid, config.user_data_dir, time.time())
         registry.add(LaunchedBrowser(config, pid))
         if pid == 7001:
+            # Attempt 1 is the stall and its (short) budget is already running;
+            # the retries are meant to fail in the ordinary way, so they get the
+            # ample one and a slow runner cannot turn them into a second stall.
+            monkeypatch.setattr(spawn_budget, "LAUNCH_BUDGET_SECONDS", AMPLE_BUDGET)
             await _never()
         raise RuntimeError("an ordinary launch failure")
 
@@ -411,10 +485,14 @@ async def _body_whose_inner_wait_for_completes_as_the_deadline_fires() -> None:
     await _never()
 
 
-async def test_the_deadline_holds_when_an_inner_wait_for_swallows_the_cancel():
+async def test_the_deadline_holds_when_an_inner_wait_for_swallows_the_cancel(
+    monkeypatch,
+):
     """THE F-969b pin: red on 3.11 against the ``asyncio.timeout``-only phase (the
     CI cell that failed: Windows py3.11), where the phase never raises and the
     next step hangs until ``WAIT_BUDGET`` cancels the whole thing."""
+
+    stall_budget(monkeypatch, "POST_LAUNCH_BUDGET_SECONDS")
 
     @spawn_budget.phase("post-launch setup", "POST_LAUNCH_BUDGET_SECONDS")
     async def phase() -> None:
@@ -455,6 +533,7 @@ async def test_a_phase_that_swallows_every_cancel_still_ends_in_a_named_error(
     """A phase that ignores cancellation twice before it gives in is re-cancelled
     until it ends, and the caller still gets the named error."""
     seen = {"cancels": 0}
+    stall_budget(monkeypatch, "LAUNCH_BUDGET_SECONDS")
 
     @spawn_budget.phase("launch", "LAUNCH_BUDGET_SECONDS")
     async def stubborn() -> None:
