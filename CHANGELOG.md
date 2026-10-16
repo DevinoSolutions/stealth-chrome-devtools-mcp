@@ -8,7 +8,7 @@
 existed and then unpacked its two lines at once, so a child that had created the file but not yet filled
 it failed the test with `ValueError: not enough values to unpack (expected 2, got 0)` (one pre-push run on
 2026-10-16; a retry passed). The child now writes `<marker>.tmp` and `os.replace()`s it into place, and the
-test polls until the file holds both lines, failing with what it last read on timeout. Test-only change.
+test polls until the file holds both lines, treating a transient Windows `PermissionError` on the open as "not ready" too, and failing with what it last read on timeout. Test-only change.
 
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 

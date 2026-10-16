@@ -160,7 +160,9 @@ def _read_marker(marker, timeout: float = 30.0, interval: float = 0.05) -> list[
     while True:
         try:
             seen = marker.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
+            # Windows refuses an open that lands while the writer's handle or
+            # an indexer/AV scan holds the file; it is the same "not ready".
             seen = None
         else:
             lines = seen.splitlines()
@@ -191,6 +193,24 @@ def test_the_marker_poll_waits_out_a_file_that_exists_before_it_is_written(tmp_p
         assert _read_marker(marker, timeout=10) == ["prefix", "executable"]
     finally:
         t.join()
+
+
+def test_the_marker_poll_retries_a_transiently_locked_file(tmp_path, monkeypatch):
+    """F-994 pin: a Windows open refused while the writer holds the file is 'not ready'."""
+    marker = tmp_path / "child.txt"
+    marker.write_text("prefix\nexecutable", encoding="utf-8")
+    real = type(marker).read_text
+    calls = {"n": 0}
+
+    def _locked_once(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(marker), "read_text", _locked_once)
+    assert _read_marker(marker, timeout=5) == ["prefix", "executable"]
+    assert calls["n"] == 2
 
 
 def test_the_marker_poll_fails_with_what_it_read_on_timeout(tmp_path):
