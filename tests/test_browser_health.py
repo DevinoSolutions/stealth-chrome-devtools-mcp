@@ -547,9 +547,9 @@ class TestBounded:
 
         await asyncio.wait_for(health.check_once(), timeout=5)
 
-        # the capture's own record is logged when ITS task ends, which can fall inside
-        # this round (3.11 does): the probe's line is the one named
-        (warning,) = [w for w in log.at("warning") if "probe 1 failed" in w]
+        # the capture starts after the probe's line is logged and awaits nothing in
+        # this round, so its own record line cannot fall inside it
+        (warning,) = log.at("warning")
         assert "TimeoutError at evaluate" in warning
 
     async def test_a_forensics_gatherer_that_hangs_does_not_block_the_heal(
@@ -981,6 +981,25 @@ class TestTheFrozenStateIsCaptured:
         assert f"{INSTANCE_ID}: evidence@probe1({stage.capture_record})" in log.at(
             "warning"
         )
+
+    async def test_one_incident_writes_two_warning_lines_in_a_fixed_order(
+        self, stage, log
+    ):
+        """BY DESIGN the record has its own line (logged when the capture task ends);
+        the first-failure line only says it is being captured. The order is the
+        design's, not the interpreter's: a capture that finishes instantly (stage's
+        does) still logs after the line that announces it, because the task starts
+        right after that line with nothing awaited between."""
+        stage.probe_results[INSTANCE_ID] = [False]
+
+        await stage.health().check_once()
+        await _settled()
+
+        warnings = log.at("warning")
+        assert len(warnings) == 2, warnings
+        assert "probe 1 failed" in warnings[0]
+        assert warnings[0].endswith("evidence@probe1(capturing)")
+        assert warnings[1] == f"{INSTANCE_ID}: evidence@probe1({stage.capture_record})"
 
     async def test_the_heal_error_line_carries_it_labelled_with_its_age(
         self, stage, log

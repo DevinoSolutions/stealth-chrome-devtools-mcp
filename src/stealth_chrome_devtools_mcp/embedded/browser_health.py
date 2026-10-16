@@ -620,8 +620,6 @@ class BrowserHealth:
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
         count = self._failures[instance_id] = self._failures.get(instance_id, 0) + 1
-        if not self._incidents.has(instance_id):
-            self._begin_incident(instance_id, data)  # F-993: a task, not an await
         facts = await self._facts(
             instance_id, data["browser"], data["instance"].created_at
         )
@@ -634,7 +632,9 @@ class BrowserHealth:
             debug_logger.log_warning(
                 _COMPONENT, "probe", f"{label}; evidence@probe1(capturing)"
             )
+            self._begin_incident(instance_id, data)
             return
+        self._begin_incident(instance_id, data)  # a count that outlived its incident
         since = self._clock() - self._last_heal.get(instance_id, -HEAL_COOLDOWN_SECONDS)
         if since < HEAL_COOLDOWN_SECONDS:
             debug_logger.log_warning(
@@ -676,8 +676,12 @@ class BrowserHealth:
         return pid, f"freeze-{session}-{key}", problem
 
     def _begin_incident(self, instance_id: str, data: dict[str, object]) -> None:
-        """Start the F-993 capture of a browser that just failed its first probe.
-        Returns at once, so nothing here can delay a heal."""
+        """Start the F-993 capture of a browser that just failed its first probe, once
+        per incident. Returns at once, so nothing here can delay a heal. Called straight
+        AFTER the first-failure line is logged, with no await between, so the record
+        (its own line when the task ends) never precedes it, on any interpreter."""
+        if self._incidents.has(instance_id):
+            return
         try:
             pid, label, problem = self._incident_target(instance_id, data)
             browser = data["browser"]
