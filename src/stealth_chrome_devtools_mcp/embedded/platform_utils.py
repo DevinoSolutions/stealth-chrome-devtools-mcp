@@ -123,7 +123,6 @@ def _stealth_blocked_args() -> dict:
         # ── direct automation signals ──
         "--enable-automation": "sets navigator.webdriver=true",
         "--test-type": "enables Chrome test mode",
-        "--enable-blink-features=automationcontrolled": "explicit automation marker",
         "--auto-open-devtools-for-tabs": "DevTools on start is detectable",
         "--remote-debugging-port": "DevTools port exposure",
         "--remote-debugging-pipe": "DevTools pipe exposure",
@@ -168,6 +167,55 @@ def _stealth_blocked_args() -> dict:
     }
 
 
+# F-992: ``--enable-blink-features`` takes a COMMA-separated list, so
+# ``AutomationControlled`` is matched as a list ENTRY, not as a prefix of the whole
+# argument: a prefix match let ``=Foo,AutomationControlled`` through (Chrome then
+# exposes navigator.webdriver) and dropped ``=AutomationControlled,Foo`` whole, taking
+# the caller's ``Foo`` with it. The split is Chrome's own (``FeaturesFromSwitch``:
+# split on "," only, each entry trimmed): ``;`` and inner spaces are part of a name,
+# so ``Foo;AutomationControlled`` is one unknown name to Chrome and is left alone.
+# Surviving entries are kept verbatim and in order, under the caller's own spelling of
+# the switch (Chrome's argv scan is case-sensitive, so re-casing it would change
+# whether the kept features are applied at all).
+# ``--disable-blink-features=AutomationControlled`` is deliberately NOT stripped: it is
+# the caller's explicit choice and makes navigator.webdriver false, even though the
+# flag is itself a detectable one.
+_ENABLE_BLINK_FEATURES = "--enable-blink-features="
+_BLOCKED_BLINK_FEATURES = {"AutomationControlled": "explicit automation marker"}
+_BLOCKED_BLINK_FEATURES_LOWER = {n.lower(): n for n in _BLOCKED_BLINK_FEATURES}
+
+
+def _strip_blocked_blink_features(
+    arg: str,
+) -> tuple[str | None, str | None, list[str]]:
+    """Remove blocked entries from an ``--enable-blink-features=`` list.
+
+    Returns ``(kept_arg, reason, removed)``: ``reason`` is None when the argument is
+    not a feature list or lists nothing blocked (``kept_arg`` is then ``arg``
+    unchanged); otherwise ``kept_arg`` is the argument, in the caller's spelling of
+    the switch, with the blocked entries removed, or None when nothing else was
+    listed, and ``removed`` names (canonically cased) what was taken out. Entries
+    are split on ``,`` only and compared trimmed and case-insensitively.
+    """
+    text = arg.strip()
+    if not text.lower().startswith(_ENABLE_BLINK_FEATURES):
+        return arg, None, []
+    name_and_eq = text[: len(_ENABLE_BLINK_FEATURES)]
+    entries = text[len(_ENABLE_BLINK_FEATURES) :].split(",")
+    removed = [
+        _BLOCKED_BLINK_FEATURES_LOWER[e.strip().lower()]
+        for e in entries
+        if e.strip().lower() in _BLOCKED_BLINK_FEATURES_LOWER
+    ]
+    if not removed:
+        return arg, None, []
+    kept = [
+        e for e in entries if e.strip().lower() not in _BLOCKED_BLINK_FEATURES_LOWER
+    ]
+    kept_arg = name_and_eq + ",".join(kept) if any(e.strip() for e in kept) else None
+    return kept_arg, _BLOCKED_BLINK_FEATURES[removed[0]], list(dict.fromkeys(removed))
+
+
 def filter_stealth_args(user_args: list[str]) -> tuple:
     """
     Strip browser args that would compromise stealth and return
@@ -175,6 +223,8 @@ def filter_stealth_args(user_args: list[str]) -> tuple:
 
     Each warning is a string like:
         ``"--no-sandbox stripped: missing sandbox detectable via process topology"``
+    An ``--enable-blink-features`` list that also names other features keeps them
+    (F-992); its warning says what was removed and what was kept.
     """
     blocked = _stealth_blocked_args()
     clean: list[str] = []
@@ -188,8 +238,18 @@ def filter_stealth_args(user_args: list[str]) -> tuple:
                 warnings.append(f"{arg} stripped: {reason}")
                 matched = True
                 break
-        if not matched:
+        if matched:
+            continue
+        kept, reason, removed = _strip_blocked_blink_features(arg)
+        if reason is None:
             clean.append(arg)
+        elif kept is None:
+            warnings.append(f"{arg} stripped: {reason}")
+        else:
+            clean.append(kept)
+            warnings.append(
+                f"{arg} stripped: {reason} ({', '.join(removed)} removed, kept {kept})"
+            )
 
     return clean, warnings
 
