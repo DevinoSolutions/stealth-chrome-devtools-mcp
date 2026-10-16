@@ -12,13 +12,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
   issues: write
+
+concurrency:
+  group: site-liveness
+  cancel-in-progress: false
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -28,7 +31,7 @@ jobs:
         run: |
           probe() { # url want_code want_location_prefix
             local out code loc
-            out=$(curl -s -o /dev/null --max-time 20 -w '%{http_code} %{redirect_url}' "$1") || out="000 "
+            out=$(curl -s -o /dev/null --connect-timeout 5 --max-time 15 -w '%{http_code} %{redirect_url}' "$1") || out="000 "
             code=${out%% *}; loc=${out#* }
             [ "$code" = "$2" ] && { [ -z "$3" ] || [[ "$loc" == "$3"* ]]; } && return 0
             echo "$1 -> $code ${loc:+($loc)}, wanted $2 ${3:+-> $3}"; return 1
@@ -53,9 +56,10 @@ jobs:
           OPEN=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
             --jq "map(select(.title == \"$TITLE\"))[0].number // empty")
           if [ -s failures.txt ]; then
-            BODY=$(printf 'Failing checks:\n\n```\n%s\n```\n\nRun: %s' "$(cat failures.txt)" "$RUN_URL")
-            if [ -n "$OPEN" ]; then gh issue comment "$OPEN" --body "$BODY"
-            else gh issue create --title "$TITLE" --body "$BODY"; fi
+            if [ -z "$OPEN" ]; then
+              BODY=$(printf 'Failing checks:\n\n```\n%s\n```\n\nRun: %s' "$(cat failures.txt)" "$RUN_URL")
+              gh issue create --title "$TITLE" --body "$BODY"
+            fi
             exit 1
           fi
           if [ -n "$OPEN" ]; then
