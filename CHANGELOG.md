@@ -9,6 +9,7 @@
 that tab first, which is the state the close wanted. The six-browser fleet test counts any such warning as an
 unrepaired fault and failed on it in CI run 38919791742. A `ProtocolException` saying `No target with given id`
 is now treated as closed and logged at debug level; every other failure in that loop still warns.
+
 ### A relaunch of `fleet` right after its browser was killed walked to `fleet-2` (F-998)
 
 `spawn_browser(session="fleet")` is meant to come back on the same directory after the browser is closed or
