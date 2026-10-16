@@ -25,15 +25,19 @@ production reads both -- the bytes are the same either way.
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import psutil
 import pytest
 
-from fakes import FakeBrowserManager, held_profile, write_singleton
+from fakes import FakeBrowserManager, a_zombie, held_profile, write_singleton
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     clone_storage,
@@ -147,6 +151,269 @@ class TestProfileHold:
     def test_lock_naming_a_dead_pid_is_not_a_hold(self, tmp_path):
         write_singleton(tmp_path, f"{socket.gethostname()}-{dead_pid()}")
         assert profile_lock.profile_hold(tmp_path, no_pids) is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows has no zombies and no lock")
+    def test_lock_naming_a_zombie_is_not_a_hold(self, tmp_path):
+        """F-998. The owner of a SIGKILLed browser's lock is a zombie until its
+        parent reaps it; ``pid_exists`` is True for it, and Chromium's own answer
+        for a lock whose owner cannot answer is orphaned. A real zombie."""
+        with a_zombie() as pid:
+            assert psutil.pid_exists(pid), "the premise: the pid is still listed"
+            write_singleton(tmp_path, f"{socket.gethostname()}-{pid}")
+            assert profile_lock.profile_hold(tmp_path, no_pids) is None
+
+    @staticmethod
+    def _psutil_says(monkeypatch, *, status, cmdline, exe=None, linux=True):
+        """A pid that ``pid_exists`` lists and whose ``status``/``cmdline`` reads
+        answer (or raise) what is given. ``exe`` is what reading its
+        ``/proc/<pid>/exe`` link does -- an exception to raise, or the target to
+        return -- and ``linux`` whether this platform has that witness at all."""
+        monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
+        monkeypatch.setattr(browser_cmdline, "_EXE_WITNESS", linux)
+
+        def _read(what):
+            def read(_self):
+                if isinstance(what, BaseException):
+                    raise what
+                return what
+
+            return read
+
+        monkeypatch.setattr(
+            psutil,
+            "Process",
+            type(
+                "_Process",
+                (),
+                {
+                    "__init__": lambda self, _pid: None,
+                    "status": _read(status),
+                    "cmdline": _read(cmdline),
+                },
+            ),
+        )
+        monkeypatch.setattr(browser_cmdline.Path, "readlink", _read(exe))
+
+    GONE = FileNotFoundError(errno.ENOENT, "no such file")
+    READABLE = "/usr/lib/chromium/chromium"
+
+    @pytest.mark.parametrize(
+        ("status", "cmdline", "exe", "linux"),
+        [
+            pytest.param(psutil.STATUS_ZOMBIE, [], READABLE, True, id="a zombie"),
+            pytest.param(
+                psutil.STATUS_ZOMBIE,
+                ["chrome"],
+                READABLE,
+                True,
+                id="a zombie, argv kept",
+            ),
+            pytest.param(
+                psutil.STATUS_ZOMBIE, [], READABLE, False, id="a zombie, off Linux"
+            ),
+            pytest.param(psutil.NoSuchProcess(9), [], READABLE, True, id="reaped"),
+            pytest.param(psutil.ZombieProcess(9), [], READABLE, True, id="raises Z"),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                [],
+                GONE,
+                True,
+                id="tearing down: no argv and no executable left",
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                [],
+                ProcessLookupError(errno.ESRCH, "gone"),
+                True,
+                id="tearing down: ESRCH on the executable",
+            ),
+        ],
+    )
+    def test_a_pid_that_cannot_be_a_running_browser_is_not_running_on_either_question(
+        self, monkeypatch, status, cmdline, exe, linux
+    ):
+        """The two "is this pid still there" readers -- the lock owner's and an
+        unreadable tree member's -- share one witness for a process that has
+        exited but is still listed, here by what psutil answers rather than by a
+        platform that can make one."""
+        self._psutil_says(
+            monkeypatch, status=status, cmdline=cmdline, exe=exe, linux=linux
+        )
+
+        assert profile_lock._pid_alive(9) is False
+        assert browser_cmdline._still_running(9) is False
+
+    @pytest.mark.parametrize(
+        ("status", "cmdline", "exe", "linux"),
+        [
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                [],
+                READABLE,
+                True,
+                id="mid-exec: no argv YET, executable readable (the measured live state)",
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                [],
+                PermissionError(errno.EACCES, "denied"),
+                True,
+                id="no argv, executable unreadable for lack of permission",
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                [],
+                OSError(errno.EIO, "io"),
+                True,
+                id="no argv, executable read fails some other way",
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                [],
+                GONE,
+                False,
+                id="no argv and no executable, but not Linux: no such witness",
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING, [], READABLE, False, id="no argv, not Linux"
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                ["chrome"],
+                GONE,
+                True,
+                id="an argv outranks an unreadable executable",
+            ),
+            pytest.param(
+                psutil.AccessDenied(9), [], GONE, True, id="status unreadable"
+            ),
+            pytest.param(
+                psutil.STATUS_SLEEPING, ["chrome"], READABLE, True, id="sleeping"
+            ),
+            pytest.param(
+                psutil.STATUS_RUNNING,
+                psutil.AccessDenied(9),
+                GONE,
+                True,
+                id="argv unreadable",
+            ),
+        ],
+    )
+    def test_only_a_pid_shown_to_be_gone_is_called_dead(
+        self, monkeypatch, status, cmdline, exe, linux
+    ):
+        """The direction F-871 fixed stays, and it is the DATA-LOSS one: a listed
+        pid that we cannot show to have exited -- mid-``exec`` (the sh launcher of
+        Chromium reads an empty argv while alive), unreadable, or running -- is
+        still HELD, because calling it free opens one profile in two browsers. (A
+        pid that vanished between the two reads is gone, and is pinned above.)"""
+        self._psutil_says(
+            monkeypatch, status=status, cmdline=cmdline, exe=exe, linux=linux
+        )
+
+        assert profile_lock._pid_alive(9) is True
+        assert browser_cmdline._still_running(9) is True
+
+    @pytest.mark.parametrize(
+        ("raised", "gone"),
+        [
+            (FileNotFoundError(errno.ENOENT, "x"), True),
+            (ProcessLookupError(errno.ESRCH, "x"), True),
+            (PermissionError(errno.EACCES, "x"), False),
+            (OSError(errno.EIO, "x"), False),
+            (OSError(errno.EINVAL, "not a link"), False),
+            ("/usr/bin/anything", False),
+        ],
+    )
+    def test_the_executable_link_is_gone_only_for_not_found(
+        self, monkeypatch, raised, gone
+    ):
+        def readlink(_self):
+            if isinstance(raised, BaseException):
+                raise raised
+            return raised
+
+        monkeypatch.setattr(browser_cmdline.Path, "readlink", readlink)
+        assert browser_cmdline._exe_is_gone(9) is gone
+
+    @pytest.mark.skipif(
+        not hasattr(os, "sched_setaffinity"), reason="the exec window is Linux's"
+    )
+    def test_a_browser_inside_its_launchers_exec_is_held_on_every_poll(self, tmp_path):
+        """F-998, the DATA-LOSS direction, with real processes and no replaced read.
+
+        ``/usr/bin/chromium`` is a ``#!/bin/sh`` script that ``exec``s the real
+        binary, so the browser pid reads an EMPTY argv for as long as the
+        ``execve`` takes, while it is alive and owns the profile. Each child here
+        is such a launcher, its lock names its pid, and the real ``profile_hold``
+        is polled continuously across the exec: not one poll may show the profile
+        free (it did, in 2 of 11,194 live polls of real Chromium, when an empty
+        argv alone counted as gone).
+
+        The window is milliseconds wide, so the children are pinned to ONE cpu
+        while the poller runs on the others: measured, that makes the exec
+        preemptable mid-way and the window observable in a few launches; it
+        keeps launching until ``windows`` of them were observed, so a poll that
+        misses one still meets the next. If none
+        is observed inside ``budget`` seconds (a one-cpu runner, a very quiet
+        one) the node SKIPS rather than passing on no evidence; the deterministic
+        twin is ``test_only_a_pid_shown_to_be_gone_is_called_dead``.
+        """
+        cpus = sorted(os.sched_getaffinity(0))
+        if len(cpus) < 2:
+            pytest.skip("pinning the launchers apart from the poller needs 2 cpus")
+        pinned, poller_cpus = {cpus[-1]}, set(cpus[:-1])
+        budget, width, windows = 30.0, 24, 12
+        launcher = tmp_path / "launcher.sh"
+        launcher.write_text(
+            "#!/bin/sh\n"
+            'until [ -e "$1" ]; do :; done\n'
+            f"exec {sys.executable} -c 'import time; time.sleep(120)'\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        deadline = time.monotonic() + budget
+        caught, polls, free = 0, 0, []
+        children: list[subprocess.Popen] = []
+        try:
+            while caught < windows and time.monotonic() < deadline:
+                # Children inherit this process's cpu set: spawn them pinned, then
+                # move the poller (this process) off that cpu.
+                os.sched_setaffinity(0, pinned)
+                go = tmp_path / f"go{len(children)}"
+                batch = [
+                    subprocess.Popen([str(launcher), str(go)]) for _ in range(width)
+                ]
+                os.sched_setaffinity(0, poller_cpus)
+                children += batch
+                profiles = []
+                for child in batch:
+                    profile = tmp_path / f"p{len(children)}-{child.pid}"
+                    profile.mkdir()
+                    write_singleton(profile, f"{socket.gethostname()}-{child.pid}")
+                    profiles.append((child.pid, profile))
+                go.touch()  # every launcher execs NOW; polling starts with it
+                settled = time.monotonic() + 1.0
+                while time.monotonic() < settled:
+                    for pid, profile in profiles:
+                        hold = profile_lock.profile_hold(profile, no_pids)
+                        polls += 1
+                        try:
+                            argv = psutil.Process(pid).cmdline()
+                        except psutil.Error:
+                            argv = None
+                        caught += argv == []
+                        if hold is None:
+                            free.append((pid, argv))
+        finally:
+            os.sched_setaffinity(0, set(cpus))
+            for child in children:
+                child.kill()
+            for child in children:
+                child.wait()
+        assert not free, f"a live browser was shown FREE: {free[:5]} of {polls} polls"
+        if not caught:
+            pytest.skip(f"no exec window was observed in {polls} polls")
 
     def test_lock_naming_a_live_pid_is_a_hold(self, tmp_path):
         held_profile(tmp_path)
