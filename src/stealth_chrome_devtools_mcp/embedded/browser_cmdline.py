@@ -258,6 +258,13 @@ def command_line_is_gone(pid: int) -> bool:
     writes no ``SingletonLock`` there, and a killed process is simply no longer
     listed), so nothing licenses reading an empty argv as dead there.
 
+    Known limit, not fixable here: on Linux the leader of a still-running
+    multithreaded process reads ``Z`` once its own thread has exited (a main
+    thread that calls ``pthread_exit``), which this reads as gone. Chrome does not
+    do that. Holding a zombie that has more than one thread was tried and fails:
+    a SIGKILLed Chrome keeps ``num_threads`` above 1 while its other threads
+    finish, and 12 of 20 runs of the fleet journey walked to ``fleet-2`` again.
+
     Neither state can hold a profile or answer Chrome's singleton socket. The ONE
     witness of the two "is this pid still there" questions below and
     ``profile_lock._pid_alive``. (``process_exit._has_exited`` asks a related
