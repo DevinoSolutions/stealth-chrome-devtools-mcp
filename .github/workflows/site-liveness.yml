@@ -1,0 +1,68 @@
+name: site-liveness
+
+# Scheduled liveness probe for the stealthly.io landing site. INFORMATIONAL: it is
+# not a release gate and nothing requires it. It exists because the Dokploy host
+# rebooted at 07:22Z on 2026-10-16 and the landing container, exited 255, stayed
+# down for up to ~49 min unnoticed (Uptimely's Free plan is capped). A failing run
+# goes red and opens (or comments on) one issue; the first green run closes it.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: site-liveness
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Probe stealthly.io
+        run: |
+          probe() { # url want_code want_location_prefix
+            local out code loc
+            out=$(curl -s -o /dev/null --connect-timeout 5 --max-time 15 -w '%{http_code} %{redirect_url}' "$1") || out="000 "
+            code=${out%% *}; loc=${out#* }
+            [ "$code" = "$2" ] && { [ -z "$3" ] || [[ "$loc" == "$3"* ]]; } && return 0
+            echo "$1 -> $code ${loc:+($loc)}, wanted $2 ${3:+-> $3}"; return 1
+          }
+          run_all() {
+            : > failures.txt
+            probe https://stealthly.io/ 200 || true
+            probe https://stealthly.io/bot-detection 200 || true
+            probe https://stealthly.io/sitemap.xml 200 || true
+            probe https://www.stealthly.io/ 301 https://stealthly.io/ || true
+            probe https://stealthy.now/ 301 https://stealthly.io/ || true
+            probe https://www.stealthy.now/ 301 https://stealthly.io/ || true
+            probe http://stealthly.io/ 301 https://stealthly.io/ || true
+          }
+          run_all >failures.txt
+          if [ -s failures.txt ]; then
+            echo "first pass failed, retrying in 30 s"; cat failures.txt; sleep 30
+            run_all >failures.txt
+          fi
+          cat failures.txt
+          TITLE='stealthly.io liveness check failing'
+          OPEN=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq "map(select(.title == \"$TITLE\"))[0].number // empty")
+          if [ -s failures.txt ]; then
+            if [ -z "$OPEN" ]; then
+              BODY=$(printf 'Failing checks:\n\n```\n%s\n```\n\nRun: %s' "$(cat failures.txt)" "$RUN_URL")
+              gh issue create --title "$TITLE" --body "$BODY"
+            fi
+            exit 1
+          fi
+          if [ -n "$OPEN" ]; then
+            gh issue comment "$OPEN" --body "recovered at $(date -u +%FT%TZ), run $RUN_URL"
+            gh issue close "$OPEN"
+          fi
