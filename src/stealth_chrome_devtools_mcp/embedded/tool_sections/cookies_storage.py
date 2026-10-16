@@ -17,6 +17,7 @@ is a HARD golden for this migration.
 
 from typing import Any
 
+from stealth_chrome_devtools_mcp.embedded import tab_identity
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError, _require_tab
 
@@ -73,11 +74,17 @@ async def set_cookie(
     tab = await _require_tab(rt.browser_manager, instance_id)
 
     if not url and not domain:
-        current_url = tab.url if hasattr(tab, "url") else None
-        if current_url:
-            url = current_url
-        else:
+        # `tab.url` is nodriver's cached TargetInfo: right after a navigation it
+        # can still be `about:blank`, which Chrome refuses as a cookie url
+        # (F-995). Ask Chrome, through the one home for "what is this tab
+        # showing now".
+        browser = await rt.browser_manager.get_browser(instance_id)
+        live = await rt._with_cdp_timeout(
+            tab_identity.refreshed(browser, tab), instance_id=instance_id
+        )
+        if not live["url"]:
             raise ToolError("At least one of 'url' or 'domain' must be specified")
+        url = live["url"]
 
     cookie = {
         "name": name,
