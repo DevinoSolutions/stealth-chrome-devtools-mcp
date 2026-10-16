@@ -11,6 +11,8 @@ behavior against a real Chrome is ``tests/test_e2e_login_persistence.py``.
 
 import asyncio
 import json
+import logging
+from types import SimpleNamespace
 
 import nodriver as uc
 import pytest
@@ -139,6 +141,15 @@ class FakeTab:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _NeverReady(FakeTab):
+    """A settings page whose privileged bindings never appear."""
+
+    async def evaluate(self, script: str, await_promise: bool = False):
+        if script == login_persistence._READY:
+            return False
+        return await super().evaluate(script, await_promise)
 
 
 class TestSessionRestorePref:
@@ -285,6 +296,109 @@ class TestFinalArgv:
 
 
 class TestSessionRestoreBounded:
+    def test_the_one_deadline_fits_inside_the_spawn_phase(self):
+        """F-995: ``ensure_session_restore`` runs inside the spawn's post-launch
+        phase, whose budget turns an overrun into a failed spawn. Its worst case
+        is ``PREF_TIMEOUT_SECONDS`` once (see the next node), so that number has
+        to leave the phase room for the steps that share it."""
+        from stealth_chrome_devtools_mcp.embedded import spawn_budget
+
+        assert (
+            login_persistence.PREF_TIMEOUT_SECONDS
+            <= spawn_budget.POST_LAUNCH_BUDGET_SECONDS / 2
+        )
+
+    async def test_a_stuck_exchange_and_a_stuck_close_cost_one_bound_not_two(
+        self, monkeypatch
+    ):
+        """The exchange never answers AND the tab will not close: the two waits
+        together may not exceed ``PREF_TIMEOUT_SECONDS``. Read from the timeouts
+        the code hands ``wait_for`` rather than from a wall clock, so a loaded
+        runner cannot move it.
+
+        The loop's clock is replaced by one that reads a Windows tick (15.6 ms)
+        LOW once the exchange has been cut off — what ``loop.time()`` really does
+        there (CI run 38909588568: granted ``[0.17, 0.044]`` against a 0.2
+        bound). A close bound read off that clock overruns; one that is the
+        held-back share by construction does not, on any platform."""
+        pref = 0.2
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", pref)
+        granted: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def spy(awaitable, timeout):
+            granted.append(timeout)
+            return await real_wait_for(awaitable, timeout)
+
+        class LaggingClock:
+            """The first read is the start; every later one is a tick short of
+            the exchange's whole bound."""
+
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def time(self) -> float:
+                self.reads += 1
+                if self.reads == 1:
+                    return 1000.0
+                return 1000.0 + pref * (1 - login_persistence.TAB_CLOSE_SHARE) - 0.0156
+
+        clock = LaggingClock()
+        monkeypatch.setattr(
+            login_persistence,
+            "asyncio",
+            SimpleNamespace(
+                sleep=asyncio.sleep, wait_for=spy, get_running_loop=lambda: clock
+            ),
+        )
+
+        class Stuck(FakeTab):
+            async def evaluate(self, script, await_promise=False):
+                await asyncio.Event().wait()
+
+            async def close(self) -> None:
+                await asyncio.Event().wait()
+
+        assert (
+            await login_persistence.ensure_session_restore(
+                FakeBrowser(opened_tab=Stuck(pref=5))
+            )
+            is False
+        )
+        assert len(granted) == 2, granted
+        # Float epsilon only: 0.17 + 0.03 is not exactly 0.2 in binary.
+        assert sum(granted) <= pref + 1e-9, granted
+
+    @pytest.mark.parametrize(
+        ("browser_factory", "stage"),
+        [
+            (
+                lambda: FakeBrowser(
+                    opened_tab=FakeTab(pref=5), update_targets_stalls=True
+                ),
+                "opening the settings tab",
+            ),
+            (
+                lambda: FakeBrowser(opened_tab=_NeverReady(pref=5)),
+                "waiting for the settings bindings",
+            ),
+        ],
+    )
+    async def test_the_timeout_warning_names_the_stage_it_stalled_in(
+        self, monkeypatch, caplog, browser_factory, stage
+    ):
+        """A 20 s overrun on a loaded cell has to say WHERE, or the next red is
+        as blind as the last one."""
+        monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
+        with caplog.at_level(logging.WARNING):
+            assert (
+                await login_persistence.ensure_session_restore(browser_factory())
+                is False
+            )
+        stalls = [r.getMessage() for r in caplog.records if "stalled" in r.getMessage()]
+        assert len(stalls) == 1, stalls
+        assert f"stalled while {stage}" in stalls[0]
+
     async def test_an_evaluate_that_never_resolves_times_out_and_closes_the_tab(
         self, monkeypatch
     ):
