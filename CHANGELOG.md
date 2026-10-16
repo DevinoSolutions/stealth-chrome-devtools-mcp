@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### `close_instance` warned about a tab Chrome had already closed (F-996)
+
+`close_instance` closes each tab over CDP before it closes the browser, and logged a WARNING
+(`Failed to close tab for <instance>: No target with given id found [code: -32602]`) when Chrome had dropped
+that tab first, which is the state the close wanted. The six-browser fleet test counts any such warning as an
+unrepaired fault and failed on it in CI run 38919791742. A `ProtocolException` saying `No target with given id`
+is now treated as closed and logged at debug level; every other failure in that loop still warns.
+
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 
 `filter_stealth_args` blocked `--enable-blink-features=automationcontrolled` by `startswith`, so a caller
