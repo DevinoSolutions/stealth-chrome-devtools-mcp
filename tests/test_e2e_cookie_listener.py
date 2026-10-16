@@ -27,6 +27,7 @@ three different CDP commands and only the first was reported:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -66,10 +67,23 @@ async def _instance_on_a_page_with_a_cookie(base: str) -> tuple[str, callable]:
     spawn = get_fn("spawn_browser")
     set_cookie = get_fn("set_cookie")
 
+    close = get_fn("close_instance")
     iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
-    await navigate_and_settle(iid, f"{base}/interactions.html")
-    assert await set_cookie(instance_id=iid, name=_COOKIE_NAME, value=_COOKIE_VALUE)
-    return iid, get_fn("close_instance")
+    # The callers' ``try/finally`` starts AFTER this returns, so a failure here
+    # would leave the browser open — and a browser left open is how one red node
+    # became three on gate runs 38882922648 and 38890560391 (F-995): the fleet's
+    # ``list_instances`` waited out its CDP budget on the orphan, and the
+    # re-attach node found it in the pid record.
+    try:
+        await navigate_and_settle(iid, f"{base}/interactions.html")
+        assert await set_cookie(instance_id=iid, name=_COOKIE_NAME, value=_COOKIE_VALUE)
+    except BaseException:
+        # The close is best effort: a failure of its own must not replace the
+        # exception that says what actually went wrong.
+        with contextlib.suppress(Exception):
+            await close(instance_id=iid)
+        raise
+    return iid, close
 
 
 async def _still_usable(iid: str) -> None:
