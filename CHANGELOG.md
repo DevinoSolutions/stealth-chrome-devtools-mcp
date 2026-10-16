@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### `close_instance` warned about a tab Chrome had already closed (F-996)
+
+`close_instance` closes each tab over CDP before it closes the browser, and logged a WARNING
+(`Failed to close tab for <instance>: No target with given id found [code: -32602]`) when Chrome had dropped
+that tab first, which is the state the close wanted. The six-browser fleet test counts any such warning as an
+unrepaired fault and failed on it in CI run 38919791742. A `ProtocolException` saying `No target with given id`
+is now treated as closed and logged at debug level; every other failure in that loop still warns.
+
 ### `set_cookie` without a `url` read a cached page address, and the settings-page bound was too short for a loaded machine (F-995)
 
 `release-gate / integration (macOS/ARM64)` went red on `main` and on pull requests from 2026-10-16 04:55Z: 5 of
