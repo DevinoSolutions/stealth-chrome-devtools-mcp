@@ -13,9 +13,8 @@ command line already reads empty, and its state is still running) and then a zom
 it, and `psutil.pid_exists` is True throughout. In that window the `SingletonLock` naming its pid read as a live
 holder (`profile_lock._pid_alive`), while the backend's own view of the instance (asyncio's `returncode`) still
 said alive. "Held, and we drive the holder" is the rule that walks and hands over the jar, so it walked, and the
-hand-off then found nothing to read from. Chromium itself treats a lock whose owner cannot answer as orphaned;
-a process that has exited, in either state, is now read the same way, by one witness
-(`browser_cmdline.has_exited`) shared by `profile_lock._pid_alive` and `browser_cmdline._still_running`.
+hand-off then found nothing to read from. Chromium itself treats a lock whose owner is gone as orphaned; a pid whose command line has gone, in either
+state, is now read the same way, by one witness (`browser_cmdline.command_line_is_gone`) shared by `profile_lock._pid_alive` and `browser_cmdline._still_running`.
 The relaunch lands on `fleet` itself, with the login on disk. Seen in 2 of the last 40 Linux transport CI runs
 (`test_the_fleet_comes_back_after_every_way_of_losing_it`); reproduced on real Chromium under CPU contention,
 and pinned hermetically with a real zombie (`tests/test_fleet_relaunch.py`).

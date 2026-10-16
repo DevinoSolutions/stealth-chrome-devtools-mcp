@@ -190,13 +190,15 @@ class TestProfileHold:
         ("status", "cmdline"),
         [
             pytest.param(psutil.STATUS_ZOMBIE, [], id="a zombie"),
+            pytest.param(psutil.STATUS_ZOMBIE, ["chrome"], id="a zombie, argv kept"),
+            pytest.param(psutil.NoSuchProcess(9), [], id="reaped between the reads"),
             pytest.param(psutil.ZombieProcess(9), [], id="a read of it raises"),
             pytest.param(
                 psutil.STATUS_RUNNING, [], id="tearing down: its argv is already empty"
             ),
         ],
     )
-    def test_an_exited_process_is_not_running_on_either_question(
+    def test_a_pid_without_a_command_line_is_not_running_on_either_question(
         self, monkeypatch, status, cmdline
     ):
         """The two "is this pid still there" readers -- the lock owner's and an
@@ -212,7 +214,6 @@ class TestProfileHold:
         ("status", "cmdline"),
         [
             pytest.param(psutil.AccessDenied(9), [], id="status unreadable"),
-            pytest.param(psutil.NoSuchProcess(9), [], id="gone between the reads"),
             pytest.param(psutil.STATUS_RUNNING, ["chrome"], id="running"),
             pytest.param(psutil.STATUS_SLEEPING, ["chrome"], id="sleeping"),
             pytest.param(
@@ -220,10 +221,12 @@ class TestProfileHold:
             ),
         ],
     )
-    def test_only_an_exited_process_is_called_dead(self, monkeypatch, status, cmdline):
+    def test_only_a_pid_shown_to_be_gone_is_called_dead(
+        self, monkeypatch, status, cmdline
+    ):
         """The direction F-871 fixed stays: a pid that is listed and that we
-        cannot show to have exited -- unreadable, vanished between the two reads,
-        or running -- is still HELD."""
+        cannot show to have exited -- unreadable or running -- is still HELD. (A pid
+        that vanished between the two reads is gone, and is pinned above.)"""
         self._psutil_says(monkeypatch, status=status, cmdline=cmdline)
 
         assert profile_lock._pid_alive(9) is True

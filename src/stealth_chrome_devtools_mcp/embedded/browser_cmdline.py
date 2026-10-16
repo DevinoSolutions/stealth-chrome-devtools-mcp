@@ -14,8 +14,10 @@ through ``merge_browser_args`` while nodriver appends its own with ``=``.
 
 A leaf: ``psutil``, stdlib ``socket``, and ``browser_pid_registry`` for the two
 things it must not re-spell — what a usable port is, and how two paths are
-compared. It decides NOTHING: every judgement is ``browser_reattach``'s and
-``profile_lock``'s, its two consumers since F-931.
+compared. It states FACTS and decides nothing: every judgement is
+``browser_reattach``'s and ``profile_lock``'s, its two consumers since F-931
+(``command_line_is_gone`` is the last of them, and it is a fact about the
+command line too).
 """
 
 from __future__ import annotations
@@ -203,29 +205,31 @@ def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
     return Members(tuple(found), tuple(unreadable))
 
 
-def has_exited(pid: int) -> bool:
-    """Whether *pid* is still LISTED but has stopped being a running program
-    (F-998). A browser that has been killed spends a moment in one of two states,
-    and ``psutil.pid_exists`` is True for both:
+def command_line_is_gone(pid: int) -> bool:
+    """Whether *pid* is still LISTED but its command line has gone (F-998): the
+    one fact a LIVE browser cannot answer yes to. A browser that has been killed
+    spends a moment in one of two states, and ``psutil.pid_exists`` is True for
+    both:
 
+    * TEARING DOWN, which has already released its address space — the first thing
+      a dying process does — and so reads an EMPTY command line, with no error,
+      while the kernel finishes with its threads and files;
     * a ZOMBIE, which has exited and waits for its parent's ``wait()``. This
       backend is that parent, and collects it only when its child watcher gets to
-      run;
-    * a process TEARING DOWN, which has already released its address space — the
-      first thing a dying process does — and so reads an EMPTY command line, with
-      no error, while the kernel finishes with its threads and files.
+      run.
 
-    Neither can hold a profile or answer Chrome's singleton socket, which is why
-    Chromium itself calls a lock whose owner cannot answer orphaned, and a live
-    browser always has a command line. The ONE witness of the two "is this pid
-    still there" questions below and ``profile_lock._pid_alive``.
+    Neither can hold a profile or answer Chrome's singleton socket. The ONE
+    witness of the two "is this pid still there" questions below and
+    ``profile_lock._pid_alive``. (``process_exit._has_exited`` asks a related
+    question of a process the backend is WAITING on and cannot answer this one:
+    it does not see a teardown.)
 
-    False for a pid that is gone or that we cannot ask about: ``pid_exists`` has
-    the say there, and an unanswerable pid stays HELD, never called dead."""
+    A pid that vanished between the listing and this read is gone, which is True;
+    one we cannot ask about (``AccessDenied``) stays HELD, never called dead."""
     try:
         process = psutil.Process(pid)
         return process.status() == psutil.STATUS_ZOMBIE or not process.cmdline()
-    except psutil.ZombieProcess:
+    except psutil.NoSuchProcess:  # incl. ZombieProcess: reaped or reaping
         return True
     except (psutil.Error, OSError, ValueError):
         return False
@@ -234,10 +238,10 @@ def has_exited(pid: int) -> bool:
 def _still_running(pid: int) -> bool:
     """Whether *pid* is still there. A pid we cannot ask about counts as
     running, which resolves toward HELD — ``profile_lock._pid_alive``'s
-    direction, for the same reason. A process that has exited is not still there
-    (F-998)."""
+    direction, for the same reason. A pid whose command line has gone is not still
+    there (F-998)."""
     try:
-        return psutil.pid_exists(pid) and not has_exited(pid)
+        return psutil.pid_exists(pid) and not command_line_is_gone(pid)
     except (psutil.Error, OSError):
         return True
 
