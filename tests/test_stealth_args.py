@@ -193,6 +193,96 @@ class TestFilterStealthArgs:
         assert clean == []
         assert len(warnings) == 2
 
+    # ── F-992: AutomationControlled inside a feature LIST ──
+
+    @pytest.mark.parametrize(
+        ("arg", "kept"),
+        [
+            (
+                "--enable-blink-features=Foo,AutomationControlled",
+                "--enable-blink-features=Foo",
+            ),
+            (
+                "--enable-blink-features=AutomationControlled,Foo",
+                "--enable-blink-features=Foo",
+            ),
+            (
+                "--enable-blink-features=Foo,AutomationControlled,Bar",
+                "--enable-blink-features=Foo,Bar",
+            ),
+            (
+                "--enable-blink-features=Foo, automationcontrolled ,Bar",
+                "--enable-blink-features=Foo,Bar",
+            ),
+            (
+                "--ENABLE-BLINK-FEATURES=Foo,AUTOMATIONCONTROLLED",
+                "--enable-blink-features=Foo",
+            ),
+        ],
+    )
+    def test_removes_automation_controlled_from_a_list_and_keeps_the_rest(
+        self, arg, kept
+    ):
+        clean, warnings = filter_stealth_args([arg])
+        assert clean == [kept]
+        assert len(warnings) == 1
+        assert warnings[0].startswith(f"{arg} stripped: explicit automation marker")
+        assert "AutomationControlled removed" in warnings[0]
+        assert kept in warnings[0]
+
+    @pytest.mark.parametrize(
+        "arg",
+        [
+            "--enable-blink-features=AutomationControlled",
+            "--enable-blink-features=automationcontrolled",
+            "--enable-blink-features= AutomationControlled ,AutomationControlled",
+        ],
+    )
+    def test_drops_the_whole_arg_when_nothing_else_is_listed(self, arg):
+        clean, warnings = filter_stealth_args([arg])
+        assert clean == []
+        assert warnings == [f"{arg} stripped: explicit automation marker"]
+
+    def test_a_list_without_automation_controlled_is_untouched(self):
+        args = [
+            "--enable-blink-features=Foo,Bar",
+            "--enable-blink-features=AutomationControlledSomethingElse",
+        ]
+        clean, warnings = filter_stealth_args(args)
+        assert clean == args
+        assert warnings == []
+
+    def test_disable_blink_features_automation_controlled_is_deliberately_kept(self):
+        # A caller's explicit choice (it makes navigator.webdriver false), even
+        # though the flag is itself detectable. Not stripped; see the module docstring.
+        arg = "--disable-blink-features=AutomationControlled"
+        clean, warnings = filter_stealth_args([arg])
+        assert clean == [arg]
+        assert warnings == []
+
+    def test_other_args_around_a_stripped_list_are_untouched(self):
+        clean, warnings = filter_stealth_args(
+            [
+                "--lang=en-US",
+                "--enable-blink-features=Foo,AutomationControlled",
+                "--window-position=0,0",
+            ]
+        )
+        assert clean == [
+            "--lang=en-US",
+            "--enable-blink-features=Foo",
+            "--window-position=0,0",
+        ]
+        assert len(warnings) == 1
+
+    def test_merge_browser_args_applies_the_list_rewrite(self):
+        args, warnings = merge_browser_args(
+            ["--enable-blink-features=Foo,AutomationControlled"]
+        )
+        assert "--enable-blink-features=Foo" in args
+        assert not any("automationcontrolled" in a.lower() for a in args)
+        assert len(warnings) == 1
+
     # ── Bulk: every blocked flag individually ──
 
     def test_all_blocked_flags_individually(self):
