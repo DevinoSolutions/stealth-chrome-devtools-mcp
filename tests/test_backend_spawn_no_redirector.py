@@ -157,13 +157,15 @@ def _read_marker(marker, timeout: float = 30.0, interval: float = 0.05) -> list[
     """
     deadline = time.monotonic() + timeout
     seen: str | None = None
+    last_err: OSError | None = None
     while True:
         try:
             seen = marker.read_text(encoding="utf-8")
-        except (FileNotFoundError, PermissionError):
+        except (FileNotFoundError, PermissionError) as err:
             # Windows refuses an open that lands while the writer's handle or
             # an indexer/AV scan holds the file; it is the same "not ready".
-            seen = None
+            # ``seen`` keeps the last real read; the error is reported apart.
+            last_err = err
         else:
             lines = seen.splitlines()
             if len(lines) == 2:
@@ -172,7 +174,8 @@ def _read_marker(marker, timeout: float = 30.0, interval: float = 0.05) -> list[
             break
         time.sleep(interval)
     pytest.fail(
-        f"child never wrote a complete marker within {timeout}s; last read: {seen!r}"
+        f"child never wrote a complete marker within {timeout}s; "
+        f"last read: {seen!r}; last error: {last_err!r}"
     )
 
 
@@ -211,6 +214,19 @@ def test_the_marker_poll_retries_a_transiently_locked_file(tmp_path, monkeypatch
     monkeypatch.setattr(type(marker), "read_text", _locked_once)
     assert _read_marker(marker, timeout=5) == ["prefix", "executable"]
     assert calls["n"] == 2
+
+
+def test_the_marker_poll_names_a_permanent_permission_error_on_timeout(
+    tmp_path, monkeypatch
+):
+    marker = tmp_path / "child.txt"
+
+    def _always_denied(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(type(marker), "read_text", _always_denied)
+    with pytest.raises(pytest.fail.Exception, match="PermissionError"):
+        _read_marker(marker, timeout=0.3)
 
 
 def test_the_marker_poll_fails_with_what_it_read_on_timeout(tmp_path):
