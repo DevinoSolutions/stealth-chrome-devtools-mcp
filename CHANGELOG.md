@@ -22,6 +22,12 @@ tool correctly timed out 4 s after the call, and the test measured 1.84 s and fa
 `test_load_wait_against_a_hang_times_out_with_the_pinned_message`). The lower bound is now measured from the
 call. Test-only; no product change. No other node had this shape.
 
+### The PyPI Homepage link points at https://stealthly.io
+
+`[project.urls] Homepage` was the GitHub repository, the same URL as `Repository`, so PyPI never linked the
+brand site and search engines had nothing tying the name Stealthly to its domain. Homepage is now
+`https://stealthly.io`; `Repository` and `Issues` still point at GitHub. Packaging metadata only; no code change.
+
 ## 2.1.34
 
 ### A browser that stalled after launching hung `spawn_browser()` for as long as the caller would wait (F-969)
