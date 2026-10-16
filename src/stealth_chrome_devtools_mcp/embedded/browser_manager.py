@@ -1290,7 +1290,7 @@ class BrowserManager:
                 self._instances[instance_id]["tab"] = survivor
 
     async def close_tab(self, instance_id: str, tab_id: str) -> bool:
-        """Close tab *tab_id*; ``False`` if it is unknown or CDP refused."""
+        """Close tab *tab_id*; ``False`` if unknown or CDP refused (gone is closed)."""
         browser = await self.get_browser(instance_id)
         if not browser:
             return False
@@ -1303,7 +1303,7 @@ class BrowserManager:
             target_id = target_tab.target.target_id
             await browser.connection.send(uc.cdp.target.close_target(target_id))
         except Exception as e:
-            if not tab_close.log_failure("close_tab", instance_id, e):  # F-996
+            if not tab_close.log_failure("close_tab", instance_id, e):  # F-996b
                 return False
         # Outside the handler: the close already succeeded (F-775b lying-False).
         await self._repoint_after_close(instance_id, browser, str(target_id))

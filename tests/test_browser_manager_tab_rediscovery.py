@@ -206,7 +206,7 @@ async def test_close_tab_reports_an_unknown_tab_id_unchanged(manager_and_browser
 
 
 # ---------------------------------------------------------------------------
-# F-996 — close_tab: a tab Chrome already dropped is a closed tab
+# F-996b — close_tab: a tab Chrome already dropped is a closed tab
 # ---------------------------------------------------------------------------
 
 
@@ -217,16 +217,21 @@ def _close_target_answers(browser, error):
     browser.connection._cdp_responses["close_target"] = _raise
 
 
-def _close_tab_warnings(since):
-    return [
-        w["message"]
-        for w in debug_logger._warnings[since:]
-        if w["method"] == "close_tab"
-    ]
+@pytest.fixture()
+def warnings_ring(monkeypatch):
+    """A fresh warning ring: the real one is capped, so a slice from a length
+    taken before the call would be empty once it is full."""
+    ring: list = []
+    monkeypatch.setattr(debug_logger, "_warnings", ring)
+    return ring
+
+
+def _close_tab_warnings(ring):
+    return [w["message"] for w in ring if w["method"] == "close_tab"]
 
 
 async def test_close_tab_of_a_target_chrome_already_dropped_is_closed(
-    manager_and_browser,
+    manager_and_browser, warnings_ring
 ):
     """``Target.closeTarget`` answers ``No target with given id found`` for a tab
     Chrome dropped first: the state the close wanted. It is ``True`` (``False``
@@ -237,14 +242,13 @@ async def test_close_tab_of_a_target_chrome_already_dropped_is_closed(
         browser,
         ProtocolException({"code": -32602, "message": "No target with given id found"}),
     )
-    before = len(debug_logger._warnings)
 
     assert await manager.close_tab(INSTANCE_ID, TRACKED["target_id"]) is True
 
     active = await manager.get_active_tab(INSTANCE_ID)
     assert active is not tracked
     assert manager._get_tab_target_id(active) == OTHER["target_id"]
-    assert _close_tab_warnings(before) == []
+    assert _close_tab_warnings(warnings_ring) == []
 
 
 @pytest.mark.parametrize(
@@ -256,16 +260,15 @@ async def test_close_tab_of_a_target_chrome_already_dropped_is_closed(
     ids=["other-protocol-failure", "gone-wording-not-protocol"],
 )
 async def test_close_tab_any_other_failure_still_warns_and_is_false(
-    manager_and_browser, error
+    manager_and_browser, warnings_ring, error
 ):
-    """F-996 control: only the gone-target answer is absorbed."""
+    """F-996b control: only the gone-target answer is absorbed."""
     manager, browser, tracked = manager_and_browser
     _close_target_answers(browser, error)
-    before = len(debug_logger._warnings)
 
     assert await manager.close_tab(INSTANCE_ID, TRACKED["target_id"]) is False
 
-    assert len(_close_tab_warnings(before)) == 1
+    assert len(_close_tab_warnings(warnings_ring)) == 1
     assert manager._instances[INSTANCE_ID]["tab"] is tracked
 
 
