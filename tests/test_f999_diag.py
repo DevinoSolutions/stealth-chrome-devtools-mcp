@@ -6,10 +6,7 @@ each saw."""
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import time
-from pathlib import Path
 
 import pytest
 
@@ -29,7 +26,7 @@ from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 
 pytestmark = integration_pytestmark()
 
-ITERATIONS = 30
+ITERATIONS = 25  # instances per test; 4 tests per arm x 25 x 2 runs = 200 runs per arm
 RUNS_PER_INSTANCE = 2
 _NET_METHODS = (
     "Network.requestWillBeSent",
@@ -60,7 +57,18 @@ def _install() -> None:
     def spied(message):
         try:
             method = message.get("method", "") if isinstance(message, dict) else ""
-            if method and method not in _NET_METHODS:
+            if method == "Page.lifecycleEvent":
+                p = message.get("params", {})
+                OTHER.append(
+                    (
+                        time.monotonic(),
+                        "EVT",
+                        f"Page.lifecycleEvent name={p.get('name')} frame={str(p.get('frameId'))[:8]}"
+                        f" loader={str(p.get('loaderId'))[:8]} ts={p.get('timestamp')}",
+                        {},
+                    )
+                )
+            elif method and method not in _NET_METHODS:
                 OTHER.append((time.monotonic(), "EVT", method, {}))
             if method in _NET_METHODS:
                 p = message.get("params", {})
@@ -125,6 +133,31 @@ def _install() -> None:
 
     type.__setattr__(nd_conn.Connection, "send", traced_send)
 
+    guard_send = google_rotation_guard.RotationGuard._send
+    guard_handle = google_rotation_guard.RotationGuard._handle
+
+    async def traced_guard_send(self, method, params=None, session_id=None):
+        OTHER.append(
+            (time.monotonic(), "GSEND", f"{method} session={str(session_id)[:8]}", {})
+        )
+        return await guard_send(self, method, params, session_id)
+
+    async def traced_guard_handle(self, message):
+        OTHER.append(
+            (
+                time.monotonic(),
+                "GEVT",
+                f"{message.get('method') or ('reply id=' + str(message.get('id')))} "
+                f"session={str(message.get('sessionId'))[:8]}"
+                f"{' ERROR' if 'error' in message else ''}",
+                {},
+            )
+        )
+        return await guard_handle(self, message)
+
+    google_rotation_guard.RotationGuard._send = traced_guard_send
+    google_rotation_guard.RotationGuard._handle = traced_guard_handle
+
     handle = rgh._FixtureHandler.handle_one_request
 
     def traced_handle(self):
@@ -167,58 +200,6 @@ def _install() -> None:
     rgh._FixtureServer.process_request = traced_process
 
 
-def _netlog_report(path: str, needle: str = "/cors/echo") -> list[str]:
-    """The net-stack story of every request whose URL contains ``needle``."""
-    try:
-        raw = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return [f"    NETLOG unreadable: {exc!r}"]
-    try:
-        doc = json.loads(raw)
-    except ValueError:
-        try:
-            doc = json.loads(raw.rstrip().rstrip(",") + "]}")
-        except ValueError as exc:
-            return [f"    NETLOG unparseable ({len(raw)} bytes): {exc!r}"]
-    const = doc.get("constants", {})
-    types = {v: k for k, v in const.get("logEventTypes", {}).items()}
-    stypes = {v: k for k, v in const.get("logSourceType", {}).items()}
-    phases = {v: k for k, v in const.get("logEventPhase", {}).items()}
-    by_src: dict[int, list[dict]] = {}
-    for ev in doc.get("events", []):
-        by_src.setdefault(ev["source"]["id"], []).append(ev)
-    roots = [
-        sid
-        for sid, evs in by_src.items()
-        if any(needle in json.dumps(e.get("params", {})) for e in evs)
-        and stypes.get(evs[0]["source"]["type"]) == "URL_REQUEST"
-    ]
-    out = [
-        f"    NETLOG {len(by_src)} sources, {len(roots)} request(s) matching {needle}"
-    ]
-    for sid in roots:
-        seen, queue, lines = set(), [sid], []
-        while queue and len(seen) < 6:
-            cur = queue.pop(0)
-            if cur in seen:
-                continue
-            seen.add(cur)
-            evs = by_src.get(cur, [])
-            t0 = int(evs[0]["time"]) if evs else 0
-            for e in evs[:80]:
-                par = json.dumps(e.get("params", {}), sort_keys=True)
-                dep = e.get("params", {}).get("source_dependency", {}).get("id")
-                if dep is not None:
-                    queue.append(dep)
-                lines.append(
-                    f"      src{cur}[{stypes.get(e['source']['type'])}] +{int(e['time']) - t0}ms "
-                    f"{types.get(e['type'], e['type'])} {phases.get(e['phase'], e['phase'])} {par[:220]}"
-                )
-        out.append(f"    request source {sid}:")
-        out.extend(lines)
-    return out
-
-
 @pytest.fixture(autouse=True)
 async def _warmup():
     await warmup_once()
@@ -231,7 +212,7 @@ def _fmt(t0, rows, port_b):
     for r in rows:
         if r[0] < t0:
             continue
-        if r[1] in ("EVT", "SEND"):
+        if r[1] in ("EVT", "SEND", "GSEND", "GEVT"):
             out.append(f"    +{r[0] - t0:.3f}s {r[1]} {r[2]}")
         elif len(r) == 4 and isinstance(r[3], dict):
             out.append(
@@ -250,20 +231,7 @@ async def _loop(fixture_origin_pair, label):
     report: list[str] = []
     bad = 0
     for i in range(ITERATIONS):
-        netlog = os.path.join(
-            tempfile.gettempdir(), f"f999-netlog-{os.getpid()}-{i}.json"
-        )
-        iid = (
-            await spawn(
-                headless=True,
-                browser_args=[
-                    f"--log-net-log={netlog}",
-                    "--net-log-capture-mode=Everything",
-                ],
-                **sandbox_kwargs(),
-            )
-        )["instance_id"]
-        bad_before = bad
+        iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
         try:
             await reset_fixture_ledger(origin_a)
             await navigate_and_settle(iid, f"{origin_a}/dynamic_probe.html")
@@ -307,29 +275,24 @@ async def _loop(fixture_origin_pair, label):
                     f"cors={json.dumps(cors, sort_keys=True)} "
                     f"cors_methods={led['cors_methods']} resources={res}"
                 ]
-                if not ok or (i == 0 and j == 0):
+                if not ok:
                     lines += _fmt(
                         t0, sorted(NET + SERVER + OTHER, key=lambda r: r[0]), port_b
                     )
                 report.append("\n".join(lines))
         finally:
             await close(instance_id=iid)
-            if bad > bad_before:
-                report.append(
-                    f"{label} iter={i} NETLOG"
-                    + chr(10)
-                    + chr(10).join(_netlog_report(netlog))
-                )
-            Path(netlog).unlink(missing_ok=True)
     summary = "\n".join(report)
     print(summary)
     assert bad == 0, f"F999-DIAG[{label}] {bad} bad of {len(report)}\n{summary}"
 
 
-async def test_f999_cors_loop_guard_armed(fixture_origin_pair):
+@pytest.mark.parametrize("chunk", range(4))
+async def test_f999_cors_loop_guard_armed(fixture_origin_pair, chunk):
     await _loop(fixture_origin_pair, "GUARD")
 
 
-async def test_f999_cors_loop_guard_disabled(fixture_origin_pair, monkeypatch):
+@pytest.mark.parametrize("chunk", range(4))
+async def test_f999_cors_loop_guard_disabled(fixture_origin_pair, monkeypatch, chunk):
     monkeypatch.setattr(google_rotation_guard, "enabled", lambda: False)
     await _loop(fixture_origin_pair, "NOGUARD")
