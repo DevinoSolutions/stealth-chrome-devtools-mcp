@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The `domcontentloaded` ordering pin no longer decides on the runner's clock (F-1000)
+
+`test_domcontentloaded_comes_back_before_that_same_load` (F-881) asserted that `navigate(wait_until="domcontentloaded")` took under 1.5 s over a page whose `load` is held for 1.8 s, and failed a correct tool on slow Windows runners: 2.27 s on release/2.1.35's Windows integration job, 2.52 s and 2.20 s on two other PRs' (3 of 45 Windows integration jobs over the last 40 CI runs, 0 of 92 on Linux and macOS). The property is an ordering, so the node now holds the image that blocks `load` on the fixture's fault controller until the test releases it, and asserts that `navigate` returned while the page read `interactive` with its `load` listener unrun and the fixture still holding the image; releasing the image then lets the same page reach `load`. The only clock left is a 15 s hang guard, which a `domcontentloaded` that waited for `load` would hit. Test-only.
+
 ### `close_tab` reported a tab Chrome had already closed as a failure (F-996b)
 
 `close_tab` sends the same `Target.closeTarget` as `close_instance`, and when Chrome had dropped the tab first it
