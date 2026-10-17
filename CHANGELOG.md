@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.35
 
 ### The `domcontentloaded` ordering pin no longer decides on the runner's clock (F-1000)
 
