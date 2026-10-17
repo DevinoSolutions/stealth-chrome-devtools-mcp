@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.35
 
 ### `close_tab` reported a tab Chrome had already closed as a failure (F-996b)
 
