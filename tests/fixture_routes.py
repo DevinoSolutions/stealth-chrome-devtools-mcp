@@ -743,6 +743,7 @@ def dynamic_probe_page(peer: str) -> str:
       window.__cors.echo = j.echo;
     }).catch(function (err) {
       window.__cors.echo = 'error:' + err.name;
+      window.__cors.echo_error = err.name + ': ' + err.message;
     }).then(function () {
       return fetch(PEER + '/cors/blocked').then(function (r) { return r.text(); })
         .then(function (t) { window.__cors.blocked = t; })
