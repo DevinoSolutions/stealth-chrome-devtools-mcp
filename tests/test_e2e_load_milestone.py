@@ -263,5 +263,7 @@ async def test_domcontentloaded_comes_back_before_that_same_load(
     finally:
         # Idempotent, and what frees the fixture's parked thread if a failure
         # above never got to the release.
-        await _get(f"{fixture_app_server}/fault/release?token={token}")
-        await close(instance_id=iid)
+        try:
+            await _get(f"{fixture_app_server}/fault/release?token={token}")
+        finally:
+            await close(instance_id=iid)
