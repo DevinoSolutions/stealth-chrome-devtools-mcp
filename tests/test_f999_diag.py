@@ -123,7 +123,7 @@ def _install() -> None:
             OTHER.append((time.monotonic(), "SEND", f"{mod}.{code.co_name}", {}))
         return await send(self, cdp_obj, _is_update)
 
-    nd_conn.Connection.send = traced_send
+    type.__setattr__(nd_conn.Connection, "send", traced_send)
 
     handle = rgh._FixtureHandler.handle_one_request
 
