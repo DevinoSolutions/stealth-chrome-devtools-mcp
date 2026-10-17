@@ -6,7 +6,10 @@ each saw."""
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +42,7 @@ _NET_METHODS = (
 
 NET: list[tuple] = []  # (t, method, requestId, summary)
 SERVER: list[tuple] = []  # (t, kind, server_port, detail)
+OTHER: list[tuple] = []  # (t, "EVT"/"SEND", name, {}) every other CDP event / command
 _cors_ids: set[str] = set()
 _installed = False
 
@@ -55,6 +59,8 @@ def _install() -> None:
     def spied(message):
         try:
             method = message.get("method", "") if isinstance(message, dict) else ""
+            if method and method not in _NET_METHODS:
+                OTHER.append((time.monotonic(), "EVT", method, {}))
             if method in _NET_METHODS:
                 p = message.get("params", {})
                 rid = p.get("requestId")
@@ -93,6 +99,7 @@ def _install() -> None:
                                         "fromDiskCache"
                                     ),
                                     "blockedCookies": p.get("blockedCookies"),
+                                    "chromeTs": p.get("timestamp"),
                                 }.items()
                                 if v not in (None, [], "")
                             },
@@ -103,6 +110,19 @@ def _install() -> None:
         return parse(message)
 
     cdp_util.parse_json_event = spied
+
+    from nodriver.core import connection as nd_conn
+
+    send = nd_conn.Connection.send
+
+    async def traced_send(self, cdp_obj, _is_update=False):
+        code = getattr(cdp_obj, "gi_code", None)
+        if code is not None:
+            mod = code.co_filename.replace("\\", "/").rsplit("/", 1)[-1][:-3]
+            OTHER.append((time.monotonic(), "SEND", f"{mod}.{code.co_name}", {}))
+        return await send(self, cdp_obj, _is_update)
+
+    nd_conn.Connection.send = traced_send
 
     handle = rgh._FixtureHandler.handle_one_request
 
@@ -146,6 +166,58 @@ def _install() -> None:
     rgh._FixtureServer.process_request = traced_process
 
 
+def _netlog_report(path: str, needle: str = "/cors/echo") -> list[str]:
+    """The net-stack story of every request whose URL contains ``needle``."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [f"    NETLOG unreadable: {exc!r}"]
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        try:
+            doc = json.loads(raw.rstrip().rstrip(",") + "]}")
+        except ValueError as exc:
+            return [f"    NETLOG unparseable ({len(raw)} bytes): {exc!r}"]
+    const = doc.get("constants", {})
+    types = {v: k for k, v in const.get("logEventTypes", {}).items()}
+    stypes = {v: k for k, v in const.get("logSourceType", {}).items()}
+    phases = {v: k for k, v in const.get("logEventPhase", {}).items()}
+    by_src: dict[int, list[dict]] = {}
+    for ev in doc.get("events", []):
+        by_src.setdefault(ev["source"]["id"], []).append(ev)
+    roots = [
+        sid
+        for sid, evs in by_src.items()
+        if any(needle in json.dumps(e.get("params", {})) for e in evs)
+        and stypes.get(evs[0]["source"]["type"]) == "URL_REQUEST"
+    ]
+    out = [
+        f"    NETLOG {len(by_src)} sources, {len(roots)} request(s) matching {needle}"
+    ]
+    for sid in roots:
+        seen, queue, lines = set(), [sid], []
+        while queue and len(seen) < 6:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            evs = by_src.get(cur, [])
+            t0 = int(evs[0]["time"]) if evs else 0
+            for e in evs[:80]:
+                par = json.dumps(e.get("params", {}), sort_keys=True)
+                dep = e.get("params", {}).get("source_dependency", {}).get("id")
+                if dep is not None:
+                    queue.append(dep)
+                lines.append(
+                    f"      src{cur}[{stypes.get(e['source']['type'])}] +{int(e['time']) - t0}ms "
+                    f"{types.get(e['type'], e['type'])} {phases.get(e['phase'], e['phase'])} {par[:220]}"
+                )
+        out.append(f"    request source {sid}:")
+        out.extend(lines)
+    return out
+
+
 @pytest.fixture(autouse=True)
 async def _warmup():
     await warmup_once()
@@ -158,7 +230,9 @@ def _fmt(t0, rows, port_b):
     for r in rows:
         if r[0] < t0:
             continue
-        if len(r) == 4 and isinstance(r[3], dict):
+        if r[1] in ("EVT", "SEND"):
+            out.append(f"    +{r[0] - t0:.3f}s {r[1]} {r[2]}")
+        elif len(r) == 4 and isinstance(r[3], dict):
             out.append(
                 f"    +{r[0] - t0:.3f}s NET {r[1]} {r[2]} {json.dumps(r[3], sort_keys=True)}"
             )
@@ -175,10 +249,32 @@ async def test_f999_cors_loop(fixture_origin_pair):
     report: list[str] = []
     bad = 0
     for i in range(ITERATIONS):
-        iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+        netlog = os.path.join(
+            tempfile.gettempdir(), f"f999-netlog-{os.getpid()}-{i}.json"
+        )
+        iid = (
+            await spawn(
+                headless=True,
+                browser_args=[
+                    f"--log-net-log={netlog}",
+                    "--net-log-capture-mode=Everything",
+                ],
+                **sandbox_kwargs(),
+            )
+        )["instance_id"]
+        bad_before = bad
         try:
             await reset_fixture_ledger(origin_a)
             await navigate_and_settle(iid, f"{origin_a}/dynamic_probe.html")
+            await eval_js(
+                iid,
+                "(function(){window.__f=[];var t0=performance.now();"
+                "function L(n){return function(){window.__f.push([n,Math.round(performance.now()-t0),"
+                "document.visibilityState,document.readyState])}}"
+                "['pagehide','pageshow','freeze','resume','visibilitychange','beforeunload','unload']"
+                ".forEach(function(n){window.addEventListener(n,L(n))});"
+                "document.addEventListener('visibilitychange',L('doc-vis'));return 1})()",
+            )
             await eval_js(iid, "window.__auth.run()")
             await wait_for_js(iid, "window.__auth.done", True, timeout=15.0)
             for j in range(RUNS_PER_INSTANCE):
@@ -204,16 +300,24 @@ async def test_f999_cors_loop(fixture_origin_pair):
                 ]
                 if not ok:
                     bad += 1
+                pagelog = await eval_js(iid, "JSON.stringify(window.__f)")
                 lines = [
-                    f"iter={i} run={j} ok={ok} done={done} took={took:.3f}s "
+                    f"iter={i} run={j} ok={ok} pagelog={pagelog} done={done} took={took:.3f}s "
                     f"cors={json.dumps(cors, sort_keys=True)} "
                     f"cors_methods={led['cors_methods']} resources={res}"
                 ]
                 if not ok or (i == 0 and j == 0):
-                    lines += _fmt(t0, sorted(NET + SERVER, key=lambda r: r[0]), port_b)
+                    lines += _fmt(
+                        t0, sorted(NET + SERVER + OTHER, key=lambda r: r[0]), port_b
+                    )
                 report.append("\n".join(lines))
         finally:
             await close(instance_id=iid)
+            if bad > bad_before:
+                report.append(
+                    f"iter={i} NETLOG" + chr(10) + chr(10).join(_netlog_report(netlog))
+                )
+            Path(netlog).unlink(missing_ok=True)
     summary = "\n".join(report)
     print(summary)
     assert bad == 0, f"F999-DIAG {bad} bad of {len(report)}\n{summary}"
