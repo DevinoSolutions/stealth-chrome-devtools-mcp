@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### `close_tab` reported a tab Chrome had already closed as a failure (F-996b)
+
+`close_tab` sends the same `Target.closeTarget` as `close_instance`, and when Chrome had dropped the tab first it
+logged the `No target with given id found [code: -32602]` answer as a WARNING and returned `False`: the lying
+failure F-775b removed, for a tab that was in fact closed. It now asks `tab_close` the same question
+`close_instance` does (F-996): that answer is logged at debug level and `close_tab` returns `True` and repoints the
+active tab as after any close. Every other failure still warns and returns `False`.
+
 ### `close_instance` warned about a tab Chrome had already closed (F-996)
 
 `close_instance` closes each tab over CDP before it closes the browser, and logged a WARNING
