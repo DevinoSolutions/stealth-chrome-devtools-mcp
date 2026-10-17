@@ -25,6 +25,7 @@ from e2e_helpers import (
     wait_for_js,
     warmup_once,
 )
+from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 
 pytestmark = integration_pytestmark()
 
@@ -241,7 +242,7 @@ def _fmt(t0, rows, port_b):
     return out
 
 
-async def test_f999_cors_loop(fixture_origin_pair):
+async def _loop(fixture_origin_pair, label):
     origin_a, origin_b = fixture_origin_pair
     port_b = int(origin_b.rsplit(":", 1)[1])
     spawn = get_fn("spawn_browser")
@@ -302,7 +303,7 @@ async def test_f999_cors_loop(fixture_origin_pair):
                     bad += 1
                 pagelog = await eval_js(iid, "JSON.stringify(window.__f)")
                 lines = [
-                    f"iter={i} run={j} ok={ok} pagelog={pagelog} done={done} took={took:.3f}s "
+                    f"{label} guards={len(google_rotation_guard._LIVE)} iter={i} run={j} ok={ok} pagelog={pagelog} done={done} took={took:.3f}s "
                     f"cors={json.dumps(cors, sort_keys=True)} "
                     f"cors_methods={led['cors_methods']} resources={res}"
                 ]
@@ -315,9 +316,20 @@ async def test_f999_cors_loop(fixture_origin_pair):
             await close(instance_id=iid)
             if bad > bad_before:
                 report.append(
-                    f"iter={i} NETLOG" + chr(10) + chr(10).join(_netlog_report(netlog))
+                    f"{label} iter={i} NETLOG"
+                    + chr(10)
+                    + chr(10).join(_netlog_report(netlog))
                 )
             Path(netlog).unlink(missing_ok=True)
     summary = "\n".join(report)
     print(summary)
-    assert bad == 0, f"F999-DIAG {bad} bad of {len(report)}\n{summary}"
+    assert bad == 0, f"F999-DIAG[{label}] {bad} bad of {len(report)}\n{summary}"
+
+
+async def test_f999_cors_loop_guard_armed(fixture_origin_pair):
+    await _loop(fixture_origin_pair, "GUARD")
+
+
+async def test_f999_cors_loop_guard_disabled(fixture_origin_pair, monkeypatch):
+    monkeypatch.setattr(google_rotation_guard, "enabled", lambda: False)
+    await _loop(fixture_origin_pair, "NOGUARD")
