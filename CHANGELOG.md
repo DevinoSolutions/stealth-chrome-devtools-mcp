@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### `networkidle` no longer spends the whole navigation budget on its fixed sleep (F-1002)
+
+`wait_until="networkidle"` is F-787's fixed 2 s sleep after commit, clipped to what is left of the caller's `timeout`. It was clipped to ALL of what was left, so the landing read that follows had no budget: a page that had already committed answered `Navigation to ... timed out after Nms (accepted, committed)` whenever the commit plus the sleep came within one landing read of `timeout` (a `timeout` of 2 s or less could never succeed). The sleep is now at most half of what is left, the rule the `ERR_ABORTED` grace already follows; with a `timeout` of 4 s or more it is still the full 2 s, so F-787 is unchanged. This is also what made `test_networkidle_returns_before_the_transfer_completes` flake on the Windows integration cell (CI runs 38909588568 and 38979395414, the first blocking a PyPI publish): its 4 s deadline left it the sleep's 2 s as the only slack, and a Windows runner spends that on one slow operation. The pin now uses a 20 s deadline of its own (the route never completes, so a success inside any deadline is what shows `networkidle` did not wait for the body), and a hermetic node pins the clip with the same `(accepted, committed)` signature.
+
 ### The lost-port pin no longer requests a port the OS can hand out (F-1001)
 
 `test_a_port_the_browser_did_not_take_is_flagged` requested port 65500 and asserted the fake browser's banner port

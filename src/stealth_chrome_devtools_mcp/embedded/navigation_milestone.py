@@ -474,5 +474,10 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
             tab.remove_handler(cdp.page.LifecycleEvent, on_lifecycle)
 
     if wait_until == "networkidle":
+        # Half of what is LEFT, never all of it (the abort grace's own rule
+        # above): the caller still has to read the landing document inside the
+        # same budget, so a sleep clipped to the deadline itself left that read
+        # nothing and every `networkidle` call whose budget was within a landing
+        # of the sleep timed out against a page that had already committed (F-1002).
         remaining = budget_seconds - (loop.time() - started)
-        await asyncio.sleep(max(0.0, min(NETWORKIDLE_SLEEP_SECONDS, remaining)))
+        await asyncio.sleep(max(0.0, min(NETWORKIDLE_SLEEP_SECONDS, remaining / 2)))
