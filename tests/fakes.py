@@ -34,6 +34,8 @@ import json
 import os
 import re
 import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import GeneratorType, SimpleNamespace
@@ -2531,3 +2533,21 @@ def held_profile(profile_dir: Path) -> Path:
     """Make *profile_dir* look like one a LIVE browser is holding, by naming a
     pid that is certainly running: this test's own."""
     return write_singleton(profile_dir, f"{socket.gethostname()}-{os.getpid()}")
+
+
+@contextlib.contextmanager
+def a_zombie():
+    """The pid of a REAL zombie (F-998): a child that has exited and that its
+    parent -- this process -- has not waited for, which is what a SIGKILLed Chrome
+    is until the backend's child watcher reaps it. ``pid_exists`` answers True for
+    it, its argv reads as empty and it can hold nothing. Reaped on the way out.
+    POSIX only; Windows has no zombies."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline, "the child never exited"
+            time.sleep(0.005)
+        yield child.pid
+    finally:
+        child.wait()
