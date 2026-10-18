@@ -738,7 +738,9 @@ async def test_networkidle_returns_before_the_transfer_completes(
         )
         assert outcome == "returned", value
         assert value["success"] is True, value
-        assert elapsed < NETWORKIDLE_PIN_TIMEOUT_MS / 1000
+        # Well under the deadline: the call is the sleep's ~2 s, so a regression
+        # that waited out most of the roomy deadline is still caught.
+        assert elapsed < NETWORKIDLE_PIN_TIMEOUT_MS / 2000
         # The transfer is still open: the tail chunk only exists after a release.
         assert (await _fault_status(base, token))["released"] is False
         partial = await eval_js(

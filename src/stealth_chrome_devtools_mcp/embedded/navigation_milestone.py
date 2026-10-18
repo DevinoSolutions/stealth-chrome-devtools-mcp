@@ -73,8 +73,9 @@ nothing in it is really a download — :data:`ABORTED_GRACE_SECONDS`, clipped to
 whatever is left of the caller's budget so a small ``timeout`` still gets the
 named answer rather than a bare cancellation.
 
-``networkidle`` is F-787's fixed sleep, moved here byte-for-byte so
-``wait_until`` has one home; it is keyed on the FIRST commit — its milestone IS
+``networkidle`` is F-787's fixed sleep, moved here so
+``wait_until`` has one home (and clipped to half of what is left of the
+budget, F-1002); it is keyed on the FIRST commit — its milestone IS
 ``init``, so the chain is satisfied the moment our own document commits and a
 later supersession can no longer reach it. That is deliberate and unchanged by
 F-882: ``networkidle`` is not a quiescence wait and never was, so making it

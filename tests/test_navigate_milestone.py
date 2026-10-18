@@ -311,7 +311,7 @@ async def test_networkidle_leaves_the_landing_read_a_share_of_a_small_budget(
     _with_tab(monkeypatch, tab)
 
     result = await manager.navigate(
-        instance_id="iid-1", url=URL, wait_until="networkidle", timeout=300
+        instance_id="iid-1", url=URL, wait_until="networkidle", timeout=1000
     )
 
     assert result["success"] is True
