@@ -26,7 +26,7 @@ from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 
 pytestmark = integration_pytestmark()
 
-ITERATIONS = 25  # instances per test; 4 tests per arm x 25 x 2 runs = 200 runs per arm
+ITERATIONS = 25  # instances per test; 8 tests x 25 instances alternate arms: 100 instances x 2 runs = 200 runs per arm
 RUNS_PER_INSTANCE = 2
 _NET_METHODS = (
     "Network.requestWillBeSent",
@@ -41,6 +41,10 @@ _NET_METHODS = (
 NET: list[tuple] = []  # (t, method, requestId, summary)
 SERVER: list[tuple] = []  # (t, kind, server_port, detail)
 OTHER: list[tuple] = []  # (t, "EVT"/"SEND", name, {}) every other CDP event / command
+GT: list[
+    tuple
+] = []  # (t, text) every guard-connection command/event since the instance spawn
+SESSIONS: dict[str, str] = {}  # guard sessionId -> "type url targetId parent waiting"
 _cors_ids: set[str] = set()
 _installed = False
 
@@ -140,19 +144,31 @@ def _install() -> None:
         OTHER.append(
             (time.monotonic(), "GSEND", f"{method} session={str(session_id)[:8]}", {})
         )
+        GT.append((time.monotonic(), f"GSEND {method} session={str(session_id)[:8]}"))
         return await guard_send(self, method, params, session_id)
 
     async def traced_guard_handle(self, message):
-        OTHER.append(
-            (
-                time.monotonic(),
-                "GEVT",
-                f"{message.get('method') or ('reply id=' + str(message.get('id')))} "
-                f"session={str(message.get('sessionId'))[:8]}"
-                f"{' ERROR' if 'error' in message else ''}",
-                {},
+        method = message.get("method")
+        params = message.get("params") or {}
+        sid = str(message.get("sessionId"))[:8]
+        label = (
+            method or f"reply id={message.get('id')}"
+        ) + f" session={sid}{' ERROR' if 'error' in message else ''}"
+        if method == "Target.attachedToTarget":
+            info = params.get("targetInfo") or {}
+            desc = (
+                f"type={info.get('type')} url={str(info.get('url'))[:90]!r} "
+                f"targetId={str(info.get('targetId'))[:8]} parent={sid} "
+                f"waiting={params.get('waitingForDebugger')}"
             )
-        )
+            SESSIONS[str(params.get("sessionId"))[:8]] = desc
+            label += f" -> new session={str(params.get('sessionId'))[:8]} {desc}"
+        elif method == "Target.detachedFromTarget":
+            label += f" -> detached session={str(params.get('sessionId'))[:8]}"
+        elif method == "Inspector.targetCrashed":
+            label += f" -> CRASHED {SESSIONS.get(sid, 'UNMAPPED')}"
+        OTHER.append((time.monotonic(), "GEVT", label, {}))
+        GT.append((time.monotonic(), f"GEVT {label}"))
         return await guard_handle(self, message)
 
     google_rotation_guard.RotationGuard._send = traced_guard_send
@@ -223,15 +239,29 @@ def _fmt(t0, rows, port_b):
     return out
 
 
-async def _loop(fixture_origin_pair, label):
+async def _loop(fixture_origin_pair, chunk):
     origin_a, origin_b = fixture_origin_pair
     port_b = int(origin_b.rsplit(":", 1)[1])
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     report: list[str] = []
-    bad = 0
+    bad = {"GUARD": 0, "NOGUARD": 0}
+    seen = {"GUARD": 0, "NOGUARD": 0}
+    real_enabled = google_rotation_guard.enabled
     for i in range(ITERATIONS):
+        # Arms alternate per instance (chunk parity flips the start) so neither
+        # arm owns an early or late stretch of the run.
+        label = "GUARD" if (i + chunk) % 2 == 0 else "NOGUARD"
+        google_rotation_guard.enabled = (
+            real_enabled if label == "GUARD" else (lambda: False)
+        )
+        GT.clear()
+        SESSIONS.clear()
+        spawn_t = time.monotonic()
         iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+        guards = len(google_rotation_guard._LIVE)
+        assert guards == (1 if label == "GUARD" else 0), (label, guards)
+        seen[label] += RUNS_PER_INSTANCE
         try:
             await reset_fixture_ledger(origin_a)
             await navigate_and_settle(iid, f"{origin_a}/dynamic_probe.html")
@@ -268,7 +298,7 @@ async def _loop(fixture_origin_pair, label):
                     "GET-blocked",
                 ]
                 if not ok:
-                    bad += 1
+                    bad[label] += 1
                 pagelog = await eval_js(iid, "JSON.stringify(window.__f)")
                 lines = [
                     f"{label} guards={len(google_rotation_guard._LIVE)} iter={i} run={j} ok={ok} pagelog={pagelog} done={done} took={took:.3f}s "
@@ -279,6 +309,10 @@ async def _loop(fixture_origin_pair, label):
                     lines += _fmt(
                         t0, sorted(NET + SERVER + OTHER, key=lambda r: r[0]), port_b
                     )
+                    lines.append(
+                        f"    GUARD-CONNECTION TRACE since spawn (cors t0 = +{t0 - spawn_t:.3f}s):"
+                    )
+                    lines += [f"      +{g[0] - spawn_t:.3f}s {g[1]}" for g in GT]
                 report.append("\n".join(lines))
         finally:
             await close(instance_id=iid)
@@ -287,12 +321,6 @@ async def _loop(fixture_origin_pair, label):
     assert bad == 0, f"F999-DIAG[{label}] {bad} bad of {len(report)}\n{summary}"
 
 
-@pytest.mark.parametrize("chunk", range(4))
-async def test_f999_cors_loop_guard_armed(fixture_origin_pair, chunk):
-    await _loop(fixture_origin_pair, "GUARD")
-
-
-@pytest.mark.parametrize("chunk", range(4))
-async def test_f999_cors_loop_guard_disabled(fixture_origin_pair, monkeypatch, chunk):
-    monkeypatch.setattr(google_rotation_guard, "enabled", lambda: False)
-    await _loop(fixture_origin_pair, "NOGUARD")
+@pytest.mark.parametrize("chunk", range(8))
+async def test_f999_cors_loop_interleaved(fixture_origin_pair, chunk):
+    await _loop(fixture_origin_pair, chunk)
