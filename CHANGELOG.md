@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### The lost-port pin no longer requests a port the OS can hand out (F-1001)
+
+`test_a_port_the_browser_did_not_take_is_flagged` requested port 65500 and asserted the fake browser's banner port
+differed, but the fake binds an OS-assigned ephemeral port and Windows assigns from 49152-65535, so about 1 run in
+16k got 65500 and failed `assert 65500 != 65500` (CI run 38994785816, Windows py3.12, which blocked the v2.1.35
+publish). The pin now requests port 1, below every platform's ephemeral range; the probe only compares and
+connects to the requested port, never binds it, so what the test asserts is unchanged.
+
+### The `domcontentloaded` ordering pin no longer decides on the runner's clock (F-1000)
+
+`test_domcontentloaded_comes_back_before_that_same_load` (F-881) asserted that `navigate(wait_until="domcontentloaded")` took under 1.5 s over a page whose `load` is held for 1.8 s, and failed a correct tool on slow Windows runners: 2.27 s on PR #232 (release/2.1.35, run 38987189254), 2.52 s on PR #238 (run 38979395414) and 2.20 s on fix/F997-deterministic-timing-pins (run 38937141979, no PR) (3 of 45 Windows integration jobs over the last 40 CI runs, 0 of 92 on Linux and macOS). The property is an ordering, so the node now holds the image that blocks `load` on the fixture's fault controller until the test releases it, and asserts that `navigate` returned while the page read `interactive` with its `load` listener unrun and the fixture still holding the image; releasing the image then lets the same page reach `load`. The only clock left is a 15 s hang guard, which a `domcontentloaded` that waited for `load` would hit. Test-only.
+
+## 2.1.35
+
+### `close_tab` reported a tab Chrome had already closed as a failure (F-996b)
+
+`close_tab` sends the same `Target.closeTarget` as `close_instance`, and when Chrome had dropped the tab first it
+logged the `No target with given id found [code: -32602]` answer as a WARNING and returned `False`: the lying
+failure F-775b removed, for a tab that was in fact closed. It now asks `tab_close` the same question
+`close_instance` does (F-996): that answer is logged at debug level and `close_tab` returns `True` and repoints the
+active tab as after any close. Every other failure still warns and returns `False`.
+
 ### `close_instance` warned about a tab Chrome had already closed (F-996)
 
 `close_instance` closes each tab over CDP before it closes the browser, and logged a WARNING
@@ -103,6 +125,14 @@ showed a live profile free in 2 of 11,194 polls, against 0 of 11,033 before). On
 as gone only when `/proc/<pid>/exe` is also `FileNotFoundError` (the link was readable on 81 of 81 live mid-exec
 samples and unreadable on every sample of a dying browser); a zombie counts everywhere; anything else, including
 `PermissionError` on the link, and any platform but Linux for the empty-argv half, stays held.
+
+### The F-866 real-process test read its marker file before the child had written it (F-994)
+
+`test_the_spawned_backend_has_no_redirector_no_job_and_no_console` polled until the child's marker file
+existed and then unpacked its two lines at once, so a child that had created the file but not yet filled
+it failed the test with `ValueError: not enough values to unpack (expected 2, got 0)` (one pre-push run on
+2026-10-16; a retry passed). The child now writes `<marker>.tmp` and `os.replace()`s it into place, and the
+test polls until the file holds both lines, treating a transient Windows `PermissionError` on the open as "not ready" too, and failing with what it last read on timeout. Test-only change.
 
 ### `AutomationControlled` in a combined `--enable-blink-features` list slipped past the stealth filter (F-992)
 

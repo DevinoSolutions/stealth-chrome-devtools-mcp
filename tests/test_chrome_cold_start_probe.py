@@ -390,6 +390,9 @@ def test_a_finished_launch_survives_a_crash_during_the_next_one(
     assert "BadStatusLine" in record["error"]
 
 
+_NEVER_EPHEMERAL_PORT = 1
+
+
 def test_a_port_the_browser_did_not_take_is_flagged(fake_browser: Path, tmp_path: Path):
     """The lost-port race (F-870 H2) is detectable only by comparing the port we
     asked for against the one Chrome says it bound. `--remote-debugging-port` is
@@ -399,11 +402,14 @@ def test_a_port_the_browser_did_not_take_is_flagged(fake_browser: Path, tmp_path
         _command(fake_browser, profile, delay=0, lead=0, mode="listen"),
         _log(tmp_path, "p4"),
         launch=1,
-        port_requested=65500,
+        # Port 1 is below every OS's ephemeral range (Windows 49152-65535, Linux
+        # 32768-60999), so the fake's OS-assigned bind can never equal it. 65500
+        # sat inside the Windows range and collided about 1 run in 16k (F-1001).
+        port_requested=_NEVER_EPHEMERAL_PORT,
         deadline_seconds=_LAUNCH_BUDGET_SECONDS,
     )
     assert record.port_from_banner == _bound_port(profile)
-    assert record.port_from_banner != 65500
+    assert record.port_from_banner != _NEVER_EPHEMERAL_PORT
     assert record.port_matches_request is False
 
 
