@@ -5,6 +5,7 @@ each saw."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -26,8 +27,20 @@ from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 
 pytestmark = integration_pytestmark()
 
-ITERATIONS = 25  # instances per test; 8 tests x 25 instances alternate arms: 100 instances x 2 runs = 200 runs per arm
+ITERATIONS = 25  # instances per test; 16 tests x 25 instances rotate 4 arms: 100 instances x 2 runs = 200 runs per arm
 RUNS_PER_INSTANCE = 2
+CHUNKS = 16
+# NOGUARD: no guard. GUARD: the guard as shipped. GUARDX: the guard, but a chrome-extension://
+# target gets neither Fetch.enable nor a nested auto-attach (resumed if held). GUARDXD: like
+# GUARDX, and the guard also detaches from that target.
+ARMS = ("NOGUARD", "GUARD", "GUARDX", "GUARDXD")
+_REAL_ENABLED = (
+    google_rotation_guard.enabled
+)  # captured at import, before any arm patches it
+ARM = "GUARD"  # the arm of the instance being run; read by the traced guard handler
+CRASHES: list[
+    tuple
+] = []  # (t, text) every Inspector.targetCrashed on the guard connection
 _NET_METHODS = (
     "Network.requestWillBeSent",
     "Network.requestWillBeSentExtraInfo",
@@ -167,8 +180,22 @@ def _install() -> None:
             label += f" -> detached session={str(params.get('sessionId'))[:8]}"
         elif method == "Inspector.targetCrashed":
             label += f" -> CRASHED {SESSIONS.get(sid, 'UNMAPPED')}"
+            CRASHES.append((time.monotonic(), SESSIONS.get(sid, "UNMAPPED")))
         OTHER.append((time.monotonic(), "GEVT", label, {}))
         GT.append((time.monotonic(), f"GEVT {label}"))
+        if (
+            ARM in ("GUARDX", "GUARDXD")
+            and method == "Target.attachedToTarget"
+            and str((params.get("targetInfo") or {}).get("url")).startswith(
+                "chrome-extension://"
+            )
+        ):
+            new_sid = str(params["sessionId"])
+            if ARM == "GUARDXD":
+                await self._send("Target.detachFromTarget", {"sessionId": new_sid})
+            elif params.get("waitingForDebugger"):
+                await self._send("Runtime.runIfWaitingForDebugger", None, new_sid)
+            return None
         return await guard_handle(self, message)
 
     google_rotation_guard.RotationGuard._send = traced_guard_send
@@ -239,88 +266,110 @@ def _fmt(t0, rows, port_b):
     return out
 
 
+def _crash_text(spawn_t, rows):
+    return [f"+{t - spawn_t:.3f}s {desc.split(' parent=')[0]}" for t, desc in rows]
+
+
 async def _loop(fixture_origin_pair, chunk):
+    global ARM
     origin_a, origin_b = fixture_origin_pair
     port_b = int(origin_b.rsplit(":", 1)[1])
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     report: list[str] = []
-    bad = {"GUARD": 0, "NOGUARD": 0}
-    seen = {"GUARD": 0, "NOGUARD": 0}
-    real_enabled = google_rotation_guard.enabled
-    for i in range(ITERATIONS):
-        # Arms alternate per instance (chunk parity flips the start) so neither
-        # arm owns an early or late stretch of the run.
-        label = "GUARD" if (i + chunk) % 2 == 0 else "NOGUARD"
-        google_rotation_guard.enabled = (
-            real_enabled if label == "GUARD" else (lambda: False)
-        )
-        GT.clear()
-        SESSIONS.clear()
-        spawn_t = time.monotonic()
-        iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
-        guards = len(google_rotation_guard._LIVE)
-        assert guards == (1 if label == "GUARD" else 0), (label, guards)
-        seen[label] += RUNS_PER_INSTANCE
-        try:
-            await reset_fixture_ledger(origin_a)
-            await navigate_and_settle(iid, f"{origin_a}/dynamic_probe.html")
-            await eval_js(
-                iid,
-                "(function(){window.__f=[];var t0=performance.now();"
-                "function L(n){return function(){window.__f.push([n,Math.round(performance.now()-t0),"
-                "document.visibilityState,document.readyState])}}"
-                "['pagehide','pageshow','freeze','resume','visibilitychange','beforeunload','unload']"
-                ".forEach(function(n){window.addEventListener(n,L(n))});"
-                "document.addEventListener('visibilitychange',L('doc-vis'));return 1})()",
+    stats = {a: {"runs": 0, "bad": 0, "crash_runs": 0, "bad_crash": 0} for a in ARMS}
+    # A broken arm must fail loudly here, not by design at the end.
+    assert google_rotation_guard.enabled is _REAL_ENABLED, "enabled left patched"
+    try:
+        for i in range(ITERATIONS):
+            # Four arms rotate per instance (chunk shifts the start) so no arm owns an
+            # early or late stretch of the run.
+            label = ARMS[(i + chunk) % len(ARMS)]
+            ARM = label
+            google_rotation_guard.enabled = (
+                (lambda: False) if label == "NOGUARD" else _REAL_ENABLED
             )
-            await eval_js(iid, "window.__auth.run()")
-            await wait_for_js(iid, "window.__auth.done", True, timeout=15.0)
-            for j in range(RUNS_PER_INSTANCE):
-                await reset_fixture_ledger(origin_b)
-                await eval_js(iid, "window.__cors.done = false")
-                t0 = time.monotonic()
-                await eval_js(iid, "window.__cors.run()")
-                done = await wait_for_js(iid, "window.__cors.done", True, timeout=15.0)
-                took = time.monotonic() - t0
-                cors = json.loads(await eval_js(iid, "JSON.stringify(window.__cors)"))
-                res = await eval_js(
+            GT.clear()
+            SESSIONS.clear()
+            CRASHES.clear()
+            spawn_t = time.monotonic()
+            iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+            guards = len(google_rotation_guard._LIVE)
+            assert guards == (0 if label == "NOGUARD" else 1), (label, guards)
+            try:
+                await reset_fixture_ledger(origin_a)
+                await navigate_and_settle(iid, f"{origin_a}/dynamic_probe.html")
+                await eval_js(
                     iid,
-                    "JSON.stringify(performance.getEntriesByType('resource')"
-                    ".filter(function(e){return e.name.indexOf('/cors/')>=0})"
-                    ".map(function(e){return [e.name.split('/cors/')[1], Math.round(e.startTime),"
-                    " Math.round(e.duration), e.responseStatus, e.transferSize]}))",
+                    "(function(){window.__f=[];var t0=performance.now();"
+                    "function L(n){return function(){window.__f.push([n,Math.round(performance.now()-t0),"
+                    "document.visibilityState,document.readyState])}}"
+                    "['pagehide','pageshow','freeze','resume','visibilitychange','beforeunload','unload']"
+                    ".forEach(function(n){window.addEventListener(n,L(n))});"
+                    "document.addEventListener('visibilitychange',L('doc-vis'));return 1})()",
                 )
-                led = await fixture_ledger(origin_b)
-                ok = cors.get("echo_status") == 200 and led["cors_methods"] == [
-                    "OPTIONS",
-                    "POST",
-                    "GET-blocked",
-                ]
-                if not ok:
-                    bad[label] += 1
-                pagelog = await eval_js(iid, "JSON.stringify(window.__f)")
-                lines = [
-                    f"{label} guards={len(google_rotation_guard._LIVE)} iter={i} run={j} ok={ok} pagelog={pagelog} done={done} took={took:.3f}s "
-                    f"cors={json.dumps(cors, sort_keys=True)} "
-                    f"cors_methods={led['cors_methods']} resources={res}"
-                ]
-                if not ok:
-                    lines += _fmt(
-                        t0, sorted(NET + SERVER + OTHER, key=lambda r: r[0]), port_b
+                await eval_js(iid, "window.__auth.run()")
+                await wait_for_js(iid, "window.__auth.done", True, timeout=15.0)
+                for j in range(RUNS_PER_INSTANCE):
+                    await reset_fixture_ledger(origin_b)
+                    await eval_js(iid, "window.__cors.done = false")
+                    t0 = time.monotonic()
+                    await eval_js(iid, "window.__cors.run()")
+                    await wait_for_js(iid, "window.__cors.done", True, timeout=15.0)
+                    took = time.monotonic() - t0
+                    cors = json.loads(
+                        await eval_js(iid, "JSON.stringify(window.__cors)")
                     )
-                    lines.append(
-                        f"    GUARD-CONNECTION TRACE since spawn (cors t0 = +{t0 - spawn_t:.3f}s):"
+                    res = await eval_js(
+                        iid,
+                        "JSON.stringify(performance.getEntriesByType('resource')"
+                        ".filter(function(e){return e.name.indexOf('/cors/')>=0})"
+                        ".map(function(e){return [e.name.split('/cors/')[1], Math.round(e.startTime),"
+                        " Math.round(e.duration), e.responseStatus, e.transferSize]}))",
                     )
-                    lines += [f"      +{g[0] - spawn_t:.3f}s {g[1]}" for g in GT]
-                report.append("\n".join(lines))
-        finally:
-            await close(instance_id=iid)
+                    led = await fixture_ledger(origin_b)
+                    ok = cors.get("echo_status") == 200 and led["cors_methods"] == [
+                        "OPTIONS",
+                        "POST",
+                        "GET-blocked",
+                    ]
+                    crashed = bool(CRASHES)
+                    st = stats[label]
+                    st["runs"] += 1
+                    st["bad"] += 0 if ok else 1
+                    st["crash_runs"] += 1 if crashed else 0
+                    st["bad_crash"] += 1 if (crashed and not ok) else 0
+                    lines = [
+                        f"RUN {label} guards={len(google_rotation_guard._LIVE)} iter={i} run={j} ok={ok}"
+                        f" took={took:.3f}s crashes={_crash_text(spawn_t, CRASHES)}"
+                        f" cors_methods={led['cors_methods']} resources={res}"
+                    ]
+                    if not ok:
+                        lines += _fmt(
+                            t0, sorted(NET + SERVER + OTHER, key=lambda r: r[0]), port_b
+                        )
+                        lines.append(
+                            f"    GUARD-CONNECTION TRACE since spawn (cors t0 = +{t0 - spawn_t:.3f}s):"
+                        )
+                        lines += [f"      +{g[0] - spawn_t:.3f}s {g[1]}" for g in GT]
+                    report.append("\n".join(lines))
+                await asyncio.sleep(0.5)
+                report.append(
+                    f"INSTANCE {label} iter={i} crashes_by_end={_crash_text(spawn_t, CRASHES)}"
+                )
+            finally:
+                await close(instance_id=iid)
+    finally:
+        google_rotation_guard.enabled = _REAL_ENABLED
+        ARM = "GUARD"
+    table = "\n".join(f"STATS {a} {json.dumps(stats[a])}" for a in ARMS)
     summary = "\n".join(report)
+    print(table)
     print(summary)
-    assert bad == 0, f"F999-DIAG[{label}] {bad} bad of {len(report)}\n{summary}"
+    # Deliberately fails: CI prints a failing test's message, which is how the data gets out.
+    pytest.fail(f"F999-DIAG chunk={chunk}\n{table}\n{summary}")
 
 
-@pytest.mark.parametrize("chunk", range(8))
+@pytest.mark.parametrize("chunk", range(CHUNKS))
 async def test_f999_cors_loop_interleaved(fixture_origin_pair, chunk):
     await _loop(fixture_origin_pair, chunk)
