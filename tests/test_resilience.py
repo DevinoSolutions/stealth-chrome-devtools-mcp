@@ -127,6 +127,15 @@ HTTP_TIMEOUT = 10
 OUTER_BOUND = 90.0
 # The product deadline, strictly inside OUTER_BOUND on both attempts.
 NAV_TIMEOUT_MS = 4000
+# The ``networkidle`` characterization's own deadline (F-1002). It must NOT be
+# NAV_TIMEOUT_MS: that pin succeeds only after ``networkidle``'s fixed 2 s sleep,
+# so a 4 s deadline left it the sleep's 2 s as its only slack for the commit and
+# the landing read, and the Windows cell (whose soak records single operations of
+# 10 s) spent that slack twice in one day. Locally the commit is 20-90 ms
+# and the landing read 1-46 ms. The route never completes, so a roomier deadline
+# costs nothing: the call still returns at ~2 s, and a SUCCESS inside any deadline
+# is what shows it did not wait for the body.
+NETWORKIDLE_PIN_TIMEOUT_MS = 20000
 BARRIER_TIMEOUT = 20.0  # how long the fixture may take to say "request arrived"
 REAP_TIMEOUT = 25.0  # how long the OS may take to reap a killed Chrome tree
 
@@ -719,7 +728,7 @@ async def test_networkidle_returns_before_the_transfer_completes(
             instance_id=instance,
             url=url,
             wait_until="networkidle",
-            timeout=NAV_TIMEOUT_MS,
+            timeout=NETWORKIDLE_PIN_TIMEOUT_MS,
         )
     )
     try:
@@ -729,7 +738,9 @@ async def test_networkidle_returns_before_the_transfer_completes(
         )
         assert outcome == "returned", value
         assert value["success"] is True, value
-        assert elapsed < NAV_TIMEOUT_MS / 1000
+        # Well under the deadline: the call is the sleep's ~2 s, so a regression
+        # that waited out most of the roomy deadline is still caught.
+        assert elapsed < NETWORKIDLE_PIN_TIMEOUT_MS / 2000
         # The transfer is still open: the tail chunk only exists after a release.
         assert (await _fault_status(base, token))["released"] is False
         partial = await eval_js(

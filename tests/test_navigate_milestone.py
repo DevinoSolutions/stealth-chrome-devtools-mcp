@@ -298,6 +298,26 @@ async def test_networkidle_still_sleeps_f787s_fixed_window_after_commit(
     assert 2.0 in slept
 
 
+async def test_networkidle_leaves_the_landing_read_a_share_of_a_small_budget(
+    monkeypatch, manager
+):
+    """F-1002: the fixed sleep is clipped to the caller's budget, and it used to be
+    clipped to ALL of what was left, so the landing read that follows had no
+    budget and a page that committed at once answered ``timed out`` (the CI flake
+    in ``test_networkidle_returns_before_the_transfer_completes`` was this with
+    the sleep's 2 s as the only slack). The clipped sleep is half of what is
+    left; the real sleep runs here, so the budget really is spent."""
+    tab = FakeTab(lifecycle="after", last_milestone="init", title_at_load="Alpha")
+    _with_tab(monkeypatch, tab)
+
+    result = await manager.navigate(
+        instance_id="iid-1", url=URL, wait_until="networkidle", timeout=1000
+    )
+
+    assert result["success"] is True
+    assert result["title"] == ""  # still F-787: answered before load
+
+
 # ---------------------------------------------------------------------------
 # F-882 — the document our loader committed can be REPLACED before it loads
 # ---------------------------------------------------------------------------

@@ -73,8 +73,9 @@ nothing in it is really a download — :data:`ABORTED_GRACE_SECONDS`, clipped to
 whatever is left of the caller's budget so a small ``timeout`` still gets the
 named answer rather than a bare cancellation.
 
-``networkidle`` is F-787's fixed sleep, moved here byte-for-byte so
-``wait_until`` has one home; it is keyed on the FIRST commit — its milestone IS
+``networkidle`` is F-787's fixed sleep, moved here so
+``wait_until`` has one home (and clipped to half of what is left of the
+budget, F-1002); it is keyed on the FIRST commit — its milestone IS
 ``init``, so the chain is satisfied the moment our own document commits and a
 later supersession can no longer reach it. That is deliberate and unchanged by
 F-882: ``networkidle`` is not a quiescence wait and never was, so making it
@@ -474,5 +475,10 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
             tab.remove_handler(cdp.page.LifecycleEvent, on_lifecycle)
 
     if wait_until == "networkidle":
+        # Half of what is LEFT, never all of it (the abort grace's own rule
+        # above): the caller still has to read the landing document inside the
+        # same budget, so a sleep clipped to the deadline itself left that read
+        # nothing and every `networkidle` call whose budget was within a landing
+        # of the sleep timed out against a page that had already committed (F-1002).
         remaining = budget_seconds - (loop.time() - started)
-        await asyncio.sleep(max(0.0, min(NETWORKIDLE_SLEEP_SECONDS, remaining)))
+        await asyncio.sleep(max(0.0, min(NETWORKIDLE_SLEEP_SECONDS, remaining / 2)))
