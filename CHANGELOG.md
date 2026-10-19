@@ -31,6 +31,18 @@ delegated headed Chrome is raised as soon as its pid is known, together with the
 started (crashpad, the GPU process and the network service exist within 0.15 s and inherited the Low levels). The raise only ever goes up and never fails a
 backend or a spawn.
 
+### A launched Chrome that has not opened its first page yet is waited for, not killed (F-1003)
+
+`spawn_browser` took its tab with `browser.main_tab` the instant the launch returned. nodriver reads the target list
+exactly once, right after `/json/version` answers, and on a large real profile (275-871 MB, extensions,
+restore-on-startup) Chrome answers that endpoint before it has created its first page target. `main_tab` then raised
+`IndexError: list index out of range`, the attempt was torn down, F-860 killed a Chrome that was coming up fine and
+`_SPAWN_ATTEMPTS` relaunched from cold: a live `spawn_browser` on a copy of a 275 MB profile reported two such retries
+and succeeded on the third attempt. The same read could also hand back a non-page target (`background_page`,
+`service_worker`) as the instance's tab when no page existed yet. `browser_connect.first_page` now re-reads the targets
+until a page exists, bounded by the same `CONNECT_PATIENCE_SECONDS` as the endpoint wait, and ends at once if the
+launched Chrome has exited; an attached browser is unchanged.
+
 ### `networkidle` no longer spends the whole navigation budget on its fixed sleep (F-1002)
 
 `wait_until="networkidle"` is F-787's fixed 2 s sleep after commit, clipped to what is left of the caller's `timeout`. It was clipped to ALL of what was left, so the landing read that follows had no budget: a page that had already committed answered `Navigation to ... timed out after Nms (accepted, committed)` whenever the commit plus the sleep came within one landing read of `timeout` (a `timeout` of 2 s or less could never succeed). The sleep is now at most half of what is left, the rule the `ERR_ABORTED` grace already follows; with a `timeout` comfortably over 4 s it is still the full 2 s, so F-787 is unchanged (at exactly 4 s it is 1.99 s: half of what the commit left). This is also what made `test_networkidle_returns_before_the_transfer_completes` flake on the Windows integration cell (CI runs 38909588568 and 38979395414, the first failing the release gate: its 4 s deadline left it the sleep's 2 s as the only slack, and a Windows runner spends that on one slow operation. The pin now uses a 20 s deadline of its own (the route never completes, so a success inside any deadline is what shows `networkidle` did not wait for the body), and a hermetic node pins the clip with the same `(accepted, committed)` signature.

@@ -156,6 +156,7 @@ class StalledTab:
     """A tab whose DevTools never answers a window-size command."""
 
     url = "about:blank"
+    type_ = "page"
 
     async def send(self, *_args, **_kwargs):
         raise RuntimeError("a version probe that fails is swallowed (F-806)")
@@ -190,6 +191,8 @@ class LaunchedChrome:
         self._process = SimpleNamespace(pid=pid, returncode=None)
         self._process_pid = pid
         self.main_tab = tab
+        # A launched Chrome with a tab has opened a page (F-1003 reads targets).
+        self.targets = [] if tab is None else [tab]
         self.stops = 0
 
     def stop(self) -> None:

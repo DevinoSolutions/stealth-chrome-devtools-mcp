@@ -655,7 +655,7 @@ class BrowserManager:
             browser = await self._launch_browser(
                 options, browser_executable, launch_args, launch_attempt
             )
-            tab = browser.main_tab
+            tab = await browser_connect.first_page(browser)  # F-1003
             config_obj = getattr(browser, "config", None)
             actual_user_data_dir = getattr(
                 config_obj, "user_data_dir", options.user_data_dir
