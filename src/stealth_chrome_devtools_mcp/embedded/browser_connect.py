@@ -2,8 +2,9 @@
 endpoint YET is not a Chrome that failed to start.
 
 THE one home for "how long does a freshly launched Chrome get to answer
-``/json/version`` before this spawn attempt is called failed" — ``install()``,
-``installed()``, ``CONNECT_PATIENCE_SECONDS`` and nothing else.
+``/json/version`` — and then to open its first page — before this spawn attempt
+is called failed" — ``install()``, ``installed()``, ``first_page()``,
+``CONNECT_PATIENCE_SECONDS`` and nothing else.
 
 The deadline being extended is nodriver's and it is FIXED. ``Browser.start``
 spawns Chrome and then::
@@ -110,6 +111,30 @@ case this could have made slower, Chrome dying at startup, is instead faster
 than before: today that still costs the full window of polling a port nobody
 will ever open.
 
+**F-1003 — the endpoint answering is not the first page existing.** The same
+question has a second milestone one step later. ``Browser.start`` reads the
+target list exactly ONCE (``update_targets()``) right after ``/json/version``
+answers, and ``Browser.main_tab`` is ``sorted(self.targets, key=type_ == "page",
+reverse=True)[0]``. On a large real profile (275-871 MB, extensions,
+restore-on-startup) Chrome answers ``/json/version`` BEFORE it has created its
+first page target, so ``targets`` is empty and ``main_tab`` raised
+``IndexError: list index out of range`` — the attempt was torn down, F-860 killed
+a Chrome that was coming up fine, and ``_SPAWN_ATTEMPTS`` relaunched from cold
+(measured live: two such retries before the third attempt succeeded, each failed
+attempt's Chrome log showing it reaching its post-start point as it was killed).
+Its latent shape: when the list holds only non-page targets (``background_page``,
+``service_worker``, ``browser_ui`` — measured present on those profiles at
+startup) ``main_tab`` does not raise, it silently returns a NON-page target as
+the instance's tab. ``first_page()`` re-reads the list with nodriver's own
+``update_targets()`` until a ``page`` target exists, then answers ``main_tab``;
+it polls at ``POLL_SECONDS`` through the same ``_now``/``_sleep`` seam, shares
+``CONNECT_PATIENCE_SECONDS`` (the endpoint answering and the first page are the
+same "Chrome is still coming up", so one ceiling, no second constant and no knob;
+it starts counting when the launch returns, i.e. when the endpoint has just
+answered) and ends at once if the launched process has exited. An ATTACHED
+browser (no ``_process`` — ``_launched_process``'s rule) is already running and
+gets ``main_tab`` exactly as before.
+
 A leaf: ``nodriver`` and stdlib only. ``install()`` is called from
 ``browser_manager._launch_browser``, the one function in the tree that launches
 a browser, on ``session_hygiene.install()``'s precedent of installing at the
@@ -124,10 +149,17 @@ import urllib.error
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple, Protocol
 
-from nodriver.core.browser import HTTPApi
+from nodriver.core.browser import Browser, HTTPApi
+from nodriver.core.tab import Tab
 from nodriver.core.util import get_registered_instances
 
-__all__ = ["CONNECT_PATIENCE_SECONDS", "install", "installed"]
+__all__ = [
+    "CONNECT_PATIENCE_SECONDS",
+    "NoFirstPageError",
+    "first_page",
+    "install",
+    "installed",
+]
 
 #: How long a freshly launched Chrome gets to open its DevTools endpoint before
 #: the attempt is called failed. ~5x the worst MEASURED cold launch (5839.1 ms,
@@ -167,6 +199,10 @@ _MARKER = "__stealth_browser_connect__"
 
 # Per-launch, because nodriver builds one ``HTTPApi`` per ``Browser.start``.
 _WAIT = "__stealth_connect_wait__"
+
+
+class NoFirstPageError(Exception):
+    """A Chrome we launched answered its endpoint but opened no page (F-1003)."""
 
 
 class _Launched(Protocol):
@@ -248,3 +284,31 @@ def install() -> None:
     if installed():
         return
     HTTPApi.get = _patient(HTTPApi.get)
+
+
+async def first_page(browser: Browser) -> Tab:
+    """The tab of a Chrome we launched, once it has opened its first page.
+
+    ``Browser.start`` has read the target list once by now, and a Chrome that is
+    still restoring a large profile has not created a page target yet. Ask again
+    (nodriver's own ``update_targets``) until one exists, bounded by
+    ``CONNECT_PATIENCE_SECONDS``; a launcher that has exited ends it at once.
+    """
+    process = getattr(browser, "_process", None)
+    if process is None:
+        return browser.main_tab
+    deadline = _now() + CONNECT_PATIENCE_SECONDS
+    while not any(target.type_ == "page" for target in browser.targets):
+        if process.returncode is not None:
+            raise NoFirstPageError(
+                "Chrome answered on its DevTools endpoint but exited "
+                f"(code {process.returncode}) before opening a page"
+            )
+        if _now() >= deadline:
+            raise NoFirstPageError(
+                "Chrome answered on its DevTools endpoint but opened no page "
+                f"within {CONNECT_PATIENCE_SECONDS:g} s"
+            )
+        await _sleep(POLL_SECONDS)
+        await browser.update_targets()
+    return browser.main_tab
