@@ -191,41 +191,61 @@ def _raise_memory_priority(pid: int, floor: int) -> tuple[int, int] | None:
         kernel32.CloseHandle(handle)
 
 
-def raise_inherited_priority(pid: int | None = None) -> dict[str, tuple[int, int]]:
+def _raise_one(proc: psutil.Process) -> dict[str, tuple[int, int]]:
+    """Raise one process's I/O and memory priority to the task-child floors."""
+    changed: dict[str, tuple[int, int]] = {}
+    io_before = int(proc.ionice())
+    if io_before < TASK_CHILD_IO_PRIORITY:
+        proc.ionice(TASK_CHILD_IO_PRIORITY)
+        changed["io"] = (io_before, TASK_CHILD_IO_PRIORITY)
+    memory = _raise_memory_priority(proc.pid, TASK_CHILD_MEMORY_PRIORITY)
+    if memory is not None:
+        changed["memory"] = memory
+    return changed
+
+
+def raise_inherited_priority(
+    pid: int | None = None, *, tree: bool = False
+) -> dict[str, tuple[int, int]]:
     """Raise *pid*'s (default: this process's) I/O and memory priority to the
     task-child levels when something started it lower (F-1004).
 
     Both are inherited, so a backend started by Task Scheduler hands its Low/2 to
     every Chrome it launches: raising the backend once, at startup, fixes every
     later launch. A delegated Chrome is started by a task of its own and is raised
-    by pid as soon as the pid is known. Returns what changed, as
+    with ``tree=True`` once its pid is known: by then it has already started
+    crashpad, the GPU process and the network service (measured within 0.15 s),
+    which inherited the Low levels, so they are raised as well; later children
+    inherit from the raised root. Returns what changed on *pid* itself, as
     ``{"io": (before, after), "memory": (before, after)}``; empty when nothing
     was below, off Windows, or when the OS refused. Best-effort and never raises:
     a priority is never a reason for a backend or a spawn to fail.
     """
     if sys.platform != "win32":
         return {}
+    label = pid or os.getpid()
     changed: dict[str, tuple[int, int]] = {}
+    raised_children = 0
     try:
         proc = psutil.Process(pid)
-        io_before = int(proc.ionice())
-        if io_before < TASK_CHILD_IO_PRIORITY:
-            proc.ionice(TASK_CHILD_IO_PRIORITY)
-            changed["io"] = (io_before, TASK_CHILD_IO_PRIORITY)
-        memory = _raise_memory_priority(proc.pid, TASK_CHILD_MEMORY_PRIORITY)
-        if memory is not None:
-            changed["memory"] = memory
-    except (psutil.Error, OSError) as exc:
+        changed = _raise_one(proc)
+        for child in proc.children(recursive=True) if tree else ():
+            try:
+                raised_children += bool(_raise_one(child))
+            except psutil.Error:
+                continue  # a child that exited or refused costs only itself
+    except Exception as exc:  # noqa: BLE001  PERMANENT(a priority must not fail a backend or a spawn)
         debug_logger.log_warning(
             "desktop_launch",
             "raise_inherited_priority",
-            f"could not raise the priority of pid {pid or os.getpid()}: {exc!r}",
+            f"could not raise the priority of pid {label}: {exc!r}",
         )
-    if changed:
+    if changed or raised_children:
         debug_logger.log_info(
             "desktop_launch",
             "raise_inherited_priority",
-            f"pid {pid or os.getpid()} raised to Normal (before, after): {changed}",
+            f"pid {label} raised to Normal (before, after): {changed}; "
+            f"{raised_children} child process(es) raised",
         )
     return changed
 
@@ -580,8 +600,9 @@ async def _run_task(
                 )
             if delegated.pid is None:
                 # F-1004: started by its own task, so at Low I/O and memory
-                # priority; the launcher script can only set the class.
-                await asyncio.to_thread(raise_inherited_priority, pid)
+                # priority with children already inheriting it; the launcher
+                # script can only set the class. Once: only the first poll.
+                await asyncio.to_thread(raise_inherited_priority, pid, tree=True)
             delegated.pid, delegated.create_time = pid, create_time
             if await asyncio.to_thread(_devtools_ready, port):
                 return pid

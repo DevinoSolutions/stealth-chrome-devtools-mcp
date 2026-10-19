@@ -294,13 +294,13 @@ def delegation(monkeypatch, tmp_path):
 
     started: list[object] = []
     killed: list[tuple[int, float | None]] = []
-    raised: list[int | None] = []
+    raised: list[tuple[int | None, bool]] = []
     # F-1004: the pid is a fake number, so the priority raise must never reach
     # the OS — a real process could own that pid on the machine running the suite.
     monkeypatch.setattr(
         desktop_launch,
         "raise_inherited_priority",
-        lambda pid=None: raised.append(pid) or {},
+        lambda pid=None, *, tree=False: raised.append((pid, tree)) or {},
     )
 
     async def fake_start(config):
@@ -354,7 +354,28 @@ async def test_the_delegated_chrome_is_raised_once_its_pid_is_known(delegation):
     await desktop_launch.launch_and_attach(
         "C:/Program Files/Google/Chrome/chrome.exe", [], "C:/profiles/one"
     )
-    assert delegation.raised == [4242]
+    assert delegation.raised == [(4242, True)]
+
+
+async def test_the_raise_happens_once_however_many_polls_it_takes(
+    delegation, monkeypatch
+):
+    """The pid is read on every poll until DevTools answers; the tree is raised
+    on the first and never again."""
+    answers = iter([False, False, True])
+    monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: next(answers))
+    delegation.install(FakeSchtasks(pid=4242))
+    await desktop_launch.launch_and_attach("chrome.exe", [], "C:/profiles/one")
+    assert delegation.raised == [(4242, True)]
+
+
+async def test_a_dead_pid_is_never_raised(delegation, monkeypatch):
+    """A pid whose process exited may already belong to someone else."""
+    monkeypatch.setattr(desktop_launch, "_process_create_time", lambda pid: None)
+    delegation.install(FakeSchtasks(pid=4242))
+    with pytest.raises(tool_errors.ToolError):
+        await desktop_launch.launch_and_attach("chrome.exe", [], "C:/profiles/one")
+    assert delegation.raised == []
 
 
 async def test_the_launcher_hands_chrome_the_args_the_config_would_have(delegation):

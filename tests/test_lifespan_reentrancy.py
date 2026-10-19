@@ -21,17 +21,19 @@ from typing import Any
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import server
+from stealth_chrome_devtools_mcp.embedded import desktop_launch, server
 
 
 class _SpyBrowserManager:
-    def __init__(self) -> None:
+    def __init__(self, order: list[str]) -> None:
         self.start_calls = 0
         self.stop_calls = 0
         self.close_all_calls = 0
+        self._order = order
 
     async def start_idle_reaper(self) -> None:
         self.start_calls += 1
+        self._order.append("start_idle_reaper")
 
     async def stop_idle_reaper(self) -> None:
         self.stop_calls += 1
@@ -84,7 +86,8 @@ def spies(monkeypatch, patched_server):
     ``_LIFESPAN_STARTED`` stays a direct ``server`` write — it is per-execution
     process state, not tool state, and does not live in ``tool_runtime``.
     """
-    bm = _SpyBrowserManager()
+    order: list[str] = []
+    bm = _SpyBrowserManager(order)
     pc = _SpyProcessCleanup()
     ims = _SpyStorage()
     cs = _SpyCloneStorage()
@@ -94,7 +97,14 @@ def spies(monkeypatch, patched_server):
     # raising=False so the RED run (before the guard exists) fails on the
     # behavioral assertions below, not on a missing-attribute setup error.
     monkeypatch.setattr(server, "_LIFESPAN_STARTED", False, raising=False)
-    return {"bm": bm, "pc": pc, "ims": ims, "cs": cs}
+    # F-1004: the lifespan raises this process's own priority; a spy keeps the
+    # suite from writing to the pytest process and records when it ran.
+    monkeypatch.setattr(
+        desktop_launch,
+        "raise_inherited_priority",
+        lambda pid=None, *, tree=False: order.append("raise_priority") or {},
+    )
+    return {"bm": bm, "pc": pc, "ims": ims, "cs": cs, "order": order}
 
 
 async def test_second_lifespan_cycle_does_not_run_teardown_in_http_mode(
@@ -149,3 +159,21 @@ async def test_stdio_mode_exit_still_runs_full_teardown(monkeypatch, spies):
     assert bm.close_all_calls == 1
     assert pc.cleanup_all_calls == 1
     assert ims.clear_all_calls == 1
+
+
+async def test_the_priority_is_raised_once_and_before_any_browser_work(
+    monkeypatch, spies
+):
+    """F-1004: every Chrome inherits the backend's I/O and memory priority, so
+    the raise runs once per process and before the idle reaper (the first
+    startup step that reaches a browser), however many sessions enter."""
+    monkeypatch.setattr(server, "_SERVE_TRANSPORT", "http", raising=False)
+
+    async with server.app_lifespan(None):
+        pass
+    async with server.app_lifespan(None):
+        pass
+
+    order = spies["order"]
+    assert order.count("raise_priority") == 1
+    assert order.index("raise_priority") < order.index("start_idle_reaper")

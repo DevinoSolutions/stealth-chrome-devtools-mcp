@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -101,10 +102,18 @@ def test_the_backend_launcher_stays_stdlib_only() -> None:
 
 
 class _FakeProc:
-    def __init__(self, io: int, *, pid: int = 4242) -> None:
+    def __init__(
+        self, io: int, *, pid: int = 4242, children: list[_FakeProc] | None = None
+    ) -> None:
         self.pid = pid
         self.io = io
         self.set_calls: list[int] = []
+        self._children = children or []
+        self.recursive: bool | None = None
+
+    def children(self, recursive: bool = False) -> list[_FakeProc]:
+        self.recursive = recursive
+        return self._children
 
     def ionice(self, value: int | None = None) -> int:
         if value is None:
@@ -174,6 +183,70 @@ def test_a_refusal_is_logged_never_raised(win32, monkeypatch) -> None:
     assert desktop_launch.raise_inherited_priority(4242) == {}
 
 
+def test_a_tree_raise_reaches_the_children_already_started(win32, monkeypatch) -> None:
+    """A delegated Chrome has started crashpad, the GPU process and the network
+    service before its pid is known, and they inherited the Low levels."""
+    kids = [_FakeProc(io=1, pid=5001), _FakeProc(io=1, pid=5002)]
+    root = _FakeProc(io=1, children=kids)
+    memory: list[int] = []
+    monkeypatch.setattr(desktop_launch.psutil, "Process", lambda pid=None: root)
+    monkeypatch.setattr(
+        desktop_launch,
+        "_raise_memory_priority",
+        lambda pid, floor: memory.append(pid) or (2, floor),
+    )
+    assert desktop_launch.raise_inherited_priority(4242, tree=True) == {
+        "io": (1, 2),
+        "memory": (2, 5),
+    }
+    assert root.recursive is True
+    assert [k.set_calls for k in kids] == [[2], [2]]
+    assert memory == [4242, 5001, 5002]
+
+
+def test_without_tree_the_children_are_left_alone(win32, monkeypatch) -> None:
+    kid = _FakeProc(io=1, pid=5001)
+    root = _FakeProc(io=1, children=[kid])
+    monkeypatch.setattr(desktop_launch.psutil, "Process", lambda pid=None: root)
+    monkeypatch.setattr(
+        desktop_launch, "_raise_memory_priority", lambda pid, floor: None
+    )
+    desktop_launch.raise_inherited_priority(4242)
+    assert root.recursive is None
+    assert kid.set_calls == []
+
+
+def test_a_child_that_exited_costs_only_itself(win32, monkeypatch) -> None:
+    import psutil
+
+    class _Gone(_FakeProc):
+        def ionice(self, value: int | None = None) -> int:
+            raise psutil.NoSuchProcess(self.pid)
+
+    later = _FakeProc(io=1, pid=5002)
+    root = _FakeProc(io=1, children=[_Gone(io=1, pid=5001), later])
+    monkeypatch.setattr(desktop_launch.psutil, "Process", lambda pid=None: root)
+    monkeypatch.setattr(
+        desktop_launch, "_raise_memory_priority", lambda pid, floor: None
+    )
+    assert desktop_launch.raise_inherited_priority(4242, tree=True) == {"io": (1, 2)}
+    assert later.set_calls == [2]
+
+
+@pytest.mark.parametrize("error", [AttributeError("SetProcessInformation"), ValueError])
+def test_no_failure_of_any_kind_escapes(win32, monkeypatch, error) -> None:
+    """``app_lifespan`` calls this before the backend serves, so anything that
+    escaped (an old Windows without the export, a ctypes ArgumentError) would
+    take the backend's startup down for the sake of a priority."""
+
+    def _broken(pid, floor):
+        raise error
+
+    monkeypatch.setattr(desktop_launch.psutil, "Process", lambda pid=None: _FakeProc(1))
+    monkeypatch.setattr(desktop_launch, "_raise_memory_priority", _broken)
+    assert desktop_launch.raise_inherited_priority(4242) == {}
+
+
 def _lower(pid: int, io: int, memory: int) -> None:
     import ctypes
     from ctypes import wintypes
@@ -219,6 +292,40 @@ def test_a_real_low_process_is_raised_and_reads_back_normal() -> None:
     finally:
         child.kill()
         child.wait(timeout=10)
+
+
+_TREE_CHILD = (
+    "import subprocess, sys, time; "
+    "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+    "time.sleep(60)"
+)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows I/O and memory priority")
+def test_a_real_tree_is_raised_child_by_child() -> None:
+    """Over the real OS: a parent and the child it had already started, both at
+    a task's levels, read back Normal after one tree raise."""
+    import psutil
+
+    parent = subprocess.Popen([sys.executable, "-c", _TREE_CHILD])
+    proc = psutil.Process(parent.pid)
+    try:
+        deadline = time.monotonic() + 30
+        while not proc.children(recursive=True) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        tree = [proc, *proc.children(recursive=True)]
+        assert len(tree) >= 2
+        for member in tree:
+            _lower(member.pid, io=1, memory=2)
+        desktop_launch.raise_inherited_priority(parent.pid, tree=True)
+        for member in tree:
+            assert int(member.ionice()) == 2, member.pid
+            assert desktop_launch._raise_memory_priority(member.pid, 5) is None
+    finally:
+        for member in proc.children(recursive=True):
+            member.kill()
+        parent.kill()
+        parent.wait(timeout=10)
 
 
 def test_the_backend_raises_itself_before_it_launches_or_adopts_a_browser() -> None:
