@@ -127,15 +127,28 @@ Its latent shape: when the list holds only non-page targets (``background_page``
 startup) ``main_tab`` does not raise, it silently returns a NON-page target as
 the instance's tab. ``first_page()`` re-reads the list with nodriver's own
 ``update_targets()`` until a ``page`` target exists, then answers ``main_tab``;
-it polls at ``POLL_SECONDS`` through the same ``_now``/``_sleep`` seam, shares
-``CONNECT_PATIENCE_SECONDS`` (the endpoint answering and the first page are the
-same "Chrome is still coming up", so one ceiling, no second constant and no knob;
-it starts counting when the launch returns, i.e. when the endpoint has just
-answered) and ends at once if the launched process has exited. An ATTACHED
-browser (no ``_process`` — ``_launched_process``'s rule) is already running and
-gets ``main_tab`` exactly as before.
+it polls at ``POLL_SECONDS`` through the same ``_now``/``_sleep`` seam and ends at
+once if the launched Chrome has exited. **It is a SECOND, sequential wait, not a
+share of the first**: its ``CONNECT_PATIENCE_SECONDS`` starts when the launch
+returns, i.e. after the endpoint wait has spent whatever it spent, so one slow
+attempt can wait up to twice the ceiling. The two are the same "Chrome is still
+coming up" and so use the one constant — no second constant, no knob. It is also
+bounded by ``spawn_budget``'s ``POST_LAUNCH_BUDGET_SECONDS`` phase, because
+nodriver's ``update_targets`` carries no deadline of its own and a wedged
+websocket would otherwise park the spawn for ever (F-969's whole subject).
 
-A leaf: ``nodriver`` and stdlib only. ``install()`` is called from
+Who is waited for is decided by the CALLER, not by ``_process``: ``first_page``
+is for a launch of ours and ``spawn_browser`` is its one caller. That includes
+the F-810 DELEGATED headed launch, which ``cdp_attach`` connects to (so nodriver
+leaves ``_process`` ``None`` and only ``_process_pid`` is stamped) but which is
+every bit as fresh a Chrome — its liveness is ``process_exit.browser_is_alive``,
+the one rule for "is the process behind this browser still running", read off
+``_process`` or the pid. ``browser_reattach``'s adoption of a browser a dead
+backend left running is an ATTACH to an already-open Chrome, reads ``main_tab``
+itself and names its own ``IndexError``; it never calls this.
+
+A leaf: ``nodriver``, stdlib, ``process_exit`` and ``spawn_budget`` (both leaves of
+their own). ``install()`` is called from
 ``browser_manager._launch_browser``, the one function in the tree that launches
 a browser, on ``session_hygiene.install()``'s precedent of installing at the
 site that needs it rather than at import time — and it is idempotent anyway.
@@ -152,6 +165,8 @@ from typing import NamedTuple, Protocol
 from nodriver.core.browser import Browser, HTTPApi
 from nodriver.core.tab import Tab
 from nodriver.core.util import get_registered_instances
+
+from stealth_chrome_devtools_mcp.embedded import process_exit, spawn_budget
 
 __all__ = [
     "CONNECT_PATIENCE_SECONDS",
@@ -286,23 +301,21 @@ def install() -> None:
     HTTPApi.get = _patient(HTTPApi.get)
 
 
+@spawn_budget.phase("first-page wait", "POST_LAUNCH_BUDGET_SECONDS")
 async def first_page(browser: Browser) -> Tab:
-    """The tab of a Chrome we launched, once it has opened its first page.
+    """The tab of a Chrome WE launched, once it has opened its first page.
 
     ``Browser.start`` has read the target list once by now, and a Chrome that is
     still restoring a large profile has not created a page target yet. Ask again
     (nodriver's own ``update_targets``) until one exists, bounded by
     ``CONNECT_PATIENCE_SECONDS``; a launcher that has exited ends it at once.
     """
-    process = getattr(browser, "_process", None)
-    if process is None:
-        return browser.main_tab
     deadline = _now() + CONNECT_PATIENCE_SECONDS
     while not any(target.type_ == "page" for target in browser.targets):
-        if process.returncode is not None:
+        if not process_exit.browser_is_alive(browser):
             raise NoFirstPageError(
                 "Chrome answered on its DevTools endpoint but exited "
-                f"(code {process.returncode}) before opening a page"
+                "before opening a page"
             )
         if _now() >= deadline:
             raise NoFirstPageError(
