@@ -10,7 +10,8 @@ Chrome it launches inherits them in turn. F-932's `NORMAL_PRIORITY_CLASS` only t
 111 s, against 0.54 s for the same launch at Normal. Every `spawn_browser` attempt, on the master profile and on
 clones alike, missed the 30 s connect ceiling and failed with `Failed to connect to browser`. The backend now raises
 its own I/O and memory priority to Normal in `app_lifespan`, before anything can launch or adopt a browser, and a
-delegated headed Chrome is raised by pid as soon as that pid is known. The raise only ever goes up and never fails a
+delegated headed Chrome is raised as soon as its pid is known, together with the child processes it has already
+started (crashpad, the GPU process and the network service exist within 0.15 s and inherited the Low levels). The raise only ever goes up and never fails a
 backend or a spawn.
 
 ### `networkidle` no longer spends the whole navigation budget on its fixed sleep (F-1002)
