@@ -12,7 +12,7 @@ with nothing around them.
 What is pinned, with a double that NEVER answers rather than one that raises
 (a raising double is the failure the product already handled):
 
-* each of the three phases is bounded, by a named module constant, and the
+* each of the spawn phases is bounded, by a named module constant, and the
   ``ToolError`` it raises names the stage and the budget;
 * the failure reaches ``spawn_browser``'s own handler and nothing else: the Chrome
   nodriver launched is reaped by the pid it launched with (``spawn_leak``), a
@@ -272,7 +272,7 @@ async def test_a_phase_that_answers_is_untouched_and_its_own_timeout_passes_thro
         await has_its_own_bound()
 
 
-def test_the_three_spawn_phases_carry_the_bound():
+def test_the_spawn_phases_carry_the_bound():
     """A refactor that drops the decorator from a phase puts the hang back; each
     wrapper keeps the original reachable as ``__wrapped__``."""
     for name in ("_launch_browser", "_apply_post_launch", "_setup_dynamic_hooks"):
