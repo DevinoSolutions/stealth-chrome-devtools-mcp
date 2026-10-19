@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### A backend started by Task Scheduler no longer starves every Chrome it launches (F-1004)
+
+A backend started on the scheduler rung (F-867) inherits the task's I/O priority Low and memory priority 2, and every
+Chrome it launches inherits them in turn. F-932's `NORMAL_PRIORITY_CLASS` only touches the CPU class. Measured on
+2026-10-18 while a chkdsk scan held the disk: a fresh-profile Chrome at those levels answered `/json/version` after
+111 s, against 0.54 s for the same launch at Normal. Every `spawn_browser` attempt, on the master profile and on
+clones alike, missed the 30 s connect ceiling and failed with `Failed to connect to browser`. The backend now raises
+its own I/O and memory priority to Normal in `app_lifespan`, before anything can launch or adopt a browser, and a
+delegated headed Chrome is raised by pid as soon as that pid is known. The raise only ever goes up and never fails a
+backend or a spawn.
+
 ### `networkidle` no longer spends the whole navigation budget on its fixed sleep (F-1002)
 
 `wait_until="networkidle"` is F-787's fixed 2 s sleep after commit, clipped to what is left of the caller's `timeout`. It was clipped to ALL of what was left, so the landing read that follows had no budget: a page that had already committed answered `Navigation to ... timed out after Nms (accepted, committed)` whenever the commit plus the sleep came within one landing read of `timeout` (a `timeout` of 2 s or less could never succeed). The sleep is now at most half of what is left, the rule the `ERR_ABORTED` grace already follows; with a `timeout` comfortably over 4 s it is still the full 2 s, so F-787 is unchanged (at exactly 4 s it is 1.99 s: half of what the commit left). This is also what made `test_networkidle_returns_before_the_transfer_completes` flake on the Windows integration cell (CI runs 38909588568 and 38979395414, the first failing the release gate: its 4 s deadline left it the sleep's 2 s as the only slack, and a Windows runner spends that on one slow operation. The pin now uses a 20 s deadline of its own (the route never completes, so a success inside any deadline is what shows `networkidle` did not wait for the body), and a hermetic node pins the clip with the same `(accepted, committed)` signature.
