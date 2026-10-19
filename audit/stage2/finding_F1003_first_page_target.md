@@ -4,7 +4,7 @@
 was coming up fine). Seen 2026-10-18 on the live backend; tracked as GetItDone T-3758.
 **Files:** `embedded/browser_connect.py` (`first_page`, `NoFirstPageError`), `embedded/browser_manager.py`
 (`spawn_browser`), `NAVMAP.md`, `CHANGELOG.md`.
-Tests: `tests/test_browser_connect.py` (+7), with double fixes in `tests/fakes.py` (`FakeBrowser`, `FakeTab.type_`) and
+Tests: `tests/test_browser_connect.py` (+8), `tests/test_spawn_budget.py` (+1), with double fixes in `tests/fakes.py` (`FakeBrowser`, `FakeTab.type_`) and
 `tests/test_spawn_budget.py` (`LaunchedChrome`).
 **Branch:** `fix/F1003-first-page-target`, from `origin/main` (58387c8).
 
@@ -43,14 +43,20 @@ this spawn attempt is called failed". It gains ONE function, `first_page(browser
 * re-reads the targets with nodriver's own `await browser.update_targets()` until a target with `type_ == "page"`
   exists, then returns `browser.main_tab`;
 * polls at the module's `POLL_SECONDS` through its `_now`/`_sleep` seam;
-* is bounded by the module's `CONNECT_PATIENCE_SECONDS`, counted from when the launch returns (the endpoint has just
-  answered). No second constant and no `STEALTH_MCP_*` knob: the endpoint answering and the first page are the same
-  "Chrome is still coming up", so one ceiling;
-* gives up at once if the launched process has exited (`browser._process.returncode is not None`, the rule the
-  endpoint wait already uses), raising `NoFirstPageError` that names the milestone ("Chrome answered on its DevTools
-  endpoint but opened no page within 30 s" / "... but exited (code N) before opening a page");
-* for an ATTACHED browser (no `_process`, the `cdp_attach` door) is just `browser.main_tab`, exactly as before, so
-  `browser_reattach`'s own `IndexError` handling is untouched.
+* waits for up to the module's `CONNECT_PATIENCE_SECONDS`, counted from when the launch returns (the endpoint has just
+  answered). That is a SECOND, sequential wait after the endpoint wait, so one slow attempt can wait up to twice the
+  ceiling; the two are the same "Chrome is still coming up", so no second constant and no `STEALTH_MCP_*` knob;
+* is decorated with `spawn_budget.phase("first-page wait", "POST_LAUNCH_BUDGET_SECONDS")` (60 s, above the 30 s
+  ceiling), because nodriver's `update_targets` has no deadline and a wedged websocket would otherwise park the spawn
+  (F-969). The review of this PR found the unbounded first draft;
+* gives up at once if the launched Chrome is gone, by `process_exit.browser_is_alive` (the repo's one rule: `_process`
+  if there is one, else the recorded pid), raising `NoFirstPageError` that names the milestone ("Chrome answered on
+  its DevTools endpoint but opened no page within 30 s" / "... but exited before opening a page");
+* is decided by its CALLER, not by `_process`: the first draft skipped any browser with `_process is None` as
+  "attached", and the review showed that is wrong for the F-810 delegated headed launch, which `cdp_attach` connects to
+  (so nodriver leaves `_process` None and `_process_pid` is stamped) but which is a fresh Chrome of ours with the same
+  race. `browser_reattach`'s adoption of an already-open Chrome is the real attach; it reads `main_tab` itself, names
+  its own `IndexError`, and never calls `first_page`.
 
 `spawn_browser` calls it in place of the bare `main_tab`. `NoFirstPageError` is a plain `Exception` subclass: it is a
 spawn-ATTEMPT failure that the `_SPAWN_ATTEMPTS` loop retries, like nodriver's own "Failed to connect to browser",
@@ -67,17 +73,18 @@ relaunch or heal path reads it after a launch; `_replace_main_tab` opens its own
   `main_tab` raises `IndexError`, `first_page` returns the page at ~3 s); only `background_page`/`service_worker` at
   first (the start-time `main_tab` IS the background page, `first_page` returns the page); never a page (raises
   `NoFirstPageError` at the 30 s ceiling); the launcher exits mid-wait (raises within two polls); the launcher had
-  already exited (no polling at all); an attached browser (no waiting, no `update_targets`, the old `IndexError` on an
-  empty list); and a source pin that `spawn_browser` calls `first_page` and no longer reads `.main_tab`.
+  already exited (no polling at all); a delegated launch with no `_process` (waited for, liveness by pid); an `update_targets` that never answers (ends in
+  the named spawn-budget stage); and, through the real `spawn_browser`, a Chrome that opens no page (the held
+  `Browser` is stopped by the one teardown, nothing published); and a source pin that `spawn_browser` calls `first_page` and no longer reads `.main_tab`.
 * RED: the new nodes were run against the pre-fix behaviour by runtime rebinding in a `git archive` export of
-  `origin/main` (58387c8), binding `browser_connect.first_page` to `return browser.main_tab`: 6 of 7 failed and the
-  attach node passed, as it must (that door is unchanged). Nothing was mutated in the worktree.
+  `origin/main` (58387c8), binding `browser_connect.first_page` to `return browser.main_tab`: all 9 new nodes (8 in `test_browser_connect.py`, 1 in `test_spawn_budget.py`) failed and the other 25
+  nodes of those two files passed. Nothing was mutated in the worktree.
 * Three test doubles modelled a launched Chrome with a `main_tab` but no page target (`FakeBrowser`, `LaunchedChrome`,
   and `FakeTab` had no `type_`); they now carry the page the real `Browser` would, which is what lets the existing
   spawn-wiring and spawn-budget nodes keep exercising `spawn_browser`.
 
 ## 5. Residuals
 
-`first_page` is not under a `spawn_budget.phase`; its own 30 s ceiling is the bound, and a `update_targets()` that
-never answers (a wedged websocket) would be bounded only by the tool's outer cancel, as the preceding `Browser.start`
-read already is.
+A Chrome that opens its page only after `CONNECT_PATIENCE_SECONDS` still fails the attempt (by name) and is retried by
+`_SPAWN_ATTEMPTS`; a profile that slow is outside anything measured. The worst case per attempt is the endpoint wait
+plus this one.

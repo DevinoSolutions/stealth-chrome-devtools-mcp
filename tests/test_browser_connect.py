@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import sys
 import urllib.error
 
@@ -514,32 +515,52 @@ async def test_a_launcher_that_exited_before_the_page_is_not_polled(
     assert clock.now() == before
 
 
-async def test_an_attached_browser_is_not_waited_for(clock, targets, launcher):
-    """No ``_process`` is the ``connect_existing`` door (``cdp_attach``): its
-    Chrome is already running, so ``main_tab`` is read exactly as it always was
-    — an empty list still raises the ``IndexError`` ``browser_reattach`` names,
-    and nothing sleeps or re-reads the targets."""
+async def test_a_delegated_launch_with_no_process_handle_is_waited_for_too(
+    clock, targets, launcher
+):
+    """The F-810 headed launch is connected to through ``cdp_attach``, so nodriver
+    leaves ``_process`` None and only ``_process_pid`` is stamped — and it is a
+    Chrome of ours that is just as fresh. What decides who is waited for is the
+    CALLER (``spawn_browser``), not ``_process``; liveness is
+    ``process_exit.browser_is_alive``, which reads the pid."""
     _process, config_factory = launcher
-    attached = Browser(config_factory())
-    assert attached._process is None
-    reads: list[str] = []
+    delegated = Browser(config_factory())
+    assert delegated._process is None
+    delegated._process_pid = os.getpid()
+    page = _target("page", 1)
 
-    async def _spy(self):
-        reads.append("update_targets")
+    async def _opens_a_page_at_two_seconds(self):
+        if clock.now() >= 2.0:
+            self.targets.append(FakeConnection("ws://x", target=page))
 
-    attached.update_targets = _spy.__get__(attached)
+    delegated.update_targets = _opens_a_page_at_two_seconds.__get__(delegated)
 
-    with pytest.raises(IndexError):
-        await browser_connect.first_page(attached)
+    tab = await browser_connect.first_page(delegated)
 
-    attached.targets.append(
-        FakeConnection("ws://x", target=_target("background_page", 1))
-    )
-    tab = await browser_connect.first_page(attached)
+    assert tab.target.target_id == page.target_id
+    assert clock.now() == pytest.approx(2.0, abs=browser_connect.POLL_SECONDS)
 
-    assert tab is attached.main_tab
-    assert clock.now() == 0.0
-    assert reads == []
+
+async def test_an_update_targets_that_never_answers_is_bounded_by_the_phase(
+    monkeypatch, clock, targets, launcher
+):
+    """nodriver gives ``update_targets`` no deadline, so a wedged websocket must
+    end in the spawn budget's named stage rather than parking the spawn."""
+    from stealth_chrome_devtools_mcp.embedded import spawn_budget
+    from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+    monkeypatch.setattr(spawn_budget, "POST_LAUNCH_BUDGET_SECONDS", 0.2)
+    targets.append((0.0, []))
+    _process, config_factory = launcher
+    browser = await _start(config_factory)
+
+    async def _wedged(self):
+        await asyncio.Event().wait()
+
+    browser.update_targets = _wedged.__get__(browser)
+
+    with pytest.raises(ToolError, match="first-page wait stage"):
+        await asyncio.wait_for(browser_connect.first_page(browser), 30)
 
 
 async def test_spawn_browser_takes_its_tab_from_first_page_not_main_tab():

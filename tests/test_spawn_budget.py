@@ -43,6 +43,7 @@ import pytest
 import e2e_helpers
 from fakes import FakeChrome, LaunchedBrowser, ProcessTable, nodriver_registry
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_connect,
     clone_storage,
     google_rotation_guard,
     spawn_budget,
@@ -276,6 +277,7 @@ def test_the_three_spawn_phases_carry_the_bound():
     wrapper keeps the original reachable as ``__wrapped__``."""
     for name in ("_launch_browser", "_apply_post_launch", "_setup_dynamic_hooks"):
         assert hasattr(getattr(BrowserManager, name), "__wrapped__"), name
+    assert hasattr(browser_connect.first_page, "__wrapped__"), "first_page (F-1003)"
 
 
 # ---------------------------------------------------------------------------
@@ -573,3 +575,39 @@ async def test_a_phase_that_swallows_every_cancel_still_ends_in_a_named_error(
     with pytest.raises(ToolError, match="launch stage"):
         caller.result()
     assert seen["cancels"] == 3
+
+
+async def test_a_chrome_that_opens_no_page_is_stopped_and_forgotten_by_the_one_teardown(
+    monkeypatch, table, registry, pid_file, tmp_path
+):
+    """F-1003 through the real orchestrator: ``first_page`` raising is a spawn
+    failure like any other, so the held ``Browser`` is stopped by the one handler
+    and nothing is published — no second teardown path."""
+    monkeypatch.setattr(browser_connect, "CONNECT_PATIENCE_SECONDS", 0.2)
+    monkeypatch.setattr(browser_connect, "POLL_SECONDS", 0.01)
+    options = clone_options(tmp_path)
+    browsers = stalling_start(
+        monkeypatch, table, registry, [6004], tab=LiveTab(), stall=False
+    )
+
+    async def _no_page_yet() -> None:
+        return None
+
+    real_start = nodriver.start
+
+    async def start_with_no_page(config=None, **kwargs):
+        browser = await real_start(config=config, **kwargs)
+        browser.targets = []
+        browser.update_targets = _no_page_yet
+        return browser
+
+    monkeypatch.setattr(nodriver, "start", start_with_no_page)
+    manager = BrowserManager()
+
+    with pytest.raises(Exception, match=r"opened no page within 0.2 s"):
+        await spawn(manager, options)
+
+    # A held Browser is stopped (its own ``stop`` ends the real Chrome; the
+    # double only counts it).
+    assert [held.stops for held in browsers] == [1], "the held Browser was not stopped"
+    assert manager._instances == {}
