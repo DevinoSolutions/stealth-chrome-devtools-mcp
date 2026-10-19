@@ -30,10 +30,11 @@ replaces, so both numbers sit several times above the slowest spawn ever
 measured (§3 of the finding gives the census). They are ceilings and not waits:
 a Chrome that answers in 2 s costs 2 s.
 
-**It is a decorator on the three phases** (``_launch_browser``,
-``_apply_post_launch``, ``_setup_dynamic_hooks``) rather than a wrapper at their
-call site, so the bound travels with the method: ``spawn_browser`` and a heal's
-relaunch (F-963) reach the same three and neither can forget it. The budget is
+**It is a decorator on the four phases** (``_launch_browser``,
+``browser_connect.first_page`` (F-1003), ``_apply_post_launch``,
+``_setup_dynamic_hooks``) rather than a wrapper at their call site, so the bound
+travels with the function: ``spawn_browser`` and a heal's relaunch (F-963) reach
+the same four and neither can forget it. The budget is
 named by its constant and read when the phase RUNS, so a test patches the one
 module attribute.
 

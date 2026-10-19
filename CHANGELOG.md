@@ -32,8 +32,8 @@ restore-on-startup) Chrome answers that endpoint before it has created its first
 `_SPAWN_ATTEMPTS` relaunched from cold: a live `spawn_browser` on a copy of a 275 MB profile reported two such retries
 and succeeded on the third attempt. The same read could also hand back a non-page target (`background_page`,
 `service_worker`) as the instance's tab when no page existed yet. `browser_connect.first_page` now re-reads the targets
-until a page exists, for up to `CONNECT_PATIENCE_SECONDS` (a second wait after the endpoint wait, inside the
-post-launch spawn budget), and ends at once if the launched Chrome has exited. The F-810 delegated launch gets the
+until a page exists, for up to `CONNECT_PATIENCE_SECONDS` (a second wait after the endpoint wait, as its own
+spawn phase sized by the post-launch budget), and ends at once if the launched Chrome has exited. The F-810 delegated launch gets the
 same wait; the re-attach of an already-open Chrome (`browser_reattach`) is unchanged.
 
 ### `networkidle` no longer spends the whole navigation budget on its fixed sleep (F-1002)
