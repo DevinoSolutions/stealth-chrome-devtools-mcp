@@ -150,6 +150,10 @@ async def app_lifespan(server):
             "server", "startup", "Starting Browser Automation MCP Server..."
         )
         rt.process_cleanup.activate()
+        # F-1004: before any browser is launched, because every Chrome inherits
+        # this process's I/O and memory priority, and a backend started by Task
+        # Scheduler has Low ones that stall a Chrome's startup under disk load.
+        rt.desktop_launch.raise_inherited_priority()
         # F-889 (b): be our own liveness witness, so a proxy that is not being
         # SCHEDULED cannot mistake its own timed-out probe for our death. Here
         # rather than in the ``__main__`` block because this is the first code

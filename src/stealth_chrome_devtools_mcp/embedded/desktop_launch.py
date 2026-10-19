@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import subprocess
 import sys
 import time
@@ -104,6 +105,18 @@ TOKEN_CHARS = 12
 # launched child asks for Normal itself; the short-lived launcher does not.
 TASK_CHILD_PRIORITY_CLASS = 0x00000020  # NORMAL_PRIORITY_CLASS
 TASK_CHILD_PRIORITY_NAME = "Normal"
+# The I/O and memory priority the same child must hold, beside the class and for
+# the same reason (F-1004). Both are inherited at process creation and the class
+# flag touches neither. Measured 2026-10-18 on Windows 11 10.0.26300: the
+# scheduler-rung backend read I/O priority Low (1) and memory priority 2, and so
+# did every Chrome it launched. While a chkdsk scan held the disk, a fresh-profile
+# Chrome at those two levels answered ``/json/version`` after 111 s; the same
+# launch at Normal, a minute later, after 0.54 s. Every spawn attempt missed the
+# 30 s connect ceiling, the master profile included. Only ever RAISED to these.
+TASK_CHILD_IO_PRIORITY = 2  # psutil.IOPRIO_NORMAL
+TASK_CHILD_MEMORY_PRIORITY = 5  # MEMORY_PRIORITY_NORMAL
+_PROCESS_MEMORY_PRIORITY = 0  # PROCESS_INFORMATION_CLASS.ProcessMemoryPriority
+_PROCESS_SET_AND_QUERY = 0x0200 | 0x1000  # SET_INFORMATION | QUERY_LIMITED_INFORMATION
 # How far apart two readings of one process's start time may be and still be
 # the same process. psutil reports it deterministically, so this only absorbs
 # float representation — it is NOT slack for "probably the same pid".
@@ -133,6 +146,88 @@ def _active_console_session_id() -> int | None:
             "Console-session probe raised; treating delegation as unavailable",
         )
         return None
+
+
+def _raise_memory_priority(pid: int, floor: int) -> tuple[int, int] | None:
+    """Raise *pid*'s memory priority to *floor* if it is below it.
+
+    Returns ``(before, after)`` when it raised, ``None`` when it was already at
+    or above *floor* or the OS refused. psutil has no memory-priority call, so
+    this is the one ctypes reach; ``argtypes``/``restype`` are spelled out
+    because a defaulted ``int`` return truncates a 64-bit HANDLE.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    for name in ("GetProcessInformation", "SetProcessInformation"):
+        call = getattr(kernel32, name)
+        call.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        call.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(_PROCESS_SET_AND_QUERY, False, pid)
+    if not handle:
+        return None
+    try:
+        info = wintypes.ULONG(0)
+        size = ctypes.sizeof(info)
+        ref = ctypes.byref(info)
+        if not kernel32.GetProcessInformation(
+            handle, _PROCESS_MEMORY_PRIORITY, ref, size
+        ):
+            return None
+        before = int(info.value)
+        if before >= floor:
+            return None
+        info.value = floor
+        if not kernel32.SetProcessInformation(
+            handle, _PROCESS_MEMORY_PRIORITY, ref, size
+        ):
+            return None
+        return before, floor
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def raise_inherited_priority(pid: int | None = None) -> dict[str, tuple[int, int]]:
+    """Raise *pid*'s (default: this process's) I/O and memory priority to the
+    task-child levels when something started it lower (F-1004).
+
+    Both are inherited, so a backend started by Task Scheduler hands its Low/2 to
+    every Chrome it launches: raising the backend once, at startup, fixes every
+    later launch. A delegated Chrome is started by a task of its own and is raised
+    by pid as soon as the pid is known. Returns what changed, as
+    ``{"io": (before, after), "memory": (before, after)}``; empty when nothing
+    was below, off Windows, or when the OS refused. Best-effort and never raises:
+    a priority is never a reason for a backend or a spawn to fail.
+    """
+    if sys.platform != "win32":
+        return {}
+    changed: dict[str, tuple[int, int]] = {}
+    try:
+        proc = psutil.Process(pid)
+        io_before = int(proc.ionice())
+        if io_before < TASK_CHILD_IO_PRIORITY:
+            proc.ionice(TASK_CHILD_IO_PRIORITY)
+            changed["io"] = (io_before, TASK_CHILD_IO_PRIORITY)
+        memory = _raise_memory_priority(proc.pid, TASK_CHILD_MEMORY_PRIORITY)
+        if memory is not None:
+            changed["memory"] = memory
+    except (psutil.Error, OSError) as exc:
+        debug_logger.log_warning(
+            "desktop_launch",
+            "raise_inherited_priority",
+            f"could not raise the priority of pid {pid or os.getpid()}: {exc!r}",
+        )
+    if changed:
+        debug_logger.log_info(
+            "desktop_launch",
+            "raise_inherited_priority",
+            f"pid {pid or os.getpid()} raised to Normal (before, after): {changed}",
+        )
+    return changed
 
 
 def available() -> bool:
@@ -483,6 +578,10 @@ async def _run_task(
                     f"opened DevTools port {port} — it most likely handed off to "
                     "an already-running Chrome instead of starting its own."
                 )
+            if delegated.pid is None:
+                # F-1004: started by its own task, so at Low I/O and memory
+                # priority; the launcher script can only set the class.
+                await asyncio.to_thread(raise_inherited_priority, pid)
             delegated.pid, delegated.create_time = pid, create_time
             if await asyncio.to_thread(_devtools_ready, port):
                 return pid

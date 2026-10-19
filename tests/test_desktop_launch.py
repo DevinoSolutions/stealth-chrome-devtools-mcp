@@ -294,6 +294,14 @@ def delegation(monkeypatch, tmp_path):
 
     started: list[object] = []
     killed: list[tuple[int, float | None]] = []
+    raised: list[int | None] = []
+    # F-1004: the pid is a fake number, so the priority raise must never reach
+    # the OS — a real process could own that pid on the machine running the suite.
+    monkeypatch.setattr(
+        desktop_launch,
+        "raise_inherited_priority",
+        lambda pid=None: raised.append(pid) or {},
+    )
 
     async def fake_start(config):
         started.append(config)
@@ -314,7 +322,11 @@ def delegation(monkeypatch, tmp_path):
         return schtasks
 
     return SimpleNamespace(
-        install=_install, started=started, killed=killed, state_dir=tmp_path
+        install=_install,
+        started=started,
+        killed=killed,
+        raised=raised,
+        state_dir=tmp_path,
     )
 
 
@@ -332,6 +344,17 @@ async def test_launch_and_attach_returns_the_launched_pid_and_attaches(delegatio
     assert len(delegation.started) == 1
     config = delegation.started[0]
     assert (config.host, config.port) == ("127.0.0.1", 9333)
+
+
+async def test_the_delegated_chrome_is_raised_once_its_pid_is_known(delegation):
+    """F-1004: a task starts its child at Low I/O and memory priority and the
+    launcher script can only set the class, so the backend raises the pid itself,
+    exactly once, and before it is handed back for the attach."""
+    delegation.install(FakeSchtasks(pid=4242))
+    await desktop_launch.launch_and_attach(
+        "C:/Program Files/Google/Chrome/chrome.exe", [], "C:/profiles/one"
+    )
+    assert delegation.raised == [4242]
 
 
 async def test_the_launcher_hands_chrome_the_args_the_config_would_have(delegation):
