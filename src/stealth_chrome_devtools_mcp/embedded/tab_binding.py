@@ -44,6 +44,9 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     instance_not_found,
 )
 
+#: ``annotationlib.Format.VALUE`` (3.14+); the number, so no import on 3.11-3.13.
+_VALUE_FORMAT = 1
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import FunctionType
@@ -303,7 +306,16 @@ def scoped(func: FunctionType) -> Callable[..., object]:
         # PEP 649: assigning ``__annotations__`` leaves ``__annotate__`` None, and
         # ``functools.wraps`` copies ``__annotate__`` -- so every layer registration
         # puts over this wrapper would read as having no annotations at all.
-        wrapper.__annotate__ = lambda _format: dict(annotations)
+
+        def annotate(annotation_format: int) -> dict[str, object]:
+            # Only VALUE: any other format raises, so annotationlib builds
+            # STRING/FORWARDREF from ``__annotations__`` itself (a closure
+            # answering VALUE_WITH_FAKE_GLOBALS breaks STRING with a ValueError).
+            if annotation_format != _VALUE_FORMAT:
+                raise NotImplementedError(annotation_format)
+            return dict(annotations)
+
+        wrapper.__annotate__ = annotate
     wrapper.__doc__ = _documented(func.__doc__ or "")
     return wrapper
 
