@@ -183,6 +183,18 @@ class AnsweringTab(StalledTab):
         await asyncio.sleep(HEALTHY_LATENCY)
 
 
+class _OwnProcess:
+    """A browser's DevTools connection that says, truthfully, it is process *pid*
+    (F-1009: ``browser_connect.start`` asks, and a real Chrome always answers)."""
+
+    def __init__(self, pid) -> None:
+        self._pid = pid
+
+    async def send(self, command):
+        next(command)
+        return [nodriver.cdp.system_info.ProcessInfo("browser", self._pid, 0.0)]
+
+
 class LaunchedChrome:
     """A launched nodriver ``Browser`` as ``spawn_browser`` holds it: the live
     process, the caller's ``config`` verbatim and a tab. ``stop`` is counted."""
@@ -191,6 +203,7 @@ class LaunchedChrome:
         self.config = config
         self._process = SimpleNamespace(pid=pid, returncode=None)
         self._process_pid = pid
+        self.connection = _OwnProcess(pid)
         self.main_tab = tab
         # A launched Chrome with a tab has opened a page (F-1003 reads targets).
         self.targets = [] if tab is None else [tab]

@@ -147,22 +147,15 @@ the one rule for "is the process behind this browser still running", read off
 backend left running is an ATTACH to an already-open Chrome, reads ``main_tab``
 itself and names its own ``IndexError``; it never calls this.
 
-**F-1009 — and the endpoint that answers is not necessarily OURS.** nodriver
-chooses the port by binding and releasing a socket, then launches Chrome on it; a
-sibling that takes the port in the gap answers ``/json/version`` in place of the
-Chrome we launched, and the spawn registered the sibling's browser (see
-``devtools_port``). :class:`LaunchConfig` is the ``uc.Config`` of a launch of
-ours, and the patience above, once the launch is one of ours, asks nothing of
-the port until Chrome has written ``DevToolsActivePort`` in OUR profile naming
-it (a Chrome that lost the race writes nothing), and refuses an answer whose
-websocket is not the one the file names. The argv keeps the concrete port:
-``--remote-debugging-port=0`` was tried and real Chrome then reports
-``navigator.webdriver == true``. nodriver swallows every exception out of that
-fetch, so the named reason is kept on the config and :func:`start` raises it in
-place of nodriver's "Failed to connect to browser".
+**F-1009 — an endpoint answering is not the endpoint being OURS.** nodriver picks
+the port by bind-and-release and Chrome binds it later; a sibling that takes it in
+the gap answers ``/json/version`` and the spawn would register ITS browser.
+:func:`start` is the one launch: ``nodriver.start``, then ``devtools_port.
+confirm_ours`` asks the connected browser which process it is, before anything is
+registered.
 
-A leaf: ``nodriver``, stdlib, ``process_exit``, ``spawn_budget`` and
-``devtools_port`` (leaves of their own). ``install()`` is called from
+A leaf: ``nodriver``, stdlib, ``devtools_port``, ``process_exit`` and
+``spawn_budget`` (all leaves of their own). ``install()`` is called from
 ``browser_manager._launch_browser``, the one function in the tree that launches
 a browser, on ``session_hygiene.install()``'s precedent of installing at the
 site that needs it rather than at import time — and it is idempotent anyway.
@@ -178,7 +171,6 @@ from typing import NamedTuple, Protocol
 
 import nodriver
 from nodriver.core.browser import Browser, HTTPApi
-from nodriver.core.config import Config
 from nodriver.core.tab import Tab
 from nodriver.core.util import get_registered_instances
 
@@ -187,11 +179,9 @@ from stealth_chrome_devtools_mcp.embedded import (
     process_exit,
     spawn_budget,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 __all__ = [
     "CONNECT_PATIENCE_SECONDS",
-    "LaunchConfig",
     "NoFirstPageError",
     "first_page",
     "install",
@@ -243,17 +233,6 @@ class NoFirstPageError(Exception):
     """A Chrome we launched answered its endpoint but opened no page (F-1003)."""
 
 
-class LaunchConfig(Config):
-    """The ``uc.Config`` of a launch of OURS, marking it as one whose endpoint
-    must be proven ours.
-
-    ``failure`` is the named reason the connect gave up, left for :func:`start`
-    because nodriver discards the exceptions its fetch raises (F-1009).
-    """
-
-    failure: ToolError | None = None
-
-
 class _Launched(Protocol):
     """The one thing this module asks of nodriver's process handle."""
 
@@ -269,8 +248,6 @@ class _Wait(NamedTuple):
 
     process: _Launched | None
     deadline: float
-    #: Set when the launch is ours (a :class:`LaunchConfig`): the port is Chrome's.
-    config: LaunchConfig | None = None
 
 
 def _now() -> float:
@@ -282,94 +259,22 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-def _launched(api: HTTPApi) -> Browser | None:
-    """The ``Browser`` whose ``Browser.start`` built this endpoint, or ``None``.
+def _launched_process(api: HTTPApi) -> _Launched | None:
+    """The process WE launched behind this endpoint, or ``None``.
 
     ``Browser.start`` sets ``_process`` before it builds the ``HTTPApi`` and
     registers itself before it starts polling, so a launch is always findable
-    from here. A ``None`` ``_process`` on what is found means the browser was
-    ATTACHED to rather than launched — ``connect_existing``, i.e. every caller of
-    ``cdp_attach`` — and that is the whole reason this lookup exists rather than
-    a bare deadline.
+    from here. ``None`` means the browser was ATTACHED to rather than launched —
+    ``connect_existing``, i.e. every caller of ``cdp_attach`` — and that is the
+    whole reason this lookup exists rather than a bare deadline.
     """
     for browser in tuple(get_registered_instances()):
         if getattr(browser, "_http", None) is api:
-            return browser
+            return getattr(browser, "_process", None)
     return None
 
 
-def _standing_wait(api: HTTPApi) -> _Wait:
-    browser = _launched(api)
-    config = getattr(browser, "config", None)
-    return _Wait(
-        getattr(browser, "_process", None),
-        _now() + CONNECT_PATIENCE_SECONDS,
-        config if isinstance(config, LaunchConfig) else None,
-    )
-
-
 _Get = Callable[[HTTPApi, str], Awaitable[object]]
-
-
-async def _own_endpoint_get(
-    original: _Get, api: HTTPApi, endpoint: str, wait: _Wait, config: LaunchConfig
-) -> object:
-    """``/json/version`` of the Chrome THIS launch started (F-1009).
-
-    Nothing is asked of the port until that Chrome has written it to
-    ``DevToolsActivePort`` in its own profile, and the answer must carry the
-    websocket the file names. Every give-up leaves its reason on *config* before
-    it raises, because ``Browser.start`` swallows what this raises and says only
-    "Failed".
-    """
-    profile = config.user_data_dir
-    while True:
-        found = devtools_port.own_endpoint(profile, api.port)
-        if found is not None:
-            try:
-                answer = await original(api, endpoint)
-            except _ANSWERED:
-                raise
-            except _NOT_OPEN_YET:
-                pass
-            else:
-                reported = (
-                    answer.get("webSocketDebuggerUrl")
-                    if isinstance(answer, dict)
-                    else None
-                )
-                try:
-                    devtools_port.verify(str(reported or ""), found)
-                except ToolError as refusal:
-                    config.failure = refusal
-                    raise
-                return answer
-        if wait.process.returncode is not None:
-            config.failure = devtools_port.exited(profile)
-            raise config.failure
-        if _now() >= wait.deadline:
-            if found is None:
-                config.failure = devtools_port.missing(
-                    profile, api.port, CONNECT_PATIENCE_SECONDS
-                )
-            raise config.failure or TimeoutError(endpoint)
-        await _sleep(POLL_SECONDS)
-
-
-async def start(config: LaunchConfig) -> Browser:
-    """``nodriver.start`` for a launch of ours: no stale port file, a named failure.
-
-    The only caller is ``browser_manager._launch_browser``. A leftover
-    ``DevToolsActivePort`` is removed first (it is some earlier Chrome's), and a
-    failed connect raises the reason :func:`_own_endpoint_get` recorded.
-    """
-    devtools_port.clear_stale(config.user_data_dir)
-    try:
-        return await nodriver.start(config=config)
-    except Exception as error:
-        if config.failure is not None:
-            raise config.failure from error
-        raise
 
 
 def _patient(original: _Get) -> _Get:
@@ -379,12 +284,10 @@ def _patient(original: _Get) -> _Get:
             return await original(self, endpoint)
         wait: _Wait | None = getattr(self, _WAIT, None)
         if wait is None:
-            wait = _standing_wait(self)
+            wait = _Wait(_launched_process(self), _now() + CONNECT_PATIENCE_SECONDS)
             setattr(self, _WAIT, wait)
         if wait.process is None:
             return await original(self, endpoint)
-        if wait.config is not None:
-            return await _own_endpoint_get(original, self, endpoint, wait, wait.config)
         while True:
             try:
                 return await original(self, endpoint)
@@ -409,6 +312,17 @@ def install() -> None:
     if installed():
         return
     HTTPApi.get = _patient(HTTPApi.get)
+
+
+async def start(config: nodriver.Config) -> Browser:
+    """Launch Chrome through nodriver and return it only if it is OURS (F-1009).
+
+    The delegated launch (F-810) runs the same ``devtools_port.confirm_ours``
+    on the browser it attaches to, so both launch paths share one proof.
+    """
+    browser = await nodriver.start(config=config)
+    await devtools_port.confirm_ours(browser, getattr(browser, "_process_pid", None))
+    return browser
 
 
 @spawn_budget.phase("first-page wait", "POST_LAUNCH_BUDGET_SECONDS")

@@ -1,6 +1,6 @@
-"""F-1009 — THE one home for "is the DevTools endpoint on this port MY Chrome's":
-reading ``DevToolsActivePort`` in OUR OWN profile and refusing an endpoint that
-is not the one that file names.
+"""F-1009 — THE one home for "is the browser behind this DevTools connection the
+Chrome THIS launch started": the process behind the endpoint is asked who it is,
+and a stranger is refused before anything is built on it.
 
 **The defect.** nodriver picks a port by binding and releasing a socket
 (``util.free_port``) and only then launches Chrome with
@@ -13,151 +13,118 @@ registers the SIBLING's browser as its own. ``close_instance`` on that instance
 kills the sibling: on the shared ``fleet`` or ``default`` session that is the
 owner's logins.
 
-**The fix does not change what Chrome is asked for.** It was first written to
-launch with ``--remote-debugging-port=0`` (no port to steal) and CI measured
-that real Chrome then reports ``navigator.webdriver == true`` on every OS — a
-stealth regression — so the argv keeps the concrete port. What changes is that
-nothing answering on it is trusted until THIS launch's Chrome has written
-``<port>
-<browser websocket path>`` to ``DevToolsActivePort`` in the
-``--user-data-dir`` it was given naming that same port (Chrome writes it only
-after it bound the port, so a Chrome that lost the race writes nothing). That
-directory is ours (``profile_lock`` holds it for the launch), so the file is ours
-— provided it was written by THIS launch, which is why :func:`clear_stale`
-removes any earlier one first and why a file that cannot be removed refuses the
-launch rather than being trusted.
+**What does not work, measured.** Not choosing the port (``=0``): CI's
+offline-stealth gate then reported ``navigator.webdriver == true`` on Linux,
+Windows and macOS, so the argv keeps the concrete port. Trusting
+``DevToolsActivePort`` in our profile: Chrome does not write it for a concrete
+port (the same fact ``cdp_endpoint`` documents — the file was ABSENT on a
+running browser started with ``--remote-debugging-port=9223``), so waiting for it
+failed every real spawn on macOS and Windows.
 
-**Identity is a second, independent check.** What answers on that port must also
-be the browser the file describes: :func:`verify` compares the
-``webSocketDebuggerUrl`` ``/json/version`` reports with the port and the path
-Chrome wrote. A mismatch is a ``ToolError`` that names both, and nothing
-downstream is built on it — no ``Browser`` is handed back, so there is no
-instance for ``close_instance`` to close and the foreign browser's pid is never
-ours to name. A launch that loses the port race is therefore a named, retryable
-failure instead of an attach to a stranger.
+**What does.** The one thing a squatter cannot fake is which process it is.
+:func:`confirm_ours` asks the connected browser ``SystemInfo.getProcessInfo`` —
+read-only, answered by the browser process itself — and requires the pid of its
+``browser`` process to be the pid we launched or one of its descendants (a
+wrapper script that forks the real binary is the descendant case). Anything else
+is a ``ToolError`` naming both pids, the connection is dropped WITHOUT sending
+``Browser.close`` (a websocket close is not a command), and nothing is
+registered, so ``close_instance`` has nothing to close and ``spawn_leak`` kills
+only the pid we launched.
 
-It is also THE one home for the file itself (``PORT_FILE``, :func:`read`): the
-adoption ladder (``cdp_endpoint``) reads it through here.
-
-A leaf: ``browser_pid_registry`` (what a usable port is), ``tool_errors`` and
-stdlib. The launch paths — ``browser_connect`` and ``desktop_launch`` — are its
-consumers.
+A leaf: stdlib, ``psutil`` and ``tool_errors``; ``nodriver`` is imported inside
+the one function that needs it because ``desktop_launch`` imports this module
+and must not pay for a browser driver on the proxy's path (F-867).
 """
 
 from __future__ import annotations
 
-import urllib.parse
-from pathlib import Path
-from typing import NamedTuple
+import asyncio
+import contextlib
+from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
+import psutil
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-__all__ = [
-    "PORT_FILE",
-    "ActivePort",
-    "clear_stale",
-    "exited",
-    "missing",
-    "own_endpoint",
-    "read",
-    "verify",
-]
+if TYPE_CHECKING:
+    from nodriver import Browser
 
-# Chrome writes the port it actually bound here, first line, then the browser
-# websocket path, inside the profile it was launched on.
-PORT_FILE = "DevToolsActivePort"
+__all__ = ["IDENTITY_TIMEOUT_SECONDS", "confirm_ours", "owned_pids"]
+
+#: How long the browser gets to say which process it is. A healthy Chrome answers
+#: in milliseconds; this is a ceiling inside the launch phase's budget, not a wait.
+IDENTITY_TIMEOUT_SECONDS = 10.0
+
+_BROWSER_PROCESS = "browser"
 
 
-class ActivePort(NamedTuple):
-    """What Chrome wrote into ``DevToolsActivePort``: the port it bound and the
-    browser websocket path (``None`` when the second line is missing)."""
+def owned_pids(launched_pid: int) -> set[int]:
+    """*launched_pid* and every process below it: what a launch of ours can be.
 
-    port: int
-    path: str | None
-
-
-def read(profile_dir: str | Path) -> ActivePort | None:
-    """Chrome's own ``DevToolsActivePort`` in *profile_dir*, or None.
-
-    The file survives its writer, so this is only evidence about a browser the
-    caller has other reasons to believe is live; a launch's own wait is
-    :func:`own_endpoint`.
+    A wrapper script that forks the real binary leaves the browser a descendant
+    of the pid we hold. A launcher that has already exited has no descendants to
+    find, so only its own pid is returned.
     """
-    try:
-        text = (Path(profile_dir) / PORT_FILE).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    lines = text.splitlines()
-    port = browser_pid_registry.valid_port(lines[0] if lines else "")
-    if port is None:
-        return None
-    return ActivePort(port, (lines[1].strip() if len(lines) > 1 else "") or None)
+    pids = {launched_pid}
+    with contextlib.suppress(psutil.Error):
+        pids.update(child.pid for child in psutil.Process(launched_pid).children(True))
+    return pids
 
 
-def clear_stale(profile_dir: str | Path | None) -> None:
-    """Remove a ``DevToolsActivePort`` an earlier Chrome left in *profile_dir*.
-
-    The file outlives the browser that wrote it, so before a launch any file
-    there is somebody else's. One that cannot be removed cannot be told from a
-    fresh one, and trusting it is the defect — so it refuses the launch.
-    """
-    if not profile_dir:
-        return
-    path = Path(profile_dir) / PORT_FILE
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as error:
-        if not path.exists():
-            return
-        raise ToolError(
-            f"F-1009: {path} is left over from an earlier Chrome and cannot be "
-            f"removed ({error}), so the port in it could not be told from the "
-            "one this launch opens. Nothing was launched."
-        ) from error
-
-
-def own_endpoint(profile_dir: str | Path | None, port: int) -> ActivePort | None:
-    """What THIS launch's Chrome wrote into *profile_dir* for *port*, or None.
-
-    None while it has not: no file, a half-written one (no path), or one naming a
-    different port than the one this launch asked Chrome for (not this launch's).
-    """
-    if not profile_dir:
-        return None
-    found = read(profile_dir)
-    return found if found and found.path and found.port == port else None
-
-
-def verify(ws_url: str, expected: ActivePort) -> None:
-    """Raise unless *ws_url* (``/json/version``'s ``webSocketDebuggerUrl``) is the
-    browser *expected* describes."""
-    parsed = urllib.parse.urlparse(ws_url)
-    if parsed.port == expected.port and parsed.path == expected.path:
-        return
-    raise ToolError(
-        f"F-1009: 127.0.0.1:{expected.port} answered as {ws_url!r}, which is not "
-        f"the browser this spawn launched ({PORT_FILE} "
-        f"names {expected.path!r}). Another process holds that DevTools "
-        "endpoint; this spawn did not attach to it and did not touch it."
-    )
-
-
-def missing(profile_dir: str | Path | None, port: int, seconds: float) -> ToolError:
-    """The launched Chrome never wrote *port* to its file within *seconds*."""
+def _refusal(browser_pid: int, launched_pid: int) -> ToolError:
     return ToolError(
-        f"F-1009: the launched Chrome did not write {PORT_FILE} naming port "
-        f"{port} in {profile_dir} within {seconds:g} s, so it never opened "
-        "DevTools on the port it was given (another process may have taken it) "
-        "and there is no endpoint of its own to attach to. Nothing that answers "
-        "on that port was attached to."
+        f"F-1009: the browser answering this spawn's DevTools port is process "
+        f"{browser_pid}, not the Chrome this spawn launched (pid {launched_pid}). "
+        "Another process holds that port; this spawn disconnected from it "
+        "without sending it anything that closes it, and did not register it."
     )
 
 
-def exited(profile_dir: str | Path | None) -> ToolError:
-    """The launched Chrome ended before it wrote its port."""
+def _unverified(seconds: float) -> ToolError:
     return ToolError(
-        f"F-1009: the launched Chrome exited before its DevTools "
-        f"endpoint opened ({PORT_FILE} in {profile_dir}) - "
-        "it most likely handed off to a browser already running on that profile."
+        f"F-1009: the browser on this spawn's DevTools port did not say which "
+        f"process it is within {seconds:g} s, so it could not be told apart from "
+        "another process's browser on that port. The connection was dropped "
+        "without closing the browser."
     )
+
+
+async def confirm_ours(browser: Browser, launched_pid: int | None) -> None:
+    """Raise ``ToolError`` unless *browser*'s own process is the one we launched.
+
+    *launched_pid* ``None`` (nodriver left it unset) means nothing to compare
+    against: logged and allowed, as before F-1009. A browser that does not offer
+    the query (a ``ProtocolException``) or reports no ``browser`` process is
+    likewise unverifiable rather than foreign.
+    """
+    if launched_pid is None:
+        debug_logger.log_warning(
+            "devtools_port",
+            "confirm_ours",
+            "no launched pid to compare the DevTools endpoint's process against",
+        )
+        return
+    from nodriver import cdp
+    from nodriver.core.connection import ProtocolException
+
+    try:
+        processes = await asyncio.wait_for(
+            browser.connection.send(cdp.system_info.get_process_info()),
+            IDENTITY_TIMEOUT_SECONDS,
+        )
+    except ProtocolException:
+        debug_logger.log_warning(
+            "devtools_port",
+            "confirm_ours",
+            "the browser does not offer SystemInfo.getProcessInfo; identity unchecked",
+        )
+        return
+    except TimeoutError:
+        await browser.connection.disconnect()
+        raise _unverified(IDENTITY_TIMEOUT_SECONDS) from None
+    browser_pids = [p.id_ for p in processes or () if p.type_ == _BROWSER_PROCESS]
+    if not browser_pids or set(browser_pids) & owned_pids(launched_pid):
+        return
+    await browser.connection.disconnect()
+    raise _refusal(browser_pids[0], launched_pid)

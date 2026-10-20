@@ -209,9 +209,7 @@ async def test_a_real_failed_nodriver_start_is_resolved_to_its_pid(
 
     attempt = spawn_leak.Attempt()
     manager = BrowserManager()
-    # F-1009: a launch of ours names the port file it was still waiting for,
-    # where nodriver alone said "Failed to connect to browser".
-    with pytest.raises(Exception, match="DevToolsActivePort"):
+    with pytest.raises(Exception, match="Failed to connect to browser"):
         await manager._launch_browser(
             BrowserOptions(headless=True, user_data_dir=str(tmp_path / "profile")),
             sys.executable,

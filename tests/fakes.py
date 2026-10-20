@@ -2066,6 +2066,10 @@ class FakeChrome:
         self._check()
         return list(self._cmdline)
 
+    def children(self, recursive=False):
+        # F-1009: ``devtools_port.owned_pids`` asks who is below the launched pid.
+        return []
+
     def create_time(self):
         self._check()
         return self._create_time

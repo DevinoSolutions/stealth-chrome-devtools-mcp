@@ -1,95 +1,99 @@
-"""F-1009 — the pure helpers behind the port-0 launch (``devtools_port``).
-
-The end-to-end pins live in ``test_devtools_port_identity.py`` (over nodriver's
-real ``Browser.start``) and ``test_desktop_launch.py`` (the delegated door); these
-are the contracts the two share, each stated once.
-"""
+"""F-1009 — the contracts of ``devtools_port`` that the launch doors share, each
+stated once. The end-to-end pins live in ``test_devtools_port_identity.py`` (over
+nodriver's real ``Browser.start``) and ``test_desktop_launch.py`` (the delegated
+door)."""
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import psutil
 import pytest
+from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded import devtools_port
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-OURS = devtools_port.ActivePort(45000, "/devtools/browser/ours")
+#: Far above any pid a machine hands out, so ``psutil`` finds nothing below them.
+LAUNCHED = 3_999_101
+OTHER = 3_999_102
 
 
-class TestRead:
-    def test_reads_port_and_browser_path(self, tmp_path):
-        (tmp_path / devtools_port.PORT_FILE).write_text("45000\n/devtools/browser/x\n")
-        assert devtools_port.read(tmp_path) == (45000, "/devtools/browser/x")
+class _Connection:
+    def __init__(self, processes) -> None:
+        self.processes = processes
+        self.disconnected = False
+        self.sent: list[dict] = []
 
-    def test_a_port_with_no_path_is_still_a_port_but_not_an_own_endpoint(
-        self, tmp_path
-    ):
-        (tmp_path / devtools_port.PORT_FILE).write_text("45000\n")
-        assert devtools_port.read(tmp_path) == (45000, None)
-        assert devtools_port.own_endpoint(tmp_path, 45000) is None
+    async def send(self, command):
+        self.sent.append(next(command))
+        return self.processes
 
-    @pytest.mark.parametrize("text", ["", "0\n/p", "70000\n/p", "abc\n/p"])
-    def test_an_unusable_port_is_none(self, tmp_path, text):
-        (tmp_path / devtools_port.PORT_FILE).write_text(text)
-        assert devtools_port.read(tmp_path) is None
-
-    def test_no_file_is_none(self, tmp_path):
-        assert devtools_port.read(tmp_path) is None
+    async def disconnect(self):
+        self.disconnected = True
 
 
-class TestOwnEndpoint:
-    def test_the_file_naming_the_port_this_launch_asked_for_is_ours(self, tmp_path):
-        (tmp_path / devtools_port.PORT_FILE).write_text(
-            "45000" + chr(10) + "/devtools/browser/x" + chr(10)
+def _browser(*processes: tuple[str, int]) -> SimpleNamespace:
+    return SimpleNamespace(
+        connection=_Connection(
+            [cdp.system_info.ProcessInfo(t, i, 0.0) for t, i in processes]
         )
-        assert devtools_port.own_endpoint(tmp_path, 45000) == (
-            45000,
-            "/devtools/browser/x",
-        )
-
-    def test_a_file_naming_another_port_is_not(self, tmp_path):
-        (tmp_path / devtools_port.PORT_FILE).write_text(
-            "45001" + chr(10) + "/devtools/browser/x" + chr(10)
-        )
-        assert devtools_port.own_endpoint(tmp_path, 45000) is None
-
-    def test_no_profile_is_none(self):
-        assert devtools_port.own_endpoint(None, 45000) is None
-
-
-class TestVerify:
-    def test_the_matching_websocket_passes(self):
-        devtools_port.verify("ws://127.0.0.1:45000/devtools/browser/ours", OURS)
-
-    @pytest.mark.parametrize(
-        "reported",
-        [
-            "ws://127.0.0.1:45000/devtools/browser/sibling",
-            "ws://127.0.0.1:45001/devtools/browser/ours",
-            "",
-        ],
     )
-    def test_anything_else_is_refused_by_name(self, reported):
-        with pytest.raises(ToolError, match="not the browser this spawn launched"):
-            devtools_port.verify(reported, OURS)
 
 
-class TestClearStale:
-    def test_removes_a_leftover_file(self, tmp_path):
-        stale = tmp_path / devtools_port.PORT_FILE
-        stale.write_text("46000\n/devtools/browser/stale\n")
-        devtools_port.clear_stale(tmp_path)
-        assert not stale.exists()
+class TestOwnedPids:
+    def test_a_pid_with_nothing_below_it_owns_itself(self):
+        assert devtools_port.owned_pids(LAUNCHED) == {LAUNCHED}
 
-    def test_a_profile_without_one_is_fine(self, tmp_path):
-        devtools_port.clear_stale(tmp_path)
+    def test_a_wrapper_owns_what_it_forked(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            assert child.pid in devtools_port.owned_pids(os.getpid())
+        finally:
+            child.terminate()
+            child.wait(timeout=10)
 
-    def test_a_file_that_cannot_be_removed_fails_closed(self, tmp_path, monkeypatch):
-        stale = tmp_path / devtools_port.PORT_FILE
-        stale.write_text("46000\n/devtools/browser/stale\n")
+    def test_a_process_psutil_cannot_read_is_just_itself(self, monkeypatch):
+        def denied(pid):
+            raise psutil.AccessDenied(pid)
 
-        def refuse(self, *a, **k):
-            raise PermissionError("held")
+        monkeypatch.setattr(psutil, "Process", denied)
+        assert devtools_port.owned_pids(LAUNCHED) == {LAUNCHED}
 
-        monkeypatch.setattr(type(stale), "unlink", refuse)
-        with pytest.raises(ToolError, match="F-1009"):
-            devtools_port.clear_stale(tmp_path)
+
+@pytest.mark.asyncio
+class TestConfirmOurs:
+    async def test_the_launched_pid_passes_and_asks_the_read_only_query(self):
+        browser = _browser(("gpu", 5), ("browser", LAUNCHED))
+        await devtools_port.confirm_ours(browser, LAUNCHED)
+        assert [c["method"] for c in browser.connection.sent] == [
+            "SystemInfo.getProcessInfo"
+        ]
+        assert not browser.connection.disconnected
+
+    async def test_another_browser_is_refused_naming_both_and_dropped(self):
+        browser = _browser(("browser", OTHER))
+        with pytest.raises(ToolError, match="F-1009") as err:
+            await devtools_port.confirm_ours(browser, LAUNCHED)
+        assert f"process {OTHER}" in str(err.value)
+        assert f"pid {LAUNCHED}" in str(err.value)
+        assert browser.connection.disconnected
+
+    async def test_a_descendant_of_the_launched_pid_passes(self, monkeypatch):
+        monkeypatch.setattr(devtools_port, "owned_pids", lambda pid: {pid, OTHER})
+        browser = _browser(("browser", OTHER))
+        await devtools_port.confirm_ours(browser, LAUNCHED)
+        assert not browser.connection.disconnected
+
+    async def test_no_browser_process_in_the_answer_is_unverifiable_not_foreign(self):
+        browser = _browser(("gpu", 5), ("renderer", 6))
+        await devtools_port.confirm_ours(browser, LAUNCHED)
+        assert not browser.connection.disconnected
+
+    async def test_no_launched_pid_means_nothing_to_compare(self):
+        browser = _browser(("browser", OTHER))
+        await devtools_port.confirm_ours(browser, None)
+        assert browser.connection.sent == []
