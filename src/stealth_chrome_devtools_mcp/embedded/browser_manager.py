@@ -23,6 +23,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     navigation_milestone,
     page_storage,
     process_exit,
+    profile_lock,
     spawn_budget,
     spawn_contention,
     spawn_exhaustion,
@@ -430,7 +431,6 @@ class BrowserManager:
         ``--no-sandbox`` is re-added after the stealth filter when the sandbox is
         explicitly disabled (a deliberate operator choice, not an accidental
         automation leak)."""
-        # Detect the best available browser executable (Chrome, Chromium, or Edge)
         browser_executable = check_browser_executable()
         if not browser_executable:
             raise Exception(
@@ -490,27 +490,27 @@ class BrowserManager:
     ) -> Browser:
         """Start the browser and return the live ``Browser`` — nodriver's
         ``Browser.start``, or a headed launch delegated to the user's desktop when
-        this backend cannot show windows (F-810). Only the fallible starts live
-        here, so the orchestrator holds what exists and can tear it down;
-        ``browser_connect`` goes in first (F-834 stage 2), *attempt* is stamped
-        BEFORE the fallible await (F-919, F-924) and the call is bounded (F-969)."""
+        this backend cannot show windows (F-810), the profile held throughout (F-1008).
+        Only the fallible starts live here, so the orchestrator holds what exists and
+        can tear it down. ``browser_connect`` goes first (F-834 stage 2), *attempt* is
+        stamped BEFORE the fallible await (F-919, F-924), and it is bounded (F-969)."""
         browser_connect.install()
         if not options.auto_clone:
             login_persistence.remove_saved_tabs(options.user_data_dir)
-        if desktop_launch.should_delegate(options.headless):
-            browser, _pid = await desktop_launch.launch_and_attach(
-                browser_executable, launch_args, options.user_data_dir
+        with profile_lock.launching(options.user_data_dir):
+            if desktop_launch.should_delegate(options.headless):
+                browser, _pid = await desktop_launch.launch_and_attach(
+                    browser_executable, launch_args, options.user_data_dir
+                )
+                return browser
+            attempt.config = config = uc.Config(
+                headless=options.headless,
+                user_data_dir=options.user_data_dir,
+                sandbox=options.sandbox,
+                browser_executable_path=browser_executable,
+                browser_args=launch_args,
             )
-            return browser
-        config = uc.Config(
-            headless=options.headless,
-            user_data_dir=options.user_data_dir,
-            sandbox=options.sandbox,
-            browser_executable_path=browser_executable,
-            browser_args=launch_args,
-        )
-        attempt.config = config
-        return await uc.start(config=config)
+            return await uc.start(config=config)
 
     @spawn_budget.phase("post-launch setup", "POST_LAUNCH_BUDGET_SECONDS")
     async def _apply_post_launch(  # noqa: PLR0913  PERMANENT(function interface)
