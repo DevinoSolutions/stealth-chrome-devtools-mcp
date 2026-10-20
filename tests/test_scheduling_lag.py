@@ -14,9 +14,15 @@ blocking probe the real loop spends most of its time inside.
 
 from __future__ import annotations
 
+import asyncio
+import math
+import os
+import sys
+import time
+
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import scheduling_lag
+from stealth_chrome_devtools_mcp.embedded import backend_eviction, scheduling_lag
 
 PATIENCE = 60.0
 PROBE_SECONDS = 10.0  # REUSE_PROBE_TIMEOUT: what one missed probe costs
@@ -150,3 +156,316 @@ class TestTheStretchIsReported:
         _spend(sched)
 
         assert reports == []
+
+
+class TestIsStarved:
+    def test_starved_means_at_or_above_the_report_factor(self):
+        at = scheduling_lag.REPORT_FACTOR
+        assert scheduling_lag.is_starved(at)
+        assert scheduling_lag.is_starved(scheduling_lag.MAX_STRETCH)
+        assert not scheduling_lag.is_starved(math.nextafter(at, 0.0))
+        assert not scheduling_lag.is_starved(1.0)
+
+    def test_no_reading_is_never_starved(self):
+        assert not scheduling_lag.is_starved(None)
+
+
+class FakeCanaryProcess:
+    """What ``asyncio.create_subprocess_exec`` hands back, minus the process."""
+
+    pid = 4321
+
+    def __init__(self) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.returncode: int | None = None
+        self.kills = 0
+        self.announce = True  # the child's first line, sent at spawn
+
+    def kill(self) -> None:
+        self.kills += 1
+        self.returncode = -9
+        self.stdout.feed_eof()
+
+    async def wait(self) -> int | None:
+        return self.returncode
+
+
+class TestIdleCanary:
+    """F-1007: an IDLE-priority child woken every CANARY_NAP_SECONDS DURING a probe.
+    The backend's own sleeps wake on time on a host where an IDLE process gets 4% of
+    its rate (measured), so this is what measures a renderer starved by priority."""
+
+    @pytest.fixture
+    async def canary(self, scheduler, monkeypatch):
+        sched = scheduler(1.0)
+        proc = FakeCanaryProcess()  # built inside the running loop its reader uses
+
+        async def spawn():
+            if proc.announce:
+                proc.stdout.feed_data(b"ready\n")
+            return proc
+
+        monkeypatch.setattr(scheduling_lag, "_spawn_canary", spawn)
+        return sched, proc
+
+    async def window(self, sched, proc, seconds, wakes):
+        """Start a canary (which waits for the child to announce itself), spend
+        *seconds*, deliver *wakes*."""
+        c = scheduling_lag.IdleCanary()
+        await c.start()
+        sched.now += seconds
+        proc.stdout.feed_data(b".\n" * wakes)
+        for _ in range(wakes + 10):  # let the reader task drain the burst
+            if c._wakes >= wakes:
+                break
+            await asyncio.sleep(0)
+        return c
+
+    async def test_a_canary_that_kept_up_reads_one(self, canary):
+        sched, proc = canary
+        window = 15.0
+        c = await self.window(
+            sched, proc, window, int(window / scheduling_lag.CANARY_NAP_SECONDS)
+        )
+
+        factor = await c.factor()
+
+        assert factor == pytest.approx(1.0)
+        assert not scheduling_lag.is_starved(factor)
+
+    async def test_a_canary_that_woke_early_still_reads_one_not_less(self, canary):
+        sched, proc = canary
+        window = 10.0
+        c = await self.window(
+            sched, proc, window, int(window / scheduling_lag.CANARY_NAP_SECONDS) + 5
+        )
+
+        assert await c.factor() == 1.0  # more wakes than expected is not "fast"
+
+    async def test_a_starved_canary_reads_clamped_and_starved(self, canary):
+        sched, proc = canary
+        c = await self.window(sched, proc, 15.0, 3)
+
+        factor = await c.factor()
+
+        assert factor == scheduling_lag.MAX_STRETCH
+        assert scheduling_lag.is_starved(factor)
+
+    async def test_a_canary_that_never_woke_is_starved_not_unknown(self, canary):
+        sched, proc = canary
+        c = await self.window(sched, proc, 15.0, 0)
+
+        assert await c.factor() == scheduling_lag.MAX_STRETCH
+
+    async def test_half_the_wakes_is_exactly_the_threshold(self, canary):
+        sched, proc = canary
+        window = 10.0
+        kept = int(window / scheduling_lag.CANARY_NAP_SECONDS / 2)  # 50: factor 2.0
+        c = await self.window(sched, proc, window, kept)
+        assert scheduling_lag.is_starved(await c.factor())
+
+    async def test_one_wake_more_than_half_is_not(self, canary):
+        sched, proc = canary
+        window = 10.0
+        kept = int(window / scheduling_lag.CANARY_NAP_SECONDS / 2) + 1  # 51
+        c = await self.window(sched, proc, window, kept)
+        assert not scheduling_lag.is_starved(await c.factor())
+
+    async def test_a_window_under_the_minimum_says_nothing(self, canary):
+        sched, proc = canary
+        floor = scheduling_lag.CANARY_MIN_WINDOW_SECONDS
+        short = await self.window(sched, proc, floor - 0.01, 0)
+        assert await short.factor() is None
+
+    async def test_a_window_at_the_minimum_speaks(self, canary):
+        sched, proc = canary
+        floor = scheduling_lag.CANARY_MIN_WINDOW_SECONDS
+        at = await self.window(sched, proc, floor, 0)
+        assert await at.factor() == scheduling_lag.MAX_STRETCH
+
+    async def test_start_returns_only_once_the_child_has_announced_itself(
+        self, scheduler, monkeypatch
+    ):
+        # The window a probe is read over must cover the WHOLE probe, so the clock
+        # starts when the child speaks and ``start`` does not return before that.
+        sched = scheduler(1.0)
+        proc = FakeCanaryProcess()
+
+        async def spawn():
+            asyncio.get_running_loop().call_later(
+                0.05, proc.stdout.feed_data, b"ready\n"
+            )
+            return proc
+
+        monkeypatch.setattr(scheduling_lag, "_spawn_canary", spawn)
+        c = scheduling_lag.IdleCanary()
+
+        await c.start()
+
+        assert c._ready_at == sched.now and proc.kills == 0
+
+    async def test_a_canary_that_never_announced_itself_is_stopped_and_says_nothing(
+        self, canary, monkeypatch
+    ):
+        sched, proc = canary
+        proc.announce = False
+        monkeypatch.setattr(scheduling_lag, "CANARY_READY_SECONDS", 0.05)
+        c = scheduling_lag.IdleCanary()
+
+        await c.start()
+        sched.now += 15.0
+
+        assert proc.kills == 1
+        assert await c.factor() is None  # not "starved": it may never have started
+
+    async def test_a_pipe_that_ends_without_a_word_does_not_wait_out_the_bound(
+        self, canary
+    ):
+        _sched, proc = canary
+        proc.announce = False
+        proc.stdout.feed_eof()
+        c = scheduling_lag.IdleCanary()
+
+        started = time.monotonic()
+        await c.start()
+
+        assert time.monotonic() - started < scheduling_lag.CANARY_READY_SECONDS / 2
+        assert proc.kills == 1 and await c.factor() is None
+
+    async def test_a_cancel_while_waiting_for_the_child_still_reaps_it(self, canary):
+        _sched, proc = canary
+        proc.announce = False  # it never speaks, so start() is parked on the wait
+
+        async def use() -> None:
+            async with scheduling_lag.idle_canary():
+                raise AssertionError("never entered")
+
+        task = asyncio.ensure_future(use())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert proc.kills == 1
+
+    async def test_a_canary_that_exited_says_nothing(self, canary):
+        sched, proc = canary
+        c = await self.window(sched, proc, 15.0, 0)
+        proc.returncode = 1  # e.g. it could not lower its own priority
+
+        assert await c.factor() is None
+
+    async def test_a_spawn_that_fails_says_nothing_and_does_not_raise(
+        self, scheduler, monkeypatch
+    ):
+        scheduler(1.0)
+
+        async def broken():
+            raise OSError("no process")
+
+        monkeypatch.setattr(scheduling_lag, "_spawn_canary", broken)
+        c = scheduling_lag.IdleCanary()
+
+        await c.start()
+
+        assert await c.factor() is None
+        await c.stop()
+
+    async def test_leaving_the_context_kills_the_child_even_on_an_error(self, canary):
+        _sched, proc = canary
+
+        with pytest.raises(RuntimeError):
+            async with scheduling_lag.idle_canary():
+                raise RuntimeError("the probe blew up")
+
+        assert proc.kills == 1
+
+    async def test_stop_is_idempotent(self, canary):
+        _sched, proc = canary
+        c = scheduling_lag.IdleCanary()
+        await c.start()
+
+        await c.stop()
+        await c.stop()
+
+        assert proc.kills == 1
+
+    async def test_the_real_child_wakes_and_is_gone_after_stop(self, monkeypatch):
+        """No fake: a real IDLE child, on whatever machine runs this. Only that it
+        starts, is counted and is reaped; its factor depends on the host."""
+        monkeypatch.setattr(scheduling_lag, "CANARY_MIN_WINDOW_SECONDS", 0.5)
+        async with scheduling_lag.idle_canary() as c:
+            deadline = time.monotonic() + 30
+            while c._ready_at is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            assert c._ready_at is not None
+            await asyncio.sleep(0.8)
+            factor = await c.factor()
+            proc = c._proc
+        assert factor is not None and 1.0 <= factor <= scheduling_lag.MAX_STRETCH
+        assert c._wakes > 0
+        assert proc is not None and proc.returncode is not None
+
+    def test_the_canary_is_as_low_as_chromium_makes_a_background_renderer(self):
+        # kBackgroundPriority = 5 (desktop Linux, base/process/process_linux.cc);
+        # IDLE_PRIORITY_CLASS on Windows (process_win.cc), 0x40 below. An absolute
+        # setpriority, never os.nice(): that adds to whatever the backend already has.
+        assert scheduling_lag.CANARY_NICE == 5
+        assert f"os.setpriority(os.PRIO_PROCESS, 0, {scheduling_lag.CANARY_NICE})" in (
+            scheduling_lag._CANARY_SOURCE
+        )
+        assert "SetPriorityClass(kernel.GetCurrentProcess(), 0x40)" in (
+            scheduling_lag._CANARY_SOURCE
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX nice values")
+    async def test_the_real_child_runs_at_the_chromium_nice_value(self):
+        async with scheduling_lag.idle_canary() as c:
+            assert c._proc is not None
+            deadline = time.monotonic() + 10
+            nice = os.getpriority(os.PRIO_PROCESS, c._proc.pid)
+            while nice != scheduling_lag.CANARY_NICE and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+                nice = os.getpriority(os.PRIO_PROCESS, c._proc.pid)
+        assert nice == scheduling_lag.CANARY_NICE
+
+
+class TestExcuseBudget:
+    """How long "starved, not dead" is believed in a row (F-1007)."""
+
+    CEILING = backend_eviction.STARVED_CEILING_SECONDS
+
+    @pytest.fixture
+    def budget(self):
+        clock = [1000.0]
+        return clock, scheduling_lag.ExcuseBudget(lambda: clock[0])
+
+    def test_the_ceiling_is_the_one_eviction_uses(self):
+        assert self.CEILING == 300.0
+
+    def test_a_round_at_the_ceiling_is_excused_one_past_it_is_not(self, budget):
+        clock, b = budget
+        assert b.grant("a") == 0.0
+        clock[0] += self.CEILING
+        assert b.grant("a") == self.CEILING
+        clock[0] += 0.001
+        assert b.grant("a") is None
+        assert b.grant("a") is None  # and it stays refused until reset
+
+    def test_reset_starts_a_new_run(self, budget):
+        clock, b = budget
+        b.grant("a")
+        clock[0] += self.CEILING + 1
+        assert b.grant("a") is None
+        b.reset("a")
+        assert b.grant("a") == 0.0
+
+    def test_subjects_do_not_share_a_run(self, budget):
+        clock, b = budget
+        b.grant("a")
+        clock[0] += self.CEILING + 1
+        assert b.grant("a") is None and b.grant("b") == 0.0
+        assert b.tracked() == {"a", "b"}
+        b.reset("a")
+        b.reset("never-seen")  # no error
+        assert b.tracked() == {"b"}

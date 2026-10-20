@@ -25,6 +25,7 @@ from fakes import FakeBrowser, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
     browser_health,
     directory_gate,
+    shared_session,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -364,14 +365,14 @@ class TestScope:
         )
 
         assert (
-            browser_health.is_shared_session(
+            shared_session.is_shared_session(
                 BrowserOptions(user_data_dir=str(directory))
             )
             is expected
         )
 
     def test_no_directory_is_no_session(self):
-        assert browser_health.is_shared_session(BrowserOptions()) is False
+        assert shared_session.is_shared_session(BrowserOptions()) is False
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +426,19 @@ class TestWhenItDoesNot:
 
         assert stage.launches == []
         assert any("the backend is stopping" in w for w in log.at("warning"))
+
+    async def test_a_relaunch_under_the_same_id_ends_the_starvation_run(self, stage):
+        """F-1007: the excuses a dead browser earned are not the new one's."""
+        _die(stage.manager, FLEET_ID)
+        health = stage.health()
+        entry = stage.manager._instances[FLEET_ID]
+        options, instance = entry["options"], entry["instance"]
+        assert health._excuses.grant(FLEET_ID) == 0
+        health.stopping = True
+
+        await health.relaunch_exited(FLEET_ID, options, instance, {})
+
+        assert FLEET_ID not in health._excuses.tracked()
 
     async def test_stop_marks_the_running_loop_as_stopping(self, stage):
         browser_health.start(

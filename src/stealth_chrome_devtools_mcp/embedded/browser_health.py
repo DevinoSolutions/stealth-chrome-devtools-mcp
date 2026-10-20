@@ -53,6 +53,13 @@ ERROR, not a retry loop), and anything while the backend is stopping. A failed
 relaunch is an ERROR and the end of it. A human who closes a shared headed
 window gets it back at the next round: the loop cannot tell that from a crash.
 
+**F-1007: a starved browser is not a frozen one.** A background renderer runs at IDLE
+priority, so on a saturated host a healthy browser times out its probe. A timeout is
+not counted when the browser process still answers a fresh ``Browser.getVersion`` AND
+an IDLE canary child run DURING the probe was starved (``scheduling_lag``, THE one
+home; never a CPU poll). ``scheduling_lag.ExcuseBudget`` bounds it (an ERROR, then the
+count resumes); an excused round still starts the F-993 capture.
+
 **Forensics are counts and shapes only** — never a URL, title or cookie. They are
 written once on the first failed probe (WARNING) and again when the heal fires
 (ERROR, which reaches Sentry through ``debug_logger``).
@@ -76,9 +83,8 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
-from pathlib import Path
 
 import nodriver as uc
 import psutil
@@ -91,11 +97,10 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_pid_registry,
     chrome_log,
     directory_gate,
-    fleet_session,
     freeze_capture,
     process_exit,
-    profile_lock,
-    profile_seed,
+    scheduling_lag,
+    shared_session,
     spawn_exhaustion,
     tab_binding,
 )
@@ -103,7 +108,6 @@ from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: Seconds between two rounds of probes. A module constant on purpose: an unknown
 #: ``STEALTH_MCP_*`` key crashes ``get_settings()``, and the house rule is
@@ -127,6 +131,10 @@ HEAL_COOLDOWN_SECONDS = 900
 #: ``process_exit.browser_is_alive`` cannot be the witness (measured on real
 #: Chrome): the pid taken BEFORE the close is.
 EXIT_WAIT_SECONDS = 15
+
+#: How long the browser process gets to answer for a timeout to be put down to
+#: starvation.
+BROWSER_ANSWER_SECONDS = 5.0
 
 #: The bound on the forensics a failure writes. They are best effort.
 FORENSICS_TIMEOUT_SECONDS = 10
@@ -372,106 +380,16 @@ def _is_persistent(instance_id: str) -> bool:
     return bool(entry) and browser_pid_registry.on_persistent_profile(entry)
 
 
-def shared_session_name(user_data_dir: str | None, *, auto_clone: bool) -> str | None:
-    """``default`` or ``fleet`` when a browser on *user_data_dir* is the browser
-    of one of the two shared sessions, else ``None``: a directory the caller
-    named (never an auto-clone) that ``fleet_session.lock_key`` -- the one mapping
-    from a directory to a session -- keys as one of the two.
-
-    THE classifier (F-964, and F-966's ``close_instance`` guard): the relaunch asks
-    whether it is one, the close asks which. Plain values, because the two read
-    them from different records of the same browser -- the options it launched
-    with, and the profile selection its spawn diagnostics carry (which survives a
-    re-attach, F-888) -- and the close must not look an instance up in a way that
-    discards a dead one."""
-    if not user_data_dir or auto_clone:
-        return None
-    key = fleet_session.lock_key(user_data_dir)
-    if key in (profile_seed.DEFAULT_SESSION, fleet_session.FLEET_SESSION):
-        return key
-    return None
-
-
-def require_shared_session_named(
-    instance_id: str, profile_selection: Mapping[str, object], session: str | None
-) -> None:
-    """Refuse to close the ``default`` or ``fleet`` browser unless the caller named
-    that session (F-966).
-
-    Those two are browsers other chats work in, and a chat that was handed one
-    by mistake (2.1.27 gave ``spawn_browser()`` the ``default`` browser) closed it
-    for all of them. Naming the session is the confirmation: it says the caller
-    knows what it is closing. The selection is the one the spawn recorded, which
-    ``close_instance`` already reads and which does not discard a dead browser the
-    way an instance lookup does. ``session`` is ignored for every other instance:
-    nothing there needs confirming, and rejecting it would break a caller that
-    always sends one."""
-    directory = profile_selection.get("user_data_dir")
-    shared = shared_session_name(
-        directory if isinstance(directory, str) else None,
-        auto_clone=profile_selection.get("profile_role") == "clone",
-    )
-    if shared is None or (session and fleet_session.session_key(session) == shared):
-        return
-    raise ToolError(
-        f"Instance {instance_id} is the {shared!r} session's browser, and other "
-        "chats depend on it, so it was NOT closed. If closing it is what you "
-        "mean, say so by naming the session: "
-        f'close_instance(instance_id="{instance_id}", session="{shared}"). '
-        "If you only wanted a browser of your own, spawn_browser() with no "
-        "session gives you a disposable one to close freely."
-    )
-
-
-def is_shared_session(options: BrowserOptions) -> bool:
-    """The ``default`` or ``fleet`` session's browser (F-964)."""
-    return (
-        shared_session_name(options.user_data_dir, auto_clone=options.auto_clone)
-        is not None
-    )
-
-
-def holder_of(user_data_dir: str) -> str | None:
-    """Who holds *user_data_dir* right now, as a short phrase, or ``None``: the
-    one witness ``spawn_browser(session=...)`` asks before it adopts or spawns."""
-    hold = profile_lock.profile_hold(
-        Path(user_data_dir),
-        getattr(process_cleanup, "_get_browser_pids_for_profile", None),
-    )
-    if hold is None:
-        return None
-    return f"pid {hold.pid}" if isinstance(hold.pid, int) else "an unaddressable holder"
-
-
-def _relaunch_options(
-    options: BrowserOptions, instance: BrowserInstance, previous: dict[str, object]
-) -> BrowserOptions:
-    """What a relaunch of *instance* spawns with: the same directory, headless and
-    viewport it had, and rotation-guarded when the spawn path's own rule says so."""
-    selection = previous.get("profile_selection")
-    role = selection.get("profile_role") if isinstance(selection, dict) else None
-    # The ONE rule for "this relaunch must be guarded" is the spawn path's.
-    guard = options.guard_rotation or fleet_session.guards_rotation(
-        {
-            "profile_role": role,
-            "user_data_dir": options.user_data_dir,
-        }
-    )
-    return options.model_copy(
-        update={
-            "headless": instance.headless,
-            "viewport_width": instance.viewport.get("width", options.viewport_width),
-            "viewport_height": instance.viewport.get("height", options.viewport_height),
-            "guard_rotation": guard,
-        }
-    )
-
-
 def _log_note(diagnostics: dict[str, object] | None) -> str:
     """``; chrome_log=<path>`` when the browser's launch asked Chrome for a log
     (F-964): the PATH only, never a line of it."""
     path = (diagnostics or {}).get("chrome_log")
     return f"; chrome_log={path}" if path else ""
+
+
+def _describe(error: Exception, steps: list[str]) -> str:
+    """``TimeoutError at evaluate``: the error's type and the step it stopped at."""
+    return f"{type(error).__name__} at {steps[-1] if steps else 'connect'}"
 
 
 class BrowserHealth:
@@ -486,6 +404,12 @@ class BrowserHealth:
         arm_interception: Armer,
         probe: Probe = probe_browser,
         own_check: Callable[[Browser], Awaitable[None]] = own_connection_answers,
+        browser_answers: Callable[
+            [str | None], Awaitable[None]
+        ] = fresh_browser_version,
+        canary: Callable[
+            [], contextlib.AbstractAsyncContextManager[scheduling_lag.IdleCanary]
+        ] = scheduling_lag.idle_canary,
         persistent: Callable[[str], bool] = _is_persistent,
         forensics: Callable[..., Awaitable[str]] = gather_forensics,
         heal: Callable[[str], Awaitable[bool]] | None = None,
@@ -496,8 +420,8 @@ class BrowserHealth:
             process_exit.wait_for_exit_async
         ),
         clock: Callable[[], float] = time.monotonic,
-        shared: Callable[[BrowserOptions], bool] = is_shared_session,
-        holder: Callable[[str], str | None] = holder_of,
+        shared: Callable[[BrowserOptions], bool] = shared_session.is_shared_session,
+        holder: Callable[[str], str | None] = shared_session.holder_of,
         capture: Callable[..., Awaitable[str]] = freeze_capture.capture,
         dump_now: Callable[..., Awaitable[str]] = freeze_capture.dump_now,
         mark_healed: Callable[[str], str | None] = freeze_capture.mark_healed,
@@ -512,6 +436,8 @@ class BrowserHealth:
         self._arm_interception = arm_interception
         self._probe = probe
         self._own_check = own_check
+        self._browser_answers = browser_answers
+        self._canary = canary
         self._persistent = persistent
         self._forensics = forensics
         self._heal = heal or self.heal
@@ -533,6 +459,7 @@ class BrowserHealth:
         self.stopping = False
         self._failures: dict[str, int] = {}
         self._last_heal: dict[str, float] = {}
+        self._excuses = scheduling_lag.ExcuseBudget(clock)  # F-1007
         # F-993: per adopted shared-session browser, the (pid, handle) that keeps
         # its exit code readable.
         self._exit_handles: dict[str, tuple[int, int]] = {}
@@ -572,6 +499,7 @@ class BrowserHealth:
         tracked = (
             set(self._failures)
             | set(self._last_heal)
+            | self._excuses.tracked()
             | self._incidents.tracked()
             | set(self._exit_handles)
         )
@@ -579,6 +507,7 @@ class BrowserHealth:
             if gone not in scoped:
                 self._failures.pop(gone, None)
                 self._last_heal.pop(gone, None)
+                self._excuses.reset(gone)
                 self._incidents.forget(gone)
                 self._release_exit(gone)
         for instance_id in scoped:
@@ -587,19 +516,82 @@ class BrowserHealth:
             except Exception as error:  # noqa: BLE001  PERMANENT(F-963: a probe that raises must not end the loop, nor skip the other instances)
                 debug_logger.log_error(_COMPONENT, "check", error)
 
+    async def _probe_error(
+        self, browser: Browser, steps: list[str]
+    ) -> Exception | None:
+        """The error the direct probe failed with, or ``None`` when it passed."""
+        try:
+            await asyncio.wait_for(
+                self._probe(browser.websocket_url, steps), PROBE_TIMEOUT_SECONDS
+            )
+        except Exception as error:  # noqa: BLE001  PERMANENT(F-963: every way of not answering is a failed probe)
+            return error
+        return None
+
     async def _failure_of(
         self, browser: Browser, steps: list[str] | None = None
     ) -> str | None:
         """Why the direct probe failed, or ``None`` when it passed. *steps* is the
         caller's own list when it wants to read them (and, F-993, time them)."""
         steps = [] if steps is None else steps
+        error = await self._probe_error(browser, steps)
+        return None if error is None else _describe(error, steps)
+
+    async def _starved(
+        self, data: dict[str, object], factor: float | None
+    ) -> str | None:
+        """F-1007: a counts-only phrase when this failed probe is put down to a
+        starved host (*factor*: ``_probed``'s, a TIMEOUT only), else ``None``."""
+        if not scheduling_lag.is_starved(factor):
+            return None
+        url = getattr(data["browser"], "websocket_url", None)
         try:
-            await asyncio.wait_for(
-                self._probe(browser.websocket_url, steps), PROBE_TIMEOUT_SECONDS
+            await asyncio.wait_for(self._browser_answers(url), BROWSER_ANSWER_SECONDS)
+        except Exception as problem:  # noqa: BLE001  PERMANENT(F-1007: every way of not answering keeps the old verdict, the heal)
+            debug_logger.log_debug(
+                _COMPONENT, "probe", f"not starved: {type(problem).__name__}"
             )
-        except Exception as error:  # noqa: BLE001  PERMANENT(F-963: every way of not answering is a failed probe)
-            return f"{type(error).__name__} at {steps[-1] if steps else 'connect'}"
-        return None
+            return None
+        return f"idle canary ran {factor:.1f}x slow"
+
+    async def _probed(
+        self, browser: Browser, steps: list[str]
+    ) -> tuple[Exception | None, float | None]:
+        """The probe's error (or ``None``) and, for a TIMEOUT only, the IDLE canary's
+        factor over the window the probe just spent. Never raises."""
+        async with self._canary() as canary:
+            error = await self._probe_error(browser, steps)
+            if not isinstance(error, TimeoutError):
+                return error, None
+            try:
+                return error, await canary.factor()
+            except Exception as problem:  # noqa: BLE001  PERMANENT(F-1007: a canary that cannot be read is no evidence, never an error in the loop)
+                debug_logger.log_debug(
+                    _COMPONENT, "probe", f"canary unreadable: {type(problem).__name__}"
+                )
+                return error, None
+
+    def _excused(self, instance_id: str, failure: str, starved: str) -> bool:
+        """True while within the excuse ceiling; past it an ERROR and False."""
+        spent = self._excuses.grant(instance_id)
+        if spent is None:
+            debug_logger.log_error(
+                _COMPONENT,
+                "probe",
+                HungBrowserError(
+                    f"{instance_id}: probe failed ({failure}) past the starvation "
+                    f"ceiling ({starved}); counting it (F-1007)"
+                ),
+            )
+            return False
+        debug_logger.log_warning(
+            _COMPONENT,
+            "probe",
+            f"{instance_id}: probe failed ({failure}), the browser process answers "
+            f"and the {starved}: starved, not frozen, not counted (F-1007); "
+            f"{self._failures.get(instance_id, 0)} failure(s) kept, {spent:.0f}s in",
+        )
+        return True
 
     async def _check(self, instance_id: str) -> None:
         data = await self._manager.get_instance(instance_id)
@@ -607,18 +599,24 @@ class BrowserHealth:
             return
         self._watch_exit(instance_id, data)
         steps = freeze_capture.TimedSteps()
-        failure = await self._failure_of(data["browser"], steps)
+        error, factor = await self._probed(data["browser"], steps)
         steps.finish()
-        if failure is None:
+        if error is None:
             self._incidents.end(instance_id)  # the incident, if any, is over
+            self._excuses.reset(instance_id)
             if self._failures.pop(instance_id, 0):
                 debug_logger.log_info(
                     _COMPONENT, "probe", f"{instance_id} answers probes again"
                 )
             await self._check_own_connection(instance_id, data["browser"])
             return
+        failure = _describe(error, steps)
+        starved = await self._starved(data, factor)
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
+        if starved and self._excused(instance_id, failure, starved):
+            self._begin_incident(instance_id, data)  # F-993: evidence, never a count
+            return
         count = self._failures[instance_id] = self._failures.get(instance_id, 0) + 1
         facts = await self._facts(
             instance_id, data["browser"], data["instance"].created_at
@@ -653,6 +651,7 @@ class BrowserHealth:
         )
         self._last_heal[instance_id] = self._clock()
         self._failures[instance_id] = 0  # what comes next is a new incident
+        self._excuses.reset(instance_id)
         await self._heal(instance_id)
 
     def _incident_target(
@@ -811,7 +810,7 @@ class BrowserHealth:
         # What close_instance reads later (the `default` seed refresh) lives in
         # the spawn diagnostics; the relaunch writes new ones.
         previous = dict(await self._manager.get_spawn_diagnostics(instance_id) or {})
-        relaunch = _relaunch_options(options, data["instance"], previous)
+        relaunch = shared_session.relaunch_options(options, data["instance"], previous)
         old_pid = self._browser_pid(
             getattr(old_browser, "_process", None),
             getattr(old_browser, "_process_pid", None),
@@ -820,7 +819,7 @@ class BrowserHealth:
         try:
             # The close path refuses `default` and `fleet` unless told which one
             # (F-966); a heal knows, from the options it is about to relaunch.
-            shared = shared_session_name(
+            shared = shared_session.shared_session_name(
                 options.user_data_dir, auto_clone=options.auto_clone
             )
             await self._close(instance_id, shared)
@@ -882,6 +881,7 @@ class BrowserHealth:
             )
             return False
         self._last_heal[instance_id] = self._clock()
+        self._excuses.reset(instance_id)  # a new browser, a new run
         gate = await directory_gate.hold(directory)
         try:
             holder = await asyncio.to_thread(self._holder, directory)
@@ -901,7 +901,7 @@ class BrowserHealth:
             try:
                 return await self._launch_again(
                     instance_id,
-                    _relaunch_options(options, instance, previous),
+                    shared_session.relaunch_options(options, instance, previous),
                     previous,
                     "relaunched after an unexpected exit (under the same id)",
                 )

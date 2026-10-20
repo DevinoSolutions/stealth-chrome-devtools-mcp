@@ -403,7 +403,7 @@ then `close_instance`d it, taking every later clone's live seed with it. F-834 h
   hand-over by another door and is gone. A relaunch (heal, exit) carries its directory in
   its `BrowserOptions` and never reaches the resolver, so it still reopens master.
 * `close_instance` refuses a `default` or `fleet` browser unless `session` names it.
-  The one classifier is `browser_health.shared_session_name` (F-964's relaunch scope),
+  The one classifier is `shared_session.shared_session_name` (F-964's relaunch scope),
   fed by the profile selection a spawn or re-attach recorded; it does not look the
   instance up (that discards a dead one). The heal closes through the same tool and passes
   the name; every other instance ignores `session`.

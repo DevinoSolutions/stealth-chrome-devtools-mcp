@@ -50,6 +50,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_seed,
     session_hygiene,
     session_lease,
+    shared_session,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -111,6 +112,7 @@ __all__ = [
     "response_handler",
     "session_hygiene",
     "session_lease",
+    "shared_session",
     "tab_binding",
 ]
 

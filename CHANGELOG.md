@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### The health probe no longer heals a browser that is only starved (F-1007)
+
+`browser_health` probes a background `about:blank` target, and Chrome runs a renderer nothing is looking at at IDLE
+priority. On a CPU-saturated host a healthy browser's `Runtime.evaluate` therefore timed out (measured: 60 s with 48
+spinners), and two such rounds closed and relaunched a browser a person was signed in to. A failed probe is now put to
+one more question before it counts, and is excused only when ALL of these hold: it was a `TimeoutError` (a browser that
+answered with an error is unhealthy whatever the host is doing), the browser PROCESS, which runs at normal priority,
+still answers a fresh connection's `Browser.getVersion`, and an IDLE-priority canary child, run for the whole probe
+window (`start` waits up to `CANARY_READY_SECONDS`, 5 s, for it to announce itself, so the window covers the full probe;
+no announcement, no reading; on POSIX it runs at Chromium's own background nice, 5), was starved (`scheduling_lag.idle_canary`: `IdleCanary.factor()` at or above `REPORT_FACTOR`, no machine-wide CPU
+poll). The canary is the witness because the backend's own `asyncio` sleeps cannot see this: measured on 32 CPUs with 64
+normal-priority spinners, a normal-priority sleep read 1.05x late while an IDLE-class counter ran at 4.3% of its
+unloaded rate, so a self-measured loop lag stays under `REPORT_FACTOR` exactly when the renderer is starved. An excused
+round is logged as "starved, not frozen", is not counted, and still starts the F-993 evidence capture. The excuse is
+bounded (`scheduling_lag.ExcuseBudget`): after `STARVED_CEILING_SECONDS` (300 s, the F-967 ceiling) of consecutive
+excuses the failures count again and an ERROR says so, so a freeze that happens to coincide with a busy host is healed
+late and never skipped; a passing probe, a heal or a same-id relaunch restarts the clock. Anything else keeps the old
+verdict (a canary that never started or could not be read is no evidence), so a dead process, an error the browser sent,
+or F-963's freeze on an idle machine heals exactly as before. The `default`/`fleet` classifier, the profile-holder
+witness and the relaunch options moved verbatim out of `browser_health.py`, which stood at exactly its 1000-line budget,
+into `embedded/shared_session.py`.
+
 ## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)
