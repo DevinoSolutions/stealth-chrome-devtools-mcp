@@ -17,6 +17,7 @@ state a real launch is in during the window.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import time
@@ -31,9 +32,11 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_copy,
     profile_lock,
     spawn_budget,
+    spawn_leak,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
+from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 
 def no_pids(_user_data_dir):
@@ -120,7 +123,7 @@ class TestOurLaunchHoldsTheProfile:
         assert seen and seen[0] is not None
         assert hold(tmp_path) is None
 
-    async def test_a_launch_that_fails_leaves_nothing_holding_it(
+    async def test_a_launch_that_fails_holds_it_while_it_starts(
         self, tmp_path, monkeypatch, launch_seams
     ):
         launch_seams(False)
@@ -137,12 +140,106 @@ class TestOurLaunchHoldsTheProfile:
             )
 
         assert seen and seen[0] is not None
-        assert hold(tmp_path) is None
-        assert leftovers(tmp_path) == []
 
 
 class _Attempt:
     config = None
+
+
+class _Reaper:
+    """``process_cleanup`` as a failed spawn's reap sees it: *running* is what
+    the scan reports on the profile, *kills* whether a kill succeeds."""
+
+    def __init__(self, running, kills=True):
+        self.running, self.kills, self.killed = set(running), kills, []
+
+    def _get_browser_pids_for_profile(self, _user_data_dir):
+        return set(self.running)
+
+    def _kill_process_by_pid(self, pid, _instance_id="unknown"):
+        self.killed.append(pid)
+        return self.kills
+
+
+async def _fail_launch(profile: Path, monkeypatch, error: BaseException):
+    """``_launch_browser`` with nodriver's start raising *error* after Chrome
+    "started": the state ``spawn_browser``'s teardown is entered in."""
+
+    async def start(config):
+        raise error
+
+    monkeypatch.setattr(browser_manager.uc, "start", start)
+    options = BrowserOptions(user_data_dir=str(profile))
+    with pytest.raises(type(error)):
+        await BrowserManager()._launch_browser(options, "exe", [], _Attempt())
+    return options
+
+
+class TestAFailedLaunchHoldsUntilItsChromeIsReaped:
+    """The Chrome a failed start launched runs until the failed spawn's
+    teardown reaps it, AFTER ``_launch_browser`` has raised: removing the
+    marker in its ``finally`` showed that browser's profile FREE meanwhile."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(RuntimeError("Failed to connect to browser"), id="raised"),
+            pytest.param(asyncio.CancelledError(), id="cancelled"),
+        ],
+    )
+    async def test_held_until_the_teardown_has_reaped_it(
+        self, tmp_path, monkeypatch, launch_seams, error
+    ):
+        launch_seams(False)
+        options = await _fail_launch(tmp_path, monkeypatch, error)
+        assert hold(tmp_path) is not None, "a failed launch's Chrome read as FREE"
+
+        reaper = _Reaper(running={4242})
+        monkeypatch.setattr(browser_manager, "process_cleanup", reaper)
+        monkeypatch.setattr(spawn_leak, "launched_pid", lambda _attempt: 4242)
+        await BrowserManager()._teardown_failed_spawn(
+            "error", "i-1", None, None, options, _Attempt()
+        )
+
+        assert reaper.killed == [4242]
+        assert hold(tmp_path) is None
+        assert leftovers(tmp_path) == []
+
+    async def test_a_reap_that_fails_leaves_it_held(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        launch_seams(False)
+        options = await _fail_launch(tmp_path, monkeypatch, RuntimeError("boom"))
+        monkeypatch.setattr(
+            browser_manager, "process_cleanup", _Reaper(running={4242}, kills=False)
+        )
+        monkeypatch.setattr(spawn_leak, "launched_pid", lambda _attempt: 4242)
+        await BrowserManager()._teardown_failed_spawn(
+            "error", "i-1", None, None, options, _Attempt()
+        )
+        assert hold(tmp_path) is not None, "a Chrome the reap could not end read FREE"
+
+    async def test_one_nothing_can_reap_holds_for_the_grace_only(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        launch_seams(False)
+        await _fail_launch(tmp_path, monkeypatch, RuntimeError("boom"))
+        assert hold(tmp_path) is not None, "a failed launch's Chrome read as FREE"
+
+        grace = profile_lock.FAILED_LAUNCH_GRACE_SECONDS
+        # Longer than the reap it waits for; far shorter than a launch, or a
+        # failed `default` launch would turn its own retry into a clone.
+        rungs = sum(patience for _m, patience, _o in ProcessCleanup._KILL_RUNGS)
+        assert rungs < grace < spawn_budget.LAUNCH_BUDGET_SECONDS / 4
+        marker = tmp_path / profile_lock.LAUNCH_NAME
+        dated = marker.stat().st_mtime
+
+        def aged(by: float):
+            os.utime(marker, (dated - by, dated - by))
+            return hold(tmp_path)
+
+        assert aged(grace - 2) is not None
+        assert aged(grace + 2) is None
 
 
 class TestTheLaunchMarker:
@@ -151,6 +248,101 @@ class TestTheLaunchMarker:
             with profile_lock.launching(str(tmp_path)):
                 assert hold(tmp_path) is not None
             assert hold(tmp_path) is not None, "the first launch to end freed it"
+        assert hold(tmp_path) is None
+
+    def test_a_second_claim_re_dates_the_marker(self, tmp_path):
+        """And the directory, which dates it when its own ``lstat`` fails."""
+        marker = tmp_path / profile_lock.LAUNCH_NAME
+        long_ago = time.time() - 60
+        with profile_lock.launching(tmp_path):
+            os.utime(marker, (long_ago, long_ago))
+            os.utime(tmp_path, (long_ago, long_ago))
+            with profile_lock.launching(tmp_path):
+                assert marker.stat().st_mtime > long_ago + 30
+                assert tmp_path.stat().st_mtime > long_ago + 30
+
+    def test_a_later_launch_is_held_for_its_own_whole_budget(self, tmp_path):
+        """The first launch started a whole budget ago; the second has just
+        started and must not read FREE under it."""
+        marker = tmp_path / profile_lock.LAUNCH_NAME
+        then = time.time() - spawn_budget.LAUNCH_BUDGET_SECONDS - 5
+        with profile_lock.launching(tmp_path):
+            os.utime(marker, (then, then))
+            with profile_lock.launching(tmp_path):
+                assert hold(tmp_path) is not None, "the newer launch read FREE"
+
+    def test_a_marker_whose_age_cannot_be_read_is_dated_by_its_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """It held the profile for ever: an unanswerable age read as 0."""
+        (tmp_path / profile_lock.LAUNCH_NAME).write_text(
+            f"{socket.gethostname()}-{os.getpid()}", encoding="utf-8"
+        )
+        real_lstat = Path.lstat
+
+        def lstat(self, *args, **kwargs):
+            if self.name == profile_lock.LAUNCH_NAME:
+                raise PermissionError(13, "denied", str(self))
+            return real_lstat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        fresh = hold(tmp_path)
+        stale = time.time() - spawn_budget.LAUNCH_BUDGET_SECONDS - 5
+        os.utime(tmp_path, (stale, stale))
+        aged = hold(tmp_path)
+        monkeypatch.undo()
+
+        assert fresh is not None
+        assert aged is None, "a marker no age could be read for held it for ever"
+
+    def test_an_unlink_refused_while_it_is_read_is_retried(self, tmp_path, monkeypatch):
+        """Windows: a ``profile_hold`` reading the marker has it open, and an
+        open file cannot be deleted. One refusal left it holding the profile."""
+        real_unlink = Path.unlink
+        refused = []
+
+        def unlink(self, *args, **kwargs):
+            if self.name == profile_lock.LAUNCH_NAME and len(refused) < 2:
+                refused.append(self.name)
+                raise PermissionError(13, "in use", str(self))
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+        with profile_lock.launching(tmp_path):
+            pass
+        monkeypatch.undo()
+
+        assert len(refused) == 2
+        assert leftovers(tmp_path) == []
+        assert hold(tmp_path) is None
+
+    async def test_an_unlink_refused_every_time_still_launches(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        """The launch succeeds; the marker left behind holds the profile until
+        the age bound drops it, the survivable direction."""
+        launch_seams(False)
+        started = object()
+
+        async def start(config):
+            return started
+
+        def refuse(self, *args, **kwargs):
+            raise PermissionError(13, "in use", str(self))
+
+        monkeypatch.setattr(browser_manager.uc, "start", start)
+        monkeypatch.setattr(Path, "unlink", refuse)
+        browser = await BrowserManager()._launch_browser(
+            BrowserOptions(user_data_dir=str(tmp_path)), "exe", [], _Attempt()
+        )
+        monkeypatch.undo()
+
+        assert browser is started
+        left = hold(tmp_path)
+        assert left is not None
+        assert left.pid is None
+        stale = time.time() - spawn_budget.LAUNCH_BUDGET_SECONDS - 5
+        os.utime(tmp_path / profile_lock.LAUNCH_NAME, (stale, stale))
         assert hold(tmp_path) is None
 
     def test_a_marker_whose_launcher_died_is_orphaned(self, tmp_path):
@@ -233,7 +425,7 @@ class TestLockReadEdges:
     ):
         """``hidepid=2``: ``psutil`` lists only our own processes, so another
         user's live browser read as gone and its lock as orphaned."""
-        hidden = 4242
+        hidden = dead_pid()  # no process to hurt, were the alias ever missed
         write_singleton(tmp_path, f"{socket.gethostname()}-{hidden}")
         asked = []
 
@@ -245,7 +437,8 @@ class TestLockReadEdges:
         # raising=False: before F-1008 there was no such switch, and the pin
         # must reach the old answer (FREE) rather than fail on a missing name.
         monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", True, raising=False)
-        monkeypatch.setattr(profile_lock.os, "kill", kill)
+        # The module's own alias: patching `os.kill` would swap it process-wide.
+        monkeypatch.setattr(profile_lock, "_signal", kill, raising=False)
         answer = hold(tmp_path)
         monkeypatch.undo()
 
@@ -254,11 +447,14 @@ class TestLockReadEdges:
 
     def test_windows_never_signals_a_pid(self, tmp_path, monkeypatch):
         """``os.kill`` TERMINATES on Windows: the question is never asked there."""
-        write_singleton(tmp_path, f"{socket.gethostname()}-4242")
+        write_singleton(tmp_path, f"{socket.gethostname()}-{dead_pid()}")
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
         monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", False, raising=False)
         monkeypatch.setattr(
-            profile_lock.os, "kill", lambda *_a: pytest.fail("signalled a pid")
+            profile_lock,
+            "_signal",
+            lambda *_a: pytest.fail("signalled a pid"),
+            raising=False,
         )
         assert hold(tmp_path) is None
 

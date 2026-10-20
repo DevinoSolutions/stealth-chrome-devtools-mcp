@@ -22,7 +22,10 @@ which profiles are idle enough to trim, are ``clone_storage``'s storage-cap
 question and are not about bytes in a directory. ``profile_lock`` names three
 of these entries too, for the DIFFERENT question of what Chrome's process
 singleton MEANS; that module's docstring says so, and this list stays about
-bytes on disk.
+bytes on disk. Its own launch marker (``profile_lock.LAUNCH_NAME``, F-1008) is
+NOT one of them: ``ignore_names`` skips it, and the ``.tmp`` it is written
+through, by the ``.lock``/``.tmp`` suffix rule, not through
+``REGENERABLE_NAMES``.
 
 **What a copy does about a locked file** — ``copy_file``'s three attempts and
 ``copy_delta``'s two ``except`` clauses. A profile being copied may be a
