@@ -1,6 +1,6 @@
-"""F-1009 — THE one home for "which DevTools port is MINE": asking Chrome for
-port ``0``, reading the port it chose from ``DevToolsActivePort`` in OUR OWN
-profile, and refusing an endpoint that is not the one that file names.
+"""F-1009 — THE one home for "is the DevTools endpoint on this port MY Chrome's":
+reading ``DevToolsActivePort`` in OUR OWN profile and refusing an endpoint that
+is not the one that file names.
 
 **The defect.** nodriver picks a port by binding and releasing a socket
 (``util.free_port``) and only then launches Chrome with
@@ -13,26 +13,31 @@ registers the SIBLING's browser as its own. ``close_instance`` on that instance
 kills the sibling: on the shared ``fleet`` or ``default`` session that is the
 owner's logins.
 
-**The fix is not a bigger retry; it is to stop choosing a port.** Chrome is
-launched with ``--remote-debugging-port=0``, binds a port of its own, and writes
-``<port>\n<browser websocket path>`` to ``DevToolsActivePort`` in the
-``--user-data-dir`` it was given. That directory is ours (``profile_lock`` holds
-it for the launch), so the file is ours — provided it was written by THIS launch,
-which is why :func:`clear_stale` removes any earlier one first and why a file
-that cannot be removed refuses the launch rather than being trusted.
+**The fix does not change what Chrome is asked for.** It was first written to
+launch with ``--remote-debugging-port=0`` (no port to steal) and CI measured
+that real Chrome then reports ``navigator.webdriver == true`` on every OS — a
+stealth regression — so the argv keeps the concrete port. What changes is that
+nothing answering on it is trusted until THIS launch's Chrome has written
+``<port>
+<browser websocket path>`` to ``DevToolsActivePort`` in the
+``--user-data-dir`` it was given naming that same port (Chrome writes it only
+after it bound the port, so a Chrome that lost the race writes nothing). That
+directory is ours (``profile_lock`` holds it for the launch), so the file is ours
+— provided it was written by THIS launch, which is why :func:`clear_stale`
+removes any earlier one first and why a file that cannot be removed refuses the
+launch rather than being trusted.
 
-**Identity is a second, independent check.** The port came from our file, but
-what answers there must also be the browser the file describes:
-:func:`verify` compares the ``webSocketDebuggerUrl`` ``/json/version`` reports
-with the port and the path Chrome wrote. A mismatch is a ``ToolError`` that names
-both, and nothing downstream is built on it — no ``Browser`` is handed back, so
-there is no instance for ``close_instance`` to close and the foreign browser's
-pid is never ours to name.
+**Identity is a second, independent check.** What answers on that port must also
+be the browser the file describes: :func:`verify` compares the
+``webSocketDebuggerUrl`` ``/json/version`` reports with the port and the path
+Chrome wrote. A mismatch is a ``ToolError`` that names both, and nothing
+downstream is built on it — no ``Browser`` is handed back, so there is no
+instance for ``close_instance`` to close and the foreign browser's pid is never
+ours to name. A launch that loses the port race is therefore a named, retryable
+failure instead of an attach to a stranger.
 
 It is also THE one home for the file itself (``PORT_FILE``, :func:`read`): the
-adoption ladder (``cdp_endpoint``) and the live-master door (``browser_cmdline``)
-read it through here, because a browser launched with ``=0`` carries no port on
-its command line and the file is where Chrome wrote the one it resolved that to.
+adoption ladder (``cdp_endpoint``) reads it through here.
 
 A leaf: ``browser_pid_registry`` (what a usable port is), ``tool_errors`` and
 stdlib. The launch paths — ``browser_connect`` and ``desktop_launch`` — are its
@@ -49,7 +54,6 @@ from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 __all__ = [
-    "PORT_ARG",
     "PORT_FILE",
     "ActivePort",
     "clear_stale",
@@ -58,17 +62,11 @@ __all__ = [
     "own_endpoint",
     "read",
     "verify",
-    "with_port_zero",
 ]
-
-PORT_FLAG = "--remote-debugging-port"
 
 # Chrome writes the port it actually bound here, first line, then the browser
 # websocket path, inside the profile it was launched on.
 PORT_FILE = "DevToolsActivePort"
-
-#: Chrome resolves ``0`` to a port of its own and reports it in the file.
-PORT_ARG = f"{PORT_FLAG}=0"
 
 
 class ActivePort(NamedTuple):
@@ -97,12 +95,6 @@ def read(profile_dir: str | Path) -> ActivePort | None:
     return ActivePort(port, (lines[1].strip() if len(lines) > 1 else "") or None)
 
 
-def with_port_zero(args: list[str]) -> list[str]:
-    """*args* with every ``--remote-debugging-port`` replaced by ``=0``, once."""
-    kept = [arg for arg in args if not arg.startswith(f"{PORT_FLAG}=")]
-    return [*kept, PORT_ARG]
-
-
 def clear_stale(profile_dir: str | Path | None) -> None:
     """Remove a ``DevToolsActivePort`` an earlier Chrome left in *profile_dir*.
 
@@ -125,13 +117,16 @@ def clear_stale(profile_dir: str | Path | None) -> None:
         ) from error
 
 
-def own_endpoint(profile_dir: str | Path | None) -> ActivePort | None:
-    """The port and path THIS launch's Chrome wrote into *profile_dir*, or None
-    while it has not (a file with no path is half-written and also None)."""
+def own_endpoint(profile_dir: str | Path | None, port: int) -> ActivePort | None:
+    """What THIS launch's Chrome wrote into *profile_dir* for *port*, or None.
+
+    None while it has not: no file, a half-written one (no path), or one naming a
+    different port than the one this launch asked Chrome for (not this launch's).
+    """
     if not profile_dir:
         return None
     found = read(profile_dir)
-    return found if found and found.path else None
+    return found if found and found.path and found.port == port else None
 
 
 def verify(ws_url: str, expected: ActivePort) -> None:
@@ -148,12 +143,14 @@ def verify(ws_url: str, expected: ActivePort) -> None:
     )
 
 
-def missing(profile_dir: str | Path | None, seconds: float) -> ToolError:
-    """The launched Chrome never wrote its port within *seconds*."""
+def missing(profile_dir: str | Path | None, port: int, seconds: float) -> ToolError:
+    """The launched Chrome never wrote *port* to its file within *seconds*."""
     return ToolError(
-        f"F-1009: the launched Chrome did not write "
-        f"{PORT_FILE} in {profile_dir} within "
-        f"{seconds:g} s, so there is no DevTools port of its own to attach to."
+        f"F-1009: the launched Chrome did not write {PORT_FILE} naming port "
+        f"{port} in {profile_dir} within {seconds:g} s, so it never opened "
+        "DevTools on the port it was given (another process may have taken it) "
+        "and there is no endpoint of its own to attach to. Nothing that answers "
+        "on that port was attached to."
     )
 
 

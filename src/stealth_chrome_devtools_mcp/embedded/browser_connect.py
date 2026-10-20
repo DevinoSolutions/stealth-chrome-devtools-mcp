@@ -152,12 +152,14 @@ chooses the port by binding and releasing a socket, then launches Chrome on it; 
 sibling that takes the port in the gap answers ``/json/version`` in place of the
 Chrome we launched, and the spawn registered the sibling's browser (see
 ``devtools_port``). :class:`LaunchConfig` is the ``uc.Config`` of a launch of
-ours: its argv asks Chrome for port ``0``, and the patience above, once the
-launch is one of ours, waits for the port Chrome wrote to ``DevToolsActivePort``
-in OUR profile, points nodriver's ``HTTPApi`` at THAT port and refuses an answer
-whose websocket is not the one the file names. nodriver swallows every exception
-out of that fetch, so the named reason is kept on the config and :func:`start`
-raises it in place of nodriver's "Failed to connect to browser".
+ours, and the patience above, once the launch is one of ours, asks nothing of
+the port until Chrome has written ``DevToolsActivePort`` in OUR profile naming
+it (a Chrome that lost the race writes nothing), and refuses an answer whose
+websocket is not the one the file names. The argv keeps the concrete port:
+``--remote-debugging-port=0`` was tried and real Chrome then reports
+``navigator.webdriver == true``. nodriver swallows every exception out of that
+fetch, so the named reason is kept on the config and :func:`start` raises it in
+place of nodriver's "Failed to connect to browser".
 
 A leaf: ``nodriver``, stdlib, ``process_exit``, ``spawn_budget`` and
 ``devtools_port`` (leaves of their own). ``install()`` is called from
@@ -242,16 +244,14 @@ class NoFirstPageError(Exception):
 
 
 class LaunchConfig(Config):
-    """The ``uc.Config`` of a launch of OURS: Chrome picks its own DevTools port.
+    """The ``uc.Config`` of a launch of OURS, marking it as one whose endpoint
+    must be proven ours.
 
     ``failure`` is the named reason the connect gave up, left for :func:`start`
     because nodriver discards the exceptions its fetch raises (F-1009).
     """
 
     failure: ToolError | None = None
-
-    def __call__(self) -> list[str]:
-        return devtools_port.with_port_zero(super().__call__())
 
 
 class _Launched(Protocol):
@@ -316,17 +316,16 @@ async def _own_endpoint_get(
 ) -> object:
     """``/json/version`` of the Chrome THIS launch started (F-1009).
 
-    The port is whatever that Chrome wrote to ``DevToolsActivePort`` in its own
-    profile, not the one nodriver picked, and the answer must carry the websocket
-    the file names. Every give-up leaves its reason on *config* before it raises,
-    because ``Browser.start`` swallows what this raises and says only "Failed".
+    Nothing is asked of the port until that Chrome has written it to
+    ``DevToolsActivePort`` in its own profile, and the answer must carry the
+    websocket the file names. Every give-up leaves its reason on *config* before
+    it raises, because ``Browser.start`` swallows what this raises and says only
+    "Failed".
     """
     profile = config.user_data_dir
     while True:
-        found = devtools_port.own_endpoint(profile)
+        found = devtools_port.own_endpoint(profile, api.port)
         if found is not None:
-            api.port = config.port = found.port
-            api.api = f"http://{api.host}:{found.port}"
             try:
                 answer = await original(api, endpoint)
             except _ANSWERED:
@@ -351,7 +350,7 @@ async def _own_endpoint_get(
         if _now() >= wait.deadline:
             if found is None:
                 config.failure = devtools_port.missing(
-                    profile, CONNECT_PATIENCE_SECONDS
+                    profile, api.port, CONNECT_PATIENCE_SECONDS
                 )
             raise config.failure or TimeoutError(endpoint)
         await _sleep(POLL_SECONDS)

@@ -33,7 +33,7 @@ import psutil
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Collection
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, devtools_port
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 
 DEBUG_PORT_FLAG = "--remote-debugging-port"
 
@@ -93,14 +93,7 @@ def debug_port(pid: int, expect_dir: str | None = None) -> int | None:
             on_disk
         ) != browser_pid_registry.normalize_path(expect_dir):
             return None
-    value = flag_value(cmdline, DEBUG_PORT_FLAG)
-    if expect_dir is not None and (value or "").strip() == "0":
-        # F-1009: every browser WE launch is asked for port 0, so the command
-        # line names no port and Chrome's own file, in the profile this process
-        # was just joined to, is where it wrote the one it resolved that to.
-        found = devtools_port.read(expect_dir)
-        return found.port if found else None
-    return browser_pid_registry.valid_port(value)
+    return browser_pid_registry.valid_port(flag_value(cmdline, DEBUG_PORT_FLAG))
 
 
 def browser_process(pids: Collection[int] | None, expect_dir: str) -> int | None:

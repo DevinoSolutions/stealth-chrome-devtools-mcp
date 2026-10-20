@@ -7,16 +7,16 @@
 nodriver chose the DevTools port by binding and releasing a socket (`util.free_port()`) and only then launched Chrome on it.
 A process that took the port in that gap, most often a sibling Chrome from a concurrent spawn, answered `/json/version` in
 place of the Chrome we had launched, and the spawn registered the SIBLING's browser as its own, so a later `close_instance`
-could kill it (on the shared `fleet`/`default` session, the logins). Chrome is now launched with `--remote-debugging-port=0`
-(`browser_connect.LaunchConfig`; `devtools_port.with_port_zero`) and the real port is read from the `DevToolsActivePort` Chrome
-writes into OUR profile, a leftover one being deleted first and never trusted; what answers on that port must carry the
-websocket path the file names or the spawn fails, naming the conflict, before any connection exists (so nothing is ever sent
-to the foreign browser). The wait is the existing `CONNECT_PATIENCE_SECONDS`, and a Chrome that exits or never writes the file
-is named instead of "Failed to connect to browser". The delegated headed launch (F-810) takes the same route and no longer
-picks a port with `proxy_forwarder._free_port()`. A browser launched on port `0` has no port on its command line, so
-`browser_cmdline.debug_port` falls back to the profile's file when joined to that profile (live-master seeding and re-attach
-keep working). Not fixed: no pid / `--user-data-dir` check over CDP, and the delegated path and real Chrome's port-0 file
-write were not run against a real Chrome (`audit/stage2/finding_F1009_devtools_port_race.md`).
+could kill it (on the shared `fleet`/`default` session, the logins). A launch of ours (`browser_connect.LaunchConfig`) now
+believes nothing that answers on the port until the Chrome it started has written `DevToolsActivePort` in OUR profile naming
+that port (Chrome writes it only after it bound the port; a leftover file is deleted first and never trusted), and what answers
+must carry the websocket path the file names or the spawn fails, naming the conflict, before any connection exists, so nothing
+is ever sent to the foreign browser. A Chrome that lost the race, exited or never wrote the file is named instead of
+"Failed to connect to browser", inside the existing `CONNECT_PATIENCE_SECONDS`. The delegated headed launch (F-810) requires
+the same proof (`devtools_port`). The argv keeps the concrete port: an attempt that asked Chrome for `--remote-debugging-port=0`
+made the offline-stealth gate report `navigator.webdriver == true` on all three OSes (cause not established), so it was dropped.
+Not fixed: no pid / `--user-data-dir` check over CDP, and nothing here ran against a real Chrome
+(`audit/stage2/finding_F1009_devtools_port_race.md`).
 
 ### A window Windows judges covered is no longer backgrounded (F-1010)
 

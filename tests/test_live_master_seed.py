@@ -43,19 +43,6 @@ class TestLiveMasterPort:
         hold = profile_lock.Hold(10, "held")
         assert profile_target.live_master_port(MASTER, hold) == 51234
 
-    def test_a_browser_launched_on_port_zero_is_found_through_its_port_file(
-        self, argv, tmp_path
-    ):
-        """F-1009: every browser this backend launches is asked for port ``0`` and
-        writes the real one to ``DevToolsActivePort``, so the command line alone
-        names no port and the shared session's live jar would stop being reachable."""
-        master = tmp_path / "master"
-        master.mkdir()
-        (master / "DevToolsActivePort").write_text("51234\n/devtools/browser/x\n")
-        argv([f"--user-data-dir={master}", "--remote-debugging-port=0"])
-        hold = profile_lock.Hold(10, "held")
-        assert profile_target.live_master_port(master, hold) == 51234
-
     def test_a_process_on_another_profile_is_no_source(self, argv):
         argv(["--user-data-dir=C:/other", "--remote-debugging-port=51234"])
         hold = profile_lock.Hold(10, "h")

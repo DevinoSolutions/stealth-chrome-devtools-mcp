@@ -285,7 +285,6 @@ class TestLoadBearingSymbols:
                 "own_endpoint",
                 "clear_stale",
                 "verify",
-                "with_port_zero",
             ],
             "embedded.reap_guard": [
                 "UNDECIDED",

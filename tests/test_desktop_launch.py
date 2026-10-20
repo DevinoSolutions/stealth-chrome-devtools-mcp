@@ -35,10 +35,10 @@ from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     devtools_port,
     display_context,
+    proxy_forwarder,
     tool_errors,
     window_sizing,
 )
-from stealth_chrome_devtools_mcp.embedded.devtools_port import ActivePort
 
 # ---------------------------------------------------------------------------
 # available() — the one question "can this process delegate a launch?"
@@ -280,22 +280,16 @@ class FakeSchtasks:
         return _powershell_literal(self.script_text, "-FilePath ")
 
 
-OWN_PORT = 9333
-OWN_PATH = "/devtools/browser/delegated-f1009"
-
-
 @pytest.fixture()
 def delegation(monkeypatch, tmp_path):
     """Hermetic delegation plumbing: tmp state dir, fixed port, faked scheduler,
     faked DevTools probe, faked ``uc.start``. Returns the handles a test asserts on."""
     monkeypatch.setattr(backend_registry, "STATE_DIR", tmp_path)
-    # F-1009: the port is Chrome's, read out of the profile it was given — the
-    # file it "wrote" is stated here and the answering endpoint is the right one.
-    monkeypatch.setattr(
-        devtools_port, "own_endpoint", lambda profile: ActivePort(OWN_PORT, OWN_PATH)
-    )
-    monkeypatch.setattr(desktop_launch, "_verify_identity", lambda found: None)
+    monkeypatch.setattr(proxy_forwarder, "_free_port", lambda: 9333)
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: True)
+    # F-1009: the identity proof reads the profile's DevToolsActivePort and asks
+    # the port who answers; those tests below use the real one.
+    monkeypatch.setattr(desktop_launch, "_verify_identity", lambda endpoint: True)
     # The launched pid is a fake number, so its liveness AND its identity stamp
     # are stated, not observed.
     monkeypatch.setattr(desktop_launch, "_process_create_time", lambda pid: 1000.0)
@@ -353,7 +347,7 @@ async def test_launch_and_attach_returns_the_launched_pid_and_attaches(delegatio
     assert browser._process_pid == 4242
     assert len(delegation.started) == 1
     config = delegation.started[0]
-    assert (config.host, config.port) == ("127.0.0.1", OWN_PORT)
+    assert (config.host, config.port) == ("127.0.0.1", 9333)
 
 
 async def test_the_delegated_chrome_is_raised_once_its_pid_is_known(delegation):
@@ -400,12 +394,7 @@ async def test_the_launcher_hands_chrome_the_args_the_config_would_have(delegati
     )
     argv = schtasks.chrome_argv
     assert "--window-size=800,600" in argv
-    # F-1009: Chrome is asked for port 0, never handed one that somebody else
-    # can take in the seconds between the task being created and Chrome binding.
-    assert "--remote-debugging-port=0" in argv
-    assert [a for a in argv if a.startswith("--remote-debugging-port")] == [
-        "--remote-debugging-port=0"
-    ]
+    assert "--remote-debugging-port=9333" in argv
     assert "--user-data-dir=C:/profiles/clone one" in argv
     assert schtasks.chrome_executable == "C:/Program Files/Google/Chrome/chrome.exe"
     assert "-PassThru" in schtasks.script_text
@@ -555,8 +544,8 @@ async def test_the_delegated_chrome_gets_nodrivers_own_default_args(delegation):
         browser_executable_path="chrome.exe",
         browser_args=["--window-size=800,600"],
     )
-    expected.host, expected.port = "127.0.0.1", 0
-    assert argv == devtools_port.with_port_zero(expected())
+    expected.host, expected.port = "127.0.0.1", 9333
+    assert argv == expected()
     assert "--remote-allow-origins=*" in argv
     assert "--remote-debugging-host=127.0.0.1" in argv
 
@@ -684,7 +673,7 @@ async def test_a_devtools_port_that_never_answers_raises_after_the_deadline(
         await desktop_launch.launch_and_attach("chrome.exe", [], None)
     message = str(err.value)
     assert "F-810" in message
-    assert "DevToolsActivePort" in message
+    assert "9333" in message
     assert "/Delete" in schtasks.verbs
     assert delegation.started == []
     # The sharp part: this Chrome is ALIVE — the poll proved it every iteration,
@@ -1015,52 +1004,106 @@ def test_desktop_launch_never_imports_server():
     assert sys.modules[desktop_launch.__name__].__name__.endswith("desktop_launch")
 
 
-async def test_a_foreign_answer_on_the_files_port_is_refused_and_never_attached(
-    delegation, monkeypatch
+# ---------------------------------------------------------------------------
+# F-1009 — the port was picked seconds before Chrome bound it; a squatter that
+# answers it is a stranger, not our browser.
+# ---------------------------------------------------------------------------
+
+_REAL_VERIFY = desktop_launch._verify_identity
+_OUR_WS = "/devtools/browser/delegated-f1009"
+_SQUATTER_WS = "/devtools/browser/squatter-f1009"
+
+
+def _chrome_that_writes_its_port(profile: Path, port: int = 9333) -> FakeSchtasks:
+    """A scheduler whose launched Chrome writes ``DevToolsActivePort`` when it
+    starts, i.e. AFTER the launch cleared any leftover one."""
+
+    class WritesPort(FakeSchtasks):
+        def __call__(self, args):
+            result = super().__call__(args)
+            if args[0] == "/Run":
+                (profile / devtools_port.PORT_FILE).write_text(
+                    f"{port}" + chr(10) + _OUR_WS + chr(10), encoding="utf-8"
+                )
+            return result
+
+    return WritesPort(pid=4242)
+
+
+def _answering(monkeypatch, port: int, ws_path: str) -> None:
+    """``/json/version`` on *port* reports a browser whose websocket is *ws_path*."""
+    import requests
+
+    def get(url, timeout=None):
+        assert url == f"http://127.0.0.1:{port}/json/version", url
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"webSocketDebuggerUrl": f"ws://127.0.0.1:{port}{ws_path}"},
+        )
+
+    monkeypatch.setattr(requests, "get", get)
+
+
+async def test_a_squatter_answering_the_port_is_never_attached(
+    delegation, monkeypatch, tmp_path
 ):
-    """F-1009: the endpoint answering where Chrome's file points is not the
-    browser the file describes. No attach, and the only pid killed is OUR
-    launcher's (identity-stamped) — the sibling that answered is never named."""
-
-    def foreign(found):
-        devtools_port.verify("ws://127.0.0.1:9333/devtools/browser/sibling", found)
-
-    monkeypatch.setattr(desktop_launch, "_verify_identity", foreign)
-    delegation.install(FakeSchtasks(pid=4242))
+    """The squatter answers ``/json/version`` and the file Chrome wrote describes
+    a different browser: refuse by name, attach to nothing, and the only pid ever
+    killed is OUR launcher's (identity-stamped), never the squatter's."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setattr(desktop_launch, "_verify_identity", _REAL_VERIFY)
+    _answering(monkeypatch, 9333, _SQUATTER_WS)
+    delegation.install(_chrome_that_writes_its_port(profile))
     with pytest.raises(tool_errors.ToolError, match="not the browser this spawn"):
-        await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
+        await desktop_launch.launch_and_attach("chrome.exe", [], str(profile))
     assert delegation.started == []
     assert delegation.killed == [(4242, 1000.0)]
 
 
-async def test_a_stale_port_file_is_removed_before_the_launch(
+async def test_the_browser_the_file_describes_is_attached(
     delegation, monkeypatch, tmp_path
 ):
-    """A leftover ``DevToolsActivePort`` is some earlier Chrome's; trusting it is
-    attaching to whatever holds that port now."""
     profile = tmp_path / "profile"
     profile.mkdir()
-    stale = profile / "DevToolsActivePort"
-    stale.write_text("46000\n/devtools/browser/stale\n")
+    monkeypatch.setattr(desktop_launch, "_verify_identity", _REAL_VERIFY)
+    _answering(monkeypatch, 9333, _OUR_WS)
+    delegation.install(_chrome_that_writes_its_port(profile))
+    await desktop_launch.launch_and_attach("chrome.exe", [], str(profile))
+    assert len(delegation.started) == 1
+    assert delegation.killed == []
+
+
+async def test_a_stale_port_file_is_removed_before_the_launch(delegation, tmp_path):
+    """A leftover ``DevToolsActivePort`` is some earlier Chrome's; the poll would
+    otherwise take it for the proof that THIS launch opened the port."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / devtools_port.PORT_FILE).write_text("9333" + chr(10) + _OUR_WS)
     seen: list[bool] = []
 
-    def own(profile_dir):
-        seen.append(stale.exists())
-        return ActivePort(OWN_PORT, OWN_PATH)
+    class Watching(FakeSchtasks):
+        def __call__(self, args):
+            if args[0] == "/Run":
+                seen.append((profile / devtools_port.PORT_FILE).exists())
+            return super().__call__(args)
 
-    monkeypatch.setattr(devtools_port, "own_endpoint", own)
-    delegation.install(FakeSchtasks(pid=4242))
+    delegation.install(Watching(pid=4242))
     await desktop_launch.launch_and_attach("chrome.exe", [], str(profile))
-    assert seen and not any(seen)
+    assert seen == [False]
 
 
-async def test_a_chrome_that_never_writes_its_port_is_named_inside_the_deadline(
-    delegation, monkeypatch
+async def test_a_chrome_that_never_writes_its_port_file_is_named(
+    delegation, monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(devtools_port, "own_endpoint", lambda profile: None)
+    """The squatter answers, our Chrome (which lost the port) writes nothing: the
+    poll must not take the answer for ours, and times out naming the file."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setattr(desktop_launch, "_verify_identity", _REAL_VERIFY)
+    _answering(monkeypatch, 9333, _SQUATTER_WS)
     delegation.install(FakeSchtasks(pid=4242))
-    with pytest.raises(tool_errors.ToolError, match="DevToolsActivePort") as err:
-        await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
-    assert "F-810" in str(err.value)
+    with pytest.raises(tool_errors.ToolError, match="DevToolsActivePort"):
+        await desktop_launch.launch_and_attach("chrome.exe", [], str(profile))
     assert delegation.started == []
     assert delegation.killed == [(4242, 1000.0)]
