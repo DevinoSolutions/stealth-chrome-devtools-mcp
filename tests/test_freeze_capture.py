@@ -337,7 +337,9 @@ class TestMinidump:
             await asyncio.sleep(0.2)  # let the stuck writer finish and clean up
 
         assert elapsed < 2.0
-        assert ticks >= 5  # the loop kept turning while the write was stuck
+        # Any tick proves the loop ran during the write; a loop-blocking dump gives 0
+        # (it returns before the ticker can run). A higher floor only measures runner load.
+        assert ticks >= 1
         assert line.startswith("not finished within 0.2s")
         assert str(tmp_path / "x.dmp") in line
 
