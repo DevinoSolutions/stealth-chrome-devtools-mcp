@@ -18,7 +18,10 @@ a rotation endpoint is failed before it leaves the browser.
 **What is blocked** (:data:`BLOCKED_URL_PATTERNS`, ``Network.setBlockedURLs`` URL
 wildcards, ``*`` matches anything; the path is case-sensitive, so both spellings
 are listed; the pattern ends in ``*`` so ``RotateCookiesPage`` — the iframe whose
-script makes the POST — is covered by the same entry as ``RotateCookies``):
+script makes the POST — is covered by the same entry as ``RotateCookies``; but
+``Network.setBlockedURLs`` fails the requests a page makes, not a frame's DOCUMENT
+navigation, so the iframe itself loads and the POST its script makes is what is
+blocked, measured on CI in F-999):
 
 * ``accounts.google.com/RotateCookies`` and ``/RotateCookiesPage`` — the PSIDTS
   rotation a Google page triggers (the endpoint community Gemini clients call to
