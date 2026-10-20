@@ -11,6 +11,14 @@ None; the `with_correlation_id` layer every tool gets then came out with no anno
 `__annotate__` on 3.14. A newer pydantic, fastmcp or mcp does not change this (pydantic 2.14.1, fastmcp 4.1.1 and mcp 2.3.0
 fail the same way). Python 3.11-3.13 are unchanged, and 3.14 is still not in the release gate matrix.
 
+### The release-gate harness waits for the fixture app to be wired before it interacts (F-1006)
+
+Test-only. `_settle_dom` and `navigate_and_settle` returned once `body` was queryable, but `app.js` (end of `<body>`) attaches the
+listeners and `window.__actions` later, so on a slow Windows runner click/type/select were silently lost and the oracle read
+`None` (`json.loads(None)` `TypeError`, PR #243 install-smoke). `app.js` now sets `window.__fixtureReady` after wiring, and both settle
+helpers wait for a `complete` document with it set (`fixture_routes.wait_fixture_ready`, one definition, 15 s, a failed probe is
+retried). A page that never wires fails naming the last page state it saw, including whether `app.js` was ever fetched.
+
 ### The health probe no longer heals a browser that is only starved (F-1007)
 
 `browser_health` probes a background `about:blank` target, and Chrome runs a renderer nothing is looking at at IDLE

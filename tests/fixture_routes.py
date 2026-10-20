@@ -70,6 +70,7 @@ thread, and a peer that gave up first is recorded rather than raised.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -77,8 +78,80 @@ import socket
 import struct
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from typing import Any
+
+# ── Fixture-ready wait: ONE definition for both settle helpers (the harness's
+# ``_settle_dom`` and ``e2e_helpers.navigate_and_settle``). A document is settled
+# when it is ``complete`` and, if it carries ``app.js``, that script has wired its
+# listeners and set ``window.__fixtureReady``. The probe returns a JSON string
+# (what ``execute_script`` carries unchanged) so a failure can name WHAT it saw. ──
+FIXTURE_READY_TIMEOUT = 15.0
+FIXTURE_STATE_JS = (
+    "JSON.stringify((function(){"
+    "var s=document.querySelector('script[src$=\"app.js\"]');"
+    "return {href:location.href,state:document.readyState,script:s!==null,"
+    "fetched:performance.getEntriesByType('resource')"
+    ".some(function(e){return e.name.indexOf('/app.js')>=0;}),"
+    "ready:window.__fixtureReady===true};})())"
+)
+
+
+def fixture_state_ready(state: dict[str, Any], expect_app: bool = False) -> bool:
+    """``expect_app``: the caller navigated to a page that loads ``app.js``, so a
+    document without the script tag (``about:blank``, the previous page) is not it."""
+    if state.get("state") != "complete":
+        return False
+    if not state.get("script"):
+        return not expect_app
+    return state.get("ready") is True
+
+
+async def wait_fixture_ready(
+    probe: Callable[[str], Any], expect_app: bool = False
+) -> None:
+    """Poll ``probe(FIXTURE_STATE_JS)`` until the document is settled, or fail.
+
+    ``probe`` is the caller's transport (async, returns the JS result or ``None``
+    on a failed call). A failed probe — a context destroyed by a redirect or
+    meta-refresh — is retried until the deadline, never fatal on its own. The
+    deadline failure names the last page state it saw: ``fetched`` false means
+    the script was never requested, true with ``ready`` false means it was
+    fetched but did not finish wiring. A wait that recovers within the deadline
+    still warns: ``navigate`` had already returned, so the page was not ready at
+    the moment the tool said it was (T-4709)."""
+    started = time.monotonic()
+    deadline = started + FIXTURE_READY_TIMEOUT
+    last: Any = None
+    probes = 0
+    while True:
+        probes += 1
+        raw = await probe(FIXTURE_STATE_JS)
+        state = None
+        if isinstance(raw, str):
+            try:
+                state = json.loads(raw)
+            except ValueError:
+                state = None
+        if isinstance(state, dict):
+            last = state
+            if fixture_state_ready(state, expect_app):
+                if probes > 1:
+                    warnings.warn(
+                        f"navigate had already returned but {state.get('href')} was "
+                        f"not settled: needed {probes} probes and "
+                        f"{time.monotonic() - started:.2f}s before the document was "
+                        "complete with app.js wired",
+                        stacklevel=2,
+                    )
+                return
+        assert time.monotonic() < deadline, (
+            "fixture page never settled (app.js did not wire window.__fixtureReady "
+            f"within {FIXTURE_READY_TIMEOUT:g}s); last page state: {last}"
+        )
+        await asyncio.sleep(0.1)
+
 
 # ── Fixed tokens and payloads (the exact oracles the W7 tests assert on) ─────
 CSP_HEADER_NAME = "Content-Security-Policy"

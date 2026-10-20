@@ -109,3 +109,109 @@ def test_fixture_files_are_ascii():
         if any(byte > 0x7F for byte in raw):
             non_ascii.append(path.name)
     assert non_ascii == [], f"non-ASCII bytes in fixture files: {non_ascii}"
+
+
+def test_app_js_sets_fixture_ready_only_after_wire():
+    """``window.__fixtureReady`` is the harness's "listeners are attached" signal,
+    so it must be set AFTER ``wire()`` returns: set before, a settle helper would
+    release a click into a page whose handlers do not exist yet (F-1006)."""
+    source = (FIXTURE_APP_DIR / "app.js").read_text(encoding="utf-8")
+    start = re.search(r"function start\(\)\s*\{(?P<body>.*?)\n  \}", source, re.DOTALL)
+    assert start, "app.js lost its start() entry point"
+    body = start.group("body")
+    assert "wire();" in body
+    assert "window.__fixtureReady = true;" in body
+    assert body.index("wire();") < body.index("window.__fixtureReady = true;")
+    # And nothing else may set it: a second writer would bypass the ordering.
+    assert source.count("__fixtureReady = true") == 1
+
+
+def test_fixture_state_ready_needs_complete_and_a_wired_script():
+    from fixture_routes import fixture_state_ready
+
+    base = {"state": "complete", "script": True, "fetched": True, "ready": True}
+    assert fixture_state_ready(base)
+    assert not fixture_state_ready({**base, "ready": False})
+    assert not fixture_state_ready({**base, "state": "interactive"})
+    # A document without app.js has nothing to wire, but must still be complete.
+    assert fixture_state_ready({**base, "script": False, "ready": False})
+    assert not fixture_state_ready(
+        {**base, "script": False, "ready": False, "state": "loading"}
+    )
+
+
+def test_wait_fixture_ready_names_the_state_it_last_saw(monkeypatch):
+    import asyncio
+
+    import fixture_routes
+
+    monkeypatch.setattr(fixture_routes, "FIXTURE_READY_TIMEOUT", 0.3)
+    seen = []
+
+    async def probe(expression):
+        seen.append(expression)
+        if len(seen) == 1:
+            return None  # a failed probe is retried, not fatal
+        return (
+            '{"href":"http://x/interact.html","state":"complete",'
+            '"script":true,"fetched":false,"ready":false}'
+        )
+
+    try:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe))
+    except AssertionError as exc:
+        assert "never settled" in str(exc)
+        assert "'fetched': False" in str(exc)
+    else:
+        raise AssertionError("an unwired page must not count as settled")
+    assert len(seen) > 2
+
+
+def test_expect_app_rejects_a_document_without_the_script():
+    from fixture_routes import fixture_state_ready
+
+    blank = {"state": "complete", "script": False, "fetched": False, "ready": False}
+    assert fixture_state_ready(blank)
+    assert not fixture_state_ready(blank, expect_app=True)
+    assert fixture_state_ready({**blank, "script": True, "ready": True}, True)
+
+
+def test_wait_fixture_ready_warns_when_navigate_returned_early():
+    import asyncio
+
+    import pytest
+
+    import fixture_routes
+
+    states = iter(
+        [
+            '{"href":"http://x/interact.html","state":"interactive",'
+            '"script":true,"fetched":false,"ready":false}',
+            '{"href":"http://x/interact.html","state":"complete",'
+            '"script":true,"fetched":true,"ready":true}',
+        ]
+    )
+
+    async def probe(expression):
+        return next(states)
+
+    with pytest.warns(UserWarning, match="navigate had already returned") as record:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe, expect_app=True))
+    assert "http://x/interact.html" in str(record[0].message)
+
+
+def test_wait_fixture_ready_is_silent_when_first_probe_settled():
+    import asyncio
+    import warnings
+
+    import fixture_routes
+
+    async def probe(expression):
+        return (
+            '{"href":"http://x/","state":"complete","script":true,'
+            '"fetched":true,"ready":true}'
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        asyncio.run(fixture_routes.wait_fixture_ready(probe))
