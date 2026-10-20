@@ -84,6 +84,10 @@ being launched, an unnamed spawn that would copy its live cookies is refused for
 
 Wording only. The `release-gate.yml` unit-tests comment, the generated `RELEASE_CONTRACT.md` sentence about where the unit lane runs, and `CONTRIBUTING.md` still said 3.11-3.13 after T-4804 added the Linux py3.14 cell; `pyproject.toml` gains the 3.14 classifier (`uv.lock` is unchanged).
 
+### A clone's page no longer has its cross-origin POST aborted by the rotation guard (F-999)
+
+The F-939 rotation guard stopped a clone from rotating Google cookies by sending `Fetch.enable` to every target. Fetch interception on a page also aborted that page's own CORS `POST` (`net::ERR_ABORTED` after its preflight) on a fraction of runs: 25 of 216 armed macOS runs against 0 of 216 with no guard, 29 of 366 against 0 of 366 pooled with Linux (Fisher p=2e-9), and the same 0 of 366 with the guard intact but `Fetch.enable` withheld. The guard now sends `Network.enable` and `Network.setBlockedURLs` per target with the same `*://host/path*` patterns, so both schemes and every path spelling are still blocked (`blockedReason: "inspector"`), and attach, auto-attach and resume are unchanged. A refused `Network.enable` or `Network.setBlockedURLs` is counted as an unguarded target exactly as a refused `Fetch.enable` was. Redirect, worker and subframe blocking are asserted by the CI-only e2e, not run locally.
+
 ## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)
