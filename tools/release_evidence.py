@@ -246,6 +246,17 @@ def _build_required_cells() -> tuple[CellSpec, ...]:
         for py in ("3.11", "3.12", "3.13")
         for cell in ALL_OS
     ]
+    # 3.14 is one Linux cell, not a column: F-1005's `__annotate__` fix is gated
+    # to 3.14 and no other cell executes its pin (T-4804).
+    specs.append(
+        _spec(
+            "unit-tests",
+            (f"{LINUX[0]}-py3.14", LINUX[1], LINUX[2]),
+            "3.14",
+            "p",
+            "hermetic unit suite (`-m 'not integration'`)",
+        )
+    )
     specs += [
         _spec(
             "coverage",
