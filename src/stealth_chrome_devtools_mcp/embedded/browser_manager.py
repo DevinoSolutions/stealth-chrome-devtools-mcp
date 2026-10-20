@@ -503,7 +503,7 @@ class BrowserManager:
                     browser_executable, launch_args, options.user_data_dir
                 )
                 return browser
-            attempt.config = config = browser_connect.LaunchConfig(
+            attempt.config = config = uc.Config(
                 headless=options.headless,
                 user_data_dir=options.user_data_dir,
                 sandbox=options.sandbox,

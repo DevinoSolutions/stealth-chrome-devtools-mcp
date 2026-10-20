@@ -43,7 +43,6 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
-    devtools_port,
     profile_lock,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
@@ -332,7 +331,7 @@ class TestEndpointLadder:
     def test_the_recorded_port_wins(self, tmp_path):
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / devtools_port.PORT_FILE).write_text("9999\n/devtools/x")
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
         entry = _entry(user_data_dir=str(profile), cdp_port=PORT)
         assert cdp_endpoint.endpoint(entry) == PORT
 
@@ -347,7 +346,7 @@ class TestEndpointLadder:
         outlives the browser that wrote it; the command line cannot."""
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / devtools_port.PORT_FILE).write_text("9999\n/devtools/x")
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text("9999\n/devtools/x")
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=8123):
             assert cdp_endpoint.endpoint(entry) == 8123
@@ -363,7 +362,9 @@ class TestEndpointLadder:
         """
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / devtools_port.PORT_FILE).write_text("9999\n/devtools/browser/abc\n")
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text(
+            "9999\n/devtools/browser/abc\n"
+        )
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=None):
             assert cdp_endpoint.endpoint(entry) == 9999
@@ -374,7 +375,7 @@ class TestEndpointLadder:
         a real number before it writes the file."""
         profile = tmp_path / "p"
         profile.mkdir()
-        (profile / devtools_port.PORT_FILE).write_text(cmdline_port)
+        (profile / cdp_endpoint.DEVTOOLS_PORT_FILE).write_text(cmdline_port)
         entry = _entry(user_data_dir=str(profile), cdp_port=None)
         with patch.object(browser_cmdline, "debug_port", return_value=None):
             assert cdp_endpoint.endpoint(entry) is None

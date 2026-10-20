@@ -46,7 +46,7 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import psutil
 
@@ -442,29 +442,6 @@ def _devtools_ready(port: int) -> bool:
     return response.status_code == _HTTP_OK
 
 
-def _verify_identity(endpoint: _Endpoint) -> bool:
-    """True only if the browser answering on *endpoint*'s port is the one Chrome
-    described in ``DevToolsActivePort`` (F-1009). Blocking; call in a thread.
-
-    False while Chrome has not written its file (or wrote another port's). A
-    wrong ``webSocketDebuggerUrl`` RAISES: that is a stranger on our port.
-    """
-    import requests
-
-    found = devtools_port.own_endpoint(endpoint.profile_dir, endpoint.port)
-    if found is None:
-        return False
-    try:
-        reported = requests.get(
-            f"http://127.0.0.1:{endpoint.port}/json/version",
-            timeout=DEVTOOLS_PROBE_TIMEOUT,
-        ).json()["webSocketDebuggerUrl"]
-    except (requests.RequestException, ValueError, KeyError):
-        return False
-    devtools_port.verify(str(reported), found)
-    return True
-
-
 def _read_pid(pid_file: Path) -> int | None:
     """The pid the launcher recorded, or ``None`` until it has written one."""
     if not pid_file.exists():
@@ -486,14 +463,6 @@ def _process_create_time(pid: int) -> float | None:
         return psutil.Process(pid).create_time()
     except psutil.Error:
         return None
-
-
-class _Endpoint(NamedTuple):
-    """The DevTools port a delegated Chrome was given and the profile whose
-    ``DevToolsActivePort`` must confirm it (F-1009)."""
-
-    port: int
-    profile_dir: str
 
 
 class _Delegated:
@@ -571,11 +540,7 @@ def _cleanup(task_name: str, *paths: Path) -> None:
 
 
 async def _run_task(
-    task_name: str,
-    command: str,
-    endpoint: _Endpoint,
-    pid_file: Path,
-    delegated: _Delegated,
+    task_name: str, command: str, port: int, pid_file: Path, delegated: _Delegated
 ) -> int:
     """Create + run the one-shot task, then wait for Chrome. Returns its pid.
 
@@ -631,8 +596,8 @@ async def _run_task(
             if create_time is None:
                 raise ToolError(
                     f"F-810: the delegated browser (pid {pid}) exited before it "
-                    f"opened DevTools port {endpoint.port} — it most likely handed "
-                    "off to an already-running Chrome instead of starting its own."
+                    f"opened DevTools port {port} — it most likely handed off to "
+                    "an already-running Chrome instead of starting its own."
                 )
             if delegated.pid is None:
                 # F-1004: started by its own task, so at Low I/O and memory
@@ -640,15 +605,12 @@ async def _run_task(
                 # script can only set the class. Once: only the first poll.
                 await asyncio.to_thread(raise_inherited_priority, pid, tree=True)
             delegated.pid, delegated.create_time = pid, create_time
-            if await asyncio.to_thread(
-                _devtools_ready, endpoint.port
-            ) and await asyncio.to_thread(_verify_identity, endpoint):
+            if await asyncio.to_thread(_devtools_ready, port):
                 return pid
         await asyncio.sleep(POLL_INTERVAL)
     raise ToolError(
-        f"F-810: the delegated browser never opened its DevTools port {endpoint.port} "
-        f"within {PORT_READY_TIMEOUT:.0f}s (or never wrote {devtools_port.PORT_FILE} "
-        f"naming it in {endpoint.profile_dir}), so there was nothing to attach to."
+        f"F-810: the delegated browser never opened its DevTools port {port} "
+        f"within {PORT_READY_TIMEOUT:.0f}s, so there was nothing to attach to."
     )
 
 
@@ -672,12 +634,9 @@ async def launch_and_attach(
 
     # The port is chosen here but bound by Chrome SECONDS later (task create,
     # task run, browser start) — a far wider race window than the normal path's
-    # milliseconds. Accepted deliberately: a squatter surfaces as the readiness
-    # timeout below, which names the port. Since F-1009 it is also never a silent
-    # attach to some stranger's browser: "we also require OUR launcher's pid" did
-    # not stop that, because the squatter answers the probe. Chrome has to write
-    # the port into OUR profile, and what answers must be the browser that file
-    # names. (Port 0 would remove the race but flips navigator.webdriver to true.)
+    # milliseconds. A squatter that wins it is caught AFTER the attach by
+    # ``devtools_port.confirm_ours`` (F-1009): the browser answering is asked which
+    # process it is and must be the pid we launched, or it is dropped unclosed.
     port = proxy_forwarder._free_port()
     # Derive the argv from nodriver's OWN config object rather than hand-copying
     # its defaults: the delegated Chrome must receive exactly what the normal
@@ -701,8 +660,6 @@ async def launch_and_attach(
         browser_executable_path=browser_executable,
         browser_args=launch_args,
     )
-    profile_dir = config.user_data_dir
-    devtools_port.clear_stale(profile_dir)
     args = config()
     token = uuid.uuid4().hex[:TOKEN_CHARS]
     task_name = f"{TASK_PREFIX}{token}"
@@ -720,9 +677,7 @@ async def launch_and_attach(
     delegated = _Delegated()
     attached = False
     try:
-        pid = await _run_task(
-            task_name, command, _Endpoint(port, profile_dir), pid_file, delegated
-        )
+        pid = await _run_task(task_name, command, port, pid_file, delegated)
         debug_logger.log_info(
             "desktop_launch",
             "launch_and_attach",
@@ -734,6 +689,7 @@ async def launch_and_attach(
         # pipeline reads back to decide profile cleanup, so it must be the dir
         # the browser actually launched with.
         browser = await cdp_attach.attach(config, pid)
+        await devtools_port.confirm_ours(browser, pid)  # F-1009, before `attached`
         attached = True
         return browser, pid
     finally:

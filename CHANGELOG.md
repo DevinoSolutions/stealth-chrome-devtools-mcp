@@ -7,16 +7,16 @@
 nodriver chose the DevTools port by binding and releasing a socket (`util.free_port()`) and only then launched Chrome on it.
 A process that took the port in that gap, most often a sibling Chrome from a concurrent spawn, answered `/json/version` in
 place of the Chrome we had launched, and the spawn registered the SIBLING's browser as its own, so a later `close_instance`
-could kill it (on the shared `fleet`/`default` session, the logins). A launch of ours (`browser_connect.LaunchConfig`) now
-believes nothing that answers on the port until the Chrome it started has written `DevToolsActivePort` in OUR profile naming
-that port (Chrome writes it only after it bound the port; a leftover file is deleted first and never trusted), and what answers
-must carry the websocket path the file names or the spawn fails, naming the conflict, before any connection exists, so nothing
-is ever sent to the foreign browser. A Chrome that lost the race, exited or never wrote the file is named instead of
-"Failed to connect to browser", inside the existing `CONNECT_PATIENCE_SECONDS`. The delegated headed launch (F-810) requires
-the same proof (`devtools_port`). The argv keeps the concrete port: an attempt that asked Chrome for `--remote-debugging-port=0`
-made the offline-stealth gate report `navigator.webdriver == true` on all three OSes (cause not established), so it was dropped.
-Not fixed: no pid / `--user-data-dir` check over CDP, and nothing here ran against a real Chrome
-(`audit/stage2/finding_F1009_devtools_port_race.md`).
+could kill it (on the shared `fleet`/`default` session, the logins). The delegated headed launch (F-810) picked its port
+seconds before Chrome bound it. Both launches now go through `devtools_port.confirm_ours`: the connected browser is asked
+which process it is (`SystemInfo.getProcessInfo`, read-only) and its `browser` pid must be the one we launched or below it.
+A mismatch fails the spawn naming both pids, drops the connection without sending `Browser.close`, and registers nothing,
+so `close_instance` has nothing to close and only our own pid is reaped. A browser that never answers the question is named
+after 10 s. The argv keeps the concrete port: `--remote-debugging-port=0` made the offline-stealth gate report
+`navigator.webdriver == true` on all three OSes (cause not established), and Chrome writes no `DevToolsActivePort` for a
+concrete port, so that file could not be the witness. Not fixed: nodriver's own `Browser.start` already sent read-only target
+discovery to the foreign browser before the check, and a Chrome without `SystemInfo.getProcessInfo` is allowed through
+unverified (`audit/stage2/finding_F1009_devtools_port_race.md`).
 
 ### A window Windows judges covered is no longer backgrounded (F-1010)
 
