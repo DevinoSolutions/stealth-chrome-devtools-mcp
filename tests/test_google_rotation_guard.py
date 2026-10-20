@@ -2,10 +2,12 @@
 
 Pins what is decidable without Chrome: which URLs the patterns cover, the opt-out,
 the CDP conversation of the guard against a scripted Chrome (every attached
-session is blocked and auto-attached further BEFORE it is resumed, a paused
-request is failed, a dropped connection ends the guard), and that a spawn arms
-the guard for a clone and for nothing else. The behavior against a real Chrome is
-``tests/test_e2e_google_rotation_guard.py``.
+session is blocked and auto-attached further BEFORE it is resumed, the block is
+``Network.setBlockedURLs`` and never ``Fetch.enable`` (F-999), a dropped
+connection ends the guard), and that a spawn arms the guard for a clone and for
+nothing else. The commands are compared with the ones nodriver's own ``cdp``
+constructors build, so a renamed field cannot pass. The behavior against a real
+Chrome is ``tests/test_e2e_google_rotation_guard.py``.
 """
 
 import asyncio
@@ -15,11 +17,24 @@ from types import SimpleNamespace
 
 import pytest
 import websockets.asyncio.server
+from nodriver.cdp import network as cdp_network
 
 from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+
+def _command(generator) -> dict:
+    """The CDP message nodriver itself builds for a ``cdp`` command."""
+    return next(generator)
+
+
+_NETWORK_ENABLE = _command(
+    cdp_network.enable(
+        max_total_buffer_size=0, max_resource_buffer_size=0, max_post_data_size=0
+    )
+)
 
 
 def _blocked(url: str) -> bool:
@@ -61,6 +76,64 @@ class TestWhatIsBlocked:
     )
     def test_nothing_else(self, url):
         assert not _blocked(url)
+
+
+async def _wire_patterns() -> list[str]:
+    """The patterns the guard really sends in ``Network.setBlockedURLs``."""
+    async with ScriptedChrome() as chrome:
+        guard = google_rotation_guard.RotationGuard()
+        await guard.start(chrome.url)
+        await _settle(chrome, "Network.setBlockedURLs", "page-1")
+        await guard.close()
+    return next(p for s, m, p in chrome.log if m == "Network.setBlockedURLs")["urls"]
+
+
+def _wire_blocks(patterns: list[str], url: str) -> bool:
+    return any(fnmatchcase(url, pattern) for pattern in patterns)
+
+
+class TestEveryUrlFormIsBlockedOnTheWire:
+    """F-999: the same URL forms the ``Fetch`` patterns covered, now judged on the
+    ``urls`` of the ``Network.setBlockedURLs`` command the guard SENDS (Chrome's
+    wildcard is ``*`` for any run of characters, which ``fnmatch`` models for
+    these patterns: none contains ``?`` or ``[``)."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://accounts.google.com/RotateCookies",
+            "https://accounts.google.com/RotateCookies?origin=https%3A%2F%2Fmail.google.com",
+            "https://accounts.google.com/RotateCookiesPage?origin=https://www.google.com",
+            "https://accounts.google.com/rotateCookies",
+            "https://accounts.google.com/rotateCookiesPage",
+            "https://accounts.google.com/RotateBoundCookies",
+            "https://accounts.google.com/rotateBoundCookies",
+            "https://accounts.youtube.com/RotateCookiesPage?origin=https://www.youtube.com",
+            "https://accounts.youtube.com/RotateCookies",
+            "https://accounts.youtube.com/RotateBoundCookies",
+            "https://accounts.youtube.com/rotateBoundCookies",
+            "http://accounts.google.com/RotateCookies",
+            "http://accounts.youtube.com/rotateCookies",
+        ],
+    )
+    async def test_the_rotation_urls(self, url):
+        assert _wire_blocks(await _wire_patterns(), url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://accounts.google.com/",
+            "https://accounts.google.com/ServiceLogin",
+            "https://accounts.google.com/ListAccounts?gpsia=1",
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://accounts.youtube.com/accounts/SetSID",
+            "https://www.google.com/search?q=RotateCookies",
+            "https://example.com/RotateCookies",
+            "https://accounts.google.com.evil.example/RotateCookies",
+        ],
+    )
+    async def test_nothing_else(self, url):
+        assert not _wire_blocks(await _wire_patterns(), url)
 
 
 class TestOptOut:
@@ -119,11 +192,12 @@ class ScriptedChrome:
                 await self._attach(ws, "page-1", "page")
             if message["method"] == "Target.setAutoAttach" and session == "page-1":
                 await self._attach(ws, "frame-1", "iframe")
-            if message["method"] == "Fetch.enable" and session == "frame-1":
+            if message["method"] == "Network.setBlockedURLs" and session == "frame-1":
+                # What Network.enable makes Chrome send: the guard must drop these.
                 await ws.send(
                     json.dumps(
                         {
-                            "method": "Fetch.requestPaused",
+                            "method": "Network.requestWillBeSent",
                             "sessionId": "frame-1",
                             "params": {"requestId": "req-9"},
                         }
@@ -171,37 +245,57 @@ class TestTheGuardConversation:
         ]
         for session in ("page-1", "frame-1"):
             methods = [m for s, m, _ in chrome.log if s == session]
-            assert methods[:3] == [
-                "Fetch.enable",
+            assert methods[:4] == [
+                "Network.enable",
+                "Network.setBlockedURLs",
                 "Target.setAutoAttach",
                 "Runtime.runIfWaitingForDebugger",
             ], (session, methods)
-        enable = next(p for s, m, p in chrome.log if m == "Fetch.enable")
-        assert enable == {
-            "patterns": [
-                {"urlPattern": "*://x/RotateCookies*", "requestStage": "Request"}
-            ]
-        }
+        wire = {m: p for s, m, p in chrome.log if m.startswith("Network.")}
+        assert {"method": "Network.enable", "params": wire["Network.enable"]} == (
+            _NETWORK_ENABLE
+        )
+        assert {
+            "method": "Network.setBlockedURLs",
+            "params": wire["Network.setBlockedURLs"],
+        } == _command(cdp_network.set_blocked_ur_ls(urls=["*://x/RotateCookies*"]))
 
-    async def test_a_paused_request_is_failed_as_blocked(self):
+    async def test_the_interception_domain_is_never_used(self):
+        """F-999: Fetch interception on every page of a clone is what aborted the
+        page's CORS POST (macOS 25/216 armed runs, 0/216 without the guard)."""
         async with ScriptedChrome() as chrome:
             guard = google_rotation_guard.RotationGuard()
             await guard.start(chrome.url)
-            await _settle(chrome, "Fetch.failRequest", "frame-1")
+            await _settle(chrome, "Runtime.runIfWaitingForDebugger", "frame-1")
             await guard.close()
-        params = next(p for s, m, p in chrome.log if m == "Fetch.failRequest")
-        assert params == {"requestId": "req-9", "errorReason": "BlockedByClient"}
+        assert [m for _, m, _ in chrome.log if m.startswith("Fetch.")] == []
+        assert len([m for _, m, _ in chrome.log if m == "Network.setBlockedURLs"]) == 2
+
+    async def test_the_network_events_enable_streams_are_dropped(self):
+        async with ScriptedChrome() as chrome:
+            guard = google_rotation_guard.RotationGuard()
+            await guard.start(chrome.url)
+            await _settle(chrome, "Runtime.runIfWaitingForDebugger", "frame-1")
+            await asyncio.sleep(0.2)
+            assert guard in google_rotation_guard._LIVE
+            await guard.close()
+        # Every command in the whole conversation is one of the four the guard is
+        # specified to send; a Network event must never provoke a fifth.
+        assert {m for _, m, _ in chrome.log} == {
+            "Target.setAutoAttach",
+            "Network.enable",
+            "Network.setBlockedURLs",
+            "Runtime.runIfWaitingForDebugger",
+        }
 
     async def test_the_default_patterns_are_the_ones_installed(self):
         async with ScriptedChrome() as chrome:
             guard = google_rotation_guard.RotationGuard()
             await guard.start(chrome.url)
-            await _settle(chrome, "Fetch.enable", "page-1")
+            await _settle(chrome, "Network.setBlockedURLs", "page-1")
             await guard.close()
-        enable = next(p for s, m, p in chrome.log if m == "Fetch.enable")
-        assert [p["urlPattern"] for p in enable["patterns"]] == list(
-            google_rotation_guard.BLOCKED_URL_PATTERNS
-        )
+        urls = next(p for s, m, p in chrome.log if m == "Network.setBlockedURLs")
+        assert urls == {"urls": list(google_rotation_guard.BLOCKED_URL_PATTERNS)}
 
     async def test_a_dropped_connection_ends_the_guard(self):
         async with ScriptedChrome() as chrome:
@@ -218,9 +312,9 @@ class TestTheGuardConversation:
 _SESSION_GONE = {"code": -32001, "message": "Session with given id not found."}
 
 
-class TestARefusedFetchEnable:
-    """F-957 — a ``Fetch.enable`` Chrome refuses warns ONLY for a target that is
-    still alive. Measured on Chrome: a session closed before our command arrives
+class TestARefusedBlock:
+    """F-957 (F-999: now ``Network.enable`` and ``Network.setBlockedURLs``) — a
+    block Chrome refuses warns ONLY for a target that is still alive. Measured on Chrome: a session closed before our command arrives
     is torn down with ``Target.detachedFromTarget`` FIRST, then the command is
     answered ``{"code": -32001, "message": "Session with given id not found."}``
     with no ``sessionId`` on the reply. That is a closed tab, not an unguarded one."""
@@ -236,7 +330,15 @@ class TestARefusedFetchEnable:
         return seen
 
     @staticmethod
-    async def _attach(guard, session):
+    async def _attach(guard, session, method):
+        """The id of *method*'s command for the session Chrome just attached."""
+        sent: list[dict] = []
+
+        class Wire:
+            async def send(self, text):
+                sent.append(json.loads(text))
+
+        guard._ws = Wire()
         await guard._handle(
             {
                 "method": "Target.attachedToTarget",
@@ -247,42 +349,57 @@ class TestARefusedFetchEnable:
                 },
             }
         )
-        return next(
-            i
-            for i in sorted(guard._pending_by_session[session])
-            if i in guard._fetch_enable_ids
-        )
+        return next(m["id"] for m in sent if m["method"] == method)
 
-    async def test_a_target_that_detached_first_does_not_warn(self, warnings):
+    @pytest.fixture(params=["Network.enable", "Network.setBlockedURLs"])
+    def method(self, request):
+        return request.param
+
+    async def test_a_target_that_detached_first_does_not_warn(self, warnings, method):
         guard = google_rotation_guard.RotationGuard()
-        fetch_enable = await self._attach(guard, "tab-1")
+        refused = await self._attach(guard, "tab-1", method)
         await guard._handle(
             {"method": "Target.detachedFromTarget", "params": {"sessionId": "tab-1"}}
         )
-        await guard._handle({"id": fetch_enable, "error": _SESSION_GONE})
+        await guard._handle({"id": refused, "error": _SESSION_GONE})
         assert warnings == []
-        assert guard._fetch_enable_ids == set()
+        assert guard._block_ids == set()
 
-    async def test_a_target_still_attached_warns(self, warnings):
+    async def test_a_target_still_attached_warns(self, warnings, method):
         guard = google_rotation_guard.RotationGuard()
-        fetch_enable = await self._attach(guard, "tab-1")
+        refused = await self._attach(guard, "tab-1", method)
         await guard._handle(
-            {"id": fetch_enable, "sessionId": "tab-1", "error": {"code": -32000}}
+            {"id": refused, "sessionId": "tab-1", "error": {"code": -32000}}
         )
         assert warnings == [
-            "Chrome refused Fetch.enable on a target; it is not guarded"
+            "Chrome refused the URL block on a target; it is not guarded"
         ]
 
-    async def test_one_detached_target_does_not_hide_a_live_one(self, warnings):
+    async def test_an_answered_command_does_not_warn(self, warnings, method):
         guard = google_rotation_guard.RotationGuard()
-        gone = await self._attach(guard, "tab-1")
-        live = await self._attach(guard, "tab-2")
+        answered = await self._attach(guard, "tab-1", method)
+        await guard._handle({"id": answered, "sessionId": "tab-1", "result": {}})
+        assert warnings == []
+        assert guard._block_ids != set(), "the other block command is still pending"
+
+    async def test_one_detached_target_does_not_hide_a_live_one(self, warnings, method):
+        guard = google_rotation_guard.RotationGuard()
+        gone = await self._attach(guard, "tab-1", method)
+        live = await self._attach(guard, "tab-2", method)
         await guard._handle(
             {"method": "Target.detachedFromTarget", "params": {"sessionId": "tab-1"}}
         )
         await guard._handle({"id": gone, "error": _SESSION_GONE})
         await guard._handle({"id": live, "error": {"code": -32000}})
         assert len(warnings) == 1
+
+    async def test_a_refused_auto_attach_is_not_a_block_refusal(self, warnings):
+        """Only the two commands that block are accounted; a refused
+        ``setAutoAttach`` is a different (unreported) failure."""
+        guard = google_rotation_guard.RotationGuard()
+        attach = await self._attach(guard, "tab-1", "Target.setAutoAttach")
+        await guard._handle({"id": attach, "sessionId": "tab-1", "error": {}})
+        assert warnings == []
 
 
 class TestAMalformedFrame:
@@ -309,7 +426,9 @@ class TestAMalformedFrame:
             await guard.start(chrome.url)
             await chrome.send_raw("not json")
             await chrome.send_raw(
-                json.dumps({"method": "Fetch.requestPaused", "sessionId": "page-1"})
+                json.dumps(
+                    {"method": "Network.requestWillBeSent", "sessionId": "page-1"}
+                )
             )
             await chrome.send_raw(
                 json.dumps(

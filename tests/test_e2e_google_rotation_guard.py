@@ -9,7 +9,11 @@ Google account and no Google request:
   RESOLVES (the fixture server answers it, 404 or not);
 * the master (``session="default"``) is served; the clone (an unnamed spawn,
   taken while the master is open) is blocked in its main frame, in a same-origin
-  iframe, in a popup and in a tab opened afterwards;
+  iframe, in a popup and in a tab opened afterwards, and (F-999, the guard blocks
+  with ``Network.setBlockedURLs``, not ``Fetch.enable``) for a request that is
+  REDIRECTED into a blocked URL (``/redirect`` answers a 302 to ``/api/json``,
+  which the fixture patterns also name), for a dedicated worker's ``fetch`` and
+  for an iframe NAVIGATION to ``/RotateCookiesPage``;
 * a cookie in a browser this backend holds no object for crosses to a spawned
   browser over that browser's debug port, and the server sees it.
 """
@@ -49,6 +53,48 @@ _ROTATE_JS = """
 """
 
 
+# A blob dedicated worker (same origin as the page) fetching the rotation path.
+_WORKER_JS = """
+new Promise(resolve => {
+  const url = location.origin + '/RotateCookies?w=1';
+  const source = "self.onmessage = async () => { try {" +
+    " const r = await fetch(" + JSON.stringify(url) + ");" +
+    " self.postMessage('served:' + r.status); } catch (e) { self.postMessage('blocked'); } }";
+  const worker = new Worker(URL.createObjectURL(new Blob([source], {type: 'text/javascript'})));
+  worker.onmessage = event => resolve(event.data);
+  worker.onerror = () => resolve('worker-error');
+  setTimeout(() => resolve('timeout'), 10000);
+  worker.postMessage(1);
+})
+"""
+
+# fetch('/redirect') is a 302 to /api/json, which the fixture patterns name.
+_REDIRECT_JS = """
+(async () => {
+  try {
+    const reply = await fetch('/redirect');
+    return 'served:' + reply.status;
+  } catch (error) {
+    return 'blocked';
+  }
+})()
+"""
+
+# A frame navigated to the page rotation iframe's path: a blocked navigation is
+# Chrome's cross-origin error page (unreadable), a served 404 is same-origin.
+_FRAME_NAVIGATION_JS = """
+new Promise(resolve => {
+  const frame = document.createElement('iframe');
+  frame.onload = () => {
+    try { frame.contentDocument.body; resolve('served'); } catch (e) { resolve('blocked'); }
+  };
+  frame.src = '/RotateCookiesPage?origin=x';
+  document.body.appendChild(frame);
+  setTimeout(() => resolve('timeout'), 10000);
+})
+"""
+
+
 @pytest.fixture(autouse=True)
 async def _warmup():
     await warmup_once()
@@ -70,7 +116,10 @@ def fixture_patterns(monkeypatch):
     original = google_rotation_guard.arm
 
     async def arm(browser, patterns=()):
-        return await original(browser, ["*://127.0.0.1:*/RotateCookies*"])
+        return await original(
+            browser,
+            ["*://127.0.0.1:*/RotateCookies*", "*://127.0.0.1:*/api/json*"],
+        )
 
     monkeypatch.setattr(google_rotation_guard, "arm", arm)
 
@@ -99,6 +148,11 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
         assert (await eval_js(master["instance_id"], _ROTATE_JS)).startswith(
             "served"
         ), "the master must still rotate"
+        for oracle in (_REDIRECT_JS, _WORKER_JS):
+            assert (await eval_js(master["instance_id"], oracle)).startswith(
+                "served"
+            ), f"the oracle must see the master served: {oracle}"
+        assert await eval_js(master["instance_id"], _FRAME_NAVIGATION_JS) == "served"
 
         await navigate_and_settle(iid, page)
         assert await eval_js(iid, _ROTATE_JS) == "blocked"
@@ -116,6 +170,10 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
             " }, 1500))",
         )
         assert frame == "blocked", "a same-origin iframe must be blocked too"
+
+        assert await eval_js(iid, _REDIRECT_JS) == "blocked", "a redirect hop"
+        assert await eval_js(iid, _WORKER_JS) == "blocked", "a dedicated worker"
+        assert await eval_js(iid, _FRAME_NAVIGATION_JS) == "blocked", "a navigation"
 
         await new_tab(instance_id=iid, url=page)
         tabs = await get_fn("list_tabs")(instance_id=iid)
