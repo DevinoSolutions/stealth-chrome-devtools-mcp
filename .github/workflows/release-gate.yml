@@ -370,6 +370,7 @@ jobs:
         shell: bash
         run: >-
           uv run pytest
+          ${{ runner.os == 'macOS' && 'tests/test_f999_diag.py' || '' }}
           -m "${{ runner.os == 'macOS' && 'integration and not transport' || 'integration' }}"
           -v --tb=short --timeout=300
           --junitxml=junit.xml -o junit_family=xunit1

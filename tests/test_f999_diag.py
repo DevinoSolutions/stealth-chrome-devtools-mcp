@@ -26,23 +26,24 @@ from e2e_helpers import (
 )
 from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 
-# Windows is out: it was clean in every round (0 bad in the armed runs of rounds 5-6) and its
-# runner (~2.3x slower) hit the 40 min job cap in round 7 before one diag chunk finished.
+# Round 9 is macOS only: Windows was clean in every round, Linux finished in round 8 (4 bad of 150
+# armed runs, too few to settle) and macOS is where the flake is common (5-7% of armed runs).
 pytestmark = [
     integration_pytestmark(),
     pytest.mark.skipif(
-        sys.platform == "win32", reason="F-999 diag: Windows is clean and over the cap"
+        sys.platform != "darwin", reason="F-999 diag round 9: macOS only"
     ),
 ]
 
-ITERATIONS = 25  # instances per test; 15 tests x 25 instances rotate 5 arms: 75 instances x 2 runs = 150 runs per arm per OS
+ITERATIONS = 24  # instances per test; 18 tests x 24 instances rotate 4 arms: 108 instances x 2 runs = 216 runs per arm
 RUNS_PER_INSTANCE = 2
-CHUNKS = 15
+CHUNKS = 18
 # NOGUARD: no guard. GUARD: the guard as shipped. NOFETCH: the guard, but Fetch.enable is never
 # sent to any target (browser-level + nested auto-attach and the resume are unchanged). CONN: the
-# guard's browser-level connection is open and sends NOTHING. BLOCKNET: the guard, but each
+# guard's browser-level connection is open and sends NOTHING (round 8; dropped in round 9, it was
+# clean on Linux). BLOCKNET: the guard, but each
 # session gets Network.enable + Network.setBlockedURLs (no Fetch interception) - also the candidate fix.
-ARMS = ("NOGUARD", "GUARD", "NOFETCH", "CONN", "BLOCKNET")
+ARMS = ("NOGUARD", "GUARD", "NOFETCH", "BLOCKNET")
 PROBE_ARMS = ("GUARD", "BLOCKNET")  # the arms that claim to block the rotation endpoint
 _REAL_ENABLED = (
     google_rotation_guard.enabled
@@ -63,6 +64,10 @@ _NET_METHODS = (
 )
 
 NET: list[tuple] = []  # (t, method, requestId, summary)
+RAW: list[
+    tuple
+] = []  # (t, method, requestId, full params JSON) every event of a RotateCookies probe request
+_probe_ids: set[str] = set()
 SERVER: list[tuple] = []  # (t, kind, server_port, detail)
 OTHER: list[tuple] = []  # (t, "EVT"/"SEND", name, {}) every other CDP event / command
 GT: list[
@@ -106,6 +111,17 @@ def _install() -> None:
                 ).get("url")
                 if url and ("/cors/" in url or "RotateCookies" in url):
                     _cors_ids.add(rid)
+                if url and "RotateCookies" in url:
+                    _probe_ids.add(rid)
+                if rid in _probe_ids:
+                    RAW.append(
+                        (
+                            time.monotonic(),
+                            method.split(".")[1],
+                            rid,
+                            json.dumps(p)[:700],
+                        )
+                    )
                 if rid in _cors_ids:
                     NET.append(
                         (
@@ -285,7 +301,7 @@ def _crash_text(spawn_t, rows):
     return [f"+{t - spawn_t:.3f}s {desc.split(' parent=')[0]}" for t, desc in rows]
 
 
-async def _loop(fixture_origin_pair, chunk):
+async def _loop(fixture_origin_pair, chunk, capfd):
     global ARM
     origin_a, origin_b = fixture_origin_pair
     port_b = int(origin_b.rsplit(":", 1)[1])
@@ -395,12 +411,14 @@ async def _loop(fixture_origin_pair, chunk):
                         if r[0] >= pt and "RotateCookies" in str(r[3].get("url"))
                     }
                     rows = [r for r in NET if r[0] >= pt and r[2] in rids]
+                    raw = [(r[1], r[2], r[3]) for r in RAW if r[0] >= pt]
                     blocked = any(
                         "BLOCKED_BY_CLIENT" in str(r[3].get("errorText")) for r in rows
                     )
                     stats[label]["probe"] += 1
                     stats[label]["probe_blocked"] += 1 if blocked else 0
                     probe = f" probe_blocked={blocked} probe_rows={[(r[1], r[3].get('errorText')) for r in rows]}"
+                    probe += f" probe_raw={raw}"
                 stats[label]["reply_err"] += len(ERRS)
                 await asyncio.sleep(0.5)
                 report.append(
@@ -414,12 +432,15 @@ async def _loop(fixture_origin_pair, chunk):
         ARM = "GUARD"
     table = "\n".join(f"STATS {a} {json.dumps(stats[a])}" for a in ARMS)
     summary = "\n".join(report)
-    print(table)
-    print(summary)
-    # Deliberately fails: CI prints a failing test's message, which is how the data gets out.
-    pytest.fail(f"F999-DIAG chunk={chunk}\n{table}\n{summary}")
+    # Streamed straight to the job log as the chunk ends: pytest prints a failing test's captured
+    # output only at the end of the session, and round 8's macOS job was cancelled before that.
+    with capfd.disabled():
+        sys.stdout.write(f"\nF999-DIAG chunk={chunk}\n{table}\n{summary}\n")
+        sys.stdout.flush()
+    # Deliberately fails (the diag must never read as a pass); the data is already in the log.
+    pytest.fail(f"F999-DIAG chunk={chunk}\n{table}")
 
 
 @pytest.mark.parametrize("chunk", range(CHUNKS))
-async def test_f999_cors_loop_interleaved(fixture_origin_pair, chunk):
-    await _loop(fixture_origin_pair, chunk)
+async def test_f999_cors_loop_interleaved(fixture_origin_pair, chunk, capfd):
+    await _loop(fixture_origin_pair, chunk, capfd)
