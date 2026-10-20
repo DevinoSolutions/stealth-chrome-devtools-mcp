@@ -262,7 +262,9 @@ class TestTheGuardConversation:
 
     async def test_the_interception_domain_is_never_used(self):
         """F-999: Fetch interception on every page of a clone is what aborted the
-        page's CORS POST (macOS 25/216 armed runs, 0/216 without the guard)."""
+        page's CORS POST (macOS 25/216 armed runs, 0/216 without the guard). Not
+        even a Document-only pattern is an exception: it paused nothing and still
+        failed 16/216 (round 10), so any Fetch.* command is a defect."""
         async with ScriptedChrome() as chrome:
             guard = google_rotation_guard.RotationGuard()
             await guard.start(chrome.url)
