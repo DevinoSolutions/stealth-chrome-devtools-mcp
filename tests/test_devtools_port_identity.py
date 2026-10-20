@@ -35,7 +35,7 @@ from nodriver.core.browser import Browser, HTTPApi
 from nodriver.core.connection import ProtocolException
 from nodriver.core.util import get_registered_instances
 
-from fakes import ProcessTable, nodriver_registry
+from fakes import ProcessTable, forbid_real_process_kills, nodriver_registry
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
     devtools_port,
@@ -147,6 +147,15 @@ class FakeConnection:
 
     async def disconnect(self):
         self.disconnected = True
+
+
+@pytest.fixture(autouse=True)
+def no_real_process_is_touched(monkeypatch):
+    """F-1009 safety net: nothing here may enumerate or end a REAL process. The
+    one test that wants a process table installs ``ProcessTable`` over this."""
+    attempts = forbid_real_process_kills(monkeypatch)
+    yield
+    assert attempts == []
 
 
 @pytest.fixture
@@ -272,14 +281,18 @@ async def test_the_identity_wait_fits_inside_the_launch_phase():
     )
 
 
-async def test_a_browser_without_the_query_is_unverifiable_not_foreign(world, profile):
-    """A Chrome that does not offer ``SystemInfo.getProcessInfo`` cannot be told
-    apart, and refusing every spawn on it would turn a hardening into an outage."""
+async def test_a_browser_without_the_query_is_refused_not_trusted(world, profile):
+    """An Electron or CEF app squatting on the port has no ``SystemInfo`` domain,
+    and real Chrome always answers: a browser that cannot say who it is is not
+    ours, and the connection to it is dropped."""
     world.identity = "unsupported"
 
-    browser = await _launch(profile)
+    with pytest.raises(ToolError, match="cannot identify its process"):
+        await _launch(profile)
 
-    assert not browser.connection.disconnected
+    (foreign,) = world.connections
+    assert foreign.disconnected
+    assert not [m for m in foreign.sent if m.startswith("Browser.")]
 
 
 async def test_a_launched_pid_nodriver_did_not_stamp_is_allowed(world, profile):
