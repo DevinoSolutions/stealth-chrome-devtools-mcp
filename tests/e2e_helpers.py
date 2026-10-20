@@ -26,6 +26,8 @@ from typing import Any
 
 import pytest
 
+import fixture_routes
+
 # THE one home for a singleton, for the E2E tier too (plan_SERVERSPLIT slice 12).
 # ``server_mod`` below is a SECOND execution of embedded/server.py under the bare
 # name ``server``; it is the right handle for a TOOL — ``get_fn`` reaches one by
@@ -337,6 +339,14 @@ async def navigate_and_settle(iid: str, url: str, timeout: float = 10.0):
     while not (isinstance(body, list) and body) and time.monotonic() < deadline:
         await asyncio.sleep(0.25)
         body = await query_elements(instance_id=iid, selector="body")
+    # A queryable body is not a wired page: app.js (end of <body>) may not have
+    # attached its listeners yet, and an interaction before that is silently lost.
+    ready_deadline = time.monotonic() + fixture_routes.FIXTURE_READY_TIMEOUT
+    while await eval_js(iid, fixture_routes.FIXTURE_READY_JS) is not True:
+        assert time.monotonic() < ready_deadline, (
+            fixture_routes.FIXTURE_NOT_READY_MESSAGE
+        )
+        await asyncio.sleep(0.1)
     return result
 
 
