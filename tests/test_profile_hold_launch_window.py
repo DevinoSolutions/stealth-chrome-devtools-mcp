@@ -26,9 +26,10 @@ from pathlib import Path
 import psutil
 import pytest
 
-from fakes import write_singleton
+from fakes import LaunchedBrowser, nodriver_registry, write_singleton
 from stealth_chrome_devtools_mcp.embedded import (
     browser_manager,
+    clone_storage,
     profile_copy,
     profile_lock,
     spawn_budget,
@@ -218,6 +219,102 @@ class TestAFailedLaunchHoldsUntilItsChromeIsReaped:
             "error", "i-1", None, None, options, _Attempt()
         )
         assert hold(tmp_path) is not None, "a Chrome the reap could not end read FREE"
+
+    @pytest.mark.parametrize(
+        ("launched", "held"),
+        [
+            pytest.param(os.getpid, True, id="the os still has it"),
+            pytest.param(dead_pid, False, id="the os does not"),
+        ],
+    )
+    async def test_a_scan_that_misses_the_pid_frees_it_only_if_the_pid_is_gone(
+        self, tmp_path, monkeypatch, launch_seams, launched, held
+    ):
+        """In its exec window a live Chrome reads an EMPTY argv (F-998), so the
+        profile scan misses it: that miss alone freed the profile under it."""
+        launch_seams(False)
+        options = await _fail_launch(tmp_path, monkeypatch, RuntimeError("boom"))
+        pid = launched()
+        reaper = _Reaper(running=set())
+        monkeypatch.setattr(browser_manager, "process_cleanup", reaper)
+        monkeypatch.setattr(spawn_leak, "launched_pid", lambda _attempt: pid)
+        await BrowserManager()._teardown_failed_spawn(
+            "error", "i-1", None, None, options, _Attempt()
+        )
+        assert reaper.killed == []
+        assert (hold(tmp_path) is not None) is held
+
+    async def test_a_start_that_registered_nothing_frees_it_for_the_retry(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        """nodriver raised before it registered a ``Browser`` (no executable
+        there), so nothing was launched: the retry of the same ``default``
+        directory must not read this attempt's own marker as a holder."""
+        launch_seams(False)
+
+        async def start(config):
+            raise FileNotFoundError("Could not determine browser executable.")
+
+        monkeypatch.setattr(browser_manager.uc, "start", start)
+        options = BrowserOptions(user_data_dir=str(tmp_path))
+        attempt = spawn_leak.Attempt()
+        with pytest.raises(FileNotFoundError):
+            await BrowserManager()._launch_browser(options, "exe", [], attempt)
+        assert attempt.config is not None
+        monkeypatch.setattr(browser_manager, "process_cleanup", _Reaper(set()))
+        await BrowserManager()._teardown_failed_spawn(
+            "error", "i-1", None, None, options, attempt
+        )
+        assert clone_storage._profile_hold(tmp_path) is None, "our own marker held it"
+
+    async def test_a_start_whose_chrome_was_collected_frees_it(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        """Registered, and asyncio has the exit code: that Chrome is gone."""
+        launch_seams(False)
+        attempt = spawn_leak.Attempt()
+
+        async def start(config):
+            exited = LaunchedBrowser(config, dead_pid())
+            exited._process.returncode = 0
+            registry.add(exited)
+            raise RuntimeError("Failed to connect to browser")
+
+        monkeypatch.setattr(browser_manager.uc, "start", start)
+        options = BrowserOptions(user_data_dir=str(tmp_path))
+        with nodriver_registry() as registry:
+            with pytest.raises(RuntimeError):
+                await BrowserManager()._launch_browser(options, "exe", [], attempt)
+            monkeypatch.setattr(browser_manager, "process_cleanup", _Reaper(set()))
+            await BrowserManager()._teardown_failed_spawn(
+                "error", "i-1", None, None, options, attempt
+            )
+        assert hold(tmp_path) is None
+
+    async def test_a_delegated_launch_that_failed_keeps_its_grace(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        """It leaves no config, and ``launch_and_attach`` kills only a Chrome
+        whose pid and start time it learned: after its task ran, a Chrome can
+        be live on the desktop with nothing here able to name it."""
+        launch_seams(True)
+
+        async def launch_and_attach(_exe, _args, _directory):
+            raise RuntimeError("delegated launch timed out")
+
+        monkeypatch.setattr(
+            browser_manager.desktop_launch, "launch_and_attach", launch_and_attach
+        )
+        options = BrowserOptions(user_data_dir=str(tmp_path))
+        attempt = spawn_leak.Attempt()
+        with pytest.raises(RuntimeError):
+            await BrowserManager()._launch_browser(options, "exe", [], attempt)
+        assert attempt.config is None
+        monkeypatch.setattr(browser_manager, "process_cleanup", _Reaper(set()))
+        await BrowserManager()._teardown_failed_spawn(
+            "error", "i-1", None, None, options, attempt
+        )
+        assert hold(tmp_path) is not None, "an unnamed delegated Chrome read FREE"
 
     async def test_one_nothing_can_reap_holds_for_the_grace_only(
         self, tmp_path, monkeypatch, launch_seams

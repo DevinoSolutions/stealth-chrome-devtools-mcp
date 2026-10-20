@@ -131,3 +131,29 @@ attribute rebinding from a `-p` plugin, no disk writes to any worktree):
 * Fixed tip: 28 passed.
 * 8 of 8 mutations killed: `age_unanswerable_zero` (1), `single_unlink` (2), `no_redate` (3), `unlink_on_failure`,
   `reap_never_releases`, `grace_is_whole_budget`, `failure_not_dated` and `reap_releases_unkilled` (5).
+
+## 7. Review round 2 (rev247 at 581e1a6): two MINORs
+
+| # | Finding | Fix | Direction |
+|---|---|---|---|
+| 1 | the reap ended the marker when the launched pid was missing from the profile scan, but in its exec window a live Chrome reads an EMPTY argv (F-998), so the scan misses it | a scan miss ends the marker only when `psutil.pid_exists(launched)` is False (an unanswerable call keeps it); a kill that succeeded still ends it | was wrong-FREE |
+| 2 | a nodriver launch that provably started nothing kept the profile held for the 15 s grace, so a `default` retry read our own marker as a holder and became a clone or an F-914 refusal (T-3758) | `spawn_leak._nothing_survives`: the config was built and nodriver registered no `Browser` for it, or the one it registered has a `returncode`, so the marker is ended now. nodriver registers right after `create_subprocess_exec` returns, and asyncio's `_make_subprocess_transport` kills and waits for a child whose creation was cancelled or failed before then | was wrong-HELD |
+
+**Not taken from MINOR 2: a `None` config.** The review asked to end the marker when `attempt.config is None` too. That is the
+delegated headed launch (F-810), or a raise before the Config was built, and the delegated one can leave a live Chrome:
+`desktop_launch.launch_and_attach` kills only a Chrome whose pid AND create time it learned, so after its task's `/Run` a
+Chrome may be starting on the desktop with nothing here able to name it (`spawn_leak.Attempt`'s docstring names three
+such refusals). Ending the marker there is a wrong-FREE on the profile being launched, which for `default` is the master
+profile. It keeps the 15 s grace, pinned by `test_a_delegated_launch_that_failed_keeps_its_grace`. Making it provable
+would need `desktop_launch` to report "task never ran" or "my kill succeeded", which is a follow-up.
+
+**NIT 3 not taken:** moving `_remove_marker`'s retry out of `_LAUNCHING_LOCK` lets a new claim write a fresh marker with
+the same owner between the lock's release and the unlink, which then deletes a live launch's marker (wrong-FREE). Dropping
+the sleeps weakens fix 2 of §6. The cost is at most 50 ms on the loop, and only when a Windows reader has the marker open.
+
+**RED and mutations, same method as §4** (`git archive` export of 581e1a6 with the new test file, runtime attribute
+rebinding, no disk writes to any worktree): 581e1a6 gives 3 failed, 30 passed. The 3 are the scan-miss pin with a pid
+the OS still has ("the os still has it"), the registered-nothing retry pin ("our own marker held it") and the
+collected-Chrome pin. The pid-gone and delegated-grace guards pass on 581e1a6. The fixed tip gives 33 passed. Mutations,
+4 of 4 killed: `scan_miss_releases`, `nothing_survives_never`, `config_none_survives_nothing` (MINOR 2 as literally
+asked, killed by the delegated pin) and `returncode_ignored`.
