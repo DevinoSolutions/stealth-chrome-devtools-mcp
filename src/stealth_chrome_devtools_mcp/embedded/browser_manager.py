@@ -503,14 +503,14 @@ class BrowserManager:
                     browser_executable, launch_args, options.user_data_dir
                 )
                 return browser
-            attempt.config = config = uc.Config(
+            attempt.config = config = browser_connect.LaunchConfig(
                 headless=options.headless,
                 user_data_dir=options.user_data_dir,
                 sandbox=options.sandbox,
                 browser_executable_path=browser_executable,
                 browser_args=launch_args,
             )
-            return await uc.start(config=config)
+            return await browser_connect.start(config)
 
     @spawn_budget.phase("post-launch setup", "POST_LAUNCH_BUDGET_SECONDS")
     async def _apply_post_launch(  # noqa: PLR0913  PERMANENT(function interface)
