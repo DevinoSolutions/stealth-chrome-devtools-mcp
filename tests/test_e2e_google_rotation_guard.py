@@ -123,6 +123,27 @@ async def _captured_body(iid: str, url_part: str, timeout: float = 15.0):
     return request, None
 
 
+async def _assert_capture_works(iid: str, label: str) -> None:
+    """The page's own network capture survives: a POST it makes is listed and its
+    response body is retrievable. Run on the master first (no guard, the oracle),
+    then on the clone, so a failure there is the guard's and not the step's."""
+    assert await get_fn("set_network_capture_filters")(
+        instance_id=iid, capture_bodies=True
+    )
+    tag = "f999=" + label.replace(" ", "-")
+    await eval_js(
+        iid,
+        f"fetch('/api/echo?{tag}',{{method:'POST',body:'f999'}}).then(r => r.text())",
+    )
+    request, body = await _captured_body(iid, tag)
+    assert request is not None, (
+        f"the {label} lost its network capture {await capture_miss_report(iid)}"
+    )
+    assert body and "f999" in body, (
+        f"the {label}'s response body is not retrievable (request {request})"
+    )
+
+
 @pytest.fixture(autouse=True)
 async def _warmup():
     await warmup_once()
@@ -181,6 +202,7 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
                 "served"
             ), f"the oracle must see the master served: {oracle}"
         assert await eval_js(master["instance_id"], _FRAME_NAVIGATION_JS) == "served"
+        await _assert_capture_works(master["instance_id"], "master")
 
         await navigate_and_settle(iid, page)
         assert await eval_js(iid, _ROTATE_JS) == "blocked"
@@ -210,18 +232,7 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
 
         # The guard enables the Network domain on every target; the page's own
         # capture (list_network_requests, get_response_content) must keep working.
-        assert await get_fn("set_network_capture_filters")(
-            instance_id=iid, capture_bodies=True
-        )
-        await eval_js(
-            iid,
-            "fetch('/api/echo?f999=capture',{method:'POST',body:'f999'}).then(r => r.text())",
-        )
-        request, body = await _captured_body(iid, "f999=capture")
-        assert request is not None, (
-            f"a guarded clone lost its network capture {await capture_miss_report(iid)}"
-        )
-        assert body and "f999" in body, "the response body is not retrievable"
+        await _assert_capture_works(iid, "guarded clone")
 
         await new_tab(instance_id=iid, url=page)
         tabs = await get_fn("list_tabs")(instance_id=iid)
