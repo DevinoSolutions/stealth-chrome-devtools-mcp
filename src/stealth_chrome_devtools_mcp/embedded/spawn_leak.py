@@ -110,9 +110,11 @@ imports nodriver already, and the stdio proxy imports neither.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import psutil
 from nodriver.core.util import get_registered_instances
 
 from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock
@@ -158,15 +160,39 @@ def launched_pid(attempt: Attempt) -> int | None:
     config``), so ``is`` on that object is an exact answer where every
     field comparison is ambiguous between concurrent siblings.
     """
+    browser = _registered(attempt)
+    if browser is None:
+        return None
+    return process_exit.browser_pid(
+        getattr(browser, "_process", None), getattr(browser, "_process_pid", None)
+    )
+
+
+def _registered(attempt: Attempt) -> object | None:
+    """The ``Browser`` nodriver registered for *attempt*'s config, or None."""
     if attempt.config is None:
         return None
     for browser in tuple(get_registered_instances()):
         if getattr(browser, "config", None) is attempt.config:
-            return process_exit.browser_pid(
-                getattr(browser, "_process", None),
-                getattr(browser, "_process_pid", None),
-            )
+            return browser
     return None
+
+
+def _nothing_survives(attempt: Attempt) -> bool:
+    """Whether a nodriver launch provably left no process (F-1008). nodriver
+    registers its ``Browser`` right after ``create_subprocess_exec`` returns, and
+    asyncio kills and waits for a child whose creation was cancelled or failed
+    before then, so a config with no ``Browser`` started nothing that lives; a
+    set ``returncode`` is a child already collected. A ``None`` config proves
+    nothing: the delegated launch (F-810) leaves it so, and can leave a Chrome
+    on the desktop that nothing here can name (``Attempt``)."""
+    if attempt.config is None:
+        return False
+    browser = _registered(attempt)
+    return (
+        browser is None
+        or getattr(getattr(browser, "_process", None), "returncode", None) is not None
+    )
 
 
 def reap_launched_browsers(
@@ -195,12 +221,18 @@ def reap_launched_browsers(
             )
             return []
         # Once it is gone, the launch marker need not wait out its grace
-        # (F-1008); a launch we cannot name keeps it until the grace ends.
+        # (F-1008). A scan that misses it proves nothing: in its exec window a
+        # live Chrome reads an EMPTY argv (F-998), so only a pid the OS no
+        # longer has counts. A launch we cannot name keeps it until the grace.
         if launched in on_profile:
             reaped = _kill(cleanup, launched, user_data_dir, instance_id)
             if reaped:
                 profile_lock.launch_reaped(user_data_dir)
             return reaped
+        with contextlib.suppress(psutil.Error, OSError):  # unanswerable: kept
+            if not psutil.pid_exists(launched):
+                profile_lock.launch_reaped(user_data_dir)
+    elif _nothing_survives(attempt):
         profile_lock.launch_reaped(user_data_dir)
     debug_logger.log_info(
         "spawn_leak",
