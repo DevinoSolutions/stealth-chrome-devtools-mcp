@@ -898,10 +898,18 @@ async def _settle_dom(client: Client, iid: str) -> None:
             allow_fail=True,
         )
         if isinstance(body, list) and body:
-            return
+            break
         if time.monotonic() >= deadline:
             return  # best-effort; a later assert surfaces the real failure
         await asyncio.sleep(0.25)
+    # A queryable body is not a wired page: app.js (end of <body>) may not have
+    # attached its listeners yet, and an interaction before that is silently lost.
+    ready_deadline = time.monotonic() + fixture_routes.FIXTURE_READY_TIMEOUT
+    while await _eval(client, iid, fixture_routes.FIXTURE_READY_JS) is not True:
+        assert time.monotonic() < ready_deadline, (
+            fixture_routes.FIXTURE_NOT_READY_MESSAGE
+        )
+        await asyncio.sleep(0.1)
 
 
 def _decode_screenshot(shot: Any) -> bytes:

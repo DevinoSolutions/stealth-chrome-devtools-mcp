@@ -80,6 +80,20 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+# ── Fixture-ready signal: ONE definition for both settle helpers (the harness's
+# ``_settle_dom`` and ``e2e_helpers.navigate_and_settle``). A page that loads
+# ``app.js`` is ready only once app.js has wired its listeners and set
+# ``window.__fixtureReady``; a page without it has nothing to wait for. ──
+FIXTURE_READY_TIMEOUT = 15.0
+FIXTURE_READY_JS = (
+    "(function(){return document.querySelector('script[src$=\"app.js\"]')"
+    " === null || window.__fixtureReady === true;})()"
+)
+FIXTURE_NOT_READY_MESSAGE = (
+    "fixture app.js never loaded: window.__fixtureReady unset after "
+    f"{FIXTURE_READY_TIMEOUT:g}s"
+)
+
 # ── Fixed tokens and payloads (the exact oracles the W7 tests assert on) ─────
 CSP_HEADER_NAME = "Content-Security-Policy"
 CSP_HEADER_VALUE = (

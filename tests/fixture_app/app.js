@@ -459,9 +459,17 @@
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", wire);
-  } else {
+  // Fixture-ready signal: set only AFTER the listeners are attached, so a
+  // harness that waits on it never clicks into a page whose handlers are not
+  // wired yet (see fixture_routes.FIXTURE_READY_JS).
+  function start() {
     wire();
+    window.__fixtureReady = true;
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
   }
 })();
