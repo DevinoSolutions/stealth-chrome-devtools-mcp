@@ -70,6 +70,7 @@ thread, and a peer that gave up first is recorded rather than raised.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -80,19 +81,57 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-# ── Fixture-ready signal: ONE definition for both settle helpers (the harness's
-# ``_settle_dom`` and ``e2e_helpers.navigate_and_settle``). A page that loads
-# ``app.js`` is ready only once app.js has wired its listeners and set
-# ``window.__fixtureReady``; a page without it has nothing to wait for. ──
+# ── Fixture-ready wait: ONE definition for both settle helpers (the harness's
+# ``_settle_dom`` and ``e2e_helpers.navigate_and_settle``). A document is settled
+# when it is ``complete`` and, if it carries ``app.js``, that script has wired its
+# listeners and set ``window.__fixtureReady``. The probe returns a JSON string
+# (what ``execute_script`` carries unchanged) so a failure can name WHAT it saw. ──
 FIXTURE_READY_TIMEOUT = 15.0
-FIXTURE_READY_JS = (
-    "(function(){return document.querySelector('script[src$=\"app.js\"]')"
-    " === null || window.__fixtureReady === true;})()"
+FIXTURE_STATE_JS = (
+    "JSON.stringify((function(){"
+    "var s=document.querySelector('script[src$=\"app.js\"]');"
+    "return {href:location.href,state:document.readyState,script:s!==null,"
+    "fetched:performance.getEntriesByType('resource')"
+    ".some(function(e){return e.name.indexOf('/app.js')>=0;}),"
+    "ready:window.__fixtureReady===true};})())"
 )
-FIXTURE_NOT_READY_MESSAGE = (
-    "fixture app.js never loaded: window.__fixtureReady unset after "
-    f"{FIXTURE_READY_TIMEOUT:g}s"
-)
+
+
+def fixture_state_ready(state: dict[str, Any]) -> bool:
+    return state.get("state") == "complete" and (
+        not state.get("script") or state.get("ready") is True
+    )
+
+
+async def wait_fixture_ready(probe: Callable[[str], Any]) -> None:
+    """Poll ``probe(FIXTURE_STATE_JS)`` until the document is settled, or fail.
+
+    ``probe`` is the caller's transport (async, returns the JS result or ``None``
+    on a failed call). A failed probe — a context destroyed by a redirect or
+    meta-refresh — is retried until the deadline, never fatal on its own. The
+    deadline failure names the last page state it saw: ``fetched`` false means
+    the script was never requested, true with ``ready`` false means it was
+    fetched but did not finish wiring."""
+    deadline = time.monotonic() + FIXTURE_READY_TIMEOUT
+    last: Any = None
+    while True:
+        raw = await probe(FIXTURE_STATE_JS)
+        state = None
+        if isinstance(raw, str):
+            try:
+                state = json.loads(raw)
+            except ValueError:
+                state = None
+        if isinstance(state, dict):
+            last = state
+            if fixture_state_ready(state):
+                return
+        assert time.monotonic() < deadline, (
+            "fixture page never settled (app.js did not wire window.__fixtureReady "
+            f"within {FIXTURE_READY_TIMEOUT:g}s); last page state: {last}"
+        )
+        await asyncio.sleep(0.1)
+
 
 # ── Fixed tokens and payloads (the exact oracles the W7 tests assert on) ─────
 CSP_HEADER_NAME = "Content-Security-Policy"
