@@ -130,12 +130,12 @@ async def _assert_capture_works(iid: str, label: str) -> None:
     assert await get_fn("set_network_capture_filters")(
         instance_id=iid, capture_bodies=True
     )
-    tag = "f999=" + label.replace(" ", "-")
+    # The fixture answers POST /api/echo only on the exact path (a query is a 404 with
+    # no body), and each instance has its own capture, so the path alone names it.
     await eval_js(
-        iid,
-        f"fetch('/api/echo?{tag}',{{method:'POST',body:'f999'}}).then(r => r.text())",
+        iid, "fetch('/api/echo',{method:'POST',body:'f999'}).then(r => r.text())"
     )
-    request, body = await _captured_body(iid, tag)
+    request, body = await _captured_body(iid, "/api/echo")
     assert request is not None, (
         f"the {label} lost its network capture {await capture_miss_report(iid)}"
     )
