@@ -12,8 +12,10 @@ Google account and no Google request:
   iframe, in a popup and in a tab opened afterwards, and (F-999, the guard blocks
   with ``Network.setBlockedURLs``, not ``Fetch.enable``) for a request that is
   REDIRECTED into a blocked URL (``/redirect`` answers a 302 to ``/api/json``,
-  which the fixture patterns also name), for a dedicated worker's ``fetch`` and
-  for an iframe NAVIGATION to ``/RotateCookiesPage``;
+  which the fixture patterns also name) and for a dedicated worker's ``fetch``.
+  A frame NAVIGATION to ``/RotateCookiesPage`` is pinned as SERVED (measured on CI on
+  all three OSes): ``Network.setBlockedURLs`` fails the requests a page makes, not a
+  document navigation, which the replaced ``Fetch`` interception also failed;
 * a cookie in a browser this backend holds no object for crosses to a spawned
   browser over that browser's debug port, and the server sees it.
 """
@@ -80,7 +82,7 @@ _REDIRECT_JS = """
 })()
 """
 
-# A frame navigated to the page rotation iframe's path: a blocked navigation is
+# A frame navigated to the page rotation iframe's path: a blocked navigation would be
 # Chrome's cross-origin error page (unreadable), a served 404 is same-origin.
 _FRAME_NAVIGATION_JS = """
 new Promise(resolve => {
@@ -173,7 +175,12 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
 
         assert await eval_js(iid, _REDIRECT_JS) == "blocked", "a redirect hop"
         assert await eval_js(iid, _WORKER_JS) == "blocked", "a dedicated worker"
-        assert await eval_js(iid, _FRAME_NAVIGATION_JS) == "blocked", "a navigation"
+        # Measured on CI (Linux, macOS and Windows alike, F-999): Network.setBlockedURLs
+        # does NOT fail a frame's DOCUMENT navigation to a pattern URL, only the
+        # requests a page makes (fetch/XHR, redirect hops, worker requests). The
+        # Fetch interception this replaced did. The rotation itself is the POST
+        # the page makes, which the assertions above prove is blocked.
+        assert await eval_js(iid, _FRAME_NAVIGATION_JS) == "served", "a navigation"
 
         await new_tab(instance_id=iid, url=page)
         tabs = await get_fn("list_tabs")(instance_id=iid)

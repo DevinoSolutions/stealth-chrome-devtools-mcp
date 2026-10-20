@@ -79,15 +79,24 @@ still does not count as a refusal (F-957).
 
 ### CDP semantics argued, not measured
 
-- **Navigations (main frame, subframes) and redirects.** `Network.setBlockedURLs` is checked by the network agent on
-  every request the page's network stack issues for that target, including each hop of a redirect and a subframe
-  navigation, which is a request in the frame's own target (an OOPIF is its own attached session and gets its own
-  block). The e2e now asserts a master-served and clone-blocked outcome for a 302 into the pattern and for a subframe
-  navigation.
+- **Redirects.** `Network.setBlockedURLs` is checked on every request the target's network stack issues for a page,
+  each hop of a redirect included. CI measured it: a `fetch` redirected by a 302 into a pattern URL is blocked on a
+  clone and served on the master, on Linux, macOS and Windows.
+- **Navigations: NOT blocked, a behaviour change.** My first version of this argument said a subframe navigation is
+  "a request in the frame's own target" and so blocked. The first CI run on this PR disproved it on all three OSes
+  (`assert 'served' == 'blocked'`): an `<iframe src="/RotateCookiesPage?origin=x">` inside a clone loads (a
+  same-origin document) rather than showing Chrome's blocked-page error. `Network.setBlockedURLs` fails the requests
+  a page makes; it does not fail a document navigation, which the `Fetch.enable` interception it replaces did. The
+  e2e now pins that outcome (`"served"`) with its reason, so a later Chrome that starts blocking it will show up
+  rather than pass silently. Whether that matters depends on whether a rotation can complete from the
+  `RotateCookiesPage` document alone; the rotation Google performs from it is the `POST /RotateCookies` the page then
+  makes, which IS blocked (the page's own request, in the iframe's attached session), but that is the published
+  behaviour of that page, not something measured here (no Google request was made). See section 7.
 - **Dedicated workers.** They are separate targets; the guard's `Target.setAutoAttach` already reaches them and
   configures each before it runs. The e2e asserts a worker-issued fetch is blocked on a clone.
-- **Nothing the guard relied on is lost.** It only ever failed matching requests with `BlockedByClient` (the removed
-  `Fetch.requestPaused` handler); it never fulfilled or modified one.
+- **What is given up.** The guard only ever failed matching requests with `BlockedByClient` (the removed
+  `Fetch.requestPaused` handler); it never fulfilled or modified one. The one thing the interception did that
+  `Network.setBlockedURLs` does not is failing a frame's document navigation to a pattern URL (above).
 
 None of the three has been run against real Chrome by this change. They are CI-only assertions in
 `test_e2e_google_rotation_guard.py`.
@@ -141,8 +150,10 @@ conversation, and M8 then went RED.
 
 ## 7. Open risks
 
-1. Redirect, dedicated-worker and subframe-navigation blocking are argued, not run; the e2e assertions are the proof
-   and run on CI only.
+1. **A document navigation to a pattern URL is no longer failed** (measured on CI, section 4). If a rotation can
+   complete from the `RotateCookiesPage` document without the later `POST /RotateCookies`, the guard would not stop
+   it. Resolving that needs a throwaway Google account (never the operator's), which this change does not touch.
+   Redirect and dedicated-worker blocking passed on CI on all three OSes.
 2. `Network.enable` makes Chrome stream every network event of every attached session to the guard's connection, where
    they are parsed and dropped. The cost is unmeasured.
 3. The zero buffer limits (section 4) deviate from the measured BLOCKNET arm.
