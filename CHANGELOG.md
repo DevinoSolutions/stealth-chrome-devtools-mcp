@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### The fixture harness explains a page that was not wired when `navigate` returned (T-4709)
+
+Test-only. The F-1006 evidence for "does `navigate(wait_until='load')` return before load?" was a fixture hit list that
+could not tell "Chrome never asked for `app.js`" from "asked, then cancelled": a request whose handler raised a connection
+error was dropped from the list. The hit list now records a request when its line is parsed and marks how it ended:
+`[unfinished]` while it is being served (or if the handler died), `[reset]` when the client went away, plain when served.
+The settle probe (`fixture_routes.FIXTURE_STATE_JS`) now also reads each `script` tag's src, the document's
+`domContentLoadedEventEnd` / `loadEventEnd` (0 until its `load` ended) and the resource timing of everything it fetched
+(status, size, start, duration), and both the "never settled" failure and the "navigate had already returned" warning name
+the FIRST page state they saw, with probe and unanswered-probe counts, so the next occurrence says which of the three it was.
+A census of the 16 CI runs since F-1006 shipped found no warning and no failure; no product change.
+
 ### The health probe no longer heals a browser that is only starved (F-1007)
 
 `browser_health` probes a background `about:blank` target, and Chrome runs a renderer nothing is looking at at IDLE

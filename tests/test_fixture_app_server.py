@@ -215,3 +215,167 @@ def test_wait_fixture_ready_is_silent_when_first_probe_settled():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         asyncio.run(fixture_routes.wait_fixture_ready(probe))
+
+
+# ── T-4709: the fixture's own diagnostics must not lose what they exist to show ──
+
+
+def _hit_ending(suffix_of: str, tail: str, timeout: float = 5.0):
+    """The newest ``_FIXTURE_HITS`` entry for *suffix_of* once it ends in *tail*
+    (``""`` = served). The entry is rewritten by the server thread AFTER the client
+    has its answer, so it is polled for, bounded."""
+    import time
+
+    import release_gate_harness as harness
+
+    deadline = time.monotonic() + timeout
+    while True:
+        mine = [h for h in list(harness._FIXTURE_HITS) if f"GET {suffix_of} " in h]
+        if mine and (
+            mine[-1].endswith(tail) if tail else mine[-1].endswith("HTTP/1.1")
+        ):
+            return mine[-1]
+        if time.monotonic() >= deadline:
+            return mine[-1] if mine else None
+        time.sleep(0.02)
+
+
+def _route(monkeypatch, path, action):
+    import fixture_routes
+
+    real = fixture_routes.dispatch
+
+    def dispatch(handler, method):
+        if handler.path == path:
+            return action(handler)
+        return real(handler, method)
+
+    monkeypatch.setattr(fixture_routes, "dispatch", dispatch)
+
+
+def test_a_served_request_is_recorded_plain(fixture_app_server):
+    requests.get(f"{fixture_app_server}/index.html", timeout=5)
+    hit = _hit_ending("/index.html", "")
+    assert hit is not None and hit.endswith("GET /index.html HTTP/1.1"), hit
+
+
+def test_a_request_the_client_cut_off_is_recorded_as_reset(
+    fixture_app_server, monkeypatch
+):
+    """The recorder used to DROP a request whose handler raised a reset, so "no GET
+    /app.js" could not tell "never sent" from "sent and cancelled" (T-4709)."""
+
+    def reset(handler):
+        raise ConnectionResetError(10054, "the client went away")
+
+    _route(monkeypatch, "/t4709-reset", reset)
+    try:
+        requests.get(f"{fixture_app_server}/t4709-reset", timeout=5)
+    except requests.exceptions.ConnectionError:
+        pass  # the server hung up without an answer: that is the case
+    hit = _hit_ending("/t4709-reset", " [reset]")
+    assert hit is not None and hit.endswith("GET /t4709-reset HTTP/1.1 [reset]"), hit
+
+
+def test_a_request_still_being_served_is_recorded_as_unfinished(
+    fixture_app_server, monkeypatch
+):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(handler):
+        entered.set()
+        release.wait(10)
+        handler.send_response(200)
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return True
+
+    _route(monkeypatch, "/t4709-hold", hold)
+    client = threading.Thread(
+        target=lambda: requests.get(f"{fixture_app_server}/t4709-hold", timeout=15),
+        daemon=True,
+    )
+    client.start()
+    try:
+        assert entered.wait(5), "the held route was never reached"
+        hit = _hit_ending("/t4709-hold", " [unfinished]")
+        assert hit is not None and hit.endswith("[unfinished]"), hit
+    finally:
+        release.set()
+        client.join(10)
+    assert _hit_ending("/t4709-hold", "").endswith("GET /t4709-hold HTTP/1.1")
+
+
+def test_the_settle_probe_reads_the_timing_and_the_resources_a_failure_needs():
+    import fixture_routes
+
+    for needed in (
+        "loadEnd",
+        "getEntriesByType('resource')",
+        "getEntriesByType('navigation')",
+        "responseStatus",
+        "document.scripts",
+        "__fixtureReady",
+    ):
+        assert needed in fixture_routes.FIXTURE_STATE_JS, needed
+
+
+def test_a_settle_that_never_happens_names_first_and_last_state_and_the_probes(
+    monkeypatch,
+):
+    import asyncio
+
+    import fixture_routes
+
+    monkeypatch.setattr(fixture_routes, "FIXTURE_READY_TIMEOUT", 0.3)
+    calls = []
+
+    async def probe(expression):
+        calls.append(expression)
+        if len(calls) == 1:
+            return None
+        loaded = len(calls) > 3
+        return (
+            '{"href":"http://x/interact.html","state":"complete","script":true,'
+            '"fetched":false,"ready":false,"scripts":["http://x/app.js"],'
+            f'"loadEnd":{99 if loaded else 0},"resources":[{{"name":"/styles.css",'
+            '"status":200,"size":1588}]}'
+        )
+
+    try:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe))
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("an unwired page must not count as settled")
+    assert "first page state" in message and "'loadEnd': 0" in message
+    assert "last page state" in message and "'loadEnd': 99" in message
+    assert "'name': '/styles.css'" in message
+    assert f"{len(calls)} probes, 1 unanswered" in message
+
+
+def test_the_early_navigate_warning_carries_what_the_first_probe_saw():
+    import asyncio
+
+    import pytest
+
+    import fixture_routes
+
+    states = iter(
+        [
+            '{"href":"http://x/interact.html","state":"interactive","script":true,'
+            '"fetched":false,"ready":false,"loadEnd":0}',
+            '{"href":"http://x/interact.html","state":"complete","script":true,'
+            '"fetched":true,"ready":true,"loadEnd":40}',
+        ]
+    )
+
+    async def probe(expression):
+        return next(states)
+
+    with pytest.warns(UserWarning, match="navigate had already returned") as record:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe, expect_app=True))
+    assert "the first probe saw" in str(record[0].message)
+    assert "'loadEnd': 0" in str(record[0].message)

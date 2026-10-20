@@ -86,15 +86,27 @@ from typing import Any
 # ``_settle_dom`` and ``e2e_helpers.navigate_and_settle``). A document is settled
 # when it is ``complete`` and, if it carries ``app.js``, that script has wired its
 # listeners and set ``window.__fixtureReady``. The probe returns a JSON string
-# (what ``execute_script`` carries unchanged) so a failure can name WHAT it saw. ──
+# (what ``execute_script`` carries unchanged) so a failure can name WHAT it saw:
+# beyond the three settle facts it carries the document's own timing (``loadEnd``
+# is 0 until its ``load`` event ends, so a ``navigate`` that returned early reads
+# ``loadEnd: 0``), every ``script`` tag's src and the resource timing of what the
+# page fetched (a request that ended without a response reads ``status`` 0), so the
+# next "navigate returned before the page was wired" explains itself (T-4709). ──
 FIXTURE_READY_TIMEOUT = 15.0
 FIXTURE_STATE_JS = (
     "JSON.stringify((function(){"
     "var s=document.querySelector('script[src$=\"app.js\"]');"
+    "var r=performance.getEntriesByType('resource');"
+    "var n=performance.getEntriesByType('navigation')[0];"
     "return {href:location.href,state:document.readyState,script:s!==null,"
-    "fetched:performance.getEntriesByType('resource')"
-    ".some(function(e){return e.name.indexOf('/app.js')>=0;}),"
-    "ready:window.__fixtureReady===true};})())"
+    "fetched:r.some(function(e){return e.name.indexOf('/app.js')>=0;}),"
+    "ready:window.__fixtureReady===true,"
+    "scripts:Array.prototype.map.call(document.scripts,function(e){return e.src;}),"
+    "dcl:n?Math.round(n.domContentLoadedEventEnd):null,"
+    "loadEnd:n?Math.round(n.loadEventEnd):null,now:Math.round(performance.now()),"
+    "resources:r.slice(0,12).map(function(e){return {name:new URL(e.name).pathname,"
+    "status:e.responseStatus,size:e.transferSize,start:Math.round(e.startTime),"
+    "ms:Math.round(e.duration)};})};})())"
 )
 
 
@@ -116,15 +128,19 @@ async def wait_fixture_ready(
     ``probe`` is the caller's transport (async, returns the JS result or ``None``
     on a failed call). A failed probe — a context destroyed by a redirect or
     meta-refresh — is retried until the deadline, never fatal on its own. The
-    deadline failure names the last page state it saw: ``fetched`` false means
-    the script was never requested, true with ``ready`` false means it was
-    fetched but did not finish wiring. A wait that recovers within the deadline
+    deadline failure names the first and the last page state it saw: ``fetched``
+    false means the page recorded no resource timing for the script, true with
+    ``ready`` false means it was fetched but did not finish wiring, and
+    ``resources``, ``scripts`` and ``loadEnd`` say what each request and the
+    document's own ``load`` did. A wait that recovers within the deadline
     still warns: ``navigate`` had already returned, so the page was not ready at
     the moment the tool said it was (T-4709)."""
     started = time.monotonic()
     deadline = started + FIXTURE_READY_TIMEOUT
     last: Any = None
+    first: Any = None
     probes = 0
+    unanswered = 0
     while True:
         probes += 1
         raw = await probe(FIXTURE_STATE_JS)
@@ -136,19 +152,25 @@ async def wait_fixture_ready(
                 state = None
         if isinstance(state, dict):
             last = state
+            if first is None:
+                first = state
             if fixture_state_ready(state, expect_app):
                 if probes > 1:
                     warnings.warn(
                         f"navigate had already returned but {state.get('href')} was "
                         f"not settled: needed {probes} probes and "
                         f"{time.monotonic() - started:.2f}s before the document was "
-                        "complete with app.js wired",
+                        "complete with app.js wired; the first probe saw: "
+                        f"{first}",
                         stacklevel=2,
                     )
                 return
+        else:
+            unanswered += 1
         assert time.monotonic() < deadline, (
             "fixture page never settled (app.js did not wire window.__fixtureReady "
-            f"within {FIXTURE_READY_TIMEOUT:g}s); last page state: {last}"
+            f"within {FIXTURE_READY_TIMEOUT:g}s; {probes} probes, {unanswered} "
+            f"unanswered); first page state: {first}; last page state: {last}"
         )
         await asyncio.sleep(0.1)
 
