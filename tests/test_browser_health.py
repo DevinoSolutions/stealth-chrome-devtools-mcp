@@ -14,6 +14,7 @@ websocket server that speaks the four CDP commands, so no Chrome is involved.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import os
@@ -135,7 +136,7 @@ class _Stage:
         # defaults are an unstarved host, a silent process and a ConnectionError,
         # so every failed probe in this file counts as it did before.
         self.process_answers = False
-        self.lag_factor = 1.0
+        self.lag_factor: float | None = 1.0
         self.lag_reads = 0
         self.probe_error: type[Exception] = ConnectionError
         self.process_asked: list[str | None] = []
@@ -231,9 +232,20 @@ class _Stage:
         if not self.process_answers:
             raise ConnectionError("the browser process does not answer")
 
-    async def lag(self) -> float:
-        self.lag_reads += 1
-        return self.lag_factor
+    @contextlib.asynccontextmanager
+    async def canary(self):
+        """The IDLE canary as the loop sees it: entered before the probe, read
+        inside it, left after it. ``events`` records the order."""
+        self.events.append("canary-start")
+
+        async def factor() -> float | None:
+            self.lag_reads += 1
+            return self.lag_factor
+
+        try:
+            yield SimpleNamespace(factor=factor)
+        finally:
+            self.events.append("canary-stop")
 
     def health(self, **overrides) -> browser_health.BrowserHealth:
         kwargs = {
@@ -242,7 +254,7 @@ class _Stage:
             "probe": self.probe,
             "own_check": self.own_ok,
             "browser_answers": self.browser_answers,
-            "lag": self.lag,
+            "canary": self.canary,
             "persistent": lambda iid: iid in self.persistent,
             "forensics": self.forensics,
             "capture": self.capture,
@@ -314,7 +326,7 @@ class TestAStarvedHostIsNotAFreeze:
     """F-1007: the probe's target is a background one, which Chrome runs at IDLE
     priority, so on a CPU-starved host a HEALTHY browser times out its evaluate.
     The browser process still answers; THIS process's own scheduling is what is
-    late (``scheduling_lag.loop_lag``, the F-856 signal), so that is the witness."""
+    starved (``scheduling_lag.idle_canary``), so that is the witness."""
 
     @staticmethod
     def starved(stage, lag: float = 3.0) -> None:
@@ -334,7 +346,7 @@ class TestAStarvedHostIsNotAFreeze:
         assert stage.closes == [] and stage.launches == []
         assert log.at("error") == []
         excused = [w for w in log.at("warning") if "starved, not frozen" in w]
-        assert len(excused) == 6 and "scheduler ran 3.0x late" in excused[0]
+        assert len(excused) == 6 and "idle canary ran 3.0x slow" in excused[0]
         assert not any("probe 1 failed" in w for w in log.at("warning"))
 
     async def test_a_browser_process_that_is_dead_too_is_healed(self, stage, log):
@@ -420,18 +432,45 @@ class TestAStarvedHostIsNotAFreeze:
         await health.check_once()
         assert stage.closes == [INSTANCE_ID]
 
-    async def test_a_lag_that_cannot_be_read_keeps_the_old_verdict(self, stage):
+    async def test_a_canary_with_no_reading_keeps_the_old_verdict(self, stage):
+        self.starved(stage)
+        stage.lag_factor = None  # it never started, or the window was too short
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.closes == [INSTANCE_ID] and stage.process_asked == []
+
+    async def test_a_canary_that_cannot_be_read_keeps_the_old_verdict(self, stage):
         self.starved(stage)
         stage.probe_results[INSTANCE_ID] = [False, False]
 
-        async def broken() -> float:
-            raise OSError("no timer")
+        @contextlib.asynccontextmanager
+        async def broken():
+            async def factor() -> float:
+                raise OSError("no pipe")
 
-        health = stage.health(lag=broken)
+            yield SimpleNamespace(factor=factor)
+
+        health = stage.health(canary=broken)
         await health.check_once()
         await health.check_once()
 
         assert stage.closes == [INSTANCE_ID]
+
+    async def test_the_canary_runs_around_the_probe_and_is_always_stopped(self, stage):
+        # DURING the window, not after it; and a probe that raises still stops it.
+        self.starved(stage)
+        stage.probe_results[INSTANCE_ID] = [False]
+
+        await stage.health().check_once()
+
+        around = [
+            e for e in stage.events if e in ("canary-start", "probe", "canary-stop")
+        ]
+        assert around == ["canary-start", "probe", "canary-stop"]
 
     async def test_a_process_that_does_not_answer_in_time_is_no_excuse(
         self, stage, monkeypatch
@@ -462,7 +501,7 @@ class TestAStarvedHostIsNotAFreeze:
         assert stage.closes == [] and log.at("error") == []
         assert not any("starved" in w for w in log.at("warning"))
         assert not health._incidents.has(INSTANCE_ID)
-        assert INSTANCE_ID not in health._starved_since
+        assert INSTANCE_ID not in health._excuses.tracked()
 
 
 class TestTheStarvationCeiling:
@@ -496,13 +535,13 @@ class TestTheStarvationCeiling:
         await health.check_once()  # counted: probe 1, plus the ERROR
 
         (error,) = log.at("error")
-        assert error.startswith("HungBrowserError") and "starvation excuses" in error
+        assert error.startswith("HungBrowserError") and "starvation ceiling" in error
         assert any("probe 1 failed" in w for w in log.at("warning"))
         assert stage.closes == []
 
         await health.check_once()  # probe 2: the heal, as ever
         assert stage.closes == [INSTANCE_ID]
-        assert INSTANCE_ID not in health._starved_since
+        assert INSTANCE_ID not in health._excuses.tracked()
 
     async def test_a_healthy_round_restarts_the_clock(self, stage, log):
         TestAStarvedHostIsNotAFreeze.starved(stage)
@@ -512,7 +551,7 @@ class TestTheStarvationCeiling:
         await health.check_once()  # starved at t0
         stage.now += self.CEILING - 1
         await health.check_once()  # healthy: the run is over
-        assert INSTANCE_ID not in health._starved_since
+        assert INSTANCE_ID not in health._excuses.tracked()
         stage.now += self.CEILING - 1  # 2x the ceiling since t0, 0.0 since the pass
         await health.check_once()  # starved again: a NEW run
 
@@ -1191,18 +1230,27 @@ async def _settled() -> None:
 
 
 class TestTheFrozenStateIsCaptured:
+    @staticmethod
+    def steps(stage) -> list[str]:
+        """The loop's own steps; the IDLE canary around each probe is not one."""
+        return [e for e in stage.events if not e.startswith("canary")]
+
     async def test_it_is_taken_once_per_incident_and_before_the_heal(self, stage, log):
         stage.probe_results[INSTANCE_ID] = [False, False]
         health = stage.health()
 
         await health.check_once()
         await _settled()
-        assert stage.events == ["probe", "capture", "capture-done"]  # nothing closed
+        assert self.steps(stage) == [
+            "probe",
+            "capture",
+            "capture-done",
+        ]  # nothing closed
 
         await health.check_once()
         # the heal's own order, with no second capture in it, and the dump marked
         # healed before the browser is closed
-        assert stage.events == [
+        assert self.steps(stage) == [
             "probe",
             "capture",
             "capture-done",

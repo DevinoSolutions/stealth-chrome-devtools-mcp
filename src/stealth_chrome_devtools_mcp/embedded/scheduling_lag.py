@@ -26,13 +26,19 @@ third of a second of patience. Because the factor is clamped to
 wall time — elastic, never infinite, and terminating without a second stopping
 rule to keep in step with the first.
 
-**The same signal answers an async prober (F-1007).** ``browser_health`` times a
-probe out on the event loop, so :func:`loop_lag` is the one-shot form of
-:meth:`FairWindow.nap`: ask for a short ``asyncio.sleep``, read how late it woke,
-and :func:`is_starved` says whether that lateness is material. The probe's target
-runs at Chrome's IDLE priority, so on a saturated host its timeout can mean "this
-host did not schedule it" and not "the browser is frozen"; this process's own lag is
-the free witness that cannot be true of a machine that is not starving us.
+**A second witness for a prober whose target is starved BY PRIORITY (F-1007).**
+``browser_health``'s probe target is a background renderer, which Chrome runs at IDLE
+priority. The backend itself runs at NORMAL priority, so on a saturated host its own
+sleeps wake on time (measured 2026-10-20: 64 normal-priority spinners on 32 cpus left
+``asyncio.sleep`` lag at 1.05x while an IDLE-priority counter ran at 4% of its idle
+rate): the self-measured signal above cannot see that starvation. :class:`IdleCanary`
+measures what starves the renderer: a tiny child process that lowers ITS OWN priority
+class to IDLE and wakes every :data:`CANARY_NAP_SECONDS`, running DURING the probe
+window. ``factor`` is the window's length over the time the wakes it kept would have
+taken, so a canary that kept up reads 1.0 and one that got a quarter of its wakes
+reads 4.0 (clamped to :data:`MAX_STRETCH`), judged by the same :func:`is_starved`.
+Anything it cannot establish (no child, no ready line, an exit, a window under
+:data:`CANARY_MIN_WINDOW_SECONDS`) is ``None``: no evidence, never an excuse.
 
 **What it is not.** It never decides that anything is alive or dead. It only
 answers "has this window been spent", so the ONE gate that owns the dead-vs-busy
@@ -43,9 +49,18 @@ starvation moves when a verdict is reached, never what happens after one.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import subprocess
+import sys
 import time
+from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import backend_eviction
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.observability import capture_lifecycle
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
 
 
 # The one timing seam, as module functions rather than constructor arguments:
@@ -56,10 +71,6 @@ def _now() -> float:
 
 def _wait(seconds: float) -> None:
     time.sleep(seconds)
-
-
-async def _async_wait(seconds: float) -> None:
-    await asyncio.sleep(seconds)
 
 
 # How much wall time a window may buy, as a multiple of its patience. Sized
@@ -78,30 +89,171 @@ MAX_STRETCH = 4.0
 # report would fire on healthy machines, which is how a warning stops meaning
 # anything.
 REPORT_FACTOR = 2.0
-# What one :func:`loop_lag` sample asks the event loop for. Long enough that timer
-# granularity (about 15 ms on Windows) stays far under :data:`REPORT_FACTOR`, short
-# enough that asking it after a failed probe adds a quarter second to the round.
-LOOP_NAP_SECONDS = 0.25
+# What the IDLE canary asks of the scheduler between two wakes. Short enough that a
+# probe window holds ~100 of them, long enough that a fair scheduler keeps timer
+# granularity (about 15 ms on Windows) well under :data:`REPORT_FACTOR`.
+CANARY_NAP_SECONDS = 0.1
+# A window shorter than this says nothing (a connect timeout is 5 s, the probe's is
+# 15 s): the canary's own start-up would be most of it.
+CANARY_MIN_WINDOW_SECONDS = 3.0
+# The child outlives its parent by at most this, whatever happens to the parent.
+CANARY_LIFETIME_SECONDS = 60.0
+# What stop() grants the child to be reaped, and what factor() grants the reader to
+# drain the pipe (a wake the loop has not read yet is not a missing wake).
+CANARY_REAP_SECONDS = 2.0
+CANARY_DRAIN_SECONDS = 0.05
+# The child. ``ready`` is printed at NORMAL priority, before the class is lowered, so
+# that a starved canary is told apart from one that never started; a failed lowering
+# exits, which the parent reads as "no evidence". POSIX lowers only the CHILD (never
+# the backend), and a pipe that closes ends it.
+_CANARY_SOURCE = f"""
+import os, sys, time
+print("ready", flush=True)
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32")
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    if not kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x40):
+        sys.exit(1)
+else:
+    os.nice(19)
+end = time.monotonic() + {CANARY_LIFETIME_SECONDS}
+while time.monotonic() < end:
+    time.sleep({CANARY_NAP_SECONDS})
+    print(".", flush=True)
+"""
 # F-827 vocabulary. A stretched window is a DECISION — "I declined to believe
 # this timeout" — and without it the CONDEMNED/HEALED/TEARDOWN series has no
 # denominator for how often starvation nearly caused one.
 STRETCHED_EVENT = "proxy: patience extended under starvation"
 
 
-def is_starved(factor: float) -> bool:
+def is_starved(factor: float | None) -> bool:
     """True when a lag factor is material: at or above :data:`REPORT_FACTOR`. THE
     one threshold, so the report below and every caller agree on what "starved"
-    means."""
-    return factor >= REPORT_FACTOR
+    means. ``None`` (no reading) is never starved."""
+    return factor is not None and factor >= REPORT_FACTOR
 
 
-async def loop_lag(seconds: float = LOOP_NAP_SECONDS) -> float:
-    """This process's scheduling lag right now, as ``actual / requested`` for one
-    ``asyncio`` sleep, clamped to ``[1.0, MAX_STRETCH]`` like
-    :meth:`FairWindow.nap`'s. Say ``is_starved(await loop_lag())``."""
-    before = _now()
-    await _async_wait(seconds)
-    return min(max((_now() - before) / seconds, 1.0), MAX_STRETCH)
+async def _spawn_canary() -> asyncio.subprocess.Process:
+    """The one seam for starting the child, so a test steers it."""
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        _CANARY_SOURCE,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+
+class IdleCanary:
+    """An IDLE-priority child woken every :data:`CANARY_NAP_SECONDS`, counted while
+    a probe runs. Use it as ``async with idle_canary() as canary`` around the probe
+    and read ``await canary.factor()`` before leaving. Never raises."""
+
+    def __init__(self) -> None:
+        self._proc: asyncio.subprocess.Process | None = None
+        self._reader: asyncio.Task[None] | None = None
+        self._ready_at: float | None = None
+        self._wakes = 0
+
+    async def start(self) -> None:
+        try:
+            self._proc = await _spawn_canary()
+            self._reader = asyncio.create_task(self._count(self._proc))
+        except Exception as error:  # noqa: BLE001  PERMANENT(F-1007: a canary that cannot start is no evidence, never an error in the probe loop)
+            self._proc = None
+            debug_logger.log_debug(
+                "scheduling_lag", "canary", f"not started: {type(error).__name__}"
+            )
+
+    async def _count(self, proc: asyncio.subprocess.Process) -> None:
+        stream = proc.stdout
+        if stream is None:
+            return
+        try:
+            async for line in stream:
+                if self._ready_at is None:
+                    self._ready_at = _now()
+                elif line.strip() == b".":
+                    self._wakes += 1
+        except (OSError, ValueError) as error:
+            debug_logger.log_debug(
+                "scheduling_lag", "canary", f"pipe ended: {type(error).__name__}"
+            )
+
+    async def factor(self) -> float | None:
+        """How starved the canary was since it announced itself, as ``expected
+        wakes / kept wakes`` clamped to ``[1.0, MAX_STRETCH]``, or ``None`` when it
+        cannot say."""
+        await asyncio.sleep(CANARY_DRAIN_SECONDS)
+        if self._proc is None or self._ready_at is None:
+            return None
+        if self._proc.returncode is not None:
+            return None  # it exited: it did not get to run, which is no evidence
+        window = _now() - self._ready_at
+        if window < CANARY_MIN_WINDOW_SECONDS:
+            return None
+        kept = max(self._wakes, 1) * CANARY_NAP_SECONDS
+        return min(max(window / kept, 1.0), MAX_STRETCH)
+
+    async def stop(self) -> None:
+        proc, reader = self._proc, self._reader
+        self._proc = self._reader = None
+        if reader is not None:
+            reader.cancel()
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), CANARY_REAP_SECONDS)
+            except TimeoutError:
+                debug_logger.log_warning(
+                    "scheduling_lag", "canary", f"pid {proc.pid} not reaped yet"
+                )
+
+
+@contextlib.asynccontextmanager
+async def idle_canary() -> AsyncIterator[IdleCanary]:
+    """An :class:`IdleCanary` that is started on entry and killed on exit."""
+    canary = IdleCanary()
+    await canary.start()
+    try:
+        yield canary
+    finally:
+        await canary.stop()
+
+
+class ExcuseBudget:
+    """How long "starved, not dead" may be believed about one subject in a row.
+
+    Starvation excuses a failed probe; it must not do so forever, or a real freeze
+    that merely coincides with a busy host is never acted on. A run of excuses is
+    honoured for :data:`backend_eviction.STARVED_CEILING_SECONDS` (F-967's "slow, not
+    wedged" ceiling, the one such number), measured from the run's first excuse by
+    the *clock* it is given; :meth:`reset` ends the run (a healthy round, a heal)."""
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._since: dict[str, float] = {}
+
+    def grant(self, key: str) -> float | None:
+        """Seconds the run for *key* has lasted, or ``None`` once it has lasted
+        longer than the ceiling (a round AT the ceiling is still excused)."""
+        spent = self._clock() - self._since.setdefault(key, self._clock())
+        return spent if spent <= backend_eviction.STARVED_CEILING_SECONDS else None
+
+    def reset(self, key: str) -> None:
+        self._since.pop(key, None)
+
+    def tracked(self) -> set[str]:
+        return set(self._since)
 
 
 class FairWindow:

@@ -427,6 +427,19 @@ class TestWhenItDoesNot:
         assert stage.launches == []
         assert any("the backend is stopping" in w for w in log.at("warning"))
 
+    async def test_a_relaunch_under_the_same_id_ends_the_starvation_run(self, stage):
+        """F-1007: the excuses a dead browser earned are not the new one's."""
+        _die(stage.manager, FLEET_ID)
+        health = stage.health()
+        entry = stage.manager._instances[FLEET_ID]
+        options, instance = entry["options"], entry["instance"]
+        assert health._excuses.grant(FLEET_ID) == 0
+        health.stopping = True
+
+        await health.relaunch_exited(FLEET_ID, options, instance, {})
+
+        assert FLEET_ID not in health._excuses.tracked()
+
     async def test_stop_marks_the_running_loop_as_stopping(self, stage):
         browser_health.start(
             stage.manager, close=stage.close, arm_interception=stage.arm
