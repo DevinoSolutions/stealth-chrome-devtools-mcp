@@ -325,9 +325,8 @@ been tested — treat it as a description of intent, not as a property.
 
 **Where that evidence runs.** Every test behind a `TESTED` row is
 hermetic and belongs to the unit lane, which the gate runs on all three
-qualified cells across CPython 3.11-3.13 (and Linux on 3.14). None of
-them launches a browser. That cuts both ways, and both directions
-matter: the §6
+OSes across CPython 3.11-3.13 and Linux on 3.14. None of them launches
+a browser. That cuts both ways, and both directions matter: the §6
 evidence does not depend on the real-Chrome lane, so neither of that
 lane's two measured flakes — the Linux cold-spawn race, and F-779's
 macOS ARM64 teardown failure seen in 2 of 6 runs independently of the

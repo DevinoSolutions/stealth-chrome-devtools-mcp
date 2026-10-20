@@ -113,7 +113,7 @@ jobs:
           path: release-evidence
           if-no-files-found: error
 
-  # ── Unit + coverage floor on all three OSes, py3.11–3.13, plus one Linux py3.14 cell ───────────────────
+  # ── Unit tests on all three OSes, py3.11–3.13, plus one Linux py3.14 cell ───────────────────
   unit-tests:
     name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
