@@ -278,7 +278,14 @@ class TestLoadBearingSymbols:
             ],
             "embedded.cdp_endpoint": [
                 "endpoint",
-                "DEVTOOLS_PORT_FILE",
+            ],
+            "embedded.devtools_port": [
+                "PORT_FILE",
+                "read",
+                "own_endpoint",
+                "clear_stale",
+                "verify",
+                "with_port_zero",
             ],
             "embedded.reap_guard": [
                 "UNDECIDED",

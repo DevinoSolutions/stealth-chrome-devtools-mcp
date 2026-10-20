@@ -40,23 +40,21 @@ tolerates a hand edit, a command line is whatever the process says it is, and
 the file survives its writer.
 
 A leaf: ``browser_pid_registry`` (what a usable port is) + ``browser_cmdline``
-(what a live process's argv says) + stdlib. It imports neither consumer, decides
-nothing about adoption, and never raises — an endpoint that cannot be recovered
-is ``None``, and what THAT means is the caller's judgement (for
+(what a live process's argv says) + ``devtools_port`` (the file) + stdlib. It
+imports neither consumer, decides nothing about adoption, and never raises — an
+endpoint that cannot be recovered is ``None``, and what THAT means is the
+caller's judgement (for
 ``browser_reattach._adoptable_entry`` since F-916 it means UNDECIDED: spare the
 browser, do not adopt it).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from stealth_chrome_devtools_mcp.embedded import browser_cmdline, browser_pid_registry
-
-# Chrome writes the port it actually bound here, first line, inside the profile
-# it was launched on. The second line is the browser websocket path, which we do
-# not use — nodriver builds its own from host and port.
-DEVTOOLS_PORT_FILE = "DevToolsActivePort"
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    browser_pid_registry,
+    devtools_port,
+)
 
 
 def endpoint(entry: browser_pid_registry.Entry) -> int | None:
@@ -79,15 +77,6 @@ def endpoint(entry: browser_pid_registry.Entry) -> int | None:
             return from_cmdline
 
     if expect is not None:
-        return _port_from_profile(Path(expect))
+        found = devtools_port.read(expect)
+        return found.port if found else None
     return None
-
-
-def _port_from_profile(profile_dir: Path) -> int | None:
-    """Chrome's own ``DevToolsActivePort``, first line, or None."""
-    try:
-        first = (profile_dir / DEVTOOLS_PORT_FILE).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    lines = first.splitlines()
-    return browser_pid_registry.valid_port(lines[0] if lines else "")
