@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### The backend starts on Python 3.14 (F-1005)
+
+On Python 3.14 the backend died while registering its tools: `KeyError: 'instance_id'` out of fastmcp's schema build, so
+`--list-sections`, `serve` and every `spawn_browser` failed. PEP 649 made `functools.wraps` copy `__annotate__` instead of
+`__annotations__`, and `tab_binding.scoped` (F-962) assigned `__annotations__` to add `tab_id`, which leaves `__annotate__`
+None; the `with_correlation_id` layer every tool gets then came out with no annotations. `scoped` now also sets a real
+`__annotate__` on 3.14. A newer pydantic, fastmcp or mcp does not change this (pydantic 2.14.1, fastmcp 4.1.1 and mcp 2.3.0
+fail the same way). Python 3.11-3.13 are unchanged, and 3.14 is still not in the release gate matrix.
+
 ### A backend started by Task Scheduler no longer starves every Chrome it launches (F-1004)
 
 A backend started on the scheduler rung (F-867) inherits the task's I/O priority Low and memory priority 2, and every
