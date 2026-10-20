@@ -152,9 +152,11 @@ class TestOptOut:
 
 
 class ScriptedChrome:
-    """A browser-level CDP endpoint that attaches one page, which has an iframe."""
+    """A browser-level CDP endpoint that attaches one page, which has an iframe, and
+    with ``workers`` a service worker and a shared worker beside it."""
 
-    def __init__(self):
+    def __init__(self, workers=False):
+        self.workers = workers
         self.log: list[tuple[str | None, str, dict]] = []
         self.paused_reply: list[str] = []
         self._server = None
@@ -190,17 +192,22 @@ class ScriptedChrome:
             await ws.send(json.dumps(reply))
             if message["method"] == "Target.setAutoAttach" and session is None:
                 await self._attach(ws, "page-1", "page")
+                if self.workers:
+                    await self._attach(ws, "sw-1", "service_worker")
+                    await self._attach(ws, "shw-1", "shared_worker")
             if message["method"] == "Target.setAutoAttach" and session == "page-1":
                 await self._attach(ws, "frame-1", "iframe")
             if message["method"] == "Network.setBlockedURLs" and session == "frame-1":
-                # What Network.enable makes Chrome send: the guard must drop these.
+                # What Network.enable makes Chrome send (compact, method first, as
+                # Chrome writes it): the guard must drop these.
                 await ws.send(
                     json.dumps(
                         {
                             "method": "Network.requestWillBeSent",
-                            "sessionId": "frame-1",
                             "params": {"requestId": "req-9"},
-                        }
+                            "sessionId": "frame-1",
+                        },
+                        separators=(",", ":"),
                     )
                 )
 
@@ -260,6 +267,26 @@ class TestTheGuardConversation:
             "params": wire["Network.setBlockedURLs"],
         } == _command(cdp_network.set_blocked_ur_ls(urls=["*://x/RotateCookies*"]))
 
+    async def test_service_and_shared_workers_are_blocked_before_they_run(self):
+        """Chrome attaches a service worker or a shared worker like a page, paused
+        before it runs; its requests are not the page's, so it needs its own block
+        and must be resumed only after it (the ordering is the whole guarantee)."""
+        async with ScriptedChrome(workers=True) as chrome:
+            guard = google_rotation_guard.RotationGuard()
+            await guard.start(chrome.url)
+            for worker in ("sw-1", "shw-1"):
+                await _settle(chrome, "Runtime.runIfWaitingForDebugger", worker)
+            await guard.close()
+        for worker in ("sw-1", "shw-1"):
+            methods = [m for s, m, _ in chrome.log if s == worker]
+            assert methods[:2] == ["Network.enable", "Network.setBlockedURLs"], (
+                worker,
+                methods,
+            )
+            assert methods.index("Runtime.runIfWaitingForDebugger") > methods.index(
+                "Network.setBlockedURLs"
+            ), (worker, methods)
+
     async def test_the_interception_domain_is_never_used(self):
         """F-999: Fetch interception on every page of a clone is what aborted the
         page's CORS POST (macOS 25/216 armed runs, 0/216 without the guard). Not
@@ -289,6 +316,54 @@ class TestTheGuardConversation:
             "Network.setBlockedURLs",
             "Runtime.runIfWaitingForDebugger",
         }
+
+    async def test_a_network_event_frame_is_never_parsed(self, monkeypatch):
+        """Network.enable streams every request event of every page to the guard,
+        which reads none: a frame Chrome starts with ``{"method":"Network.`` is
+        dropped before ``json.loads`` (F-1007's CPU class), so not even a malformed
+        one is looked at, while the frame behind it is still handled."""
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            google_rotation_guard.debug_logger,
+            "log_warning",
+            lambda component, method, message: warnings.append(message),
+        )
+        handled: list[object] = []
+        async with ScriptedChrome() as chrome:
+            guard = google_rotation_guard.RotationGuard()
+            real = guard._handle
+
+            async def recording(message):
+                handled.append(message.get("method"))
+                await real(message)
+
+            monkeypatch.setattr(guard, "_handle", recording)
+            await guard.start(chrome.url)
+            await chrome.send_raw('{"method":"Network.requestWillBeSent","params":')
+            await chrome.send_raw(
+                json.dumps(
+                    {"method": "Network.loadingFinished", "params": {}},
+                    separators=(",", ":"),
+                )
+            )
+            await chrome.send_raw(
+                json.dumps(
+                    {
+                        "method": "Target.attachedToTarget",
+                        "params": {
+                            "sessionId": "late",
+                            "targetInfo": {"type": "page"},
+                            "waitingForDebugger": True,
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+            )
+            await _settle(chrome, "Runtime.runIfWaitingForDebugger", "late")
+            await guard.close()
+        assert [m for m in handled if str(m).startswith("Network.")] == []
+        assert "Target.attachedToTarget" in handled
+        assert warnings == [], "a skipped frame must not even be a malformed one"
 
     async def test_the_default_patterns_are_the_ones_installed(self):
         async with ScriptedChrome() as chrome:

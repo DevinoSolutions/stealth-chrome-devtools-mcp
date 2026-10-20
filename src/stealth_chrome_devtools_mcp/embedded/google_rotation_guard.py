@@ -63,11 +63,11 @@ it is the cause. A narrower ``Fetch.enable`` (rotation patterns, ``resourceType`
 macOS runs, so enabling the domain at all is the trigger. ``Network.setBlockedURLs``
 blocks the same URLs without interception (probe 108/108 blocked, 0/366 bad runs).
 ``Network.enable`` is what makes the agent honour it, and it also streams every
-network event of every page of the clone to this connection, where
-:meth:`RotationGuard._handle` drops them (the cost of the fix, measured nowhere
-yet). Its three size limits are 0 because this connection only ever needs the
-blocking, never a response or post body, and the default would buffer every body
-of every page of the clone.
+network event of every page of the clone to this connection (the cost of the fix,
+measured nowhere yet); :meth:`RotationGuard._read` drops those frames by their
+prefix, before they are parsed. Its three size limits are 0 because this connection
+only ever needs the blocking, never a response or post body, and the default would
+buffer every body of every page of the clone.
 Auto-clones are never re-adopted after a backend restart (the adoption rule only
 takes persistent profiles, ``auto_clone`` false), so a re-attached browser is a
 master or a named session, which is meant to rotate: no re-arm site exists. If this
@@ -127,6 +127,12 @@ _NETWORK_ENABLE: dict[str, object] = {
     "maxResourceBufferSize": 0,
     "maxPostDataSize": 0,
 }
+
+#: What every ``Network.*`` event frame of Chrome starts with. ``Network.enable``
+#: streams every request/response event of every page of the clone to this
+#: connection, and the guard reads none of them, so :meth:`RotationGuard._read`
+#: skips them before ``json.loads`` (the CPU class F-1007 measured on a loaded host).
+_NETWORK_EVENT_PREFIX = '{"method":"Network.'
 
 #: Guards whose connection is open. The module holds them so nothing but the
 #: browser's death ends one: the reader task removes its guard when the socket
@@ -225,6 +231,8 @@ class RotationGuard:
     async def _read(self, ws: ClientConnection) -> None:
         try:
             async for raw in ws:
+                if isinstance(raw, str) and raw.startswith(_NETWORK_EVENT_PREFIX):
+                    continue
                 try:
                     await self._handle(json.loads(raw))
                 except (ValueError, KeyError, TypeError) as err:

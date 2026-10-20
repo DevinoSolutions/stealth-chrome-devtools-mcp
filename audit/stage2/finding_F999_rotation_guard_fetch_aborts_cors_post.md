@@ -65,8 +65,8 @@ GUARD's 108/108. BLOCKNET therefore both blocks the rotation URL and has 0/366 b
 the re-auto-attach, then `Runtime.runIfWaitingForDebugger` (in `finally`, as before, so a refused command never leaves a
 target frozen). The URL patterns are the same `*://host/path*` set as before, so both `http` and `https` are covered, the
 `RotateCookies` / `rotateCookies` / `RotateBoundCookies` / `rotateBoundCookies` spellings and both hosts. The
-`Fetch.requestPaused` handler is deleted; the guard no longer reacts to any event (it drops the `Network.*` stream
-that `Network.enable` makes Chrome send).
+`Fetch.requestPaused` handler is deleted; the guard no longer reacts to any event (`_read` drops the `Network.*` stream
+that `Network.enable` makes Chrome send, before parsing it).
 
 `Network.enable` is sent with `maxTotalBufferSize`, `maxResourceBufferSize` and `maxPostDataSize` set to 0 so the
 agent buffers no response bodies for a connection that never asks for one. **That setting was not in the measured BLOCKNET
@@ -103,8 +103,9 @@ domain enabled on the page's session, with any pattern, is enough. A narrower `F
 fix, and the hybrid is dropped. The guard has a hermetic pin that `Fetch.*` is never sent, whose docstring now says
 so.
 
-The shipped guard (BLOCKNET) has now run 0 of 582 bad armed runs (macOS 216 + 216, Linux 150), against 49 of 582 for
-the arms that enable `Fetch` (GUARD 29/366 + GUARD_OLD 20/216).
+Evidence for the shipped form, stated per variant and not pooled: the shipped guard (zero-buffer `Network.enable` plus
+`Network.setBlockedURLs`) ran 0/216 bad armed runs in round 10 (macOS); the bare-`Network.enable` variant (BLOCKNET,
+rounds 8-9, macOS + Linux) ran 0/366. The arms that enable `Fetch` ran 49 of 582 (GUARD 29/366 + GUARD_OLD 20/216).
 
 ### The navigation gap: an accepted, documented residual
 
@@ -117,8 +118,10 @@ silently.
 Why it is accepted, and how far that reasoning goes. The F-939 premise (module docstring, the 2026-10-05 incident) is
 that the rotation is the `POST accounts.google.com/RotateCookies` which the `RotateCookiesPage` iframe's script makes;
 that POST is a request the page makes, and this change blocks it (a fetch, an XHR, a redirect hop and a worker's
-request, all CI-measured on three OSes). **What is not established:** that the `RotateCookiesPage` document response
-itself carries no `Set-Cookie` that rotates the pair, and that Google has no other document-level path. We have no
+request, all CI-measured on three OSes). **Not established: whether a document load of RotateCookiesPage rotates the pair by itself** (that its response
+carries no `Set-Cookie` that rotates it), and that Google has no other document-level path. The residual is every
+document load of a pattern URL, not only an iframe's: popups, new tabs, top-level navigations and form-POST navigations
+to one are not failed either (only the iframe was measured; the rest follow from the same mechanism). We have no
 throwaway Google account, so neither was measured, and no Google request was made. If the document response alone can
 rotate, the guard has a hole it did not have before this change. The trade made is a measured, recurring release-gate
 failure and a page's own aborted CORS POST (49 of 582 armed runs) against an unmeasured residual on a path the
@@ -150,9 +153,9 @@ hermetic tests that name the new shape use it only as documentation of the wire.
 
 ## 6. Tests and the mutation check
 
-`tests/test_google_rotation_guard.py` (60 tests, hermetic; the expected wire messages are built from nodriver's own
+`tests/test_google_rotation_guard.py` (62 tests, hermetic; the expected wire messages are built from nodriver's own
 `cdp.network` constructors, no bare `MagicMock`): one pin per URL form on the wire (13 positive, 8 negative), `Fetch.*`
-is never sent, the order block, auto-attach, resume, a network event provokes no command, and the refused-command
+is never sent, the order block, auto-attach, resume, a network event provokes no command and a `{"method":"Network.` frame is never parsed, a service worker and a shared worker are each blocked before they are resumed, and the refused-command
 accounting for both commands (still attached warns, detached first does not, an answered command does not, a refused
 auto-attach is not a block refusal).
 
@@ -190,8 +193,9 @@ conversation, and M8 then went RED.
 1. **A document navigation to a pattern URL is no longer failed** (measured on CI) and a Document-only `Fetch.enable`
    does not fix it (round 10). If the `RotateCookiesPage` document response can rotate the pair by itself, the guard
    would not stop it. Resolving that needs a throwaway Google account, which does not exist. See the residual section.
-2. `Network.enable` makes Chrome stream every network event of every attached session to the guard's connection, where
-   they are parsed and dropped. The cost is unmeasured.
+2. `Network.enable` makes Chrome stream every network event of every attached session to the guard's connection. The
+   guard drops those frames by their `{"method":"Network.` prefix before `json.loads` (pinned), so the parse cost (the
+   F-1007 CPU class) is gone; the cost of Chrome producing and delivering them is unmeasured.
 3. The zero buffer limits (section 4) deviate from the measured BLOCKNET arm.
 4. nodriver's `set_blocked_ur_ls(urls=…)` uses the `urls` field, which newer protocol versions deprecate in favour of
    `urlPatterns`; a Chrome that stopped honouring `urls` would be a refused command (a warning), not a silent one.

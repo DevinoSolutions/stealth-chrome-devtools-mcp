@@ -16,16 +16,22 @@ Google account and no Google request:
   A frame NAVIGATION to ``/RotateCookiesPage`` is pinned as SERVED (measured on CI on
   all three OSes): ``Network.setBlockedURLs`` fails the requests a page makes, not a
   document navigation, which the replaced ``Fetch`` interception also failed;
+* the guard's ``Network.enable`` does not take network capture from the page's
+  own tool surface: on the guarded clone ``list_network_requests`` still lists a
+  page's request and ``get_response_content`` still returns its body;
 * a cookie in a browser this backend holds no object for crosses to a spawned
   browser over that browser's debug port, and the server sees it.
 """
 
+import asyncio
 import contextlib
+import time
 import uuid
 
 import pytest
 
 from e2e_helpers import (
+    capture_miss_report,
     eval_js,
     get_fn,
     integration_pytestmark,
@@ -95,6 +101,26 @@ new Promise(resolve => {
   setTimeout(() => resolve('timeout'), 10000);
 })
 """
+
+
+async def _captured_body(iid: str, url_part: str, timeout: float = 15.0):
+    """(request, body) once the capture lists a request whose URL contains *url_part*
+    and its response body is retrievable, or (request-or-None, None) at the bound."""
+    list_requests = get_fn("list_network_requests")
+    get_body = get_fn("get_response_content")
+    deadline = time.monotonic() + timeout
+    request = None
+    while time.monotonic() < deadline:
+        listed = await list_requests(instance_id=iid)
+        request = next(
+            (r for r in listed or [] if url_part in (r.get("url") or "")), request
+        )
+        if request is not None:
+            body = await get_body(instance_id=iid, request_id=request["request_id"])
+            if body is not None:
+                return request, body
+        await asyncio.sleep(0.25)
+    return request, None
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +207,21 @@ async def test_a_clone_is_blocked_everywhere_and_the_master_is_not(
         # Fetch interception this replaced did. The rotation itself is the POST
         # the page makes, which the assertions above prove is blocked.
         assert await eval_js(iid, _FRAME_NAVIGATION_JS) == "served", "a navigation"
+
+        # The guard enables the Network domain on every target; the page's own
+        # capture (list_network_requests, get_response_content) must keep working.
+        assert await get_fn("set_network_capture_filters")(
+            instance_id=iid, capture_bodies=True
+        )
+        await eval_js(
+            iid,
+            "fetch('/api/echo?f999=capture',{method:'POST',body:'f999'}).then(r => r.text())",
+        )
+        request, body = await _captured_body(iid, "f999=capture")
+        assert request is not None, (
+            f"a guarded clone lost its network capture {await capture_miss_report(iid)}"
+        )
+        assert body and "f999" in body, "the response body is not retrievable"
 
         await new_tab(instance_id=iid, url=page)
         tabs = await get_fn("list_tabs")(instance_id=iid)
