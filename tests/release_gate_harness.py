@@ -879,13 +879,14 @@ async def _eval(client: Client, iid: str, expression: str) -> Any:
     return result.get("result")
 
 
-async def _settle_dom(client: Client, iid: str) -> None:
+async def _settle_dom(client: Client, iid: str, expect_app: bool = False) -> None:
     """Bounded-poll ``query_elements('body')`` until the document is queryable.
 
     After navigation nodriver's cached document node is transiently stale, so the
     first DOM-node-path call can fail; ``query_elements`` is the safe probe (it
     returns ``[]`` rather than raising). Mirrors ``navigate_and_settle`` in
-    ``e2e_helpers`` but over the real transport.
+    ``e2e_helpers`` but over the real transport. ``expect_app`` is for a caller that
+    navigated to a page loading ``app.js`` (``interact.html``).
     """
     deadline = time.monotonic() + SETTLE_TIMEOUT
     while True:
@@ -914,7 +915,7 @@ async def _settle_dom(client: Client, iid: str) -> None:
 
     # A queryable body is not a wired page: app.js (end of <body>) may not have
     # attached its listeners yet, and an interaction before that is silently lost.
-    await fixture_routes.wait_fixture_ready(probe)
+    await fixture_routes.wait_fixture_ready(probe, expect_app)
 
 
 def _decode_screenshot(shot: Any) -> bytes:
@@ -1234,7 +1235,7 @@ async def _cookie_journey(
         url = f"{base_url}/interact.html"
         await _call(client, "navigate", {"instance_id": iid, "url": url}, NAV_TIMEOUT)
         journey["navigated_url"] = url
-        await _settle_dom(client, iid)
+        await _settle_dom(client, iid, expect_app=True)
 
         await _cookie_round_trip(client, iid, url, journey)
     finally:
@@ -1264,7 +1265,7 @@ async def _canonical_journey(
         url = f"{base_url}/interact.html"
         await _call(client, "navigate", {"instance_id": iid, "url": url}, NAV_TIMEOUT)
         journey["navigated_url"] = url
-        await _settle_dom(client, iid)
+        await _settle_dom(client, iid, expect_app=True)
 
         tabs = await _call(client, "list_tabs", {"instance_id": iid}, CALL_TIMEOUT)
         assert isinstance(tabs, list) and tabs and all("tab_id" in t for t in tabs), (

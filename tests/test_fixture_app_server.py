@@ -165,3 +165,53 @@ def test_wait_fixture_ready_names_the_state_it_last_saw(monkeypatch):
     else:
         raise AssertionError("an unwired page must not count as settled")
     assert len(seen) > 2
+
+
+def test_expect_app_rejects_a_document_without_the_script():
+    from fixture_routes import fixture_state_ready
+
+    blank = {"state": "complete", "script": False, "fetched": False, "ready": False}
+    assert fixture_state_ready(blank)
+    assert not fixture_state_ready(blank, expect_app=True)
+    assert fixture_state_ready({**blank, "script": True, "ready": True}, True)
+
+
+def test_wait_fixture_ready_warns_when_navigate_returned_early():
+    import asyncio
+
+    import pytest
+
+    import fixture_routes
+
+    states = iter(
+        [
+            '{"href":"http://x/interact.html","state":"interactive",'
+            '"script":true,"fetched":false,"ready":false}',
+            '{"href":"http://x/interact.html","state":"complete",'
+            '"script":true,"fetched":true,"ready":true}',
+        ]
+    )
+
+    async def probe(expression):
+        return next(states)
+
+    with pytest.warns(UserWarning, match="navigate had already returned") as record:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe, expect_app=True))
+    assert "http://x/interact.html" in str(record[0].message)
+
+
+def test_wait_fixture_ready_is_silent_when_first_probe_settled():
+    import asyncio
+    import warnings
+
+    import fixture_routes
+
+    async def probe(expression):
+        return (
+            '{"href":"http://x/","state":"complete","script":true,'
+            '"fetched":true,"ready":true}'
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        asyncio.run(fixture_routes.wait_fixture_ready(probe))
