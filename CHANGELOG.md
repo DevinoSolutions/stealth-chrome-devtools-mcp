@@ -27,7 +27,8 @@ spinners), and two such rounds closed and relaunched a browser a person was sign
 one more question before it counts, and is excused only when ALL of these hold: it was a `TimeoutError` (a browser that
 answered with an error is unhealthy whatever the host is doing), the browser PROCESS, which runs at normal priority,
 still answers a fresh connection's `Browser.getVersion`, and an IDLE-priority canary child, run for the whole probe
-window, was starved (`scheduling_lag.idle_canary`: `IdleCanary.factor()` at or above `REPORT_FACTOR`, no machine-wide CPU
+window (`start` waits up to `CANARY_READY_SECONDS`, 5 s, for it to announce itself, so the window covers the full probe;
+no announcement, no reading; on POSIX it runs at Chromium's own background nice, 5), was starved (`scheduling_lag.idle_canary`: `IdleCanary.factor()` at or above `REPORT_FACTOR`, no machine-wide CPU
 poll). The canary is the witness because the backend's own `asyncio` sleeps cannot see this: measured on 32 CPUs with 64
 normal-priority spinners, a normal-priority sleep read 1.05x late while an IDLE-class counter ran at 4.3% of its
 unloaded rate, so a self-measured loop lag stays under `REPORT_FACTOR` exactly when the renderer is starved. An excused

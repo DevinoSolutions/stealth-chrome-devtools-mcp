@@ -79,10 +79,39 @@ classifier (`shared_session_name`, `require_shared_session_named`, `is_shared_se
 re-pointed: `tool_runtime` exports `shared_session`, `close_instance`'s guard calls
 `rt.shared_session.require_shared_session_named`.
 
-**Known limit.** A canary that cannot start inside the window (a measured 2 s window with 32 spinners spawned
-alongside it never saw the child announce itself) gives no reading, and no reading keeps the old verdict, the heal. The
-canary starts BEFORE the 15 s probe, and the heal still needs two failed rounds, so this errs toward the pre-F-1007
-behaviour, never toward skipping a heal.
+**The canary is awaited before the probe (rev246 round 3).** `IdleCanary.start()` used to return as soon as the child was
+spawned, and `ready` was stamped when its line arrived, so under saturation (the child starts at NORMAL priority, behind a
+launcher and a fresh interpreter) the window left for the reading could fall under `CANARY_MIN_WINDOW_SECONDS` and give no
+reading in exactly the case the feature exists for. `start()` now waits for `ready`, bounded by `CANARY_READY_SECONDS`
+(5 s); a child that has not announced itself in that time, or whose pipe ended without a word, is stopped and gives no
+reading (the old verdict, the heal). The clock therefore starts before the probe does, and the window always covers the full
+probe. The bound is 5 s because the measured ready latency is 1.03 s with 32 spinners on 32 CPUs (0.16 s unloaded), so a
+5x margin; a longer bound would delay every probe of a saturated host by its own cost, a shorter one would drop the reading
+under exactly the load it is for. A healthy host pays about 0.16 s per probe, one probe per 120 s.
+
+**Measured (2026-10-20, real `IdleCanary`, 32 CPUs, 10.7 GB free RAM, 32 normal-priority Python spinners, one run):**
+
+| | unloaded | 32 spinners (1 per CPU) |
+|---|---|---|
+| ready latency (`start()` returns) | 0.16 s | 1.03 s |
+| factor over a 3.3 s window | 1.02 (33 wakes) | 4.0, the clamp (0 wakes in 3.41 s) |
+
+So the real canary, over a window of 3 s or more, reads fully starved exactly when the host starves an IDLE-class process,
+and reads 1.0 on an idle host. This replaces the earlier "not measured" gap. **Honest accounting of the load budget:** the
+spinners took 6.2 s to spawn on this thrashing host and the whole loaded phase lasted 12.6 s (the 10 s budget was exceeded
+by 2.6 s; each spinner had a 12 s lifetime backstop). All 32 spinners were killed by exact PID and confirmed gone; the
+canary child under load took more than the 2 s `CANARY_REAP_SECONDS` to be reaped (logged, harmless: its own 60 s lifetime
+bounds it) and was gone afterwards.
+
+**POSIX priority.** The canary ran at `os.nice(19)`, lower than what Chromium gives a backgrounded renderer, so it could
+starve harder than the renderer and over-excuse. Verified from Chromium source: `base/process/process_linux.cc` sets
+`kBackgroundPriority = 5` on desktop Linux (19 only under `BUILDFLAG(IS_CHROMEOS)`) and applies it with an absolute
+`setpriority(PRIO_PROCESS, pid, value)`; `base/process/process_win.cc` maps `Priority::kBestEffort` to
+`IDLE_PRIORITY_CLASS`, which is what the Windows canary uses. The POSIX canary now calls
+`os.setpriority(os.PRIO_PROCESS, 0, CANARY_NICE)` with `CANARY_NICE = 5` (absolute, because `os.nice` adds to whatever
+the backend already has). macOS backgrounds by task policy, which a nice value only approximates; the POSIX nice path is
+pinned by a source-text test everywhere and by a real-child test that skips on Windows. Anything the canary still
+over-excuses is bounded by the 300 s `ExcuseBudget`.
 
 ## 4. Not done here
 

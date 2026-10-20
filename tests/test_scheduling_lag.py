@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
+import sys
 import time
 
 import pytest
@@ -177,6 +179,7 @@ class FakeCanaryProcess:
         self.stdout = asyncio.StreamReader()
         self.returncode: int | None = None
         self.kills = 0
+        self.announce = True  # the child's first line, sent at spawn
 
     def kill(self) -> None:
         self.kills += 1
@@ -198,18 +201,18 @@ class TestIdleCanary:
         proc = FakeCanaryProcess()  # built inside the running loop its reader uses
 
         async def spawn():
+            if proc.announce:
+                proc.stdout.feed_data(b"ready\n")
             return proc
 
         monkeypatch.setattr(scheduling_lag, "_spawn_canary", spawn)
         return sched, proc
 
-    async def window(self, sched, proc, seconds, wakes, *, ready=True):
-        """Start a canary, let it announce itself, spend *seconds*, deliver *wakes*."""
+    async def window(self, sched, proc, seconds, wakes):
+        """Start a canary (which waits for the child to announce itself), spend
+        *seconds*, deliver *wakes*."""
         c = scheduling_lag.IdleCanary()
         await c.start()
-        if ready:
-            proc.stdout.feed_data(b"ready\n")
-            await asyncio.sleep(0.01)
         sched.now += seconds
         proc.stdout.feed_data(b".\n" * wakes)
         for _ in range(wakes + 10):  # let the reader task drain the burst
@@ -280,11 +283,70 @@ class TestIdleCanary:
         at = await self.window(sched, proc, floor, 0)
         assert await at.factor() == scheduling_lag.MAX_STRETCH
 
-    async def test_a_canary_that_never_announced_itself_says_nothing(self, canary):
-        sched, proc = canary
-        c = await self.window(sched, proc, 15.0, 0, ready=False)
+    async def test_start_returns_only_once_the_child_has_announced_itself(
+        self, scheduler, monkeypatch
+    ):
+        # The window a probe is read over must cover the WHOLE probe, so the clock
+        # starts when the child speaks and ``start`` does not return before that.
+        sched = scheduler(1.0)
+        proc = FakeCanaryProcess()
 
+        async def spawn():
+            asyncio.get_running_loop().call_later(
+                0.05, proc.stdout.feed_data, b"ready\n"
+            )
+            return proc
+
+        monkeypatch.setattr(scheduling_lag, "_spawn_canary", spawn)
+        c = scheduling_lag.IdleCanary()
+
+        await c.start()
+
+        assert c._ready_at == sched.now and proc.kills == 0
+
+    async def test_a_canary_that_never_announced_itself_is_stopped_and_says_nothing(
+        self, canary, monkeypatch
+    ):
+        sched, proc = canary
+        proc.announce = False
+        monkeypatch.setattr(scheduling_lag, "CANARY_READY_SECONDS", 0.05)
+        c = scheduling_lag.IdleCanary()
+
+        await c.start()
+        sched.now += 15.0
+
+        assert proc.kills == 1
         assert await c.factor() is None  # not "starved": it may never have started
+
+    async def test_a_pipe_that_ends_without_a_word_does_not_wait_out_the_bound(
+        self, canary
+    ):
+        _sched, proc = canary
+        proc.announce = False
+        proc.stdout.feed_eof()
+        c = scheduling_lag.IdleCanary()
+
+        started = time.monotonic()
+        await c.start()
+
+        assert time.monotonic() - started < scheduling_lag.CANARY_READY_SECONDS / 2
+        assert proc.kills == 1 and await c.factor() is None
+
+    async def test_a_cancel_while_waiting_for_the_child_still_reaps_it(self, canary):
+        _sched, proc = canary
+        proc.announce = False  # it never speaks, so start() is parked on the wait
+
+        async def use() -> None:
+            async with scheduling_lag.idle_canary():
+                raise AssertionError("never entered")
+
+        task = asyncio.ensure_future(use())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert proc.kills == 1
 
     async def test_a_canary_that_exited_says_nothing(self, canary):
         sched, proc = canary
@@ -343,6 +405,29 @@ class TestIdleCanary:
         assert factor is not None and 1.0 <= factor <= scheduling_lag.MAX_STRETCH
         assert c._wakes > 0
         assert proc is not None and proc.returncode is not None
+
+    def test_the_canary_is_as_low_as_chromium_makes_a_background_renderer(self):
+        # kBackgroundPriority = 5 (desktop Linux, base/process/process_linux.cc);
+        # IDLE_PRIORITY_CLASS on Windows (process_win.cc), 0x40 below. An absolute
+        # setpriority, never os.nice(): that adds to whatever the backend already has.
+        assert scheduling_lag.CANARY_NICE == 5
+        assert f"os.setpriority(os.PRIO_PROCESS, 0, {scheduling_lag.CANARY_NICE})" in (
+            scheduling_lag._CANARY_SOURCE
+        )
+        assert "SetPriorityClass(kernel.GetCurrentProcess(), 0x40)" in (
+            scheduling_lag._CANARY_SOURCE
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX nice values")
+    async def test_the_real_child_runs_at_the_chromium_nice_value(self):
+        async with scheduling_lag.idle_canary() as c:
+            assert c._proc is not None
+            deadline = time.monotonic() + 10
+            nice = os.getpriority(os.PRIO_PROCESS, c._proc.pid)
+            while nice != scheduling_lag.CANARY_NICE and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+                nice = os.getpriority(os.PRIO_PROCESS, c._proc.pid)
+        assert nice == scheduling_lag.CANARY_NICE
 
 
 class TestExcuseBudget:

@@ -93,9 +93,21 @@ REPORT_FACTOR = 2.0
 # probe window holds ~100 of them, long enough that a fair scheduler keeps timer
 # granularity (about 15 ms on Windows) well under :data:`REPORT_FACTOR`.
 CANARY_NAP_SECONDS = 0.1
-# A window shorter than this says nothing (a connect timeout is 5 s, the probe's is
-# 15 s): the canary's own start-up would be most of it.
+# A window shorter than this says nothing: a probe that timed out inside it was not
+# waiting on a scheduler (the probe's own timeout is 15 s).
 CANARY_MIN_WINDOW_SECONDS = 3.0
+# How long ``start`` waits for the child to announce itself, so the window a probe
+# is read over always covers the WHOLE probe (the child starts at NORMAL priority,
+# but behind a launcher and a fresh interpreter, which a saturated host stretches).
+# A canary that has not announced itself in this time gives no reading, and the
+# probe is no later than it is without one by more than this.
+CANARY_READY_SECONDS = 5.0
+# The POSIX nice value Chromium gives a backgrounded renderer on desktop Linux
+# (``kBackgroundPriority = 5`` in base/process/process_linux.cc; 19 is ChromeOS
+# only). Windows is IDLE_PRIORITY_CLASS, Chromium's ``Priority::kBestEffort``
+# (base/process/process_win.cc). macOS backgrounds by task policy, which a nice
+# value only approximates.
+CANARY_NICE = 5
 # The child outlives its parent by at most this, whatever happens to the parent.
 CANARY_LIFETIME_SECONDS = 60.0
 # What stop() grants the child to be reaped, and what factor() grants the reader to
@@ -118,7 +130,7 @@ if sys.platform == "win32":
     if not kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x40):
         sys.exit(1)
 else:
-    os.nice(19)
+    os.setpriority(os.PRIO_PROCESS, 0, {CANARY_NICE})
 end = time.monotonic() + {CANARY_LIFETIME_SECONDS}
 while time.monotonic() < end:
     time.sleep({CANARY_NAP_SECONDS})
@@ -161,17 +173,24 @@ class IdleCanary:
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._ready_at: float | None = None
+        self._announced = asyncio.Event()  # set when the child spoke or the pipe ended
         self._wakes = 0
 
     async def start(self) -> None:
+        """Spawn the child and wait up to :data:`CANARY_READY_SECONDS` for it to
+        announce itself; one that does not is stopped, and ``factor`` says nothing."""
         try:
             self._proc = await _spawn_canary()
             self._reader = asyncio.create_task(self._count(self._proc))
+            await asyncio.wait_for(self._announced.wait(), CANARY_READY_SECONDS)
         except Exception as error:  # noqa: BLE001  PERMANENT(F-1007: a canary that cannot start is no evidence, never an error in the probe loop)
-            self._proc = None
-            debug_logger.log_debug(
-                "scheduling_lag", "canary", f"not started: {type(error).__name__}"
-            )
+            reason = type(error).__name__
+        else:
+            if self._ready_at is not None:
+                return
+            reason = "exited before announcing itself"
+        await self.stop()
+        debug_logger.log_debug("scheduling_lag", "canary", f"not started: {reason}")
 
     async def _count(self, proc: asyncio.subprocess.Process) -> None:
         stream = proc.stdout
@@ -181,12 +200,15 @@ class IdleCanary:
             async for line in stream:
                 if self._ready_at is None:
                     self._ready_at = _now()
+                    self._announced.set()
                 elif line.strip() == b".":
                     self._wakes += 1
         except (OSError, ValueError) as error:
             debug_logger.log_debug(
                 "scheduling_lag", "canary", f"pipe ended: {type(error).__name__}"
             )
+        finally:
+            self._announced.set()  # a pipe that ended without a word ends the wait
 
     async def factor(self) -> float | None:
         """How starved the canary was since it announced itself, as ``expected
@@ -223,8 +245,8 @@ class IdleCanary:
 async def idle_canary() -> AsyncIterator[IdleCanary]:
     """An :class:`IdleCanary` that is started on entry and killed on exit."""
     canary = IdleCanary()
-    await canary.start()
     try:
+        await canary.start()  # inside, so a cancel during the spawn still reaps it
         yield canary
     finally:
         await canary.stop()
