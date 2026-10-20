@@ -897,19 +897,24 @@ async def _settle_dom(client: Client, iid: str) -> None:
             raise_on_error=False,
             allow_fail=True,
         )
-        if isinstance(body, list) and body:
-            break
-        if time.monotonic() >= deadline:
-            return  # best-effort; a later assert surfaces the real failure
+        if (isinstance(body, list) and body) or time.monotonic() >= deadline:
+            break  # best-effort; the ready wait below fails loudly if it matters
         await asyncio.sleep(0.25)
+
+    async def probe(expression: str) -> Any:
+        result = await _call(
+            client,
+            "execute_script",
+            {"instance_id": iid, "script": expression},
+            CALL_TIMEOUT,
+            raise_on_error=False,
+            allow_fail=True,
+        )
+        return result.get("result") if isinstance(result, dict) else None
+
     # A queryable body is not a wired page: app.js (end of <body>) may not have
     # attached its listeners yet, and an interaction before that is silently lost.
-    ready_deadline = time.monotonic() + fixture_routes.FIXTURE_READY_TIMEOUT
-    while await _eval(client, iid, fixture_routes.FIXTURE_READY_JS) is not True:
-        assert time.monotonic() < ready_deadline, (
-            fixture_routes.FIXTURE_NOT_READY_MESSAGE
-        )
-        await asyncio.sleep(0.1)
+    await fixture_routes.wait_fixture_ready(probe)
 
 
 def _decode_screenshot(shot: Any) -> bytes:

@@ -339,14 +339,18 @@ async def navigate_and_settle(iid: str, url: str, timeout: float = 10.0):
     while not (isinstance(body, list) and body) and time.monotonic() < deadline:
         await asyncio.sleep(0.25)
         body = await query_elements(instance_id=iid, selector="body")
+    execute = get_fn("execute_script")
+
+    async def probe(expression: str) -> Any:
+        try:
+            r = await execute(instance_id=iid, script=expression)
+        except Exception:  # noqa: BLE001  PERMANENT(a probe racing a redirect may fail; the deadline decides)
+            return None
+        return r.get("result") if isinstance(r, dict) and r.get("success") else None
+
     # A queryable body is not a wired page: app.js (end of <body>) may not have
     # attached its listeners yet, and an interaction before that is silently lost.
-    ready_deadline = time.monotonic() + fixture_routes.FIXTURE_READY_TIMEOUT
-    while await eval_js(iid, fixture_routes.FIXTURE_READY_JS) is not True:
-        assert time.monotonic() < ready_deadline, (
-            fixture_routes.FIXTURE_NOT_READY_MESSAGE
-        )
-        await asyncio.sleep(0.1)
+    await fixture_routes.wait_fixture_ready(probe)
     return result
 
 
