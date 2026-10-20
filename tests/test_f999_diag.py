@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 
 import pytest
@@ -25,15 +26,24 @@ from e2e_helpers import (
 )
 from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 
-pytestmark = integration_pytestmark()
+# Windows is out: it was clean in every round (0 bad in the armed runs of rounds 5-6) and its
+# runner (~2.3x slower) hit the 40 min job cap in round 7 before one diag chunk finished.
+pytestmark = [
+    integration_pytestmark(),
+    pytest.mark.skipif(
+        sys.platform == "win32", reason="F-999 diag: Windows is clean and over the cap"
+    ),
+]
 
-ITERATIONS = 25  # instances per test; 16 tests x 25 instances rotate 4 arms: 100 instances x 2 runs = 200 runs per arm
+ITERATIONS = 25  # instances per test; 15 tests x 25 instances rotate 5 arms: 75 instances x 2 runs = 150 runs per arm per OS
 RUNS_PER_INSTANCE = 2
-CHUNKS = 16
-# NOGUARD: no guard. GUARD: the guard as shipped. GUARDX: the guard, but a chrome-extension://
-# target gets neither Fetch.enable nor a nested auto-attach (resumed if held). GUARDXD: like
-# GUARDX, and the guard also detaches from that target.
-ARMS = ("NOGUARD", "GUARD", "GUARDX", "GUARDXD")
+CHUNKS = 15
+# NOGUARD: no guard. GUARD: the guard as shipped. NOFETCH: the guard, but Fetch.enable is never
+# sent to any target (browser-level + nested auto-attach and the resume are unchanged). CONN: the
+# guard's browser-level connection is open and sends NOTHING. BLOCKNET: the guard, but each
+# session gets Network.enable + Network.setBlockedURLs (no Fetch interception) - also the candidate fix.
+ARMS = ("NOGUARD", "GUARD", "NOFETCH", "CONN", "BLOCKNET")
+PROBE_ARMS = ("GUARD", "BLOCKNET")  # the arms that claim to block the rotation endpoint
 _REAL_ENABLED = (
     google_rotation_guard.enabled
 )  # captured at import, before any arm patches it
@@ -41,6 +51,7 @@ ARM = "GUARD"  # the arm of the instance being run; read by the traced guard han
 CRASHES: list[
     tuple
 ] = []  # (t, text) every Inspector.targetCrashed on the guard connection
+ERRS: list[str] = []  # guard-connection replies that carried an error
 _NET_METHODS = (
     "Network.requestWillBeSent",
     "Network.requestWillBeSentExtraInfo",
@@ -93,7 +104,7 @@ def _install() -> None:
                 url = (p.get("request") or {}).get("url") or (
                     p.get("response") or {}
                 ).get("url")
-                if url and "/cors/" in url:
+                if url and ("/cors/" in url or "RotateCookies" in url):
                     _cors_ids.add(rid)
                 if rid in _cors_ids:
                     NET.append(
@@ -154,10 +165,25 @@ def _install() -> None:
     guard_handle = google_rotation_guard.RotationGuard._handle
 
     async def traced_guard_send(self, method, params=None, session_id=None):
+        suppressed = ARM == "CONN" or (ARM == "NOFETCH" and method == "Fetch.enable")
+        tag = "GSEND-SUPPRESSED" if suppressed else "GSEND"
         OTHER.append(
-            (time.monotonic(), "GSEND", f"{method} session={str(session_id)[:8]}", {})
+            (time.monotonic(), tag, f"{method} session={str(session_id)[:8]}", {})
         )
-        GT.append((time.monotonic(), f"GSEND {method} session={str(session_id)[:8]}"))
+        GT.append((time.monotonic(), f"{tag} {method} session={str(session_id)[:8]}"))
+        if ARM == "CONN":
+            self._settled.set()  # nothing is outstanding: do not let start() wait out its bound
+            return None
+        if ARM == "NOFETCH" and method == "Fetch.enable":
+            return None
+        if ARM == "BLOCKNET" and method == "Fetch.enable":
+            await guard_send(self, "Network.enable", None, session_id)
+            return await guard_send(
+                self,
+                "Network.setBlockedURLs",
+                {"urls": list(self._patterns)},
+                session_id,
+            )
         return await guard_send(self, method, params, session_id)
 
     async def traced_guard_handle(self, message):
@@ -167,6 +193,8 @@ def _install() -> None:
         label = (
             method or f"reply id={message.get('id')}"
         ) + f" session={sid}{' ERROR' if 'error' in message else ''}"
+        if "error" in message:
+            ERRS.append(json.dumps(message["error"])[:120])
         if method == "Target.attachedToTarget":
             info = params.get("targetInfo") or {}
             desc = (
@@ -183,19 +211,6 @@ def _install() -> None:
             CRASHES.append((time.monotonic(), SESSIONS.get(sid, "UNMAPPED")))
         OTHER.append((time.monotonic(), "GEVT", label, {}))
         GT.append((time.monotonic(), f"GEVT {label}"))
-        if (
-            ARM in ("GUARDX", "GUARDXD")
-            and method == "Target.attachedToTarget"
-            and str((params.get("targetInfo") or {}).get("url")).startswith(
-                "chrome-extension://"
-            )
-        ):
-            new_sid = str(params["sessionId"])
-            if ARM == "GUARDXD":
-                await self._send("Target.detachFromTarget", {"sessionId": new_sid})
-            elif params.get("waitingForDebugger"):
-                await self._send("Runtime.runIfWaitingForDebugger", None, new_sid)
-            return None
         return await guard_handle(self, message)
 
     google_rotation_guard.RotationGuard._send = traced_guard_send
@@ -255,7 +270,7 @@ def _fmt(t0, rows, port_b):
     for r in rows:
         if r[0] < t0:
             continue
-        if r[1] in ("EVT", "SEND", "GSEND", "GEVT"):
+        if r[1] in ("EVT", "SEND", "GSEND", "GSEND-SUPPRESSED", "GEVT"):
             out.append(f"    +{r[0] - t0:.3f}s {r[1]} {r[2]}")
         elif len(r) == 4 and isinstance(r[3], dict):
             out.append(
@@ -277,7 +292,18 @@ async def _loop(fixture_origin_pair, chunk):
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
     report: list[str] = []
-    stats = {a: {"runs": 0, "bad": 0, "crash_runs": 0, "bad_crash": 0} for a in ARMS}
+    stats = {
+        a: {
+            "runs": 0,
+            "bad": 0,
+            "crash_runs": 0,
+            "bad_crash": 0,
+            "reply_err": 0,
+            "probe": 0,
+            "probe_blocked": 0,
+        }
+        for a in ARMS
+    }
     # A broken arm must fail loudly here, not by design at the end.
     assert google_rotation_guard.enabled is _REAL_ENABLED, "enabled left patched"
     try:
@@ -292,6 +318,7 @@ async def _loop(fixture_origin_pair, chunk):
             GT.clear()
             SESSIONS.clear()
             CRASHES.clear()
+            ERRS.clear()
             spawn_t = time.monotonic()
             iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
             guards = len(google_rotation_guard._LIVE)
@@ -353,9 +380,32 @@ async def _loop(fixture_origin_pair, chunk):
                         )
                         lines += [f"      +{g[0] - spawn_t:.3f}s {g[1]}" for g in GT]
                     report.append("\n".join(lines))
+                probe = ""
+                if label in PROBE_ARMS:
+                    # Does this arm really stop a rotation request? Only the arms that claim to.
+                    pt = time.monotonic()
+                    await eval_js(
+                        iid,
+                        "fetch('http://accounts.google.com/RotateCookies',{mode:'no-cors'}).catch(function(){})",
+                    )
+                    await asyncio.sleep(1.0)
+                    rids = {
+                        r[2]
+                        for r in NET
+                        if r[0] >= pt and "RotateCookies" in str(r[3].get("url"))
+                    }
+                    rows = [r for r in NET if r[0] >= pt and r[2] in rids]
+                    blocked = any(
+                        "BLOCKED_BY_CLIENT" in str(r[3].get("errorText")) for r in rows
+                    )
+                    stats[label]["probe"] += 1
+                    stats[label]["probe_blocked"] += 1 if blocked else 0
+                    probe = f" probe_blocked={blocked} probe_rows={[(r[1], r[3].get('errorText')) for r in rows]}"
+                stats[label]["reply_err"] += len(ERRS)
                 await asyncio.sleep(0.5)
                 report.append(
                     f"INSTANCE {label} iter={i} crashes_by_end={_crash_text(spawn_t, CRASHES)}"
+                    f" reply_errors={ERRS[:3]}{probe}"
                 )
             finally:
                 await close(instance_id=iid)
