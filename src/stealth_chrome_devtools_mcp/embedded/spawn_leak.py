@@ -172,6 +172,8 @@ def _registered(attempt: Attempt) -> object | None:
     """The ``Browser`` nodriver registered for *attempt*'s config, or None."""
     if attempt.config is None:
         return None
+    # Any match is the right one: nodriver's re-create path (browser.py:349-351)
+    # reuses the config but connects to an existing endpoint and starts no process.
     for browser in tuple(get_registered_instances()):
         if getattr(browser, "config", None) is attempt.config:
             return browser
