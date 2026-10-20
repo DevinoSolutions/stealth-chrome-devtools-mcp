@@ -80,6 +80,10 @@ reads as no pid, as Chromium reads it, instead of raising `OverflowError` out of
 being launched, an unnamed spawn that would copy its live cookies is refused for those seconds, as it is for any
 `default` held by a browser this backend does not drive.
 
+### The docs say Python 3.14 is tested (T-4836)
+
+Wording only. The `release-gate.yml` unit-tests comment, the generated `RELEASE_CONTRACT.md` sentence about where the unit lane runs, and `CONTRIBUTING.md` still said 3.11-3.13 after T-4804 added the Linux py3.14 cell; `pyproject.toml` gains the 3.14 classifier (`uv.lock` is unchanged).
+
 ## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)

@@ -200,7 +200,7 @@ and trip `--cov-fail-under` on partial runs). CI turns it on explicitly.
 CI (`.github/workflows/test.yml`) is the source of truth. It runs three jobs; a change
 must pass all three. Locally you can run each with the venv Python:
 
-**1. Unit tests + coverage** (`ubuntu`, Python 3.11 / 3.12 / 3.13)
+**1. Unit tests + coverage** (`ubuntu`, Python 3.11 / 3.12 / 3.13, plus 3.14 on Linux)
 ```
 pytest -m "not integration"  … --cov-fail-under=55
 ```
