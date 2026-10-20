@@ -363,6 +363,8 @@ The server automatically strips Chrome flags that would compromise stealth:
 
 Stripped args are reported in `spawn_diagnostics.stealth_args_stripped`.
 
+On Windows a spawn also launches with `--disable-features=CalculateNativeWinOcclusion`, so a headed window that other windows cover keeps `visibilityState` `visible` at Normal priority instead of being backgrounded (F-1010); the Puppeteer backgrounding switches above stay stripped.
+
 ### Orphan Recovery
 
 On server restart, the process cleanup system:

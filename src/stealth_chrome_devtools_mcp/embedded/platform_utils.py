@@ -145,6 +145,8 @@ def _stealth_blocked_args() -> dict:
         "--force-device-scale-factor": "DPI/scale mismatch detectable",
         "--disable-background-networking": "network behavior differs from real browser",
         # ── Puppeteer / Playwright signature flags ──
+        # (F-1010: the two ``backgrounding`` switches stay blocked here; a covered
+        # window is kept visible by ``default_disabled_features`` instead.)
         "--disable-backgrounding-occluded-windows": "Puppeteer default",
         "--disable-renderer-backgrounding": "Puppeteer/Playwright default",
         "--disable-ipc-flooding-protection": "Puppeteer default",
@@ -651,6 +653,28 @@ def append_start_page(args: list[str]) -> list[str]:
     return [*args, START_PAGE_URL]
 
 
+# F-1010: Chrome on Windows asks the OS which of its windows are covered
+# (``CalculateNativeWinOcclusion``) and treats a covered one as ``hidden``: the
+# page reports ``visibilityState == "hidden"`` and its renderer drops to Idle
+# priority, so pages run 50-1000x slower and a ``navigate`` times out. A headed
+# window on a person's desktop is covered all the time. Turning the TRACKER off keeps
+# the window ``visible`` whatever is on top of it, and it is a feature name, not
+# one of the Puppeteer ``--disable-*backgrounding*`` switches that
+# ``_stealth_blocked_args`` strips from caller args: only the occlusion verdict
+# changes, nothing else about how a background renderer is scheduled. The name is
+# Windows-only (Mac and Linux have no such tracker), so it is only named there.
+# It is returned as a feature LIST because Chrome honors ONE ``--disable-features``
+# switch: ``login_persistence.merge_disable_features`` folds it into the rest.
+_WINDOWS_DEFAULT_DISABLED_FEATURES = ("CalculateNativeWinOcclusion",)
+
+
+def default_disabled_features() -> tuple[str, ...]:
+    """Chrome features every spawn on this platform launches with turned off."""
+    if platform.system() == "Windows":
+        return _WINDOWS_DEFAULT_DISABLED_FEATURES
+    return ()
+
+
 def merge_browser_args(user_args: list[str] | None = None) -> tuple:
     """
     Merge user-provided browser arguments with platform-specific required arguments.
@@ -672,6 +696,10 @@ def merge_browser_args(user_args: list[str] | None = None) -> tuple:
     for arg in required_args:
         if arg not in combined_args:
             combined_args.append(arg)
+
+    features = default_disabled_features()
+    if features:
+        combined_args.append(f"--disable-features={','.join(features)}")
 
     return _apply_default_user_agent(combined_args), stealth_warnings
 

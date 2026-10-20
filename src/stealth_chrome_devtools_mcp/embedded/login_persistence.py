@@ -188,9 +188,16 @@ def merge_disable_features(args: Sequence[str], extra: Sequence[str]) -> list[st
 
 def disable_dbsc(args: list[str]) -> list[str]:
     """Launch args with Device Bound Session Credentials turned off, unless
-    ``STEALTH_MCP_NO_DISABLE_DBSC`` opts out."""
+    ``STEALTH_MCP_NO_DISABLE_DBSC`` opts out.
+
+    The opt-out adds no DBSC feature but still folds a ``--disable-features`` already
+    in the args (the caller's, or ``platform_utils.default_disabled_features``, which
+    every Windows spawn carries, F-1010) into the one switch Chrome honors: two would
+    make it keep only the last and drop nodriver's own names."""
     if get_settings().no_disable_dbsc:
-        return args
+        if not any(arg.lower().startswith(_DISABLE_FEATURES_PREFIX) for arg in args):
+            return args
+        return merge_disable_features(args, ())
     return merge_disable_features(args, DBSC_FEATURES)
 
 

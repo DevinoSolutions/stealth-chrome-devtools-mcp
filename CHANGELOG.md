@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### A window Windows judges covered is no longer backgrounded (F-1010)
+
+On Windows, Chrome asks the OS which of its windows another window covers (`CalculateNativeWinOcclusion`, on by
+default) and treats a covered one as hidden: the page reports `visibilityState == "hidden"` and its renderer drops to
+Idle priority, so pages ran 50-1000x slower and `navigate` timed out at 30 s. A headed window on a person's own desktop is
+the one that gets covered. Every Windows spawn now launches with that feature turned off (`platform_utils.default_disabled_features`,
+added by `merge_browser_args`), through the ONE `--disable-features` switch Chrome honors: `login_persistence.merge_disable_features`
+folds it with nodriver's own names, the caller's and the DBSC ones, and the delegated headed launch carries it too.
+It is a feature name, not the Puppeteer `--disable-renderer-backgrounding` / `--disable-backgrounding-occluded-windows`
+switches, which stay stripped from caller args, so no automation switch joins the argv; nothing is named on Mac or Linux.
+`STEALTH_MCP_NO_DISABLE_DBSC` used to return the args untouched, which now would have left two `--disable-features`
+switches (Chrome keeps the last, dropping nodriver's site-isolation pair); it still adds no DBSC feature but folds
+a switch already in the args. Not fixed: a second tab is still a background tab until `switch_tab` activates it, and
+Mac/Linux were not measured (`audit/stage2/finding_F1010_covered_window_renderer_backgrounded.md`). No real-Chrome
+measurement was run for this change.
+
 ### The fixture harness explains a page that was not wired when `navigate` returned (T-4709)
 
 Test-only. The F-1006 evidence for "does `navigate(wait_until='load')` return before load?" was a fixture hit list that
