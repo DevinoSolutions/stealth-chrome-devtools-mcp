@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)
 
