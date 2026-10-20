@@ -11,6 +11,18 @@ None; the `with_correlation_id` layer every tool gets then came out with no anno
 `__annotate__` on 3.14. A newer pydantic, fastmcp or mcp does not change this (pydantic 2.14.1, fastmcp 4.1.1 and mcp 2.3.0
 fail the same way). Python 3.11-3.13 are unchanged, and 3.14 is still not in the release gate matrix.
 
+### The health probe no longer heals a browser that is only starved (F-1007)
+
+`browser_health` probes a background `about:blank` target, and Chrome runs a renderer nothing is looking at at IDLE
+priority. On a CPU-saturated host a healthy browser's `Runtime.evaluate` therefore timed out (measured: 60 s with 48
+spinners), and two such rounds closed and relaunched a browser a person was signed in to. A failed probe is now put to
+one more question before it counts: does the browser PROCESS, which runs at normal priority, still answer a fresh
+connection's `Browser.getVersion`, and is the machine's CPU saturated (90% or more over one second)? When both hold the
+round is logged as "starved, not frozen" and is not counted. Either one false keeps the old verdict, so a dead process, or
+F-963's freeze on an idle machine, heals exactly as before. The new decision lives in `embedded/starvation.py`; the
+`default`/`fleet` classifier and the profile-holder witness moved verbatim out of `browser_health.py`, which stood at
+exactly its 1000-line budget, into `embedded/shared_session.py`.
+
 ### A backend started by Task Scheduler no longer starves every Chrome it launches (F-1004)
 
 A backend started on the scheduler rung (F-867) inherits the task's I/O priority Low and memory priority 2, and every

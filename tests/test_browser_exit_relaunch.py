@@ -25,6 +25,7 @@ from fakes import FakeBrowser, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
     browser_health,
     directory_gate,
+    shared_session,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -364,14 +365,14 @@ class TestScope:
         )
 
         assert (
-            browser_health.is_shared_session(
+            shared_session.is_shared_session(
                 BrowserOptions(user_data_dir=str(directory))
             )
             is expected
         )
 
     def test_no_directory_is_no_session(self):
-        assert browser_health.is_shared_session(BrowserOptions()) is False
+        assert shared_session.is_shared_session(BrowserOptions()) is False
 
 
 # ---------------------------------------------------------------------------

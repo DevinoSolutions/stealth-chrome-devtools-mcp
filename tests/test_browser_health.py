@@ -31,6 +31,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     directory_gate,
     fleet_session,
     freeze_capture,
+    starvation,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
@@ -125,6 +126,12 @@ class _Stage:
         self.capture_seconds = 0.0
         self.late_dumps: list[tuple[int, str]] = []
         self.healed_labels: list[str] = []
+        # F-1007: the browser PROCESS answers a fresh connection (or does not), and
+        # how busy the host is; the default is a quiet host and a silent process, so
+        # every failed probe in this file counts as it did before.
+        self.process_answers = False
+        self.host_percent = 0.0
+        self.process_asked: list[str | None] = []
         monkeypatch.setattr(manager, "spawn_browser", self._spawn)
 
     def _held(self) -> bool:
@@ -212,12 +219,19 @@ class _Stage:
     async def own_ok(self, _browser) -> None:
         return None
 
+    async def browser_answers(self, url: str | None) -> None:
+        self.process_asked.append(url)
+        if not self.process_answers:
+            raise ConnectionError("the browser process does not answer")
+
     def health(self, **overrides) -> browser_health.BrowserHealth:
         kwargs = {
             "close": self.close,
             "arm_interception": self.arm,
             "probe": self.probe,
             "own_check": self.own_ok,
+            "browser_answers": self.browser_answers,
+            "host_load": lambda: self.host_percent,
             "persistent": lambda iid: iid in self.persistent,
             "forensics": self.forensics,
             "capture": self.capture,
@@ -283,6 +297,119 @@ class TestWhenItHeals:
         assert browser_health.PROBE_INTERVAL_SECONDS == 120
         assert browser_health.PROBE_TIMEOUT_SECONDS == 15
         assert browser_health.HEAL_COOLDOWN_SECONDS == 900
+
+
+class TestAStarvedHostIsNotAFreeze:
+    """F-1007: the probe's target is a background one, which Chrome runs at IDLE
+    priority, so on a CPU-saturated host a HEALTHY browser times out its evaluate.
+    The browser process still answers; the machine is the thing that is busy."""
+
+    async def test_a_saturated_host_with_an_answering_browser_is_never_healed(
+        self, stage, log
+    ):
+        stage.process_answers, stage.host_percent = True, 97.0
+        stage.probe_results[INSTANCE_ID] = [False] * 6
+        health = stage.health()
+
+        for _ in range(6):
+            await health.check_once()
+
+        assert stage.closes == [] and stage.launches == []
+        assert log.at("error") == []
+        starved = [w for w in log.at("warning") if "starved, not frozen" in w]
+        assert len(starved) == 6 and "host cpu 97%" in starved[0]
+        assert not any("probe 1 failed" in w for w in log.at("warning"))
+
+    async def test_a_browser_process_that_is_dead_too_is_healed(self, stage, log):
+        stage.process_answers, stage.host_percent = False, 99.0
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.closes == [INSTANCE_ID]
+        assert any("healing" in line for line in log.at("error"))
+
+    async def test_a_freeze_on_a_quiet_host_is_healed(self, stage, log):
+        # F-963's own case: the process answers, no renderer runs a script.
+        stage.process_answers, stage.host_percent = True, 12.0
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.closes == [INSTANCE_ID]
+
+    async def test_the_load_is_read_at_the_failure_not_once(self, stage):
+        stage.process_answers, stage.host_percent = True, 97.0
+        stage.probe_results[INSTANCE_ID] = [False] * 4
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()  # both starved: nothing counted
+        assert stage.closes == []
+
+        stage.host_percent = 20.0  # the host calms; the freeze, if any, is real
+        await health.check_once()
+        assert stage.closes == []  # one counted failure is a WARNING
+        await health.check_once()
+        assert stage.closes == [INSTANCE_ID]
+
+    async def test_the_process_is_asked_over_the_browsers_own_endpoint(self, stage):
+        stage.process_answers, stage.host_percent = True, 97.0
+        stage.probe_results[INSTANCE_ID] = [False]
+
+        await stage.health().check_once()
+
+        assert stage.process_asked == [
+            stage.manager._instances[INSTANCE_ID]["browser"].websocket_url
+        ]
+
+    async def test_a_passing_probe_asks_nothing_extra(self, stage):
+        stage.process_answers, stage.host_percent = True, 97.0
+
+        await stage.health().check_once()
+
+        assert stage.process_asked == []
+
+
+class TestTheStarvationVerdict:
+    async def test_it_needs_both_the_answer_and_the_load(self):
+        async def answers() -> None:
+            return None
+
+        async def silent() -> None:
+            raise ConnectionError
+
+        assert await starvation.verdict(answers, lambda: 95.0) == "host cpu 95%"
+        assert await starvation.verdict(answers, lambda: 89.9) is None
+        assert await starvation.verdict(silent, lambda: 99.0) is None
+
+    async def test_a_load_that_cannot_be_read_keeps_the_old_verdict(self):
+        async def answers() -> None:
+            return None
+
+        def broken() -> float:
+            raise OSError("no counters")
+
+        assert await starvation.verdict(answers, broken) is None
+
+    async def test_a_process_that_does_not_answer_in_time_is_not_an_excuse(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(starvation, "BROWSER_ANSWER_SECONDS", 0.05)
+
+        async def never() -> None:
+            await asyncio.sleep(30)
+
+        assert (
+            await asyncio.wait_for(starvation.verdict(never, lambda: 99.0), 5) is None
+        )
+
+    def test_the_real_reading_is_a_percentage(self):
+        assert 0.0 <= starvation.host_cpu_percent() <= 100.0
 
 
 class TestCooldown:

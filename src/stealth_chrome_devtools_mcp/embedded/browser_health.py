@@ -53,6 +53,14 @@ ERROR, not a retry loop), and anything while the backend is stopping. A failed
 relaunch is an ERROR and the end of it. A human who closes a shared headed
 window gets it back at the next round: the loop cannot tell that from a crash.
 
+**F-1007: a starved browser is not a frozen one.** The probe's target is a background
+one, which Chrome runs at IDLE priority, so on a CPU-saturated host a healthy browser
+times out (measured: 60 s with 48 spinners) and two rounds would heal it.
+:func:`starvation.verdict` is asked on every failed probe, before it is counted: the
+browser process answers a fresh connection's ``Browser.getVersion`` AND the machine's
+CPU is saturated -> the round is logged and not counted. Either one false is the old
+verdict, so a dead process, or a freeze on an idle machine, heals as before.
+
 **Forensics are counts and shapes only** — never a URL, title or cookie. They are
 written once on the first failed probe (WARNING) and again when the heal fires
 (ERROR, which reaches Sentry through ``debug_logger``).
@@ -76,9 +84,8 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
-from pathlib import Path
 
 import nodriver as uc
 import psutil
@@ -94,16 +101,15 @@ from stealth_chrome_devtools_mcp.embedded import (
     fleet_session,
     freeze_capture,
     process_exit,
-    profile_lock,
-    profile_seed,
+    shared_session,
     spawn_exhaustion,
+    starvation,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: Seconds between two rounds of probes. A module constant on purpose: an unknown
 #: ``STEALTH_MCP_*`` key crashes ``get_settings()``, and the house rule is
@@ -372,77 +378,6 @@ def _is_persistent(instance_id: str) -> bool:
     return bool(entry) and browser_pid_registry.on_persistent_profile(entry)
 
 
-def shared_session_name(user_data_dir: str | None, *, auto_clone: bool) -> str | None:
-    """``default`` or ``fleet`` when a browser on *user_data_dir* is the browser
-    of one of the two shared sessions, else ``None``: a directory the caller
-    named (never an auto-clone) that ``fleet_session.lock_key`` -- the one mapping
-    from a directory to a session -- keys as one of the two.
-
-    THE classifier (F-964, and F-966's ``close_instance`` guard): the relaunch asks
-    whether it is one, the close asks which. Plain values, because the two read
-    them from different records of the same browser -- the options it launched
-    with, and the profile selection its spawn diagnostics carry (which survives a
-    re-attach, F-888) -- and the close must not look an instance up in a way that
-    discards a dead one."""
-    if not user_data_dir or auto_clone:
-        return None
-    key = fleet_session.lock_key(user_data_dir)
-    if key in (profile_seed.DEFAULT_SESSION, fleet_session.FLEET_SESSION):
-        return key
-    return None
-
-
-def require_shared_session_named(
-    instance_id: str, profile_selection: Mapping[str, object], session: str | None
-) -> None:
-    """Refuse to close the ``default`` or ``fleet`` browser unless the caller named
-    that session (F-966).
-
-    Those two are browsers other chats work in, and a chat that was handed one
-    by mistake (2.1.27 gave ``spawn_browser()`` the ``default`` browser) closed it
-    for all of them. Naming the session is the confirmation: it says the caller
-    knows what it is closing. The selection is the one the spawn recorded, which
-    ``close_instance`` already reads and which does not discard a dead browser the
-    way an instance lookup does. ``session`` is ignored for every other instance:
-    nothing there needs confirming, and rejecting it would break a caller that
-    always sends one."""
-    directory = profile_selection.get("user_data_dir")
-    shared = shared_session_name(
-        directory if isinstance(directory, str) else None,
-        auto_clone=profile_selection.get("profile_role") == "clone",
-    )
-    if shared is None or (session and fleet_session.session_key(session) == shared):
-        return
-    raise ToolError(
-        f"Instance {instance_id} is the {shared!r} session's browser, and other "
-        "chats depend on it, so it was NOT closed. If closing it is what you "
-        "mean, say so by naming the session: "
-        f'close_instance(instance_id="{instance_id}", session="{shared}"). '
-        "If you only wanted a browser of your own, spawn_browser() with no "
-        "session gives you a disposable one to close freely."
-    )
-
-
-def is_shared_session(options: BrowserOptions) -> bool:
-    """The ``default`` or ``fleet`` session's browser (F-964)."""
-    return (
-        shared_session_name(options.user_data_dir, auto_clone=options.auto_clone)
-        is not None
-    )
-
-
-def holder_of(user_data_dir: str) -> str | None:
-    """Who holds *user_data_dir* right now, as a short phrase, or ``None``: the
-    one witness ``spawn_browser(session=...)`` asks before it adopts or spawns."""
-    hold = profile_lock.profile_hold(
-        Path(user_data_dir),
-        getattr(process_cleanup, "_get_browser_pids_for_profile", None),
-    )
-    if hold is None:
-        return None
-    return f"pid {hold.pid}" if isinstance(hold.pid, int) else "an unaddressable holder"
-
-
 def _relaunch_options(
     options: BrowserOptions, instance: BrowserInstance, previous: dict[str, object]
 ) -> BrowserOptions:
@@ -486,6 +421,10 @@ class BrowserHealth:
         arm_interception: Armer,
         probe: Probe = probe_browser,
         own_check: Callable[[Browser], Awaitable[None]] = own_connection_answers,
+        browser_answers: Callable[
+            [str | None], Awaitable[None]
+        ] = fresh_browser_version,
+        host_load: Callable[[], float] = starvation.host_cpu_percent,
         persistent: Callable[[str], bool] = _is_persistent,
         forensics: Callable[..., Awaitable[str]] = gather_forensics,
         heal: Callable[[str], Awaitable[bool]] | None = None,
@@ -496,8 +435,8 @@ class BrowserHealth:
             process_exit.wait_for_exit_async
         ),
         clock: Callable[[], float] = time.monotonic,
-        shared: Callable[[BrowserOptions], bool] = is_shared_session,
-        holder: Callable[[str], str | None] = holder_of,
+        shared: Callable[[BrowserOptions], bool] = shared_session.is_shared_session,
+        holder: Callable[[str], str | None] = shared_session.holder_of,
         capture: Callable[..., Awaitable[str]] = freeze_capture.capture,
         dump_now: Callable[..., Awaitable[str]] = freeze_capture.dump_now,
         mark_healed: Callable[[str], str | None] = freeze_capture.mark_healed,
@@ -512,6 +451,8 @@ class BrowserHealth:
         self._arm_interception = arm_interception
         self._probe = probe
         self._own_check = own_check
+        self._browser_answers = browser_answers
+        self._host_load = host_load
         self._persistent = persistent
         self._forensics = forensics
         self._heal = heal or self.heal
@@ -619,6 +560,18 @@ class BrowserHealth:
             return
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
+        url = getattr(data["browser"], "websocket_url", None)
+        if starved := await starvation.verdict(
+            lambda: self._browser_answers(url), self._host_load
+        ):
+            debug_logger.log_warning(
+                _COMPONENT,
+                "probe",
+                f"{instance_id}: probe failed ({failure}) but the browser process "
+                f"answers and the {starved}: starved, not frozen; not counted "
+                f"(F-1007); {self._failures.get(instance_id, 0)} failure(s) kept",
+            )
+            return
         count = self._failures[instance_id] = self._failures.get(instance_id, 0) + 1
         facts = await self._facts(
             instance_id, data["browser"], data["instance"].created_at
@@ -820,7 +773,7 @@ class BrowserHealth:
         try:
             # The close path refuses `default` and `fleet` unless told which one
             # (F-966); a heal knows, from the options it is about to relaunch.
-            shared = shared_session_name(
+            shared = shared_session.shared_session_name(
                 options.user_data_dir, auto_clone=options.auto_clone
             )
             await self._close(instance_id, shared)

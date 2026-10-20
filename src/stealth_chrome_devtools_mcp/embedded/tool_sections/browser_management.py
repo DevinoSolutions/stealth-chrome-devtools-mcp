@@ -779,7 +779,7 @@ async def close_instance(
     profile_selection = {}
     if isinstance(spawn_diagnostics, dict):
         profile_selection = spawn_diagnostics.get("profile_selection") or {}
-    rt.browser_health.require_shared_session_named(
+    rt.shared_session.require_shared_session_named(
         instance_id, profile_selection, session
     )
     should_refresh_snapshot = (
