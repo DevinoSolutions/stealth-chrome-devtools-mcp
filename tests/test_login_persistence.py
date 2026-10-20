@@ -18,7 +18,11 @@ import nodriver as uc
 import pytest
 
 from fakes import FakeBrowser, fake_target
-from stealth_chrome_devtools_mcp.embedded import login_persistence, profile_copy
+from stealth_chrome_devtools_mcp.embedded import (
+    login_persistence,
+    platform_utils,
+    profile_copy,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -93,10 +97,27 @@ class TestDisableFeaturesMerge:
         assert set(login_persistence.DBSC_FEATURES) <= set(_tokens(switches[-1]))
         assert set(_tokens(switches[0])) <= set(_tokens(switches[-1]))
 
-    def test_opt_out_leaves_the_args_alone(self, opt_out):
+    def test_opt_out_adds_no_dbsc_feature_and_leaves_args_without_a_switch_alone(
+        self, opt_out
+    ):
         opt_out("STEALTH_MCP_NO_DISABLE_DBSC")
-        args = ["--disable-features=Translate", "about:blank"]
+        args = ["--lang=en-US", "about:blank"]
         assert login_persistence.disable_dbsc(args) == args
+
+    def test_opt_out_still_folds_a_switch_already_in_play_into_one(self, opt_out):
+        """F-1010: the platform's own default switch (Windows occlusion) is always
+        in play, and two switches would make Chrome keep only the last and drop
+        nodriver's site-isolation pair. The opt-out is about DBSC, not about that."""
+        opt_out("STEALTH_MCP_NO_DISABLE_DBSC")
+        merged = login_persistence.disable_dbsc(
+            ["--disable-features=Translate", "about:blank"]
+        )
+        (switch,) = _disable_features(merged)
+        assert _tokens(switch) == [
+            *login_persistence.NODRIVER_DISABLED_FEATURES,
+            "Translate",
+        ]
+        assert merged[-1] == switch
 
     def test_the_spawn_path_applies_it(self, monkeypatch):
         monkeypatch.setattr(
@@ -112,6 +133,60 @@ class TestDisableFeaturesMerge:
         )
         (switch,) = _disable_features(launch_args)
         assert {"Translate", *login_persistence.DBSC_FEATURES} <= set(_tokens(switch))
+
+
+class TestWindowsOcclusionDefaultOnTheSpawnPath:
+    """F-1010: ``CalculateNativeWinOcclusion`` is off by default on Windows and
+    shares the ONE ``--disable-features`` switch Chrome honors."""
+
+    @pytest.fixture
+    def windows(self, monkeypatch):
+        monkeypatch.setattr(
+            "stealth_chrome_devtools_mcp.embedded.browser_manager."
+            "check_browser_executable",
+            lambda: "/usr/bin/chromium",
+        )
+        monkeypatch.setattr(platform_utils, "check_browser_executable", lambda: None)
+        monkeypatch.setattr(platform_utils, "is_running_as_root", lambda: False)
+        monkeypatch.setattr(platform_utils, "is_running_in_container", lambda: False)
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+
+    def _launch_args(self, **options) -> list[str]:
+        args, _exe, _warn = BrowserManager()._resolve_launch_args(
+            BrowserOptions(**options),
+            None,
+            {"system": "Windows", "is_root": False, "is_container": False},
+        )
+        return args
+
+    def test_a_default_spawn_carries_it_in_the_one_switch(self, windows):
+        (switch,) = _disable_features(self._launch_args())
+        tokens = _tokens(switch)
+        assert "CalculateNativeWinOcclusion" in tokens
+        assert set(login_persistence.NODRIVER_DISABLED_FEATURES) <= set(tokens)
+        assert set(login_persistence.DBSC_FEATURES) <= set(tokens)
+
+    def test_a_callers_features_are_kept_alongside(self, windows):
+        (switch,) = _disable_features(
+            self._launch_args(browser_args=["--disable-features=Translate"])
+        )
+        assert {"Translate", "CalculateNativeWinOcclusion"} <= set(_tokens(switch))
+
+    def test_the_dbsc_opt_out_does_not_split_it_into_two_switches(
+        self, windows, opt_out
+    ):
+        opt_out("STEALTH_MCP_NO_DISABLE_DBSC")
+        (switch,) = _disable_features(self._launch_args())
+        tokens = _tokens(switch)
+        assert "CalculateNativeWinOcclusion" in tokens
+        assert set(login_persistence.NODRIVER_DISABLED_FEATURES) <= set(tokens)
+        assert not set(login_persistence.DBSC_FEATURES) & set(tokens)
+
+    def test_nodriver_keeps_the_switch_that_carries_it_last(self, windows):
+        config = uc.Config(user_data_dir="x", browser_args=self._launch_args())
+        switches = _disable_features(config())
+        assert "CalculateNativeWinOcclusion" in _tokens(switches[-1])
+        assert set(_tokens(switches[0])) <= set(_tokens(switches[-1]))
 
 
 class FakeTab:

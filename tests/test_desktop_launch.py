@@ -457,6 +457,41 @@ async def test_the_delegated_launch_presents_the_same_user_agent_as_a_normal_spa
     assert delegated_agents == normal_agents
 
 
+async def test_the_delegated_launch_turns_native_occlusion_off_like_a_normal_spawn(
+    delegation, monkeypatch
+):
+    """F-1010: the headed window on the user's desktop is the one other windows
+    cover, so the switch that keeps Windows from backgrounding it must reach
+    Chrome through the delegated launch too, as ONE ``--disable-features``."""
+    from stealth_chrome_devtools_mcp.embedded import platform_utils
+
+    executable = "C:/Program Files/Google/Chrome/chrome.exe"
+    monkeypatch.setattr(browser_manager, "check_browser_executable", lambda: executable)
+    monkeypatch.setattr(platform_utils, "check_browser_executable", lambda: None)
+    monkeypatch.setattr(platform_utils, "is_running_as_root", lambda: False)
+    monkeypatch.setattr(platform_utils, "is_running_in_container", lambda: False)
+    monkeypatch.setattr(platform_utils.platform, "system", lambda: "Windows")
+    platform_info = {"system": "Windows", "is_root": False, "is_container": False}
+    launch_args, _exe, _warnings = (
+        browser_manager.BrowserManager()._resolve_launch_args(
+            browser_manager.BrowserOptions(headless=False), None, platform_info
+        )
+    )
+    schtasks = delegation.install(FakeSchtasks())
+    await desktop_launch.launch_and_attach(executable, launch_args, "C:/profiles/p")
+    switches = [
+        a.split("=", 1)[1].split(",")
+        for a in schtasks.chrome_argv
+        if a.startswith("--disable-features=")
+    ]
+    # nodriver's own switch comes first and Chrome keeps the LAST, so ours must be
+    # the last and a superset of the first.
+    assert "CalculateNativeWinOcclusion" in switches[-1]
+    assert set(switches[0]) <= set(switches[-1])
+    assert len(launch_args) == len(set(launch_args))
+    assert len([a for a in launch_args if a.startswith("--disable-features=")]) == 1
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="CommandLineToArgvW is a Win32 API")
 async def test_the_quoting_matches_windows_own_parser(delegation):
     """Cross-check the reference splitter against the OS: ``CommandLineToArgvW``

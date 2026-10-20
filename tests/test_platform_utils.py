@@ -97,6 +97,8 @@ class TestMergeBrowserArgs:
     def test_strips_stealth_flags_but_keeps_benign(self, monkeypatch):
         monkeypatch.setattr(platform_utils, "is_running_as_root", lambda: False)
         monkeypatch.setattr(platform_utils, "is_running_in_container", lambda: False)
+        # Not Windows: that platform's own default switch (F-1010) has its own class.
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: "Linux")
         combined, warnings = merge_browser_args(["--headless", "--lang=en-US"])
         assert combined == ["--lang=en-US"]
         assert len(warnings) == 1
@@ -111,6 +113,54 @@ class TestMergeBrowserArgs:
         assert "--foo" in combined
         assert "--no-sandbox" in combined
         assert combined.count("--no-sandbox") == 1
+
+
+class TestDefaultDisabledFeaturesInMergeBrowserArgs:
+    """F-1010: a window Windows judges covered must not be backgrounded.
+
+    Chrome's native occlusion tracker reports a covered window as ``hidden`` and
+    runs its renderer at Idle priority (pages 50-1000x slower, ``navigate`` timing
+    out). ``--disable-features=CalculateNativeWinOcclusion`` stops that; the two
+    Puppeteer backgrounding switches are deliberately NOT how it is done.
+    """
+
+    def _arm(self, monkeypatch, system: str):
+        monkeypatch.setattr(platform_utils, "is_running_as_root", lambda: False)
+        monkeypatch.setattr(platform_utils, "is_running_in_container", lambda: False)
+        monkeypatch.setattr(platform_utils.platform, "system", lambda: system)
+
+    def test_windows_spawn_turns_native_occlusion_off(self, monkeypatch):
+        self._arm(monkeypatch, "Windows")
+        combined, _ = merge_browser_args(["--lang=en-US"])
+        assert combined == [
+            "--lang=en-US",
+            "--disable-features=CalculateNativeWinOcclusion",
+        ]
+
+    @pytest.mark.parametrize("system", ["Linux", "Darwin"])
+    def test_other_platforms_have_no_native_windows_tracker_to_turn_off(
+        self, monkeypatch, system
+    ):
+        self._arm(monkeypatch, system)
+        combined, _ = merge_browser_args(["--lang=en-US"])
+        assert combined == ["--lang=en-US"]
+
+    @pytest.mark.parametrize("system", ["Windows", "Linux", "Darwin"])
+    def test_the_puppeteer_backgrounding_switches_stay_out_of_the_argv(
+        self, monkeypatch, system
+    ):
+        self._arm(monkeypatch, system)
+        combined, _ = merge_browser_args([])
+        assert "--disable-renderer-backgrounding" not in combined
+        assert "--disable-backgrounding-occluded-windows" not in combined
+
+    def test_a_caller_switch_survives_to_be_merged_into_the_one_chrome_honors(
+        self, monkeypatch
+    ):
+        self._arm(monkeypatch, "Windows")
+        combined, _ = merge_browser_args(["--disable-features=Translate"])
+        assert "--disable-features=Translate" in combined
+        assert "--disable-features=CalculateNativeWinOcclusion" in combined
 
 
 class TestAppendStartPage:
