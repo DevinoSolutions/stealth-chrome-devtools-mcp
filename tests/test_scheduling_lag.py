@@ -14,6 +14,8 @@ blocking probe the real loop spends most of its time inside.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import scheduling_lag
@@ -150,3 +152,47 @@ class TestTheStretchIsReported:
         _spend(sched)
 
         assert reports == []
+
+
+class TestLoopLag:
+    """F-1007: the one-shot, async form of ``nap``'s measurement, for a prober that
+    times out on the event loop. Same arithmetic, same clamp, same threshold."""
+
+    @pytest.fixture
+    def loop_scheduler(self, scheduler, monkeypatch):
+        def _install(lag: float) -> Scheduler:
+            sched = scheduler(lag)
+
+            async def asleep(seconds: float) -> None:
+                sched.sleep(seconds)
+
+            monkeypatch.setattr(scheduling_lag, "_async_wait", asleep)
+            return sched
+
+        return _install
+
+    @pytest.mark.parametrize(
+        ("lag", "factor"),
+        [(1.0, 1.0), (2.5, 2.5), (0.5, 1.0), (50.0, scheduling_lag.MAX_STRETCH)],
+    )
+    async def test_it_reports_how_late_the_sleep_woke_clamped(
+        self, loop_scheduler, lag, factor
+    ):
+        loop_scheduler(lag)
+
+        assert await scheduling_lag.loop_lag() == pytest.approx(factor)
+
+    async def test_it_asks_the_loop_for_a_short_nap(self, loop_scheduler):
+        sched = loop_scheduler(1.0)
+
+        await scheduling_lag.loop_lag()
+
+        assert sched.naps == 1
+        assert sched.now == pytest.approx(1000.0 + scheduling_lag.LOOP_NAP_SECONDS)
+
+    def test_starved_means_at_or_above_the_report_factor(self):
+        at = scheduling_lag.REPORT_FACTOR
+        assert scheduling_lag.is_starved(at)
+        assert scheduling_lag.is_starved(scheduling_lag.MAX_STRETCH)
+        assert not scheduling_lag.is_starved(math.nextafter(at, 0.0))
+        assert not scheduling_lag.is_starved(1.0)

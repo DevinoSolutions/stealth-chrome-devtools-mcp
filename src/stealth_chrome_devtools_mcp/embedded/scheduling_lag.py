@@ -26,6 +26,14 @@ third of a second of patience. Because the factor is clamped to
 wall time — elastic, never infinite, and terminating without a second stopping
 rule to keep in step with the first.
 
+**The same signal answers an async prober (F-1007).** ``browser_health`` times a
+probe out on the event loop, so :func:`loop_lag` is the one-shot form of
+:meth:`FairWindow.nap`: ask for a short ``asyncio.sleep``, read how late it woke,
+and :func:`is_starved` says whether that lateness is material. The probe's target
+runs at Chrome's IDLE priority, so on a saturated host its timeout can mean "this
+host did not schedule it" and not "the browser is frozen"; this process's own lag is
+the free witness that cannot be true of a machine that is not starving us.
+
 **What it is not.** It never decides that anything is alive or dead. It only
 answers "has this window been spent", so the ONE gate that owns the dead-vs-busy
 policy keeps owning it, and ``proxy_selfheal``'s single heal path is untouched:
@@ -34,6 +42,7 @@ starvation moves when a verdict is reached, never what happens after one.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from stealth_chrome_devtools_mcp.observability import capture_lifecycle
@@ -47,6 +56,10 @@ def _now() -> float:
 
 def _wait(seconds: float) -> None:
     time.sleep(seconds)
+
+
+async def _async_wait(seconds: float) -> None:
+    await asyncio.sleep(seconds)
 
 
 # How much wall time a window may buy, as a multiple of its patience. Sized
@@ -65,10 +78,30 @@ MAX_STRETCH = 4.0
 # report would fire on healthy machines, which is how a warning stops meaning
 # anything.
 REPORT_FACTOR = 2.0
+# What one :func:`loop_lag` sample asks the event loop for. Long enough that timer
+# granularity (about 15 ms on Windows) stays far under :data:`REPORT_FACTOR`, short
+# enough that asking it after a failed probe adds a quarter second to the round.
+LOOP_NAP_SECONDS = 0.25
 # F-827 vocabulary. A stretched window is a DECISION — "I declined to believe
 # this timeout" — and without it the CONDEMNED/HEALED/TEARDOWN series has no
 # denominator for how often starvation nearly caused one.
 STRETCHED_EVENT = "proxy: patience extended under starvation"
+
+
+def is_starved(factor: float) -> bool:
+    """True when a lag factor is material: at or above :data:`REPORT_FACTOR`. THE
+    one threshold, so the report below and every caller agree on what "starved"
+    means."""
+    return factor >= REPORT_FACTOR
+
+
+async def loop_lag(seconds: float = LOOP_NAP_SECONDS) -> float:
+    """This process's scheduling lag right now, as ``actual / requested`` for one
+    ``asyncio`` sleep, clamped to ``[1.0, MAX_STRETCH]`` like
+    :meth:`FairWindow.nap`'s. Say ``is_starved(await loop_lag())``."""
+    before = _now()
+    await _async_wait(seconds)
+    return min(max((_now() - before) / seconds, 1.0), MAX_STRETCH)
 
 
 class FairWindow:
@@ -127,7 +160,7 @@ class FairWindow:
         to raise, so it is called directly: a second never-raise wrapper here
         would be a second way to do something that already has a home.
         """
-        if self._reported or self._peak < REPORT_FACTOR:
+        if self._reported or not is_starved(self._peak):
             return
         self._reported = True
         capture_lifecycle(

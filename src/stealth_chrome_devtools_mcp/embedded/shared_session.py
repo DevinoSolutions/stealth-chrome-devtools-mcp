@@ -3,7 +3,8 @@ witness of who holds a profile directory.
 
 Moved VERBATIM out of :mod:`browser_health` (F-1007), which stood at exactly its
 1000-line budget: the relaunch asks whether a browser is one of ``default`` /
-``fleet``, ``close_instance`` asks which, and neither is about probing a browser.
+``fleet`` (and builds its options, :func:`relaunch_options`), ``close_instance``
+asks which, and neither is about probing a browser.
 "Shared" here means those two sessions and nothing else (CLAUDE.md glossary).
 
 A leaf: it imports neither ``browser_health`` nor ``server``.
@@ -17,7 +18,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_lock,
     profile_seed,
 )
-from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
+from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -91,3 +92,27 @@ def holder_of(user_data_dir: str) -> str | None:
     if hold is None:
         return None
     return f"pid {hold.pid}" if isinstance(hold.pid, int) else "an unaddressable holder"
+
+
+def relaunch_options(
+    options: BrowserOptions, instance: BrowserInstance, previous: dict[str, object]
+) -> BrowserOptions:
+    """What a relaunch of *instance* spawns with: the same directory, headless and
+    viewport it had, and rotation-guarded when the spawn path's own rule says so."""
+    selection = previous.get("profile_selection")
+    role = selection.get("profile_role") if isinstance(selection, dict) else None
+    # The ONE rule for "this relaunch must be guarded" is the spawn path's.
+    guard = options.guard_rotation or fleet_session.guards_rotation(
+        {
+            "profile_role": role,
+            "user_data_dir": options.user_data_dir,
+        }
+    )
+    return options.model_copy(
+        update={
+            "headless": instance.headless,
+            "viewport_width": instance.viewport.get("width", options.viewport_width),
+            "viewport_height": instance.viewport.get("height", options.viewport_height),
+            "guard_rotation": guard,
+        }
+    )
