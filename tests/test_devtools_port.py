@@ -9,26 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import browser_cmdline, devtools_port
+from stealth_chrome_devtools_mcp.embedded import devtools_port
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 OURS = devtools_port.ActivePort(45000, "/devtools/browser/ours")
-
-
-class TestWithPortZero:
-    def test_replaces_any_port_the_args_already_carry(self):
-        args = ["--a", "--remote-debugging-port=9222", "--b"]
-        assert devtools_port.with_port_zero(args) == [
-            "--a",
-            "--b",
-            "--remote-debugging-port=0",
-        ]
-
-    def test_adds_the_flag_when_there_is_none(self):
-        assert devtools_port.with_port_zero(["--a"]) == [
-            "--a",
-            "--remote-debugging-port=0",
-        ]
 
 
 class TestRead:
@@ -41,7 +25,7 @@ class TestRead:
     ):
         (tmp_path / devtools_port.PORT_FILE).write_text("45000\n")
         assert devtools_port.read(tmp_path) == (45000, None)
-        assert devtools_port.own_endpoint(tmp_path) is None
+        assert devtools_port.own_endpoint(tmp_path, 45000) is None
 
     @pytest.mark.parametrize("text", ["", "0\n/p", "70000\n/p", "abc\n/p"])
     def test_an_unusable_port_is_none(self, tmp_path, text):
@@ -50,6 +34,26 @@ class TestRead:
 
     def test_no_file_is_none(self, tmp_path):
         assert devtools_port.read(tmp_path) is None
+
+
+class TestOwnEndpoint:
+    def test_the_file_naming_the_port_this_launch_asked_for_is_ours(self, tmp_path):
+        (tmp_path / devtools_port.PORT_FILE).write_text(
+            "45000" + chr(10) + "/devtools/browser/x" + chr(10)
+        )
+        assert devtools_port.own_endpoint(tmp_path, 45000) == (
+            45000,
+            "/devtools/browser/x",
+        )
+
+    def test_a_file_naming_another_port_is_not(self, tmp_path):
+        (tmp_path / devtools_port.PORT_FILE).write_text(
+            "45001" + chr(10) + "/devtools/browser/x" + chr(10)
+        )
+        assert devtools_port.own_endpoint(tmp_path, 45000) is None
+
+    def test_no_profile_is_none(self):
+        assert devtools_port.own_endpoint(None, 45000) is None
 
 
 class TestVerify:
@@ -89,34 +93,3 @@ class TestClearStale:
         monkeypatch.setattr(type(stale), "unlink", refuse)
         with pytest.raises(ToolError, match="F-1009"):
             devtools_port.clear_stale(tmp_path)
-
-
-class TestDebugPortFindsAPortZeroBrowser:
-    """A browser launched with ``=0`` carries no port on its command line, so the
-    live-master door would see none; the file in ITS profile is where it is."""
-
-    def _argv(self, monkeypatch, profile, port):
-        monkeypatch.setattr(
-            browser_cmdline,
-            "arguments",
-            lambda pid: [
-                "chrome",
-                f"--user-data-dir={profile}",
-                f"--remote-debugging-port={port}",
-            ],
-        )
-
-    def test_falls_back_to_the_profiles_file_for_port_zero(self, tmp_path, monkeypatch):
-        (tmp_path / devtools_port.PORT_FILE).write_text("45000\n/devtools/browser/x\n")
-        self._argv(monkeypatch, tmp_path, 0)
-        assert browser_cmdline.debug_port(1, str(tmp_path)) == 45000
-
-    def test_no_profile_means_no_file_is_consulted(self, tmp_path, monkeypatch):
-        (tmp_path / devtools_port.PORT_FILE).write_text("45000\n/devtools/browser/x\n")
-        self._argv(monkeypatch, tmp_path, 0)
-        assert browser_cmdline.debug_port(1) is None
-
-    def test_an_explicit_port_never_consults_the_file(self, tmp_path, monkeypatch):
-        (tmp_path / devtools_port.PORT_FILE).write_text("45000\n/devtools/browser/x\n")
-        self._argv(monkeypatch, tmp_path, 9222)
-        assert browser_cmdline.debug_port(1, str(tmp_path)) == 9222

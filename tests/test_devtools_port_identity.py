@@ -1,5 +1,5 @@
-"""F-1009 — the DevTools port a spawn connects to must be the one ITS OWN Chrome
-opened, never one a sibling happens to hold.
+"""F-1009 — the DevTools endpoint a spawn connects to must be the one ITS OWN
+Chrome opened, never one a sibling happens to hold.
 
 nodriver picks the port by binding and releasing a socket (``util.free_port``)
 and only then launches Chrome with ``--remote-debugging-port=<that port>``. In
@@ -9,16 +9,16 @@ while the sibling's answers ``/json/version``. nodriver cannot tell, so the
 spawn registered the SIBLING's browser as its own and a later ``close_instance``
 killed it: on the shared ``fleet`` or ``default`` session that is the logins.
 
-The fix is not a bigger retry. Chrome is asked for port ``0`` and the real port
-is read from ``DevToolsActivePort`` inside OUR profile directory; what answers
-there must carry the websocket path Chrome wrote, or it is somebody else's.
+The fix keeps the argv (``--remote-debugging-port=0`` was tried and real Chrome
+then reports ``navigator.webdriver == true``) and refuses to believe anything
+that answers on the port until Chrome has written ``DevToolsActivePort`` in OUR
+profile naming that port; what answers there must then carry the websocket path
+Chrome wrote, or it is somebody else's.
 
 Every node drives nodriver's REAL ``Browser.start`` through the REAL
 ``BrowserManager._launch_browser`` over a faked OS: a subprocess that "binds" the
-port its argv names, a table of endpoints, a virtual clock and the process
-table. No Chrome is launched, no socket is opened. The fake Chrome reads its
-OWN argv, so a launcher that still passes a pre-picked port gets the squatter
-and a launcher that passes ``0`` gets its own.
+port its argv names (unless a sibling already holds it), a table of endpoints, a
+virtual clock and the process table. No Chrome is launched, no socket is opened.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 PORT_FILE = "DevToolsActivePort"
+#: The port ``util.free_port`` hands nodriver, so the one Chrome is asked for.
 OUR_PORT = 45000
 OUR_PATH = "/devtools/browser/ours-f1009"
 SIBLING_PATH = "/devtools/browser/sibling-f1009"
-STALE_PORT = 46000
 STALE_PATH = "/devtools/browser/stale-f1009"
 OUR_PID = 7331
 SIBLING_PID = 9999
@@ -68,10 +68,11 @@ class World:
         self.opens_at = 1.0
         #: Does the launched Chrome ever get to write its file / open its port?
         self.chrome_opens = True
-        #: Every port NOT in ``endpoints`` answers as a sibling's browser — the
-        #: port nodriver pre-picked and somebody else took.
-        self.squatter_everywhere = True
-        #: What a sibling's endpoint reports for OUR port (a second squatter).
+        #: A sibling bound the port nodriver picked before our Chrome could: it
+        #: answers there, and our Chrome opens nothing and writes no file.
+        self.sibling_takes_port = False
+        #: The websocket path the browser answering on OUR port reports (a path
+        #: other than the file's is a foreign browser).
         self.endpoint_on_our_port = OUR_PATH
         self.endpoints: dict[int, str] = {}
         self.argv: list[str] = []
@@ -104,7 +105,10 @@ class World:
     def _maybe_open(self) -> None:
         if not (self._launched and self.chrome_opens and self.t >= self.opens_at):
             return
-        if self.requested_port() != "0" or OUR_PORT in self.endpoints:
+        if self.requested_port() != str(OUR_PORT) or OUR_PORT in self.endpoints:
+            return
+        if self.sibling_takes_port:
+            self.endpoints[OUR_PORT] = SIBLING_PATH
             return
         self.endpoints[OUR_PORT] = self.endpoint_on_our_port
         (self.profile / PORT_FILE).write_text(f"{OUR_PORT}\n{OUR_PATH}\n")
@@ -115,8 +119,6 @@ class World:
 
         self.requests.append(api.port)
         path = self.endpoints.get(api.port)
-        if path is None and self.squatter_everywhere and api.port != OUR_PORT:
-            path = SIBLING_PATH
         if path is None:
             raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
         return {
@@ -156,6 +158,7 @@ def world(monkeypatch, profile):
     this = World(profile)
     FakeConnection.world = this
     monkeypatch.setattr(asyncio, "create_subprocess_exec", this.spawn)
+    monkeypatch.setattr("nodriver.core.util.free_port", lambda: OUR_PORT)
     monkeypatch.setattr("nodriver.core.browser.Connection", FakeConnection)
 
     async def _request(api, endpoint_name, method="get", data=None):
@@ -186,22 +189,37 @@ async def _launch(profile: Path) -> Browser:
 
 
 async def test_a_stolen_port_cannot_attach_us_to_a_sibling(world, profile):
-    """THE pin. The port nodriver picked is held by a sibling's browser; our
-    Chrome, asked for whatever port it likes, opens its own and writes it into
-    our profile. The spawn must end up on OUR endpoint, not the sibling's."""
+    """THE pin. The port nodriver picked was taken by a sibling's browser before
+    our Chrome could bind it: the sibling answers ``/json/version``, ours writes
+    no ``DevToolsActivePort``. The spawn must fail by name and attach to NOTHING
+    (before F-1009 it registered the sibling's browser as its own)."""
+    world.sibling_takes_port = True
+
+    with pytest.raises(ToolError, match=PORT_FILE) as err:
+        await _launch(profile)
+
+    assert str(OUR_PORT) in str(err.value)
+    assert world.connections == []
+    assert world.t >= browser_connect.CONNECT_PATIENCE_SECONDS
+
+
+async def test_our_own_chrome_on_the_port_is_attached(world, profile):
+    """The other side of it: when the port is ours the file appears and the spawn
+    attaches to exactly the websocket the file names."""
     browser = await _launch(profile)
 
     assert browser.connection.url == f"ws://127.0.0.1:{OUR_PORT}{OUR_PATH}"
     assert world.connections == [browser.connection.url]
-    # The port is the real one everywhere it is read afterwards — the registry
-    # records it, and a later backend re-attaches through it (F-888).
     assert browser.config.port == OUR_PORT
 
 
-async def test_chrome_is_not_handed_a_port_somebody_else_can_take(world, profile):
+async def test_chrome_keeps_the_concrete_port_in_its_argv(world, profile):
+    """Pinned because the first version of this fix asked Chrome for port 0 and
+    CI's offline-stealth gate then saw ``navigator.webdriver == true`` on every
+    OS: the argv must keep the port nodriver chose."""
     await _launch(profile)
 
-    assert world.requested_port() == "0"
+    assert world.requested_port() == str(OUR_PORT)
     assert sum(a.startswith("--remote-debugging-port") for a in world.argv) == 1
 
 
@@ -220,26 +238,33 @@ async def test_a_foreign_answer_on_our_port_is_refused_by_name(world, profile):
 
 
 async def test_a_stale_port_file_is_not_trusted(world, profile):
-    """A file a dead Chrome left behind names a port a squatter now holds. It is
-    not ours, so it is never asked — we wait for the file THIS launch writes."""
-    (profile / PORT_FILE).write_text(f"{STALE_PORT}\n{STALE_PATH}\n")
-    world.endpoints[STALE_PORT] = SIBLING_PATH
+    """A file a dead Chrome left behind names the port a squatter now holds. It
+    is not ours, so the port is never asked: we wait for the file THIS launch
+    writes, which a Chrome that lost the race never does."""
+    (profile / PORT_FILE).write_text(f"{OUR_PORT}\n{STALE_PATH}\n")
+    world.sibling_takes_port = True
 
-    browser = await _launch(profile)
-
-    assert STALE_PORT not in world.requests
-    assert browser.connection.url == f"ws://127.0.0.1:{OUR_PORT}{OUR_PATH}"
-
-
-async def test_a_stale_port_file_alone_is_not_an_endpoint(world, profile):
-    (profile / PORT_FILE).write_text(f"{STALE_PORT}\n{STALE_PATH}\n")
-    world.endpoints[STALE_PORT] = STALE_PATH
-    world.chrome_opens = False
-
-    with pytest.raises(ToolError, match=PORT_FILE):
+    with pytest.raises(ToolError, match="did not write"):
         await _launch(profile)
 
-    assert STALE_PORT not in world.requests
+    assert world.requests == []
+    assert world.connections == []
+
+
+async def test_a_stale_file_that_matches_the_squatter_exactly_is_still_not_trusted(
+    world, profile
+):
+    """The worst case for the identity check alone: the leftover file and the
+    squatter agree with each other. Only deleting the file before the launch
+    keeps that from being an attach to the squatter."""
+    (profile / PORT_FILE).write_text(f"{OUR_PORT}\n{STALE_PATH}\n")
+    world.endpoints[OUR_PORT] = STALE_PATH
+    world.chrome_opens = False
+
+    with pytest.raises(ToolError, match="did not write"):
+        await _launch(profile)
+
+    assert world.requests == []
     assert world.connections == []
 
 
