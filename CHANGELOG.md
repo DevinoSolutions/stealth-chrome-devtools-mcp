@@ -40,6 +40,10 @@ into `embedded/shared_session.py`.
 
 `test_a_dump_that_outlives_its_budget_does_not_block_the_loop` counted loop ticks (`>= 5`), which flaked on loaded runners. It now takes a liveness witness inside the writer thread (the loop must have ticked while the dump ran), which still fails for a dump that blocks the loop but no longer depends on runner speed.
 
+### CI runs the unit suite on Python 3.14 too (T-4804)
+
+CI-only. F-1005 (2.1.36) gated an `__annotate__` fix to Python 3.14, but the gate ran 3.11-3.13 only, so its pin never executed on CI. `release-gate.yml` gains ONE `unit-tests` cell, `Linux-X64-py3.14` (same hermetic `-m "not integration"` selection), declared in `tools/release_evidence.py`'s `REQUIRED_CELLS` so the evidence aggregate requires it, and listed in `RELEASE_CONTRACT.md`. Linux and unit tests only: no Windows/macOS, coverage, integration or transport cell on 3.14.
+
 ## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)
