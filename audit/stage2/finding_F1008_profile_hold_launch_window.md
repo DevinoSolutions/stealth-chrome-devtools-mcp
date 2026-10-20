@@ -3,9 +3,10 @@
 **Severity:** High (data-loss class: master-profile loss is the owner's top severity). Pre-existing on main; found
 during F-998's data-loss review (PR #236), tracked as GetItDone T-3022.
 **Files:** `embedded/profile_lock.py` (witness 3 `launching`/`_launch_hold`, `_lock_content`, `_lock_owner`,
-`_pid_alive`, `_kernel_has`), `embedded/browser_manager.py` (`_launch_browser` runs the start inside
-`profile_lock.launching`), `tools/check_file_budgets.py` (`browser_manager.py` holds at 1438, paid), `NAVMAP.md`,
-`CHANGELOG.md`. Tests: `tests/test_profile_hold_launch_window.py` (new).
+`_pid_alive`, `_kernel_has`, and from review `launch_reaped`/`_remove_marker`), `embedded/browser_manager.py`
+(`_launch_browser` runs the start inside `profile_lock.launching`), `embedded/spawn_leak.py` (the reap ends a failed
+launch's marker), `embedded/browser_cmdline.py` and `embedded/profile_copy.py` (docstrings),
+`tools/check_file_budgets.py` (`browser_manager.py` holds at 1438, paid), `NAVMAP.md`, `CHANGELOG.md`. Tests: `tests/test_profile_hold_launch_window.py` (new).
 **Branch:** `fix/F1008-profile-hold-launch-window`, from `origin/main` (b767977).
 
 ---
@@ -31,8 +32,8 @@ exemption at all, unlike the auto-clone sweep's `clone_protection`), and `remove
 
 `profile_lock.launching(profile_dir)` is a context manager. `BrowserManager._launch_browser` runs both starts — nodriver's
 and the delegated headed launch (F-810) — inside it, after `remove_saved_tabs` (which must still see the profile free).
-It writes `stealth-launch.lock` in the profile holding `<hostname>-<backend pid>`, and removes it when the block
-ends, whether the launch returned or raised. `profile_hold` reads it after `SingletonLock`, with the same
+It writes `stealth-launch.lock` in the profile holding `<hostname>-<backend pid>`, and removes it when the launch
+returns. A launch that raised keeps it until its Chrome is reaped (§6). `profile_hold` reads it after `SingletonLock`, with the same
 `_lock_hold` code, so there is still one reader of "whose lock is this and is that pid alive".
 
 Why it is not a second way to answer "is this profile held": the answer still comes from `profile_hold` alone. The
@@ -91,8 +92,9 @@ per mutation and no disk writes to any worktree. Counts are in the PR body.
 2. **Selection → launch.** `clone_storage` decides FREE before `_launch_browser` starts, so two spawns of one session
    can both pass selection before either writes the marker. Chrome's own singleton then arbitrates (one browser exits)
    as it did before. The marker narrows the window to "both selected before either launched".
-3. **A failed launch's Chrome** may still be starting after the marker is removed and before F-860's reaper kills
-   it.
+3. **A failed launch's Chrome** that nothing can name (no pid: a delegated launch, a `Browser` missing from nodriver's
+   registry) is covered only by `FAILED_LAUNCH_GRACE_SECONDS` (15 s), not by its reap. One named by its pid is covered
+   until the reap ends it (§6).
 4. **Check-then-act in the sweeps.** A trim that decided FREE before a launch began keeps going. That is inherent in any
    check-then-act and was true of Chrome's own witnesses too.
 5. **`default` mid-launch refuses an unnamed spawn's live-jar seed.** While this backend launches `default`, the
@@ -102,3 +104,30 @@ per mutation and no disk writes to any worktree. Counts are in the PR body.
 6. **`process_cleanup._get_browser_pids_for_profile` skips an `AccessDenied` process** (an elevated Chrome on
    Windows) instead of reporting it unreadable. On Windows, where the scan is the only witness, such a browser reads
    FREE. Changing that scan changes what the reapers kill, so it is out of scope here.
+
+## 6. Review round (PR #247): every minor finding fixed here
+
+| # | Finding | Fix | Direction |
+|---|---|---|---|
+| 1 | `_launch_hold` read an unanswerable marker `lstat` as age 0, so such a marker held the profile for ever | dated by the profile directory's `lstat`, which every claim touches, so it is never older than the newest launch's start; both failing drops it (unreachable: Chrome's lock in the same directory was just read) | bounded HELD |
+| 2 | on Windows `unlink` fails while a `profile_hold` reader has the marker open, leaving it to hold until the age bound | `_remove_marker` retries 3 times, 25 ms apart; a marker still left holds until the age bound, and the launch succeeds | toward HELD |
+| 3 | a second launch in one backend on one profile did not re-date the marker, so it was dropped at the FIRST launch's start + 120 s, under the second | the count>0 branch of `_claim_launch` re-dates the marker and the directory (`os.utime`, `OSError` suppressed) | was wrong-FREE |
+| 4 | stale docs: NAVMAP "two witnesses and no third", `browser_cmdline` "Windows never reaches `_pid_alive`", `profile_copy` "names three" | corrected | docs |
+| 5 | a failed or cancelled launch's `finally` removed the marker BEFORE `spawn_browser`'s teardown reaped the Chrome it may have started | a failed launch leaves the marker, dated to expire after `FAILED_LAUNCH_GRACE_SECONDS` (15 s, longer than the reap's 3 + 2 s kill rungs); `spawn_leak.reap_launched_browsers` ends it through `profile_lock.launch_reaped` once the launched pid is killed or is not on the profile. A kill that failed keeps it. `browser_manager.py` is unchanged, cap unchanged | was wrong-FREE |
+| 6 | tests: a cancelled launch, a re-dating claim, and the hidepid pin patching the global `os.kill` | added; the hidepid and Windows pins patch the module's own `_signal` alias and name a pid no process has | tests |
+
+Why the reap ends the marker and not the grace alone: `_fallback_profile_selection` re-asks `profile_hold` about a failed
+`default` launch AFTER the teardown has reaped it and, if held, turns the retry into a clone. A grace alone would have
+made our own dead launch read as a sibling's for 15 s.
+
+**RED and mutations, same method as §4** (out-of-tree `git archive` export of 55448bf with the new test file, runtime
+attribute rebinding from a `-p` plugin, no disk writes to any worktree):
+
+* 55448bf: 10 failed, 18 passed. 8 are behavioural REDs of the new pins: the failed-launch pin raised and cancelled, the
+  failed-reap pin and the grace pin ("a failed launch's Chrome read as FREE"), both re-dating pins, the unanswerable-age
+  pin ("held it for ever") and the unlink-retry pin (`assert 1 == 2`, one try). The other 2 are the hidepid params:
+  55448bf has no `_signal` alias, so they are a harness change, not a RED. The pid is one no process has, so the real
+  `os.kill` that 55448bf calls there hurt nothing. The unlink-refused-every-time pin passes on 55448bf, as a guard.
+* Fixed tip: 28 passed.
+* 8 of 8 mutations killed: `age_unanswerable_zero` (1), `single_unlink` (2), `no_redate` (3), `unlink_on_failure`,
+  `reap_never_releases`, `grace_is_whole_budget`, `failure_not_dated` and `reap_releases_unkilled` (5).

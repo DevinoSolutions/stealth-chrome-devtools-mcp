@@ -102,10 +102,10 @@ that replaces the launch failure the caller needs to see is strictly worse
 than a leak that is logged.
 
 A leaf in the sense that matters — it imports no orchestrator, and the
-``ProcessCleanup`` arrives as an argument. ``process_exit`` is itself a leaf,
-and the ``nodriver`` import costs no cold start: this module is reached only
-through ``browser_manager``, which imports nodriver already, and the stdio proxy
-imports neither.
+``ProcessCleanup`` arrives as an argument. ``process_exit`` and
+``profile_lock`` are themselves leaves, and the ``nodriver`` import costs no
+cold start: this module is reached only through ``browser_manager``, which
+imports nodriver already, and the stdio proxy imports neither.
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ from typing import TYPE_CHECKING
 
 from nodriver.core.util import get_registered_instances
 
-from stealth_chrome_devtools_mcp.embedded import process_exit
+from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -194,8 +194,14 @@ def reap_launched_browsers(
                 f"{instance_id}: {error}",
             )
             return []
+        # Once it is gone, the launch marker need not wait out its grace
+        # (F-1008); a launch we cannot name keeps it until the grace ends.
         if launched in on_profile:
-            return _kill(cleanup, launched, user_data_dir, instance_id)
+            reaped = _kill(cleanup, launched, user_data_dir, instance_id)
+            if reaped:
+                profile_lock.launch_reaped(user_data_dir)
+            return reaped
+        profile_lock.launch_reaped(user_data_dir)
     debug_logger.log_info(
         "spawn_leak",
         "reap",

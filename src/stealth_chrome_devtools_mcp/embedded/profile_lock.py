@@ -45,7 +45,9 @@ Two witnesses of Chrome's, in order, then one of OURS (F-1008):
    Chrome's lock does and is read by the same code, naming the LAUNCHER (this
    backend), and it is dropped once it is older than a launch may last
    (``spawn_budget.LAUNCH_BUDGET_SECONDS``) — so a backend killed mid-launch
-   leaves nothing that holds a profile for longer than one launch could.
+   leaves nothing that holds a profile for longer than one launch could. A
+   launch that FAILS keeps it until the failed spawn has reaped the Chrome it
+   may have started, or ``FAILED_LAUNCH_GRACE_SECONDS`` when nothing can say.
    Only our own launches write it; a Chrome started by hand is still seen only
    once it is visible to the two witnesses above.
 
@@ -123,6 +125,14 @@ _LAUNCH_WHOSE = "the launch marker of a browser still starting"
 # write the same `<hostname>-<pid>`, so the first to finish must not remove it.
 _LAUNCHING: dict[str, int] = {}
 _LAUNCHING_LOCK = threading.Lock()
+# How long a FAILED launch still holds the profile when nothing ends it sooner:
+# the Chrome it may have started is reaped only after the launch has raised
+# (`spawn_leak`, which calls `launch_reaped`; its kill rungs wait 3 + 2 s), and
+# one with no pid to reap is seen by witnesses 1 and 2 well within this.
+FAILED_LAUNCH_GRACE_SECONDS = 15.0
+# Removing the marker while a reader has it open fails on Windows: retried.
+_UNLINK_TRIES = 3
+_UNLINK_PAUSE_SECONDS = 0.025
 
 # The largest pid Chromium's `StringToInt` parses; above it a lock names no pid.
 _PID_MAX = 2**31 - 1
@@ -130,6 +140,7 @@ _PID_MAX = 2**31 - 1
 # Whether `os.kill(pid, 0)` is a QUESTION: on Windows any signal but the console
 # ones terminates the process.
 _SIGNAL_ASKS = os.name != "nt"
+_signal = os.kill
 
 # Whether Chrome leaves a readable owner in the profile — i.e. whether witness 2
 # exists on this platform at all (see the module docstring). False on Windows.
@@ -193,18 +204,24 @@ def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
 def launching(profile_dir: str | os.PathLike[str] | None) -> Iterator[None]:
     """Hold *profile_dir* for the browser launch inside this block (F-1008).
 
-    Witness 3 of the module docstring: written before the block, removed after
-    it whether the launch returned or raised. By then a started browser is seen
-    by witnesses 1 and 2 — nodriver returns only once Chrome answers on its
-    debugging port, which it opens after taking its own singleton. A directory
-    that does not exist yet is skipped: there is nothing on disk to lose. Never
-    raises: a marker that cannot be written costs this protection, not a spawn.
+    Witness 3 of the module docstring: written before the block and removed
+    after a launch that returned. By then a started browser is seen by
+    witnesses 1 and 2 — nodriver returns only once Chrome answers on its
+    debugging port, which it opens after taking its own singleton. A launch
+    that RAISED (or was cancelled) leaves it, because the Chrome it may have
+    started is still running until the failed spawn's teardown reaps it: the
+    reap ends it (:func:`launch_reaped`), and ``FAILED_LAUNCH_GRACE_SECONDS``
+    does if nothing can say the Chrome is gone. A directory that does not exist yet is
+    skipped: there is nothing on disk to lose. Never raises: a marker that
+    cannot be written costs this protection, not a spawn.
     """
     marker = _claim_launch(profile_dir)
+    failed = True
     try:
         yield
+        failed = False
     finally:
-        _release_launch(marker)
+        _release_launch(marker, failed=failed)
 
 
 def _launch_owner() -> str:
@@ -223,6 +240,12 @@ def _claim_launch(profile_dir: str | os.PathLike[str] | None) -> Path | None:
         count = _LAUNCHING.get(_launch_key(marker), 0)
         _LAUNCHING[_launch_key(marker)] = count + 1
         if count:
+            # This launch is newer than the one that wrote it: the age bound
+            # runs from ITS start, or the marker expires under it. The
+            # directory too, which `_launch_hold` dates it by when it must.
+            for dated in (marker, marker.parent):
+                with contextlib.suppress(OSError):
+                    os.utime(dated)
             return marker
         # Through a scratch file and one rename, so a reader never sees the
         # marker EMPTY, which reads as no marker at all.
@@ -239,7 +262,7 @@ def _claim_launch(profile_dir: str | os.PathLike[str] | None) -> Path | None:
     return marker
 
 
-def _release_launch(marker: Path | None) -> None:
+def _release_launch(marker: Path | None, *, failed: bool = False) -> None:
     if marker is None:
         return
     with _LAUNCHING_LOCK:
@@ -250,14 +273,49 @@ def _release_launch(marker: Path | None) -> None:
         # Only OUR marker: another backend's launch may have written its own since.
         if _lock_content(marker) != _launch_owner():
             return
+        if failed:
+            # Dated so the age bound in `_launch_hold` ends it after the grace.
+            dated = time.time() - (
+                spawn_budget.LAUNCH_BUDGET_SECONDS - FAILED_LAUNCH_GRACE_SECONDS
+            )
+            with contextlib.suppress(OSError):
+                os.utime(marker, (dated, dated))
+            return
+        _remove_marker(marker)
+
+
+def launch_reaped(profile_dir: str | os.PathLike[str] | None) -> None:
+    """The Chrome a FAILED launch on *profile_dir* started is gone (reaped, or
+    never running): its marker need not wait out the grace. Called by
+    ``spawn_leak`` once it knows; a launch still running here, or another
+    backend's marker, is left alone. Never raises."""
+    if not profile_dir:
+        return
+    marker = Path(profile_dir) / LAUNCH_NAME
+    with _LAUNCHING_LOCK:
+        if _launch_key(marker) in _LAUNCHING:
+            return
+        if _lock_content(marker) == _launch_owner():
+            _remove_marker(marker)
+
+
+def _remove_marker(marker: Path) -> None:
+    """Unlink *marker*, retried: on Windows a ``profile_hold`` reading it at
+    that moment has it open, and an open file cannot be deleted. One left
+    behind holds the profile until ``_launch_hold``'s age bound drops it."""
+    for attempt in range(_UNLINK_TRIES):
         try:
             marker.unlink()
         except FileNotFoundError:
-            pass
+            return
         except OSError as error:
+            if attempt + 1 < _UNLINK_TRIES:
+                time.sleep(_UNLINK_PAUSE_SECONDS)
+                continue
             debug_logger.log_warning(
                 "profile_lock", "launching", f"Could not remove {marker}: {error}"
             )
+        return
 
 
 def _launch_hold(marker: Path) -> Hold | None:
@@ -273,7 +331,14 @@ def _launch_hold(marker: Path) -> Hold | None:
     except FileNotFoundError:
         return None  # the launch finished between the two reads
     except OSError:
-        age = 0.0  # unanswerable, so HELD
+        # Unanswerable: dated by the profile directory instead, which every
+        # claim touches, so it is never older than the newest launch's start
+        # and the answer leans HELD without holding forever. Unreachable, that
+        # one failing too: Chrome's lock beside it was just read.
+        try:
+            age = time.time() - marker.parent.lstat().st_mtime
+        except OSError:
+            return None
     if age > spawn_budget.LAUNCH_BUDGET_SECONDS:
         return None
     return Hold(None, held.reason)
@@ -492,7 +557,7 @@ def _kernel_has(pid: int) -> bool:
     if not _SIGNAL_ASKS:
         return False
     try:
-        os.kill(pid, 0)
+        _signal(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:

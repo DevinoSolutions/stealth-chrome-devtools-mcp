@@ -254,9 +254,11 @@ def command_line_is_gone(pid: int) -> bool:
 
     Off Linux only the zombie half applies. The exec-window measurement is
     Linux-only (Chrome on macOS is a direct binary, which was not measured, and
-    Windows has no zombies and never reaches ``profile_lock._pid_alive``: Chrome
-    writes no ``SingletonLock`` there, and a killed process is simply no longer
-    listed), so nothing licenses reading an empty argv as dead there.
+    Windows has no zombies and never asks ``profile_lock._pid_alive`` about a
+    BROWSER: Chrome writes no ``SingletonLock`` there, and a killed process is
+    simply no longer listed. Since F-1008 our own launch marker reaches it
+    there, but for a BACKEND's pid, whose argv no exec window empties), so
+    nothing licenses reading an empty argv as dead there.
 
     Known limit, not fixable here: on Linux the leader of a still-running
     multithreaded process reads ``Z`` once its own thread has exited (a main

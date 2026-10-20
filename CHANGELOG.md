@@ -69,7 +69,11 @@ one launch. For that window a second spawn, a seed copy or a storage trim could 
 on, which is the master-profile-loss class. Our launcher now writes a launch marker, `stealth-launch.lock`, in the
 profile for as long as it is starting a browser there, and `profile_hold` reads it as held. The marker holds
 `<hostname>-<pid>` like Chrome's lock and is read by the same code. It is never copied into another profile, and it stops
-counting once its backend has exited or once it is older than a launch may last (120 s). Three lock reads were also
+counting once its backend has exited or once it is older than a launch may last (120 s). A launch that fails or is
+cancelled keeps the profile held until the failed spawn has killed the Chrome it may have started, or for 15 s when
+nothing can say whether one is running; before, the profile read free while that Chrome was still alive. A second
+launch on the same profile re-dates the marker, so it is not dropped under that launch, and a marker that a Windows
+reader has open is removed on a retry instead of being left behind. Three lock reads were also
 fixed in the same direction: a `SingletonLock` that exists but cannot be read now reads as held (it used to read as no
 lock), a lock owner that `/proc` hides under `hidepid=2` is asked of the kernel, and a lock pid too large for an `int`
 reads as no pid, as Chromium reads it, instead of raising `OverflowError` out of the spawn. One cost: while `default` is
