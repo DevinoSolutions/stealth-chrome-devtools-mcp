@@ -50,11 +50,20 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 if TYPE_CHECKING:
     from nodriver import Browser
 
-__all__ = ["IDENTITY_TIMEOUT_SECONDS", "confirm_ours", "owned_pids"]
+__all__ = [
+    "DROP_TIMEOUT_SECONDS",
+    "IDENTITY_TIMEOUT_SECONDS",
+    "confirm_ours",
+    "owned_pids",
+]
 
 #: How long the browser gets to say which process it is. A healthy Chrome answers
 #: in milliseconds; this is a ceiling inside the launch phase's budget, not a wait.
 IDENTITY_TIMEOUT_SECONDS = 10.0
+
+#: How long dropping a refused connection may take. The drop runs on the cancel
+#: path too, so it must not be able to hold a cancellation up for ever.
+DROP_TIMEOUT_SECONDS = 5.0
 
 _BROWSER_PROCESS = "browser"
 
@@ -63,12 +72,20 @@ def owned_pids(launched_pid: int) -> set[int]:
     """*launched_pid* and every process below it: what a launch of ours can be.
 
     A wrapper script that forks the real binary leaves the browser a descendant
-    of the pid we hold. A launcher that has already exited has no descendants to
-    find, so only its own pid is returned.
+    of the pid we hold. A launcher that has already exited, or one psutil may not
+    read, has no descendants to find, so only its own pid is returned (logged:
+    a browser that IS a descendant is then refused as foreign).
     """
     pids = {launched_pid}
-    with contextlib.suppress(psutil.Error):
+    try:
         pids.update(child.pid for child in psutil.Process(launched_pid).children(True))
+    except psutil.Error as error:
+        debug_logger.log_warning(
+            "devtools_port",
+            "owned_pids",
+            f"could not list the processes below pid {launched_pid} "
+            f"({type(error).__name__}); only that pid counts as ours",
+        )
     return pids
 
 
@@ -76,8 +93,9 @@ def _refusal(browser_pid: int, launched_pid: int) -> ToolError:
     return ToolError(
         f"F-1009: the browser answering this spawn's DevTools port is process "
         f"{browser_pid}, not the Chrome this spawn launched (pid {launched_pid}). "
-        "Another process holds that port; this spawn disconnected from it "
-        "without sending it anything that closes it, and did not register it."
+        "Another process holds that port, or the browser runs in a separate pid "
+        "namespace (e.g. flatpak); this spawn disconnected from it without "
+        "sending it anything that closes it, and did not register it."
     )
 
 
@@ -90,21 +108,29 @@ def _unverified(seconds: float) -> ToolError:
     )
 
 
-async def confirm_ours(browser: Browser, launched_pid: int | None) -> None:
-    """Raise ``ToolError`` unless *browser*'s own process is the one we launched.
+def _unidentifiable() -> ToolError:
+    return ToolError(
+        "F-1009: the browser on this spawn's DevTools port cannot identify its "
+        "process (it has no SystemInfo.getProcessInfo, which real Chrome always "
+        "answers), so it cannot be told apart from another program's browser on "
+        "that port, such as an Electron or CEF app. The connection was dropped "
+        "without closing the browser."
+    )
 
-    *launched_pid* ``None`` (nodriver left it unset) means nothing to compare
-    against: logged and allowed, as before F-1009. A browser that does not offer
-    the query (a ``ProtocolException``) or reports no ``browser`` process is
-    likewise unverifiable rather than foreign.
+
+async def _drop(browser: Browser) -> None:
+    """Close OUR end of the websocket. Never ``Browser.close``: that is a command.
+
+    Shielded and bounded because it also runs while the spawn is being cancelled,
+    when a second cancellation must not abandon the half-open foreign socket.
     """
-    if launched_pid is None:
-        debug_logger.log_warning(
-            "devtools_port",
-            "confirm_ours",
-            "no launched pid to compare the DevTools endpoint's process against",
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            asyncio.shield(browser.connection.disconnect()), DROP_TIMEOUT_SECONDS
         )
-        return
+
+
+async def _ask(browser: Browser, launched_pid: int) -> None:
     from nodriver import cdp
     from nodriver.core.connection import ProtocolException
 
@@ -114,17 +140,39 @@ async def confirm_ours(browser: Browser, launched_pid: int | None) -> None:
             IDENTITY_TIMEOUT_SECONDS,
         )
     except ProtocolException:
+        raise _unidentifiable() from None
+    except TimeoutError:
+        raise _unverified(IDENTITY_TIMEOUT_SECONDS) from None
+    browser_pids = [p.id_ for p in processes or () if p.type_ == _BROWSER_PROCESS]
+    if not browser_pids:
         debug_logger.log_warning(
             "devtools_port",
             "confirm_ours",
-            "the browser does not offer SystemInfo.getProcessInfo; identity unchecked",
+            "the browser's process list has no `browser` process; identity unchecked",
         )
         return
-    except TimeoutError:
-        await browser.connection.disconnect()
-        raise _unverified(IDENTITY_TIMEOUT_SECONDS) from None
-    browser_pids = [p.id_ for p in processes or () if p.type_ == _BROWSER_PROCESS]
-    if not browser_pids or set(browser_pids) & owned_pids(launched_pid):
+    if not set(browser_pids) & owned_pids(launched_pid):
+        raise _refusal(browser_pids[0], launched_pid)
+
+
+async def confirm_ours(browser: Browser, launched_pid: int | None) -> None:
+    """Raise ``ToolError`` unless *browser*'s own process is the one we launched.
+
+    *launched_pid* ``None`` (nodriver left it unset) means nothing to compare
+    against: logged and allowed, as before F-1009. A browser that cannot answer
+    the query is NOT allowed (real Chrome always does; an Electron or CEF app on
+    the port does not). Whatever ends the wait, an error or a cancellation, the
+    connection to the browser is dropped before it propagates.
+    """
+    if launched_pid is None:
+        debug_logger.log_warning(
+            "devtools_port",
+            "confirm_ours",
+            "no launched pid to compare the DevTools endpoint's process against",
+        )
         return
-    await browser.connection.disconnect()
-    raise _refusal(browser_pids[0], launched_pid)
+    try:
+        await _ask(browser, launched_pid)
+    except BaseException:
+        await _drop(browser)
+        raise

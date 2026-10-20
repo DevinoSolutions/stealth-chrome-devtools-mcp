@@ -12,11 +12,11 @@ seconds before Chrome bound it. Both launches now go through `devtools_port.conf
 which process it is (`SystemInfo.getProcessInfo`, read-only) and its `browser` pid must be the one we launched or below it.
 A mismatch fails the spawn naming both pids, drops the connection without sending `Browser.close`, and registers nothing,
 so `close_instance` has nothing to close and only our own pid is reaped. A browser that never answers the question is named
-after 10 s. The argv keeps the concrete port: `--remote-debugging-port=0` made the offline-stealth gate report
+after 10 s, and one that cannot answer it at all (an Electron or CEF app on the port) is refused; a cancelled spawn still drops
+the socket. The argv keeps the concrete port: `--remote-debugging-port=0` made the offline-stealth gate report
 `navigator.webdriver == true` on all three OSes (cause not established), and Chrome writes no `DevToolsActivePort` for a
 concrete port, so that file could not be the witness. Not fixed: nodriver's own `Browser.start` already sent read-only target
-discovery to the foreign browser before the check, and a Chrome without `SystemInfo.getProcessInfo` is allowed through
-unverified (`audit/stage2/finding_F1009_devtools_port_race.md`).
+discovery to the foreign browser before the check, and a launcher that daemonizes, or a browser in a separate pid namespace (flatpak), is refused as foreign (`audit/stage2/finding_F1009_devtools_port_race.md`).
 
 ### A window Windows judges covered is no longer backgrounded (F-1010)
 

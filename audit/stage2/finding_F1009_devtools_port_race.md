@@ -40,8 +40,15 @@ The one thing a squatter cannot fake is which process it is. `devtools_port.conf
 * on a mismatch calls `Connection.disconnect()` (a websocket close; NOT `Browser.close`, which is a command that would
   shut the sibling down) and raises a `ToolError` naming both pids; on silence it disconnects and raises a named
   `ToolError`;
-* treats "no launched pid", "the browser does not offer the query" (`ProtocolException`) and "no `browser` process in
-  the answer" as unverifiable and allows them, logging the first two (a hardening must not turn into an outage).
+* FAILS CLOSED when the browser cannot answer the query (`ProtocolException`): an Electron or CEF app squatting on the
+  port has no `SystemInfo` domain and real Chrome always answers, so "cannot identify its process" is a `ToolError` and the
+  connection is dropped (review of #256, finding 1);
+* allows, with a `log_warning` each (review finding 2), only "no launched pid" and "no `browser` process in the answer",
+  and `owned_pids` logs when psutil cannot list the launcher's descendants (AccessDenied or any `psutil.Error`);
+* ends EVERY way out of the wait (mismatch, silence, unidentifiable, cancellation) through one `_drop`: the websocket is
+  closed, shielded and bounded by `DROP_TIMEOUT_SECONDS` (5 s) so a cancelled spawn cannot leak the foreign socket and a
+  stuck close cannot hold a cancellation up (review finding 4). The refusal text names a separate pid namespace
+  (flatpak) as the other reason a pid can differ (finding 5).
 
 Callers: `browser_connect.start` (`nodriver.start` then `confirm_ours`; `BrowserManager._launch_browser` calls it in place
 of `uc.start`) and `desktop_launch.launch_and_attach` (after `cdp_attach.attach`, before `attached = True`, so the
@@ -62,6 +69,14 @@ repo (`MUT=<name>`), applied in the test process only, no source file edited. Ba
 | mismatch never touches the foreign browser | `test_a_refused_foreign_connection_is_dropped_not_closed` (no `Browser.*` command sent, connection disconnected), `test_a_mismatch_never_touches_the_foreign_browser` (`ProcessTable`: sibling `terminate_calls == 0` and alive, ours reaped once, no instance, `close_instance(...) is False`) | `close_foreign` (sends `Browser.close`); `no_disconnect`; `kill_foreign` | RED (3; 5; the ProcessTable pin plus 6 others) |
 | descendant of the launcher is ours | `TestOwnedPids::test_a_wrapper_owns_what_it_forked` (a real child process), `test_a_descendant_of_the_launched_pid_passes` | `no_descendants` | RED (1) |
 
+Review round (#256 REQUEST_CHANGES, five findings): added pins `test_a_browser_without_the_query_is_refused_*` (identity
+and unit), `test_a_cancelled_wait_still_drops_the_foreign_socket`, `test_the_refusal_names_a_separate_pid_namespace`, and
+log-spy pins on the no-launched-pid, no-browser-process and `owned_pids` psutil-error paths. An autouse fixture in both
+new test files (`fakes.forbid_real_process_kills`) records and fails on any real `psutil.process_iter` / `Process.terminate`
+/ `Process.kill`. **These new pins were NOT mutation-checked and NOT run under pytest locally** (free RAM about 0.1 GB, lead's
+instruction); a throwaway script exercised the three new `confirm_ours` outcomes (unidentifiable, mismatch, cancel) and the
+pins run in CI only.
+
 Incident to state: the `kill_foreign` mutation terminated "every process but ours" through the real
 `psutil.process_iter()` in the tests that do not patch psutil. It raised on its first process (an access-denied system
 entry) before reaching any user process, and a process census afterwards showed the machine intact, but the mutation was
@@ -73,9 +88,10 @@ unsafe and was not re-run. The `ProcessTable` pin that matters runs against a pa
   transparently pick another port, because the port is nodriver's to choose before Chrome starts.
 * nodriver's own `Browser.start` sends read-only `Target.setDiscoverTargets` / `getTargets` to whatever answers before the
   check runs; nothing that closes or navigates anything is sent.
-* Fail-open when the browser has no `SystemInfo.getProcessInfo` or reports no `browser` process. Real Chrome has both.
-* A launcher that daemonizes (the pid we hold exits and the browser is not its descendant) would be refused as foreign.
-  nodriver launches the binary directly on every platform here; the delegated launch records the Chrome pid itself.
+* Fail-open only when the answer has no `browser` process (logged); real Chrome always has one.
+* A launcher that daemonizes (the pid we hold exits and the browser is not its descendant), or a browser in a separate pid
+  namespace such as flatpak, would be refused as foreign; the refusal text says so. nodriver launches the binary directly on
+  every platform here; the delegated launch records the Chrome pid itself.
 * Not run against real Chrome (rules): the premise that `SystemInfo.getProcessInfo` reports the browser process pid is the
   protocol's documented behaviour and is exercised in CI by every integration spawn, which now sends it.
 * Why `--remote-debugging-port=0` makes `navigator.webdriver` true was not investigated.
