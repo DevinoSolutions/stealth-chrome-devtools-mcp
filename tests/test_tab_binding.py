@@ -16,11 +16,13 @@ import contextvars
 import importlib
 import inspect
 import pkgutil
+import typing
 from types import SimpleNamespace
 
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import tab_binding, tab_open
+from stealth_chrome_devtools_mcp.embedded.logging_setup import with_correlation_id
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     InstanceNotFoundError,
     ToolError,
@@ -348,6 +350,25 @@ def test_scoped_adds_tab_id_and_its_doc_line_only_to_page_tools():
     at = next(i for i, line in enumerate(lines) if "instance_id (str)" in line)
     assert lines[at + 1].strip().startswith("tab_id (Optional[str])")
     assert tab_binding.scoped(instance_tool) is instance_tool
+
+
+def test_scoped_annotations_survive_the_wrappers_registration_puts_over_it():
+    """Python 3.14 (PEP 649) made ``functools.wraps`` copy ``__annotate__``, not
+    ``__annotations__``. ``scoped`` ASSIGNS ``__annotations__`` (adding
+    ``tab_id``), which leaves ``__annotate__`` None, so the next ``wraps`` layer
+    -- ``with_correlation_id``, which every tool gets -- came out with NO
+    annotations and fastmcp's schema build died on ``KeyError: 'instance_id'``:
+    the backend could not register a single tool. Read through the layer the
+    registry puts on, as pydantic does."""
+
+    async def page_tool(instance_id: str, script: str) -> dict:
+        await _require_tab(None, instance_id)
+        return {}
+
+    layered = with_correlation_id(tab_binding.scoped(page_tool))
+    hints = typing.get_type_hints(layered)
+    assert set(hints) == {"instance_id", "script", "tab_id", "return"}
+    assert hints["tab_id"] == (str | None)
 
 
 async def test_scoped_hands_the_tab_id_to_the_resolver_for_that_call_only():

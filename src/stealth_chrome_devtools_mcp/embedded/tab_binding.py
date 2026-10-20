@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import inspect
+import sys
 from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.embedded import backend_client, tab_open
@@ -296,7 +297,13 @@ def scoped(func: FunctionType) -> Callable[..., object]:
     wrapper.__dict__["__signature__"] = signature.replace(
         parameters=[*signature.parameters.values(), parameter]
     )
-    wrapper.__annotations__ = {**func.__annotations__, PARAMETER: str | None}
+    annotations = {**func.__annotations__, PARAMETER: str | None}
+    wrapper.__annotations__ = annotations
+    if sys.version_info >= (3, 14):
+        # PEP 649: assigning ``__annotations__`` leaves ``__annotate__`` None, and
+        # ``functools.wraps`` copies ``__annotate__`` -- so every layer registration
+        # puts over this wrapper would read as having no annotations at all.
+        wrapper.__annotate__ = lambda _format: dict(annotations)
     wrapper.__doc__ = _documented(func.__doc__ or "")
     return wrapper
 
