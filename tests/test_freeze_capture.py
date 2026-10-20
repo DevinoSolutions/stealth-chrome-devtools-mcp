@@ -311,8 +311,13 @@ class TestMinidump:
         self, tmp_path
     ):
         release = threading.Event()
+        alive = threading.Event()
+        seen: list[bool] = []
 
         def stuck(_pid: int, path: Path) -> None:
+            # Witness taken INSIDE the writer thread: did the loop tick while the
+            # dump was running? A loop that blocks on the dump cannot set `alive`.
+            seen.append(alive.wait(0.4))
             release.wait(30)
             path.write_bytes(b"late")
 
@@ -323,12 +328,13 @@ class TestMinidump:
             while True:
                 await asyncio.sleep(0.01)
                 ticks += 1
+                alive.set()
 
         watcher = asyncio.create_task(ticker())
         started = time.monotonic()
         try:
             line = await freeze_capture.write_minidump(
-                4242, tmp_path, "x", budget=0.2, platform="win32", write=stuck
+                4242, tmp_path, "x", budget=0.5, platform="win32", write=stuck
             )
             elapsed = time.monotonic() - started
         finally:
@@ -337,10 +343,9 @@ class TestMinidump:
             await asyncio.sleep(0.2)  # let the stuck writer finish and clean up
 
         assert elapsed < 2.0
-        # Any tick proves the loop ran during the write; a loop-blocking dump gives 0
-        # (it returns before the ticker can run). A higher floor only measures runner load.
+        assert seen == [True]  # the loop ticked while the writer thread was running
         assert ticks >= 1
-        assert line.startswith("not finished within 0.2s")
+        assert line.startswith("not finished within 0.5s")
         assert str(tmp_path / "x.dmp") in line
 
     async def test_a_second_dump_does_not_start_while_the_first_is_stuck(

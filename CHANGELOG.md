@@ -24,6 +24,10 @@ or F-963's freeze on an idle machine heals exactly as before. The `default`/`fle
 witness and the relaunch options moved verbatim out of `browser_health.py`, which stood at exactly its 1000-line budget,
 into `embedded/shared_session.py`.
 
+### The freeze-capture loop test no longer flakes (T-4713)
+
+`test_a_dump_that_outlives_its_budget_does_not_block_the_loop` counted loop ticks (`>= 5`), which flaked on loaded runners. It now takes a liveness witness inside the writer thread (the loop must have ticked while the dump ran), which still fails for a dump that blocks the loop but no longer depends on runner speed.
+
 ## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)
