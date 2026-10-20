@@ -2567,11 +2567,15 @@ def a_zombie():
 
 
 def forbid_real_process_kills(monkeypatch):
-    """Make ``psutil`` unable to enumerate or end a REAL process, and return the
-    list of attempts so the caller can assert it stayed empty.
+    """Make ``psutil`` unable to end a REAL process and show an EMPTY machine to
+    anything that enumerates, and return the list of attempts to end one so the
+    caller can assert it stayed empty.
 
-    A raise alone is not enough: a handler that catches ``Exception`` would eat it
-    and the test would pass having tried. A test that installs ``ProcessTable``
+    Enumeration is answered, not refused: ``profile_lock``'s read-only scan of the
+    process table runs on every launch, and refusing it only proved (CI, PR #256)
+    that these tests had been reading the REAL machine. A raise alone is not
+    enough for the kills: a handler that catches ``Exception`` would eat it and
+    the test would pass having tried. A test that installs ``ProcessTable``
     replaces these names afterwards and is unaffected."""
     attempts: list[str] = []
 
@@ -2582,7 +2586,7 @@ def forbid_real_process_kills(monkeypatch):
 
         return refuse
 
-    monkeypatch.setattr(psutil, "process_iter", _forbid("process_iter"))
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None: [])
     monkeypatch.setattr(psutil.Process, "terminate", _forbid("Process.terminate"))
     monkeypatch.setattr(psutil.Process, "kill", _forbid("Process.kill"))
     return attempts

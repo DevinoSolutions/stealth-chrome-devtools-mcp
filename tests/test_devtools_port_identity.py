@@ -151,7 +151,7 @@ class FakeConnection:
 
 @pytest.fixture(autouse=True)
 def no_real_process_is_touched(monkeypatch):
-    """F-1009 safety net: nothing here may enumerate or end a REAL process. The
+    """F-1009 safety net: nothing here may end a REAL process or see the real process table. The
     one test that wants a process table installs ``ProcessTable`` over this."""
     attempts = forbid_real_process_kills(monkeypatch)
     yield

@@ -72,8 +72,9 @@ repo (`MUT=<name>`), applied in the test process only, no source file edited. Ba
 Review round (#256 REQUEST_CHANGES, five findings): added pins `test_a_browser_without_the_query_is_refused_*` (identity
 and unit), `test_a_cancelled_wait_still_drops_the_foreign_socket`, `test_the_refusal_names_a_separate_pid_namespace`, and
 log-spy pins on the no-launched-pid, no-browser-process and `owned_pids` psutil-error paths. An autouse fixture in both
-new test files (`fakes.forbid_real_process_kills`) records and fails on any real `psutil.process_iter` / `Process.terminate`
-/ `Process.kill`. **These new pins were NOT mutation-checked and NOT run under pytest locally** (free RAM about 0.1 GB, lead's
+new test files (`fakes.forbid_real_process_kills`) fails on any real `Process.terminate` / `Process.kill` and shows an EMPTY machine to `process_iter`. Its first version
+refused `process_iter`, and CI went RED on it: `profile_lock`'s read-only scan runs on every launch, so these tests had been
+reading the REAL process table; they now see none. **These new pins were NOT mutation-checked and NOT run under pytest locally** (free RAM about 0.1 GB, lead's
 instruction); a throwaway script exercised the three new `confirm_ours` outcomes (unidentifiable, mismatch, cancel) and the
 pins run in CI only.
 
