@@ -15,14 +15,16 @@ both hold: the browser process answers, and the machine's CPU is saturated
 old verdict, so a browser whose process is dead too, or a freeze on an idle machine,
 heals exactly as before; and once the host calms the next failed probe counts.
 
-A leaf: stdlib and ``psutil`` only. The browser-level question and the host-load
-reading arrive as arguments, so the one place that decides is hermetic.
+A leaf: stdlib, ``psutil`` and ``debug_logger``. The browser-level question and the
+host-load reading arrive as arguments, so the one place that decides is hermetic.
 """
 
 import asyncio
 from collections.abc import Awaitable, Callable
 
 import psutil
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 #: Machine-wide CPU use (percent) at or above which an unanswered renderer probe is
 #: put down to the host. A saturated machine is the one the measurement was taken on.
@@ -52,6 +54,9 @@ async def verdict(
     try:
         await asyncio.wait_for(browser_answers(), BROWSER_ANSWER_SECONDS)
         percent = await asyncio.to_thread(host_load)
-    except Exception:  # noqa: BLE001  PERMANENT(F-1007: every way of not answering keeps the old verdict, the heal)
+    except Exception as error:  # noqa: BLE001  PERMANENT(F-1007: every way of not answering keeps the old verdict, the heal)
+        debug_logger.log_debug(
+            "starvation", "verdict", f"not starved: {type(error).__name__}"
+        )
         return None
     return f"host cpu {percent:.0f}%" if percent >= SATURATED_PERCENT else None
