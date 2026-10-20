@@ -230,6 +230,15 @@ class TestIdleCanary:
         assert factor == pytest.approx(1.0)
         assert not scheduling_lag.is_starved(factor)
 
+    async def test_a_canary_that_woke_early_still_reads_one_not_less(self, canary):
+        sched, proc = canary
+        window = 10.0
+        c = await self.window(
+            sched, proc, window, int(window / scheduling_lag.CANARY_NAP_SECONDS) + 5
+        )
+
+        assert await c.factor() == 1.0  # more wakes than expected is not "fast"
+
     async def test_a_starved_canary_reads_clamped_and_starved(self, canary):
         sched, proc = canary
         c = await self.window(sched, proc, 15.0, 3)

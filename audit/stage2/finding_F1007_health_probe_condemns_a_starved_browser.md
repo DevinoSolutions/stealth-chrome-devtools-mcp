@@ -51,11 +51,12 @@ priority to IDLE (`SetPriorityClass`, or `nice 19`), announces itself at normal 
 `CANARY_NAP_SECONDS` (0.1 s) and prints a byte. `IdleCanary.factor()`, read inside the window the probe just spent, is
 `window / (wakes x nap)` clamped to `MAX_STRETCH`, so it measures DURING the probe, not after it, and reads the same
 starvation the renderer suffers. It is `None` (no evidence) when the child never announced itself, exited, could not
-be read, or the window is under `CANARY_MIN_WINDOW_SECONDS` (3 s). `BrowserHealth._starved(error, data, factor)` returns a
+be read, or the window is under `CANARY_MIN_WINDOW_SECONDS` (3 s). `BrowserHealth._starved(data, factor)` returns a
 log phrase only when ALL of these hold, and `_check` asks it on every failed probe before the count moves:
 
-* the probe's error is a `TimeoutError`. A `ProbeError` or a refused call is an answer the browser SENT, which no
-  host load explains, so it counts as before;
+* the probe's error was a `TimeoutError`: `_probed` reads the canary for a timeout only, so any other error reaches
+  `_starved` with no factor. A `ProbeError` or a refused call is an answer the browser SENT, which no host load
+  explains, so it counts as before;
 * the canary's factor is at or above `REPORT_FACTOR` (`scheduling_lag.is_starved`, the one threshold);
 * the browser process answers `Browser.getVersion` over a fresh connection inside 5 s (`fresh_browser_version`, the
   question F-993's capture asks).

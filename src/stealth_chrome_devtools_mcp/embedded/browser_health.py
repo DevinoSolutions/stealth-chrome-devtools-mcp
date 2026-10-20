@@ -538,11 +538,11 @@ class BrowserHealth:
         return None if error is None else _describe(error, steps)
 
     async def _starved(
-        self, error: Exception, data: dict[str, object], factor: float | None
+        self, data: dict[str, object], factor: float | None
     ) -> str | None:
         """F-1007: a counts-only phrase when this failed probe is put down to a
-        starved host (*factor*: the IDLE canary's), else ``None``. Never raises."""
-        if not (isinstance(error, TimeoutError) and scheduling_lag.is_starved(factor)):
+        starved host (*factor*: ``_probed``'s, a TIMEOUT only), else ``None``."""
+        if not scheduling_lag.is_starved(factor):
             return None
         url = getattr(data["browser"], "websocket_url", None)
         try:
@@ -611,7 +611,7 @@ class BrowserHealth:
             await self._check_own_connection(instance_id, data["browser"])
             return
         failure = _describe(error, steps)
-        starved = await self._starved(error, data, factor)
+        starved = await self._starved(data, factor)
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
         if starved and self._excused(instance_id, failure, starved):
