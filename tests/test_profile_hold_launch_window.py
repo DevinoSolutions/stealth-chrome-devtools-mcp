@@ -242,7 +242,9 @@ class TestLockReadEdges:
             raise raised
 
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
-        monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", True)
+        # raising=False: before F-1008 there was no such switch, and the pin
+        # must reach the old answer (FREE) rather than fail on a missing name.
+        monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", True, raising=False)
         monkeypatch.setattr(profile_lock.os, "kill", kill)
         answer = hold(tmp_path)
         monkeypatch.undo()
@@ -254,7 +256,7 @@ class TestLockReadEdges:
         """``os.kill`` TERMINATES on Windows: the question is never asked there."""
         write_singleton(tmp_path, f"{socket.gethostname()}-4242")
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
-        monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", False)
+        monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", False, raising=False)
         monkeypatch.setattr(
             profile_lock.os, "kill", lambda *_a: pytest.fail("signalled a pid")
         )
