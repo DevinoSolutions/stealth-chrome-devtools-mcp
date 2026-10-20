@@ -138,13 +138,20 @@ _STDERR_CAP_LINES = 200
 # here). Serves tests/fixture_app plus the plan_E2E §2.2 API routes over an
 # ephemeral 127.0.0.1 port. Moved verbatim from conftest so there is one home.
 # ---------------------------------------------------------------------------
-# Diagnostics only: every request the fixture server actually served. When a
-# navigation fails there is no other way to tell "Chrome never reached the
+# Diagnostics only: every request the fixture server received, and how it ended.
+# When a navigation fails there is no other way to tell "Chrome never reached the
 # server" (a network/launch problem) from "Chrome fetched the page but the load
 # never completed" (a CDP/page problem) — the two have identical symptoms at the
-# tool boundary. Bounded, and never asserted on.
+# tool boundary. An entry is written when the request line is parsed, marked
+# ``[unfinished]``, and rewritten when the handler ends: plain when the response
+# was served, ``[reset]`` when the client went away mid-request. So a request
+# Chrome sent and then cancelled, or one still being served, is visible instead
+# of absent (T-4709: "no GET /app.js" used to mean "none served to completion").
+# Bounded, and never asserted on.
 _FIXTURE_HITS: list[str] = []
 _FIXTURE_HITS_CAP = 50
+_HIT_UNFINISHED = " [unfinished]"
+_HIT_RESET = " [reset]"
 
 
 class _FixtureHandler(SimpleHTTPRequestHandler):
@@ -167,28 +174,48 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
         """Silence per-request stderr logging (keeps test output clean)."""
 
-    def handle_one_request(self):
-        """Record the request line, then serve normally (stdlib override).
+    def parse_request(self):
+        """Record the request the moment its line is parsed (stdlib override)."""
+        parsed = super().parse_request()
+        line = f"{self.client_address[0]} {self.requestline}"
+        if len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
+            _FIXTURE_HITS.append(line + _HIT_UNFINISHED)
+            self._hit = (len(_FIXTURE_HITS) - 1, line)
+        return parsed
 
-        A browser closing a keep-alive socket while this thread sits in
-        ``readline`` raises ``ConnectionResetError`` (WinError 10054) out of
-        the stdlib handler, and pytest prints the whole traceback into the
-        node's captured output — where it masks the output a failure is read
-        from (it did exactly that on PR #151's cookie-node failure). The reset
-        is the client going away on a connection this request never used, so
-        it is nothing to report: return, and record no request line, because
-        there was no request.
+    def _end_hit(self, suffix: str) -> None:
+        """Rewrite this request's entry to its outcome; no-op when it was never
+        recorded or the list was cleared for another server since."""
+        hit, self._hit = self._hit, None
+        if hit is None:
+            return
+        index, line = hit
+        if (
+            index < len(_FIXTURE_HITS)
+            and _FIXTURE_HITS[index] == line + _HIT_UNFINISHED
+        ):
+            _FIXTURE_HITS[index] = line + suffix
+
+    def handle_one_request(self):
+        """Serve one request and record how it ended (stdlib override).
+
+        A browser closing a socket while this thread reads or writes raises a
+        ``ConnectionError`` (``ConnectionResetError`` / WinError 10054, or the
+        aborted/broken-pipe pair) out of the stdlib handler, and pytest prints the
+        whole traceback into the node's captured output — where it masks the
+        output a failure is read from (it did exactly that on PR #151's
+        cookie-node failure). The client going away is nothing to report: return.
+        A reset with no request line parsed (a speculative socket) records
+        nothing, because there was no request; one after it records ``[reset]``.
         """
+        self._hit = None
         try:
             super().handle_one_request()
-        except ConnectionResetError:
+        except ConnectionError:
             self.close_connection = True
+            self._end_hit(_HIT_RESET)
             return
-        line = getattr(self, "raw_requestline", b"") or b""
-        if line and len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
-            _FIXTURE_HITS.append(
-                f"{self.client_address[0]} {line.decode('latin-1').strip()}"
-            )
+        self._end_hit("")
 
     def _send_json(self, payload, status=200, extra_headers=None):
         body = json.dumps(payload).encode("utf-8")
