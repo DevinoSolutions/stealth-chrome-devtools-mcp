@@ -291,6 +291,31 @@ class TestAFailedLaunchHoldsUntilItsChromeIsReaped:
             )
         assert hold(tmp_path) is None
 
+    async def test_a_registered_browser_with_no_process_keeps_it(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        """Registered with no ``_process`` (nodriver's connect-to-existing
+        shape) proves nothing about what is on the profile: it keeps the grace."""
+        launch_seams(False)
+        attempt = spawn_leak.Attempt()
+
+        async def start(config):
+            attached = LaunchedBrowser(config, os.getpid())
+            attached._process = attached._process_pid = None
+            registry.add(attached)
+            raise RuntimeError("Failed to connect to browser")
+
+        monkeypatch.setattr(browser_manager.uc, "start", start)
+        options = BrowserOptions(user_data_dir=str(tmp_path))
+        with nodriver_registry() as registry:
+            with pytest.raises(RuntimeError):
+                await BrowserManager()._launch_browser(options, "exe", [], attempt)
+            monkeypatch.setattr(browser_manager, "process_cleanup", _Reaper(set()))
+            await BrowserManager()._teardown_failed_spawn(
+                "error", "i-1", None, None, options, attempt
+            )
+        assert hold(tmp_path) is not None, "a Browser with no process read as gone"
+
     async def test_a_delegated_launch_that_failed_keeps_its_grace(
         self, tmp_path, monkeypatch, launch_seams
     ):
