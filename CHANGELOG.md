@@ -2,23 +2,6 @@
 
 ## Unreleased
 
-### The backend starts on Python 3.14 (F-1005)
-
-On Python 3.14 the backend died while registering its tools: `KeyError: 'instance_id'` out of fastmcp's schema build, so
-`--list-sections`, `serve` and every `spawn_browser` failed. PEP 649 made `functools.wraps` copy `__annotate__` instead of
-`__annotations__`, and `tab_binding.scoped` (F-962) assigned `__annotations__` to add `tab_id`, which leaves `__annotate__`
-None; the `with_correlation_id` layer every tool gets then came out with no annotations. `scoped` now also sets a real
-`__annotate__` on 3.14. A newer pydantic, fastmcp or mcp does not change this (pydantic 2.14.1, fastmcp 4.1.1 and mcp 2.3.0
-fail the same way). Python 3.11-3.13 are unchanged, and 3.14 is still not in the release gate matrix.
-
-### The release-gate harness waits for the fixture app to be wired before it interacts (F-1006)
-
-Test-only. `_settle_dom` and `navigate_and_settle` returned once `body` was queryable, but `app.js` (end of `<body>`) attaches the
-listeners and `window.__actions` later, so on a slow Windows runner click/type/select were silently lost and the oracle read
-`None` (`json.loads(None)` `TypeError`, PR #243 install-smoke). `app.js` now sets `window.__fixtureReady` after wiring, and both settle
-helpers wait for a `complete` document with it set (`fixture_routes.wait_fixture_ready`, one definition, 15 s, a failed probe is
-retried). A page that never wires fails naming the last page state it saw, including whether `app.js` was ever fetched.
-
 ### The health probe no longer heals a browser that is only starved (F-1007)
 
 `browser_health` probes a background `about:blank` target, and Chrome runs a renderer nothing is looking at at IDLE
@@ -41,6 +24,25 @@ or F-963's freeze on an idle machine heals exactly as before. The `default`/`fle
 witness and the relaunch options moved verbatim out of `browser_health.py`, which stood at exactly its 1000-line budget,
 into `embedded/shared_session.py`.
 
+## 2.1.36
+
+### The backend starts on Python 3.14 (F-1005)
+
+On Python 3.14 the backend died while registering its tools: `KeyError: 'instance_id'` out of fastmcp's schema build, so
+`--list-sections`, `serve` and every `spawn_browser` failed. PEP 649 made `functools.wraps` copy `__annotate__` instead of
+`__annotations__`, and `tab_binding.scoped` (F-962) assigned `__annotations__` to add `tab_id`, which leaves `__annotate__`
+None; the `with_correlation_id` layer every tool gets then came out with no annotations. `scoped` now also sets a real
+`__annotate__` on 3.14. A newer pydantic, fastmcp or mcp does not change this (pydantic 2.14.1, fastmcp 4.1.1 and mcp 2.3.0
+fail the same way). Python 3.11-3.13 are unchanged, and 3.14 is still not in the release gate matrix.
+
+### The release-gate harness waits for the fixture app to be wired before it interacts (F-1006)
+
+Test-only. `_settle_dom` and `navigate_and_settle` returned once `body` was queryable, but `app.js` (end of `<body>`) attaches the
+listeners and `window.__actions` later, so on a slow Windows runner click/type/select were silently lost and the oracle read
+`None` (`json.loads(None)` `TypeError`, PR #243 install-smoke). `app.js` now sets `window.__fixtureReady` after wiring, and both settle
+helpers wait for a `complete` document with it set (`fixture_routes.wait_fixture_ready`, one definition, 15 s, a failed probe is
+retried). A page that never wires fails naming the last page state it saw, including whether `app.js` was ever fetched.
+
 ### A backend started by Task Scheduler no longer starves every Chrome it launches (F-1004)
 
 A backend started on the scheduler rung (F-867) inherits the task's I/O priority Low and memory priority 2, and every
@@ -52,6 +54,19 @@ its own I/O and memory priority to Normal in `app_lifespan`, before anything can
 delegated headed Chrome is raised as soon as its pid is known, together with the child processes it has already
 started (crashpad, the GPU process and the network service exist within 0.15 s and inherited the Low levels). The raise only ever goes up and never fails a
 backend or a spawn.
+
+### A launched Chrome that has not opened its first page yet is waited for, not killed (F-1003)
+
+`spawn_browser` took its tab with `browser.main_tab` the instant the launch returned. nodriver reads the target list
+exactly once, right after `/json/version` answers, and on a large real profile (275-871 MB, extensions,
+restore-on-startup) Chrome answers that endpoint before it has created its first page target. `main_tab` then raised
+`IndexError: list index out of range`, the attempt was torn down, F-860 killed a Chrome that was coming up fine and
+`_SPAWN_ATTEMPTS` relaunched from cold: a live `spawn_browser` on a copy of a 275 MB profile reported two such retries
+and succeeded on the third attempt. The same read could also hand back a non-page target (`background_page`,
+`service_worker`) as the instance's tab when no page existed yet. `browser_connect.first_page` now re-reads the targets
+until a page exists, for up to `CONNECT_PATIENCE_SECONDS` (a second wait after the endpoint wait, as its own
+spawn phase sized by the post-launch budget), and ends at once if the launched Chrome has exited. The F-810 delegated launch gets the
+same wait; the re-attach of an already-open Chrome (`browser_reattach`) is unchanged.
 
 ### `networkidle` no longer spends the whole navigation budget on its fixed sleep (F-1002)
 

@@ -410,6 +410,11 @@ class FakeTab:
         self._current_loader: str | None = None
         self._superseded = False
 
+    @property
+    def type_(self) -> str:
+        """nodriver's ``Connection`` answers ``type_`` off its target (F-1003)."""
+        return self.target.type_
+
     # -- the navigation model (F-881) ---------------------------------------
 
     def _deliver(self, event: Any) -> None:
@@ -2217,6 +2222,10 @@ class FakeBrowser:
         # that reports no tab is a real case the adoption path must refuse rather
         # than register half an instance for.
         self.main_tab = main_tab
+        # A browser that reports a main tab has opened that page (F-1003:
+        # ``browser_connect.first_page`` waits on a ``page`` target).
+        if main_tab is not None and main_tab not in self.tabs:
+            self.tabs.append(main_tab)
 
     @property
     def targets(self) -> list[Any]:

@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import sys
 import urllib.error
 
 import nodriver as uc
 import pytest
+from nodriver import cdp
 from nodriver.core.browser import Browser, HTTPApi
 
 from fakes import nodriver_registry
@@ -78,13 +80,24 @@ class FakeConnection:
     """nodriver's ``Connection``, as ``Browser.start`` uses it: a handler map
     and one ``send``. Nothing here opens a websocket."""
 
-    def __init__(self, url, browser=None, **_kwargs) -> None:
+    #: What ``Target.getTargets`` answers right now; a node that cares sets it.
+    targets_now = None
+
+    def __init__(self, url, browser=None, **kwargs) -> None:
         self.url = url
         self.handlers: dict = {}
         self.sent: list = []
+        self.target = kwargs.get("target")
 
-    async def send(self, command, **_kwargs):
+    def __getattr__(self, item):
+        """nodriver's ``Connection`` reads ``type_`` and the rest off its target."""
+        return getattr(self.target, item)
+
+    async def send(self, command, **kwargs):
         self.sent.append(command)
+        if kwargs.get("_is_update") and self.targets_now is not None:
+            return self.targets_now()
+        return None
 
 
 @pytest.fixture
@@ -144,6 +157,9 @@ def launcher(monkeypatch, tmp_path):
     # home for that, shared with ``test_spawn_leak``.
     with nodriver_registry():
         yield process, _config
+
+
+_REAL_UPDATE_TARGETS = Browser.update_targets
 
 
 def _unwrapped() -> object:
@@ -369,3 +385,188 @@ async def test_the_window_this_extends_is_still_the_one_in_nodrivers_source():
 
     browser_source = inspect.getsource(sys.modules[Browser.__module__])
     assert browser_source.count('_http.get("') == 1
+
+
+# --- F-1003: the endpoint answering is not the first page existing ------------
+
+
+def _target(kind: str, n: int) -> cdp.target.TargetInfo:
+    """One ``Target.getTargets`` entry, built by nodriver's own constructor."""
+    return cdp.target.TargetInfo(
+        target_id=cdp.target.TargetID(f"f1003-{kind}-{n}"),
+        type_=kind,
+        title="",
+        url="about:blank" if kind == "page" else "",
+        attached=False,
+        can_access_opener=False,
+    )
+
+
+@pytest.fixture
+def targets(monkeypatch, clock, endpoint, launcher):
+    """``Target.getTargets`` as a function of the virtual clock.
+
+    The endpoint answers at once (``opens_at`` 0) and nodriver's REAL
+    ``update_targets`` reads the list, so ``Browser.start`` does exactly what it
+    does in production: one read, right after ``/json/version``.
+    """
+    endpoint["opens_at"] = 0.0
+    monkeypatch.setattr(Browser, "update_targets", _REAL_UPDATE_TARGETS)
+    schedule: list[tuple[float, list[cdp.target.TargetInfo]]] = []
+
+    def _now_targets() -> list[cdp.target.TargetInfo]:
+        shown: list[cdp.target.TargetInfo] = []
+        for at, listed in schedule:
+            if clock.now() >= at:
+                shown = listed
+        return list(shown)
+
+    monkeypatch.setattr(FakeConnection, "targets_now", staticmethod(_now_targets))
+    browser_connect.install()
+    return schedule
+
+
+async def test_a_chrome_that_opens_its_first_page_late_is_waited_for(
+    clock, targets, launcher
+):
+    """The defect: ``/json/version`` answered, ``Browser.start`` read an EMPTY
+    target list and ``main_tab`` raised ``IndexError`` — the attempt was torn
+    down and a Chrome that was coming up fine was killed."""
+    page = _target("page", 1)
+    targets.extend([(0.0, []), (3.0, [page])])
+    _process, config_factory = launcher
+    browser = await _start(config_factory)
+    with pytest.raises(IndexError):
+        _ = browser.main_tab  # what spawn_browser did before F-1003
+
+    tab = await browser_connect.first_page(browser)
+
+    assert tab.target.target_id == page.target_id
+    assert clock.now() == pytest.approx(3.0, abs=browser_connect.POLL_SECONDS)
+
+
+async def test_a_non_page_target_is_never_the_instances_tab(clock, targets, launcher):
+    """The latent shape: with only ``background_page``/``service_worker``
+    targets, ``main_tab`` does not raise, it hands back a NON-page one."""
+    background, worker, page = (
+        _target("background_page", 1),
+        _target("service_worker", 2),
+        _target("page", 3),
+    )
+    targets.extend([(0.0, [background, worker]), (2.0, [background, worker, page])])
+    _process, config_factory = launcher
+    browser = await _start(config_factory)
+    assert browser.main_tab.type_ == "background_page"
+
+    tab = await browser_connect.first_page(browser)
+
+    assert tab.type_ == "page"
+    assert tab.target.target_id == page.target_id
+    assert clock.now() == pytest.approx(2.0, abs=browser_connect.POLL_SECONDS)
+
+
+async def test_a_chrome_that_never_opens_a_page_fails_at_the_ceiling_by_name(
+    clock, targets, launcher
+):
+    targets.append((0.0, [_target("browser_ui", 1)]))
+    _process, config_factory = launcher
+    browser = await _start(config_factory)
+
+    with pytest.raises(browser_connect.NoFirstPageError, match="opened no page within"):
+        await browser_connect.first_page(browser)
+
+    assert clock.now() == pytest.approx(
+        browser_connect.CONNECT_PATIENCE_SECONDS, abs=browser_connect.POLL_SECONDS
+    )
+
+
+async def test_a_launcher_that_exits_while_waiting_for_the_page_ends_it_there(
+    clock, targets, launcher
+):
+    targets.append((0.0, []))
+    process, config_factory = launcher
+    browser = await _start(config_factory)
+    died_at = clock.now() + 1.0
+
+    def die_at(now: float) -> None:
+        if now >= died_at:
+            process.returncode = 1
+
+    clock.on_tick = die_at
+
+    with pytest.raises(browser_connect.NoFirstPageError, match="exited"):
+        await browser_connect.first_page(browser)
+
+    assert clock.now() < died_at + 2 * browser_connect.POLL_SECONDS
+
+
+async def test_a_launcher_that_exited_before_the_page_is_not_polled(
+    clock, targets, launcher
+):
+    targets.append((0.0, []))
+    process, config_factory = launcher
+    browser = await _start(config_factory)
+    process.returncode = 1
+    before = clock.now()
+
+    with pytest.raises(browser_connect.NoFirstPageError, match="exited"):
+        await browser_connect.first_page(browser)
+
+    assert clock.now() == before
+
+
+async def test_a_delegated_launch_with_no_process_handle_is_waited_for_too(
+    clock, targets, launcher
+):
+    """The F-810 headed launch is connected to through ``cdp_attach``, so nodriver
+    leaves ``_process`` None and only ``_process_pid`` is stamped — and it is a
+    Chrome of ours that is just as fresh. What decides who is waited for is the
+    CALLER (``spawn_browser``), not ``_process``; liveness is
+    ``process_exit.browser_is_alive``, which reads the pid."""
+    _process, config_factory = launcher
+    delegated = Browser(config_factory())
+    assert delegated._process is None
+    delegated._process_pid = os.getpid()
+    page = _target("page", 1)
+
+    async def _opens_a_page_at_two_seconds(self):
+        if clock.now() >= 2.0:
+            self.targets.append(FakeConnection("ws://x", target=page))
+
+    delegated.update_targets = _opens_a_page_at_two_seconds.__get__(delegated)
+
+    tab = await browser_connect.first_page(delegated)
+
+    assert tab.target.target_id == page.target_id
+    assert clock.now() == pytest.approx(2.0, abs=browser_connect.POLL_SECONDS)
+
+
+async def test_an_update_targets_that_never_answers_is_bounded_by_the_phase(
+    monkeypatch, clock, targets, launcher
+):
+    """nodriver gives ``update_targets`` no deadline, so a wedged websocket must
+    end in the spawn budget's named stage rather than parking the spawn."""
+    from stealth_chrome_devtools_mcp.embedded import spawn_budget
+    from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+    monkeypatch.setattr(spawn_budget, "POST_LAUNCH_BUDGET_SECONDS", 0.2)
+    targets.append((0.0, []))
+    _process, config_factory = launcher
+    browser = await _start(config_factory)
+
+    async def _wedged(self):
+        await asyncio.Event().wait()
+
+    browser.update_targets = _wedged.__get__(browser)
+
+    with pytest.raises(ToolError, match="first-page wait stage"):
+        await asyncio.wait_for(browser_connect.first_page(browser), 30)
+
+
+async def test_spawn_browser_takes_its_tab_from_first_page_not_main_tab():
+    """The wiring: the one line after the launch that used to read ``main_tab``
+    bare. ``browser_reattach`` is the other reader and is an ATTACH."""
+    source = inspect.getsource(BrowserManager.spawn_browser)
+
+    assert "await browser_connect.first_page(browser)" in source
+    assert ".main_tab" not in source
