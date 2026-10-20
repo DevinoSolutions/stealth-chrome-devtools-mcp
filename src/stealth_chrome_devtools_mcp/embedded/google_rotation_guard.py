@@ -58,13 +58,16 @@ interception: no guard 0/216, the guard 25/216 on macOS; the same guard with its
 auto-attach, per-target attach and resume intact but ``Fetch.enable`` never sent
 0/366 (macOS + Linux, p=2e-9 against 29/366), so neither the extra browser
 connection, the auto-attach nor the extension service worker that crashes beside
-it is the cause. ``Network.setBlockedURLs`` blocks the same URLs without
-interception (probe 108/108 blocked, 0/366 bad runs). ``Network.enable`` is what
-makes the agent honour it, and it also streams every network event of every page
-of the clone to this connection, where :meth:`RotationGuard._handle` drops them
-(the cost of the fix, measured nowhere yet). Its three size limits are 0 because
-this connection only ever needs the blocking, never a response or post body, and
-the default would buffer every body of every page of the clone.
+it is the cause. A narrower ``Fetch.enable`` (rotation patterns, ``resourceType``
+``Document`` only) is no way out: it paused no request and still failed 16 of 216
+macOS runs, so enabling the domain at all is the trigger. ``Network.setBlockedURLs``
+blocks the same URLs without interception (probe 108/108 blocked, 0/366 bad runs).
+``Network.enable`` is what makes the agent honour it, and it also streams every
+network event of every page of the clone to this connection, where
+:meth:`RotationGuard._handle` drops them (the cost of the fix, measured nowhere
+yet). Its three size limits are 0 because this connection only ever needs the
+blocking, never a response or post body, and the default would buffer every body
+of every page of the clone.
 Auto-clones are never re-adopted after a backend restart (the adoption rule only
 takes persistent profiles, ``auto_clone`` false), so a re-attached browser is a
 master or a named session, which is meant to rotate: no re-arm site exists. If this

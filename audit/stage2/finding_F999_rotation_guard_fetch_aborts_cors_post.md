@@ -18,7 +18,7 @@ of runs, a preflight that completed (`OPTIONS` answered) and then a POST that ne
 `net::ERR_ABORTED`, the fixture ledger read `OPTIONS` without `POST`. Windows never showed it. Linux showed it at about
 1-3% per run, macOS at 5-12% per run.
 
-## 2. What nine diagnostic rounds established
+## 2. What diagnostic rounds 1-9 established (round 10 is in section 4)
 
 Rounds 1-6 (raw CDP `Network` events, a server accept/request trace, Chrome timestamps, a net-log of the failing
 requests, a guard-armed vs guard-disabled A/B, 200 runs per arm, then interleaved arms with a guard-connection target
@@ -77,23 +77,60 @@ The refused-command accounting that existed for `Fetch.enable` (a clone left ung
 only) now covers `Network.enable` and `Network.setBlockedURLs` (`_BLOCKING_METHODS`), and a target that detaches first
 still does not count as a refusal (F-957).
 
-### CDP semantics argued, not measured
+### Round 10: can a narrow `Fetch.enable` close the navigation gap? No, measured
+
+Lead's hybrid: keep `Network.setBlockedURLs` for requests and add a `Fetch.enable` whose patterns are only the
+rotation patterns with `resourceType: "Document"`, failing what it pauses with `Fetch.failRequest`, so that
+navigations are blocked again while preflights, XHR and fetch never pass through Fetch interception. Measured the way
+round 9 was (macOS integration cell, `tests/test_f999_diag.py` on a throwaway branch of this PR's head, diag PR #254,
+run 39449526716, 18 chunks x 24 instances, 4 arms interleaved, 216 runs per arm, same bad-run selection):
+
+| arm | bad / 216 | extension-SW crash runs | requests paused by Fetch |
+|---|---|---|---|
+| NOGUARD | 0 | 0 | n/a |
+| GUARD_OLD (the replaced guard, emulated: no `Network.*`, `Fetch.enable` on every rotation pattern, `Fetch.failRequest`) | **20** | 21 | 108 |
+| BLOCKNET (this PR's guard as shipped) | **0** | 0 | n/a |
+| GUARD_DOC (this PR's guard plus the Document-only `Fetch.enable`) | **16** | 15 | **0** |
+
+GUARD_DOC vs BLOCKNET and vs NOGUARD: p=2.3e-5. GUARD_DOC vs GUARD_OLD: p=0.60 (indistinguishable). GUARD_OLD vs
+NOGUARD: p=1.2e-6, so the harness still reproduces the flake. All 36 bad runs in the two Fetch arms have the same
+signature as before (ledger `OPTIONS` only, no `POST`). All three guarded arms blocked the probe request on 108/108
+(`blockedReason: "inspector"` through `Network.setBlockedURLs`, `net::ERR_BLOCKED_BY_CLIENT.Inspector` through Fetch).
+
+The result that matters: **GUARD_DOC paused no request at all (0) and still failed 16 of 216.** The page's POST never
+matched a Document pattern, so it is not the interception of any request that aborts it; merely having the `Fetch`
+domain enabled on the page's session, with any pattern, is enough. A narrower `Fetch.enable` therefore cannot be the
+fix, and the hybrid is dropped. The guard has a hermetic pin that `Fetch.*` is never sent, whose docstring now says
+so.
+
+The shipped guard (BLOCKNET) has now run 0 of 582 bad armed runs (macOS 216 + 216, Linux 150), against 49 of 582 for
+the arms that enable `Fetch` (GUARD 29/366 + GUARD_OLD 20/216).
+
+### The navigation gap: an accepted, documented residual
+
+With `Fetch` ruled out and `Network.setBlockedURLs` not failing a document navigation, a frame's DOCUMENT load of
+`accounts.{google,youtube}.com/RotateCookiesPage` is not blocked in a clone. The first CI run showed this on Linux,
+macOS and Windows (`assert 'served' == 'blocked'`); my earlier argument that a subframe navigation would be blocked was
+wrong. The e2e pins the measured outcome (`"served"`) so a Chrome that starts blocking it shows up rather than passes
+silently.
+
+Why it is accepted, and how far that reasoning goes. The F-939 premise (module docstring, the 2026-10-05 incident) is
+that the rotation is the `POST accounts.google.com/RotateCookies` which the `RotateCookiesPage` iframe's script makes;
+that POST is a request the page makes, and this change blocks it (a fetch, an XHR, a redirect hop and a worker's
+request, all CI-measured on three OSes). **What is not established:** that the `RotateCookiesPage` document response
+itself carries no `Set-Cookie` that rotates the pair, and that Google has no other document-level path. We have no
+throwaway Google account, so neither was measured, and no Google request was made. If the document response alone can
+rotate, the guard has a hole it did not have before this change. The trade made is a measured, recurring release-gate
+failure and a page's own aborted CORS POST (49 of 582 armed runs) against an unmeasured residual on a path the
+original design did not rely on.
+
+### Other CDP semantics
 
 - **Redirects.** `Network.setBlockedURLs` is checked on every request the target's network stack issues for a page,
   each hop of a redirect included. CI measured it: a `fetch` redirected by a 302 into a pattern URL is blocked on a
   clone and served on the master, on Linux, macOS and Windows.
-- **Navigations: NOT blocked, a behaviour change.** My first version of this argument said a subframe navigation is
-  "a request in the frame's own target" and so blocked. The first CI run on this PR disproved it on all three OSes
-  (`assert 'served' == 'blocked'`): an `<iframe src="/RotateCookiesPage?origin=x">` inside a clone loads (a
-  same-origin document) rather than showing Chrome's blocked-page error. `Network.setBlockedURLs` fails the requests
-  a page makes; it does not fail a document navigation, which the `Fetch.enable` interception it replaces did. The
-  e2e now pins that outcome (`"served"`) with its reason, so a later Chrome that starts blocking it will show up
-  rather than pass silently. Whether that matters depends on whether a rotation can complete from the
-  `RotateCookiesPage` document alone; the rotation Google performs from it is the `POST /RotateCookies` the page then
-  makes, which IS blocked (the page's own request, in the iframe's attached session), but that is the published
-  behaviour of that page, not something measured here (no Google request was made). See section 7.
 - **Dedicated workers.** They are separate targets; the guard's `Target.setAutoAttach` already reaches them and
-  configures each before it runs. The e2e asserts a worker-issued fetch is blocked on a clone.
+  configures each before it runs. The e2e asserts a worker-issued fetch is blocked on a clone (CI-measured, three OSes).
 - **What is given up.** The guard only ever failed matching requests with `BlockedByClient` (the removed
   `Fetch.requestPaused` handler); it never fulfilled or modified one. The one thing the interception did that
   `Network.setBlockedURLs` does not is failing a frame's document navigation to a pattern URL (above).
@@ -150,15 +187,14 @@ conversation, and M8 then went RED.
 
 ## 7. Open risks
 
-1. **A document navigation to a pattern URL is no longer failed** (measured on CI, section 4). If a rotation can
-   complete from the `RotateCookiesPage` document without the later `POST /RotateCookies`, the guard would not stop
-   it. Resolving that needs a throwaway Google account (never the operator's), which this change does not touch.
-   Redirect and dedicated-worker blocking passed on CI on all three OSes.
+1. **A document navigation to a pattern URL is no longer failed** (measured on CI) and a Document-only `Fetch.enable`
+   does not fix it (round 10). If the `RotateCookiesPage` document response can rotate the pair by itself, the guard
+   would not stop it. Resolving that needs a throwaway Google account, which does not exist. See the residual section.
 2. `Network.enable` makes Chrome stream every network event of every attached session to the guard's connection, where
    they are parsed and dropped. The cost is unmeasured.
 3. The zero buffer limits (section 4) deviate from the measured BLOCKNET arm.
 4. nodriver's `set_blocked_ur_ls(urls=…)` uses the `urls` field, which newer protocol versions deprecate in favour of
    `urlPatterns`; a Chrome that stopped honouring `urls` would be a refused command (a warning), not a silent one.
 5. Whether `Network.setBlockedURLs` works without `Network.enable` was not tested; it would remove risk 2 if it did.
-6. Confirmation that the flake is gone is statistical: the PR asks for three armed macOS CI runs (GUARD was 25/216,
-   about 11.6% per run, so three runs of the journey are not proof, the 216-run diag is).
+6. Confirmation that the flake is gone is statistical: the shipped guard is 0/216 in round 10 on macOS, in addition to
+   round 9 (0/216) and Linux (0/150); three journey runs would add little (the flake was about 10% per run).
