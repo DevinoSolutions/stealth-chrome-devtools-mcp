@@ -60,6 +60,22 @@ into `embedded/shared_session.py`.
 
 CI-only. F-1005 (2.1.36) gated an `__annotate__` fix to Python 3.14, but the gate ran 3.11-3.13 only, so its pin never executed on CI. `release-gate.yml` gains ONE `unit-tests` cell, `Linux-X64-py3.14` (same hermetic `-m "not integration"` selection), declared in `tools/release_evidence.py`'s `REQUIRED_CELLS` so the evidence aggregate requires it, and listed in `RELEASE_CONTRACT.md`. Linux and unit tests only: no Windows/macOS, coverage, integration or transport cell on 3.14.
 
+### A profile reads as held while our own browser is still starting on it (F-1008)
+
+`profile_hold` answers "is this profile in use" from the process table and Chrome's `SingletonLock`. Neither can see a
+browser that is still starting: on Linux the launcher `exec`s the real binary under the same pid, and the pid reads an
+empty argv meanwhile, and Chrome writes `SingletonLock` 0.1-0.6 s after that. F-998's review measured 4 FREE polls inside
+one launch. For that window a second spawn, a seed copy or a storage trim could act on a profile a browser was starting
+on, which is the master-profile-loss class. Our launcher now writes a launch marker, `stealth-launch.lock`, in the
+profile for as long as it is starting a browser there, and `profile_hold` reads it as held. The marker holds
+`<hostname>-<pid>` like Chrome's lock and is read by the same code. It is never copied into another profile, and it stops
+counting once its backend has exited or once it is older than a launch may last (120 s). Three lock reads were also
+fixed in the same direction: a `SingletonLock` that exists but cannot be read now reads as held (it used to read as no
+lock), a lock owner that `/proc` hides under `hidepid=2` is asked of the kernel, and a lock pid too large for an `int`
+reads as no pid, as Chromium reads it, instead of raising `OverflowError` out of the spawn. One cost: while `default` is
+being launched, an unnamed spawn that would copy its live cookies is refused for those seconds, as it is for any
+`default` held by a browser this backend does not drive.
+
 ## 2.1.36
 
 ### The backend starts on Python 3.14 (F-1005)
