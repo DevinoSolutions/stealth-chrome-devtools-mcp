@@ -33,5 +33,18 @@ def log_failure(method: str, instance_id: str, exc: BaseException) -> bool:
     """
     gone = is_already_gone(exc)
     log = debug_logger.log_debug if gone else debug_logger.log_warning
-    log("browser_manager", method, f"Failed to close tab for {instance_id}: {exc}")
+    log(
+        "browser_manager",
+        method,
+        f"Failed to close tab for {instance_id}: {_describe(exc)}",
+    )
     return gone
+
+
+def _describe(exc: BaseException) -> str:
+    """The failure's type and text. The type is the part that cannot be left
+    out: a ``TimeoutError`` from ``asyncio.wait_for`` has NO text, so the line
+    read ``Failed to close tab for <id>: `` and named nothing (T-5900, CI run
+    39564101655)."""
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__

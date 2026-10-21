@@ -276,8 +276,13 @@ async def test_a_browser_that_never_says_who_it_is_times_out_by_name(world, prof
 
 
 async def test_the_identity_wait_fits_inside_the_launch_phase():
+    """The floor, the patience while our launch runs, and the room the rest of
+    the launch needs: the patience must leave the launch phase most of its 120 s."""
     assert (
-        0 < devtools_port.IDENTITY_TIMEOUT_SECONDS < spawn_budget.LAUNCH_BUDGET_SECONDS
+        0
+        < devtools_port.IDENTITY_TIMEOUT_SECONDS
+        <= devtools_port.IDENTITY_PATIENCE_SECONDS
+        <= spawn_budget.LAUNCH_BUDGET_SECONDS / 2
     )
 
 

@@ -30,13 +30,22 @@ class _Connection:
         self.processes = processes
         self.disconnected = False
         self.sent: list[dict] = []
-        #: ``"hang"`` never answers; an exception instance is raised instead.
+        #: ``"hang"`` never answers; ``("slow", seconds)`` answers after that long;
+        #: an exception instance is raised instead.
         self.behaviour: object = None
+        #: The request was cancelled rather than left running (T-5899).
+        self.send_cancelled = False
 
     async def send(self, command):
         self.sent.append(next(command))
-        if self.behaviour == "hang":
-            await asyncio.Event().wait()
+        try:
+            if self.behaviour == "hang":
+                await asyncio.Event().wait()
+            if isinstance(self.behaviour, tuple) and self.behaviour[0] == "slow":
+                await asyncio.sleep(self.behaviour[1])
+        except asyncio.CancelledError:
+            self.send_cancelled = True
+            raise
         if isinstance(self.behaviour, BaseException):
             raise self.behaviour
         return self.processes
@@ -72,6 +81,13 @@ def _browser(*processes: tuple[str, int]) -> SimpleNamespace:
             [cdp.system_info.ProcessInfo(t, i, 0.0) for t, i in processes]
         )
     )
+
+
+def _short_waits(monkeypatch) -> None:
+    """Scale the identity waits down so the pins run in a fraction of a second."""
+    monkeypatch.setattr(devtools_port, "IDENTITY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 1.0)
 
 
 class TestOwnedPids:
@@ -145,6 +161,58 @@ class TestConfirmOurs:
         )
         with pytest.raises(ToolError, match="cannot identify its process"):
             await devtools_port.confirm_ours(browser, LAUNCHED)
+        assert browser.connection.disconnected
+
+    async def test_a_slow_answer_from_our_own_running_launch_is_accepted(
+        self, monkeypatch, logged
+    ):
+        """T-5899: a healthy Chrome on a starved runner answered after the floor
+        and the spawn of OUR OWN browser was refused. While the pid we launched is
+        running, the wait goes on past the floor (here 0.05 s) and the late answer
+        is the proof, as ever; the delay is logged so a slow host is visible."""
+        _short_waits(monkeypatch)
+        me = os.getpid()
+        browser = _browser(("browser", me))
+        browser.connection.behaviour = ("slow", 0.4)
+        await devtools_port.confirm_ours(browser, me)
+        assert not browser.connection.disconnected
+        assert [fn for fn, _ in logged] == ["confirm_ours"]
+        assert "to say which process it is" in logged[0][1]
+
+    async def test_a_stranger_answering_late_is_still_refused(self, monkeypatch):
+        """Patience is not trust: the pid in the answer decides, however late."""
+        _short_waits(monkeypatch)
+        browser = _browser(("browser", OTHER))
+        browser.connection.behaviour = ("slow", 0.4)
+        with pytest.raises(ToolError, match=f"process {OTHER}"):
+            await devtools_port.confirm_ours(browser, os.getpid())
+        assert browser.connection.disconnected
+
+    async def test_silence_past_the_patience_is_refused_and_the_request_ended(
+        self, monkeypatch
+    ):
+        _short_waits(monkeypatch)
+        browser = _browser()
+        browser.connection.behaviour = "hang"
+        with pytest.raises(ToolError, match="did not say which process it is"):
+            await asyncio.wait_for(
+                devtools_port.confirm_ours(browser, os.getpid()), 10.0
+            )
+        assert browser.connection.disconnected
+        assert browser.connection.send_cancelled
+
+    async def test_a_launcher_that_is_gone_gets_no_wait_past_the_floor(
+        self, monkeypatch
+    ):
+        """Only a RUNNING launch earns the patience. A pid that is gone (here one no
+        machine hands out) is held to the floor; the outer bound fails this pin
+        if the patience is given anyway."""
+        _short_waits(monkeypatch)
+        monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 60.0)
+        browser = _browser()
+        browser.connection.behaviour = "hang"
+        with pytest.raises(ToolError, match="did not say which process it is"):
+            await asyncio.wait_for(devtools_port.confirm_ours(browser, LAUNCHED), 10.0)
         assert browser.connection.disconnected
 
     async def test_the_refusal_names_a_separate_pid_namespace(self):
