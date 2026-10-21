@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### CI cancels a pull request's superseded runs (T-5430)
+
+`test.yml` now has a `concurrency` group keyed on the PR number (or the ref)
+with `cancel-in-progress` true for `pull_request` events only, so a new commit
+stops the previous full 3-OS gate. Pushes to main/dev, `v*` tag runs and manual
+runs are never cancelled. A test pins the shape.
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)

@@ -220,6 +220,47 @@ def test_pr_caller_runs_the_same_reusable_gate():
 # ---------------------------------------------------------------------------
 # W5: the evidence ledger is wired to the real jobs, not to a parallel list.
 # ---------------------------------------------------------------------------
+def test_only_pull_request_runs_are_ever_cancelled():
+    """Superseded PR runs cancel; main/dev pushes, tags and dispatches never do.
+
+    The group lives in the CALLER (test.yml): a `concurrency` inside the called
+    release-gate.yml would evaluate in publish.yml's/canary.yml's context too.
+    """
+    caller = _load(TEST_CALLER)
+    conc = caller["concurrency"]
+    assert conc["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert "github.event.pull_request.number || github.ref" in conc["group"]
+    assert "concurrency" not in _load(RELEASE_GATE)
+    assert all("concurrency" not in j for j in _jobs(RELEASE_GATE).values())
+    # publish (tags) must stay out of the cancelling group entirely.
+    assert "concurrency" not in _load(PUBLISH)
+    assert "pull_request" not in _load(PUBLISH)[True]
+
+
+def test_release_tag_reaches_the_shell_only_through_env():
+    """T-5588: no `${{ inputs.* }}` or `github.ref_name` text inside a `run:` script."""
+    for path in (RELEASE_GATE, PUBLISH, TEST_CALLER):
+        for name, job in _jobs(path).items():
+            for run in _all_run_steps(job):
+                assert not re.search(
+                    r"\$\{\{\s*(inputs|github\.(ref_name|head_ref|event\.(?!pull_request\.number)))",
+                    run,
+                ), (
+                    f"{path.name}:{name} interpolates an attacker-influenced value into a script"
+                )
+    steps = _jobs(RELEASE_GATE)["build-dist"]["steps"]
+    step = next(s for s in steps if "assert-version" in s.get("run", ""))
+    assert step["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
+    assert '"$RELEASE_TAG"' in step["run"]
+
+
+def test_the_pr_caller_grants_least_privilege_not_write_all():
+    """T-5586: the caller grants exactly what release-gate.yml caps itself at."""
+    granted = _jobs(TEST_CALLER)["release-gate"]["permissions"]
+    assert granted == {"contents": "read", "id-token": "write"}
+    assert granted == _load(RELEASE_GATE)["permissions"]
+
+
 def test_w5_evidence_edge_is_present_and_required(gate_jobs):
     assert "release-evidence" in gate_jobs, (
         "W5's ledger job is missing; the aggregate would be green with no "
