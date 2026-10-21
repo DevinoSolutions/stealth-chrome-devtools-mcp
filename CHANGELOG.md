@@ -11,7 +11,7 @@ no `requestAnimationFrame`, timers clamped to 1 Hz, and it also missed the heade
 target with an `openerId` calls the same `BrowserManager._arm_tracked_tab` that `new_tab` and `switch_tab` use. A tab the backend opened itself has no
 opener and is armed by its caller, so nothing is armed twice; a later `switch_tab` re-arms harmlessly (network capture is keyed by target id). On a
 real headed spawn, a popup in the background reads `visible`, 172 frames and 30 timer ticks in 3 s, against `hidden`, 1 frame and 4 ticks before.
-Best effort: a popup that closes first or a refused command is logged, never raised. See `audit/stage2/finding_F1012_popups_armed_on_creation.md`.
+Best effort: a popup that closes first, a refused command or an arming that takes over 5 s is logged, never raised. Measured on a real headed spawn for `window.open()` and `<a target=_blank rel=noopener>` (both carry an `openerId`), and a tab `open_tab` makes carries none. Each popup now costs a websocket and, with capture armed, `Network.enable` plus entries in `network_data`; nothing caps that. See `audit/stage2/finding_F1012_popups_armed_on_creation.md`.
 
 ## 2.1.38
 
