@@ -37,7 +37,7 @@ or timezone command cannot skip it. That home is already reached by:
   (its options carry no headers or timezone, those are in `not_restored`, so this is focus emulation alone; CDP state died with the backend that set it).
 
 Best effort: a refusal is logged (`debug_logger.log_warning`) and swallowed; a spawn or a tab never fails because of it. Applied headed and headless
-alike: no concrete reason to differ (headless pages are already "visible", so the call is a harmless no-op there). No second code path was added.
+alike: no concrete reason to differ, but the headless effect was not measured. No second code path was added.
 
 ## 3. Residuals, stated plainly
 
@@ -48,6 +48,7 @@ alike: no concrete reason to differ (headless pages are already "visible", so th
 - **Page-opened popups (`window.open`) are not driven through the home** until a tool moves onto them (`switch_tab` arms it). Adding a target-created
   listener would be a second way to arm a tab, so it is not done here.
 - Mac and Linux were not measured; the call is cross-platform CDP and is sent everywhere.
+- Survival of the emulation across target rediscovery (F-775a) or a `Connection` swap is not measured; `_arm_tracked_tab` re-applies it on every `switch_tab`, which bounds the exposure.
 
 ## 4. Verification
 
@@ -55,7 +56,7 @@ Hermetic pins (`tests/fakes.py` `FakeTab`):
 
 - `test_focus_emulation.py::test_the_spawn_tab_gets_focus_emulation`, `::test_a_refused_focus_emulation_does_not_fail_the_spawn`,
   `::test_a_failing_header_command_cannot_skip_focus_emulation`, `::test_new_tab_gets_focus_emulation` (the real `new_tab` tool against the real manager),
-  `::test_a_refused_focus_emulation_does_not_fail_new_tab`;
+  `::test_a_refused_focus_emulation_does_not_skip_the_rest_of_the_arming` (the refusal must not skip the tab's headers or the network armer);
 - `test_browser_reattach.py::TestAnAdoptedInstanceTellsTheTruth::test_the_adopted_tab_gets_focus_emulation`.
 - `test_extra_headers_cdp.py::test_spawn_sends_no_header_command_when_extra_headers_is_empty` used to assert an EMPTY frame list; it now asserts no
   `Network.setExtraHTTPHeaders` frame (the claim it was named for).
@@ -64,8 +65,8 @@ Mutation, by runtime rebinding in an out-of-tree copy (`src` + `tests` copied to
 
 | Rebinding | Result |
 |---|---|
-| `enable_focus_emulation` is a no-op | 6 fail: spawn, spawn-refused, header-order, `new_tab`, `new_tab`-refused (count 0), re-attach |
-| `enable_focus_emulation` sends without the try/except | 1 fails (spawn-refused). The `new_tab` refused-pin SURVIVES: `_arm_tracked_tab` already catches and logs everything, a second net by design |
+| `enable_focus_emulation` is a no-op | 5 of 5 fail: spawn, spawn-refused, header-order, `new_tab`, arming-continues (re-attach pin also fails, 6 in all) |
+| `enable_focus_emulation` sends without the try/except | 2 fail: spawn-refused and arming-continues (`_arm_tracked_tab` would swallow the refusal but also skip the headers and every armer) |
 | focus emulation moved after the headers/timezone commands | 1 fails (header-order pin) |
 
 Real Chrome, branch code, own `BrowserManager` (not the shared backend), throwaway profile under `%TEMP%`, headed, 3 s measurement in each tab after a

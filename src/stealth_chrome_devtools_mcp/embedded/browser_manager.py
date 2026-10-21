@@ -91,8 +91,7 @@ class BrowserManager:
         # garbage-collect them mid-run; the done-callback discards each entry and
         # surfaces any failure instead of letting it vanish (RUF006).
         self._background_tasks: set[asyncio.Task] = set()
-        # F-935: ``armer(tab, instance_id)`` for per-tab state kept OUTSIDE this
-        # class (network capture), run on every tab tracked after spawn.
+        # F-935: ``armer(tab, instance_id)``: per-tab state kept outside this class.
         self._tab_armers = tuple(tab_armers)
         # F-964: (id, entry) of each browser that died ON ITS OWN, for browser_health.
         self._exited: deque[tuple[str, dict]] = deque(maxlen=16)
@@ -563,7 +562,8 @@ class BrowserManager:
     async def _apply_tab_overrides(
         self, tab: Tab, options: BrowserOptions
     ) -> str | None:
-        """Per-TARGET overrides (headers, timezone, focus) of each tab (F-935)."""
+        """Per-TARGET overrides (headers, timezone, focus emulation F-1011) of each
+        tab (F-935); the applied IANA id or None."""
         await window_sizing.enable_focus_emulation(tab)
         if options.extra_headers:
             headers = uc.cdp.network.Headers(options.extra_headers)
