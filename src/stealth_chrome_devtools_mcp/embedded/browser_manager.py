@@ -563,8 +563,8 @@ class BrowserManager:
     async def _apply_tab_overrides(
         self, tab: Tab, options: BrowserOptions
     ) -> str | None:
-        """The spawn's per-TARGET overrides (headers, timezone), for the spawn tab
-        and every tab tracked after it (F-935); the applied IANA id or None."""
+        """Per-TARGET overrides (headers, timezone, focus) of each tab (F-935)."""
+        await window_sizing.enable_focus_emulation(tab)
         if options.extra_headers:
             headers = uc.cdp.network.Headers(options.extra_headers)
             await tab.send(uc.cdp.network.set_extra_http_headers(headers=headers))
