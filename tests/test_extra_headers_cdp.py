@@ -144,7 +144,9 @@ async def test_spawn_sends_no_header_command_when_extra_headers_is_empty(
 ):
     tab = FakeTab()
     await _run_post_launch(post_launch_manager, tab, BrowserOptions(extra_headers={}))
-    assert SET_EXTRA not in [f["method"] for f in tab.cdp_frames]
+    assert [f["method"] for f in tab.cdp_frames] == [
+        "Emulation.setFocusEmulationEnabled"
+    ]
 
 
 # ---------------------------------------------------------------------------

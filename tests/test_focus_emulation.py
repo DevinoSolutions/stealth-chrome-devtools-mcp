@@ -149,16 +149,30 @@ async def test_new_tab_gets_focus_emulation(new_tab_world):
     assert frames[0]["params"] == {"enabled": True}
 
 
-async def test_a_refused_focus_emulation_does_not_fail_new_tab(
-    new_tab_world, monkeypatch
+async def test_a_refused_focus_emulation_does_not_skip_the_rest_of_the_arming(
+    manager, new_tab_world, monkeypatch
 ):
+    """``_arm_tracked_tab`` would swallow the refusal anyway, but it would also skip
+    everything after it: the tab's headers and every armer (network capture). The
+    inner swallow in ``enable_focus_emulation`` is what lets them run."""
     refusing = refusing_tab()
     refusing.target = new_tab_world.target
 
     async def open_tab(_browser, url):
         return refusing
 
+    armed: list[str] = []
+
+    async def armer(tab, instance_id):
+        armed.append(instance_id)
+
     monkeypatch.setattr(tab_open, "open_tab", open_tab)
+    manager._instances[IID]["options"] = BrowserOptions(extra_headers={"X-A": "b"})
+    manager._tab_armers = (armer,)
+
     result = await tabs.new_tab(IID)
+
     assert result["tab_id"] == "t-new"
     assert refusing.send_calls.count("set_focus_emulation_enabled") == 1
+    assert "set_extra_http_headers" in refusing.send_calls
+    assert armed == [IID]
