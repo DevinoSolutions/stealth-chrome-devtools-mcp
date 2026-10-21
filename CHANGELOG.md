@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.38
 
 ### Every tab the backend drives stays visible when its window is minimized or another tab is in front (F-1011)
 
