@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
 
