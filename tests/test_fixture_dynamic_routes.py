@@ -28,6 +28,7 @@ import pytest
 import requests
 
 import fixture_routes as fr
+import fixture_routes_nav
 from release_gate_harness import _bind_origin, serve_fixture_origin_pair
 from test_e2e_fleet import FLEET_SIZE
 
@@ -728,7 +729,7 @@ def test_the_slow_document_is_in_the_ledger_before_it_is_answered(origins, monke
         release.wait(TIMEOUT)
         return 0.0
 
-    monkeypatch.setattr(fr, "_nav_delay_seconds", _gated_delay)
+    monkeypatch.setattr(fixture_routes_nav, "_nav_delay_seconds", _gated_delay)
 
     path = "/nav/slow-doc?ms=2500"
     captured: list = []
