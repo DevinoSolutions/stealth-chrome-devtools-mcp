@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>emulated click</title>
+</head>
+<body style="margin:0;height:900px">
+  <!-- F-1017: a button away from the origin (so a scaled click lands on <body>,
+       not on it), and a capturing listener that records what the PAGE really
+       received -- the real event target, not elementFromPoint. -->
+  <button id="target" style="position:absolute;left:60px;top:260px;width:80px;height:60px">Target</button>
+  <!-- An element hard against the right edge: under a scale below 1 an input
+       aimed at it lands BEYOND the emulated viewport and is dropped. -->
+  <button id="edge" style="position:absolute;left:280px;top:640px;width:70px;height:40px">Edge</button>
+  <script>
+    window.__hits = [];
+    // A frame (its events are frame-relative; the click point is top-level) and a
+    // CLOSED shadow root (composedPath stops at the host), each recording the REAL
+    // mousedown target.
+    var frame = document.createElement('iframe');
+    frame.id = 'frame';
+    frame.style.cssText = 'position:absolute;left:20px;top:340px;width:240px;height:380px;border:0';
+    frame.srcdoc = '<body style="margin:0"><button id="ib" style="position:absolute;left:10px;top:160px;width:80px;height:40px">Inner Button</button><script>window.__hits=[];addEventListener("mousedown",function(e){__hits.push(e.target.id||e.target.tagName.toLowerCase())},true)<\/script>';
+    document.body.appendChild(frame);
+    var host = document.createElement('div');
+    host.id = 'host';
+    host.style.cssText = 'position:absolute;left:270px;top:400px;width:80px;height:40px';
+    var root = host.attachShadow({mode: 'closed'});
+    root.innerHTML = '<button style="width:80px;height:40px">Shadow Button</button>';
+    window.__shadow = [];
+    root.querySelector('button').addEventListener('mousedown', function () {
+      window.__shadow.push('shadow-button');
+    });
+    document.body.appendChild(host);
+    addEventListener('mousedown', function (e) {
+      window.__hits.push({
+        id: e.target.id || e.target.tagName.toLowerCase(),
+        x: e.clientX, y: e.clientY, trusted: e.isTrusted
+      });
+    }, true);
+  </script>
+</body>
+</html>

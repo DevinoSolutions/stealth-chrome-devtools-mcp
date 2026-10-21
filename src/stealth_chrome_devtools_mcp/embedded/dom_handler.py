@@ -270,8 +270,10 @@ class DOMHandler:
             aim = await click_target.aim(element, selector)
 
             try:
-                await element.mouse_click()
+                await click_target.click(tab, element, selector, aim)
                 dispatch = click_target.COORDINATE
+            except ToolError:
+                raise
             except Exception as e:
                 debug_logger.log_debug("dom_handler", "click_element", str(e))
                 await element.click()

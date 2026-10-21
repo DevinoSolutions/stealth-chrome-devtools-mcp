@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- F-1017: a 450 px layout in a 360 px emulated screen, so Chrome fits it with a
+       visualViewport.scale of 0.8 and NO `scale` in the metrics override. Raw
+       Input.dispatchMouseEvent was measured landing 1:1 here. -->
+  <meta name="viewport" content="width=450">
+  <title>emulated click, zoomed out</title>
+</head>
+<body style="margin:0;height:900px">
+  <button id="target" style="position:absolute;left:60px;top:260px;width:80px;height:60px">Target</button>
+  <script>
+    window.__hits = [];
+    addEventListener('mousedown', function (e) {
+      window.__hits.push({
+        id: e.target.id || e.target.tagName.toLowerCase(),
+        x: e.clientX, y: e.clientY, trusted: e.isTrusted
+      });
+    }, true);
+  </script>
+</body>
+</html>

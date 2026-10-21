@@ -197,8 +197,20 @@ class FakeClickTarget:
         mouse_click_error: Exception | None = None,
         aim_answer: Any = _UNSET,
         viewport: tuple[float, float] = (1280.0, 720.0),
+        input_scale: float = 1.0,
+        frame_offset: tuple[float, float] = (0.0, 0.0),
+        navigates_on_press: bool = False,
+        swallows_press: bool = False,
     ) -> None:
         self.viewport = viewport
+        self.input_scale = input_scale
+        self.frame_offset = frame_offset
+        self.navigates_on_press = navigates_on_press
+        self.swallows_press = swallows_press
+        self.pressed = False
+        self.armed: list[str] | None = None
+        self.observed: list[dict[str, Any]] = []
+        self.landings: list[tuple[str, float, float, bool]] = []
         self.tag = tag
         self.element_id = element_id
         self.classes = tuple(classes)
@@ -267,9 +279,67 @@ class FakeClickTarget:
         self.calls.append("scroll_into_view")
 
     async def mouse_click(self) -> None:
-        self.calls.append("mouse_click")
+        """nodriver's ``Element.mouse_click``: press at the box centre, in CSS
+        pixels, straight into ``Input.dispatchMouseEvent`` — with no idea what
+        scale the page's emulation applies to it."""
         if self.mouse_click_error is not None:
+            self.calls.append("mouse_click")
             raise self.mouse_click_error
+        x, y = self._quad_centre()
+        self.receive_mouse({"type": "mousePressed", "x": x, "y": y})
+
+    def _quad_centre(self) -> tuple[float, float]:
+        """``DOM.getContentQuads``' first-box centre: TOP-LEVEL viewport px, so
+        inside a frame it is the frame-relative box shifted by the frame's origin
+        (``getClientRects`` stays frame-relative)."""
+        left, top, width, height = self.rect
+        return (
+            left + width / 2 + self.frame_offset[0],
+            top + height / 2 + self.frame_offset[1],
+        )
+
+    async def get_position(self) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(center=self._quad_centre())
+
+    def receive_mouse(self, params: dict[str, Any]) -> None:
+        """One ``Input.dispatchMouseEvent`` as the PAGE receives it.
+
+        ``input_scale`` models an ``Emulation.setDeviceMetricsOverride`` carrying
+        a ``scale`` (F-1017, measured on Chrome 155): the input is in widget
+        coordinates, so the page sees ``x / scale`` while the geometry the aim
+        reads stays in CSS pixels. Whether the event lands INSIDE this element is
+        derived from its box and from what is on top of it, never stated.
+        """
+        kind = params["type"]
+        # The page reports frame-relative coordinates, after the emulation scale.
+        top_x = params["x"] / self.input_scale
+        top_y = params["y"] / self.input_scale
+        x = top_x - self.frame_offset[0]
+        y = top_y - self.frame_offset[1]
+        left, top, width, height = self.rect
+        over_box = left <= x <= left + width and top <= y <= top + height
+        inside = self.rendered and over_box and self.hit is None
+        self.landings.append((kind, x, y, inside))
+        if kind == "mousePressed":
+            self.calls.append("mouse_click")
+            self.pressed = True
+        wanted = {"mouseMoved": "mousemove", "mousePressed": "mousedown"}.get(kind)
+        if wanted == "mousedown" and self.swallows_press:
+            return
+        if self.armed and wanted in self.armed and self._in_viewport(top_x, top_y):
+            self.observed.append(
+                {
+                    "type": wanted,
+                    "x": x,
+                    "y": y,
+                    "inside": inside,
+                    "tag": self.tag if inside else "body",
+                    "id": self.element_id if inside else "",
+                    "classes": list(self.classes) if inside else [],
+                }
+            )
 
     async def click(self) -> None:
         self.calls.append("click")
@@ -281,7 +351,27 @@ class FakeClickTarget:
             if self._aim_answer is not _UNSET:
                 return self._aim_answer
             return self._aim()
+        if PROBE_KEY in js_function and "addEventListener" in js_function:
+            self.armed = _probe_kinds(js_function)
+            self.observed = []
+            return True
+        if PROBE_KEY in js_function:
+            if self.navigates_on_press and self.pressed:
+                # The page navigated on mousedown: the document the read would
+                # have asked is gone, which is how Chrome answers it.
+                raise RuntimeError("Cannot find context with specified id")
+            seen, self.observed, self.armed = self.observed, [], None
+            return json.dumps(seen)
         return None
+
+
+PROBE_KEY = "stealth.click.probe"
+
+
+def _probe_kinds(js_function: str) -> list[str]:
+    """The event types the product armed its probe for, read off the script."""
+    match = re.search(r"const kinds = (\[.*?\]);", js_function)
+    return json.loads(match.group(1)) if match else []
 
 
 class FakeSelect:
