@@ -25,7 +25,7 @@ from fakes_consts import (
     SUPERSEDED_MARK,
     TARGET_SWAPPED_ERROR,
 )
-from fakes_elements import FakeTextField, fake_target
+from fakes_elements import FakeClickTarget, FakeTextField, fake_target
 from fakes_js import JsPromise, js_result
 
 # ---------------------------------------------------------------------------
@@ -573,6 +573,12 @@ class FakeTab:
             field = self._select_result
             if isinstance(field, FakeTextField) and field.focused:
                 field.insert(frame["params"].get("text", ""))
+        if name == "dispatch_mouse_event" and frame:
+            # Chrome's own routing for pointer input (F-1017): the page receives
+            # it, at the point the device-metrics override maps it to.
+            clicked = self._select_result
+            if isinstance(clicked, FakeClickTarget):
+                clicked.receive_mouse(frame["params"])
         if name == "dispatch_key_event" and frame:
             # Chrome's own routing: a key event carrying ``text`` is inserted at
             # the caret of the FOCUSED element (F-873). Modelled per EVENT, not

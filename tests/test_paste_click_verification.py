@@ -363,3 +363,146 @@ async def test_an_aim_that_cannot_be_read_raises():
         await DOMHandler.click_element(tab, CLICK_SELECTOR)
 
     assert "could not read" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# click_element -- under a device-metrics override that carries a ``scale``
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scale", [1.25, 0.8, 2.0])
+async def test_click_lands_on_the_target_under_an_emulation_scale(scale):
+    """F-1017 (T-5907). ``Input.dispatchMouseEvent`` takes widget coordinates, so
+    under ``setDeviceMetricsOverride(scale=...)`` the page sees ``x / scale`` while
+    the aim stays in CSS pixels: a click at CSS (30, 30) reached (24, 24) at 1.25
+    and hit ``<body>``, and ``elementFromPoint`` at (30, 30) still said "button".
+
+    RED before the fix: the press landed outside the box and the record still
+    answered ``reason: None``."""
+    tab, target = _click_tab(rect=(10.0, 20.0, 40.0, 20.0), input_scale=scale)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    pressed = [land for land in target.landings if land[0] == "mousePressed"]
+    assert len(pressed) == 1, target.landings
+    _, x, y, inside = pressed[0]
+    assert inside, f"the press reached the page at ({x}, {y}), outside the box"
+    assert (round(x, 6), round(y, 6)) == (30.0, 30.0)
+    assert result["dispatch"] == "coordinate"
+    assert result["reason"] is None
+
+
+async def test_click_that_cannot_be_aimed_raises_instead_of_missing_silently():
+    """The real event target is what decides, not ``elementFromPoint``: a press
+    the page received outside an element the hit-test named must raise."""
+    tab, target = _click_tab(rect=(10.0, 20.0, 40.0, 20.0), input_scale=1.25)
+    real_receive = target.receive_mouse
+
+    def _drifting(params):
+        # The page moved under the input between the aim and the press.
+        if params["type"] == "mousePressed":
+            params = {**params, "x": params["x"] * 3}
+        real_receive(params)
+
+    target.receive_mouse = _drifting
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert "missed" in str(caught.value)
+    assert "SECRET-BUTTON-LABEL" not in str(caught.value)
+
+
+async def test_an_unscaled_click_sends_no_corrective_move():
+    """The guard against over-correcting: scale 1 is one probe move, one press."""
+    tab, target = _click_tab()
+
+    await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    kinds = [land[0] for land in target.landings]
+    assert kinds == ["mouseMoved", "mousePressed", "mouseReleased"], kinds
+
+
+# ---------------------------------------------------------------------------
+# click_element -- review of F-1017 (PR 266)
+# ---------------------------------------------------------------------------
+
+
+def _presses(target):
+    return [land for land in target.landings if land[0] == "mousePressed"]
+
+
+async def test_a_page_that_navigates_on_the_press_gets_exactly_one_press():
+    """RED before the fix: the post-press read threw (the document was gone), the
+    generic fallback answered with ``Element.click`` and the page took a SECOND,
+    synthetic click, reported as ``dispatch: synthetic``."""
+    tab, target = _click_tab(navigates_on_press=True)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert len(_presses(target)) == 1, target.landings
+    assert "click" not in target.calls, target.calls
+    assert result["dispatch"] == "coordinate"
+
+
+async def test_a_probe_that_lands_beyond_the_emulated_viewport_is_retried_nearer():
+    """RED before the fix: at ``scale 0.8`` a move to x=1230 reaches the page at
+    1537, beyond a 1280 viewport, and is DROPPED; the old code then claimed scale 1,
+    pressed at the unscaled point and had no mousedown to compare."""
+    tab, target = _click_tab(rect=(1200.0, 100.0, 60.0, 20.0), input_scale=0.8)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    ((_, x, y, inside),) = _presses(target)
+    assert inside, (x, y)
+    assert result["reason"] is None
+
+
+async def test_a_click_whose_input_never_reaches_the_page_raises():
+    """RED before the fix: nothing observed meant "scale 1", and the answer was a
+    record that said the click reached the element."""
+    tab, target = _click_tab(rect=(1200.0, 100.0, 60.0, 20.0), input_scale=0.1)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert "no probe move reached the page" in str(caught.value)
+    assert not _presses(target), "nothing may be pressed at a point never measured"
+    assert "click" not in target.calls
+
+
+async def test_a_press_the_page_never_reported_raises():
+    tab, target = _click_tab(swallows_press=True)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert "could not be verified" in str(caught.value)
+    assert "click" not in target.calls, "a delivered press is never repeated"
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.8])
+async def test_a_click_inside_a_frame_is_aimed_in_top_level_coordinates(scale):
+    """RED before the fix: the aim was the frame-relative ``getClientRects`` point
+    and the press went to (30, 30) of the TOP document, not the frame's button."""
+    tab, target = _click_tab(
+        rect=(10.0, 10.0, 80.0, 40.0), frame_offset=(100.0, 400.0), input_scale=scale
+    )
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    ((_, x, y, inside),) = _presses(target)
+    assert inside, (x, y)
+    assert (round(x), round(y)) == (50, 30)  # frame-relative; the quad is (150, 430)
+    assert result["reason"] is None
+
+
+async def test_a_disabled_control_that_reports_no_press_is_not_a_miss():
+    """Chrome sends a disabled control no mousedown; ``reason`` already says
+    ``disabled``. Verifying the press would have failed two real-Chrome nodes."""
+    tab, target = _click_tab(disabled=True, swallows_press=True)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert result["reason"] == "disabled"
+    assert len(_presses(target)) == 1

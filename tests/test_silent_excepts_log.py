@@ -173,6 +173,10 @@ class TestDomHandlerSilentExcepts:
         )
         tab = _single_shot_tab()
         tab.query_selector = AsyncMock(return_value=element)
+        # F-1017: the coordinate click reads the element's content quads itself (so
+        # it can be aimed under a device-metrics scale) instead of calling
+        # ``Element.mouse_click``; a quad read that raises is the same fallback.
+        element.get_position = AsyncMock(side_effect=RuntimeError("mouse-fail"))
 
         result = await DOMHandler.click_element(tab, "#btn")
 
