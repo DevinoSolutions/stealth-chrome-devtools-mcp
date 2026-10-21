@@ -1,0 +1,214 @@
+{
+ "step1": {
+  "base": "http://127.0.0.1:21153",
+  "shots": {
+   "opener": {
+    "file": "s1_01_opener.png",
+    "exists": true,
+    "bytes": 40708,
+    "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s1_01_opener.png"
+   },
+   "popup_before_switch": {
+    "file": "s1_02_popup_before_switch.png",
+    "exists": true,
+    "bytes": 73765,
+    "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s1_02_popup_before_switch.p"
+   },
+   "popup_after_switch_background": {
+    "file": "s1_03_popup_background.png",
+    "exists": true,
+    "bytes": 73724,
+    "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s1_03_popup_background.png"
+   },
+   "plain_bg_tab": {
+    "file": "s1_04_plain_bg_tab.png",
+    "exists": true,
+    "bytes": 63932,
+    "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s1_04_plain_bg_tab.png"
+   }
+  },
+  "spawn": {
+   "instance_id": "23746997-615d-447f-8abd-435ff0e1d8f5",
+   "state": "ready",
+   "headless": false
+  },
+  "spawn_selection": {
+   "user_data_dir": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\sessions-root\\sessions\\prove2138-fe408dc0eb6e",
+   "profile_role": "clone",
+   "clone_source": "empty-profile",
+   "clone_source_path": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\sessions-root\\master-snapshot",
+   "seed_path": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\sessions-root\\master-snapshot",
+   "seed_warning": "There is no shared profile or seed yet, so this browser started EMPTY: it holds no logins and is deleted when it closes. To keep a signed-in profile, open one with spawn_browser(session=\"default\"), sign in there, and close it with close_instance(instance_id=..., session=\"default\"): every later spawn is then copied from it.",
+   "seeded_from": "none",
+   "seeded_at": "2026-10-21T19:34:41Z",
+   "seed_changed_since": false
+  },
+  "iid": "23746997-615d-447f-8abd-435ff0e1d8f5",
+  "click": "{'selector': '#b', 'dispatch': 'coordinate', 'point': {'x': 51.21875, 'y': 231.60000038146973}, 'size': {'width': 86.4375, 'height': 21.200000762939453}, 'target': {'tag': 'button', 'id': 'b', 'classe",
+  "popup_tabs_found": [
+   [
+    "F0AC0AF1381FF216E39D81DC9458B199",
+    "http://127.0.0.1:21153/pop"
+   ]
+  ],
+  "popup_id": "F0AC0AF1381FF216E39D81DC9458B199",
+  "popup_BEFORE_switch_tab": {
+   "visibilityState": "visible",
+   "hidden": false,
+   "hasFocus": true,
+   "rAF_in_3s": 183,
+   "timer100ms_in_3s": 31
+  },
+  "switch_back_to_opener": true,
+  "popup_AFTER_switch_tab_background": {
+   "visibilityState": "visible",
+   "hidden": false,
+   "hasFocus": false,
+   "rAF_in_3s": 183,
+   "timer100ms_in_3s": 31
+  },
+  "opener_state": [
+   "visible",
+   true
+  ],
+  "plain_bg_tab": {
+   "visibilityState": "visible",
+   "hidden": false,
+   "hasFocus": true,
+   "rAF_in_3s": 5,
+   "timer100ms_in_3s": 27
+  }
+ },
+ "step2_3": {
+  "label": "2.1.38",
+  "step2_raw_http": {
+   "loopback_normal": {
+    "status": 200,
+    "has_session_id": true,
+    "body_head": "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"experimental\":{}"
+   },
+   "forged_Host_evil.example": {
+    "status": 200,
+    "has_session_id": true,
+    "body_head": "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"experimental\":{}"
+   },
+   "forged_Origin_http://evil.example": {
+    "status": 200,
+    "has_session_id": true,
+    "body_head": "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"experimental\":{}"
+   }
+  },
+  "step3_spawn_s": 9.5,
+  "shots": {
+   "A": {
+    "file": "s3_clone_A_port8023.png",
+    "exists": true,
+    "bytes": 43301,
+    "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s3_clone_A_port8023.png"
+   },
+   "B": {
+    "file": "s3_clone_B_port8022.png",
+    "exists": true,
+    "bytes": 43301,
+    "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s3_clone_B_port8022.png"
+   }
+  },
+  "step3": {
+   "distinct_ports": true,
+   "distinct_pids": true,
+   "listener_is_browser": true,
+   "A_marker_only_on_A": true,
+   "B_marker_only_on_B": true,
+   "B_answer_names_A_port": false,
+   "A_answer_names_B_port": false,
+   "B_answer_names_A_pid": false
+  },
+  "step3_inst": [
+   {
+    "name": "A",
+    "iid": "e1257908-bdc6-41ad-b7e0-7f84a315d6cd",
+    "port": 8023,
+    "browser_pid": 141544,
+    "listener_pid": 141544,
+    "json_version": "Chrome/155.0.8059.85",
+    "marker": "MARK-A",
+    "marker_read_on_own_port": [
+     "MARK-A"
+    ]
+   },
+   {
+    "name": "B",
+    "iid": "32aa21e2-bc50-47f9-b13d-a7a9540837ff",
+    "port": 8022,
+    "browser_pid": 132380,
+    "listener_pid": 132380,
+    "json_version": "Chrome/155.0.8059.85",
+    "marker": "MARK-B",
+    "marker_read_on_own_port": [
+     "MARK-B"
+    ]
+   }
+  ],
+  "step2_tools_ok": {
+   "spawn_browser": true,
+   "navigate": true,
+   "take_screenshot": true
+  },
+  "closed": [
+   "{'closed': True, 'seed_refreshed': None}",
+   "{'closed': True, 'seed_refreshed': None}"
+  ]
+ },
+ "step4": {
+  "snapshot_before": {
+   "files": 1338,
+   "bytes": 144875468,
+   "max_mtime_ns": 1792556141913217400
+  },
+  "spawn": {
+   "instance_id": "08a46c4e-0f2a-42b4-a341-6fb314f23696",
+   "state": "ready",
+   "headless": false,
+   "seeded_from": null,
+   "seed_warning": null
+  },
+  "selection": {
+   "user_data_dir": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\sessions-root\\sessions\\prove2138-fe408dc0eb6e",
+   "profile_role": "clone",
+   "clone_source": "default-seed",
+   "clone_source_path": "C:\\stealth-mcp-browser-sessions\\master-snapshot",
+   "seed_path": "C:\\stealth-mcp-browser-sessions\\master-snapshot",
+   "seeded_from": "default",
+   "seed_changed_since": false
+  },
+  "clone_under_isolated_root": true,
+  "clone_has_cookies_db": true,
+  "navigate": "{'url': 'https://app.sendly.now/auth/login', 'title': 'Sign in | Sendly', 'success': True}",
+  "final": {
+   "success": true,
+   "result": {
+    "url": "https://app.sendly.now/auth/login",
+    "title": "Sign in | Sendly",
+    "hasPasswordInput": true,
+    "hasEmailInput": true,
+    "loginWords": true,
+    "text": "S\nSendly\n\n// EMAIL PLATFORM \u00b7 2026\n\nEmail,\nwell delivered.\n\nFor teams who notice the details. Transactional sends, campaigns, and visual workflows in one workspace.\n\nFROM\nSENDLY \u00b7 HALIFAX NS\nNO-REPLY@SENDLY.NOW\nWelcome to Acme, Jane.\n\nYour account is ready. Here's what to do next\u2026\n\nmsg_8f2a1c\nvia Sendly\n\nPOSTMARKED \u00b7 HALIFAX NS \u00b7 2026\n\n// SIGN IN\n\nWelcome back.\nContinue with Google\nLAST USED\nConti"
+   },
+   "error": null
+  },
+  "shot": {
+   "file": "s4_sendly_app.png",
+   "exists": true,
+   "bytes": 197271,
+   "ret": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2138\\shots\\s4_sendly_app.png"
+  },
+  "closed": "{'closed': True, 'seed_refreshed': None}",
+  "snapshot_after": {
+   "files": 1338,
+   "bytes": 144875468,
+   "max_mtime_ns": 1792556141913217400
+  },
+  "snapshot_unchanged": true
+ },
+ "package": "stealth-chrome-devtools-mcp==2.1.38 from PyPI, isolated real HTTP backend (ports 51901, 51902), headed Chrome/155.0.8059.85, Windows"
+}
