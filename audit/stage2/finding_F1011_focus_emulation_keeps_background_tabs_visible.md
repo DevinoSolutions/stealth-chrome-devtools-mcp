@@ -45,8 +45,8 @@ alike: no concrete reason to differ, but the headless effect was not measured. N
   stealth-blocked (`platform_utils._stealth_blocked_args`). On a starved machine a background tab is therefore still CPU-starved; its page just no
   longer believes it is hidden.
 - **The active tab of a minimized window paints about one frame per second** (C: rAF 5): timers run, frames barely.
-- **Page-opened popups (`window.open`) are not driven through the home** until a tool moves onto them (`switch_tab` arms it). Adding a target-created
-  listener would be a second way to arm a tab, so it is not done here.
+- **Page-opened popups (`window.open`) were not driven through the home** until a tool moved onto them (`switch_tab` armed them). CLOSED by F-1012
+  (`audit/stage2/finding_F1012_popups_armed_on_creation.md`): a `Target.targetCreated` listener hands such a popup to the same `_arm_tracked_tab`.
 - Mac and Linux were not measured; the call is cross-platform CDP and is sent everywhere.
 - Survival of the emulation across target rediscovery (F-775a) or a `Connection` swap is not measured; `_arm_tracked_tab` re-applies it on every `switch_tab`, which bounds the exposure.
 

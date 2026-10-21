@@ -993,7 +993,11 @@ async def test_apply_post_launch_tracks_an_attached_browser(monkeypatch):
     monkeypatch.setattr(manager, "_apply_timezone_override", fake_timezone)
 
     options = browser_manager.BrowserOptions(headless=False)
-    attached = SimpleNamespace(_process=None, _process_pid=1234)
+    attached = SimpleNamespace(
+        _process=None,
+        _process_pid=1234,
+        connection=SimpleNamespace(add_handler=lambda *_: None),  # F-1012
+    )
     # The trailing executable is F-806's version reconciliation. It is left LIVE
     # here on purpose: this bare tab has no `send`, so the reconcile's guard
     # swallows the AttributeError and the tracking below still happens — which is

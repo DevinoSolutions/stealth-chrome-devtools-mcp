@@ -50,6 +50,8 @@ def refusing_tab() -> FakeTab:
 class _StubBrowser:
     # Truthy so the desktop_launch pid shim (a delegated-launch path) is skipped.
     _process = object()
+    # The browser-level connection nodriver's ``Browser`` has (F-1012 listens on it).
+    connection = FakeTab()
 
 
 @pytest.fixture

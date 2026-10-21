@@ -103,9 +103,8 @@ class BrowserManager:
         return exited
 
     async def _arm_tracked_tab(self, instance_id: str, tab: Tab) -> None:
-        """Give a newly tracked tab what the spawn tab got (F-935): its per-target
-        overrides and every armer. Logged, never raised — the tab works, and the
-        navigation it serves is the caller's answer."""
+        """Give a tracked tab (or a popup, F-1012) what the spawn tab got (F-935): its
+        overrides and every armer. Logged, never raised: the tab works without them."""
         data = await self.get_instance(instance_id)
         try:
             if data and data.get("options") is not None:
@@ -556,6 +555,7 @@ class BrowserManager:
             await google_rotation_guard.arm(browser)
         await reconcile_launched_browser_version(tab, browser_executable)
         applied_timezone_id = await self._apply_tab_overrides(tab, options)
+        tab_open.arm_popups(browser, self._arm_tracked_tab, instance_id)  # F-1012
         window_metrics = await window_sizing.apply_and_measure(tab, options)
         return applied_timezone_id, window_metrics
 

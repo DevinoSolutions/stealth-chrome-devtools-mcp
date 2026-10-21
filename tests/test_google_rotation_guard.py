@@ -589,7 +589,11 @@ class TestTheSpawnArmsClonesOnly:
         monkeypatch.setattr(
             bm.process_cleanup, "track_browser_process", lambda *a, **k: None
         )
-        browser = SimpleNamespace(_process=None, config=None)
+        browser = SimpleNamespace(
+            _process=None,
+            config=None,
+            connection=SimpleNamespace(add_handler=lambda *_: None),  # F-1012
+        )
         await manager._apply_post_launch(
             browser, SimpleNamespace(), options, "iid", options.user_data_dir, True, "c"
         )
