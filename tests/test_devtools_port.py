@@ -223,6 +223,11 @@ def test_the_process_kill_net_is_armed(monkeypatch):
     BEFORE anything real is ended; a net that is neutered fails here."""
     attempts = forbid_real_process_kills(monkeypatch)
 
+    # Look at the patch before calling through it: a neutered net would make the
+    # call below really end this process (rc 15, no summary) instead of failing.
+    assert "forbid_real_process_kills" in psutil.Process.terminate.__qualname__
+    assert "forbid_real_process_kills" in psutil.Process.kill.__qualname__
+
     with pytest.raises(AssertionError, match=r"real psutil.Process.terminate"):
         psutil.Process(os.getpid()).terminate()
 
