@@ -78,6 +78,10 @@ reading the REAL process table; they now see none. **These new pins were NOT mut
 instruction); a throwaway script exercised the three new `confirm_ours` outcomes (unidentifiable, mismatch, cancel) and the
 pins run in CI only.
 
+Re-review pins (all run locally and mutation-checked by runtime rebinding): `test_a_second_cancel_during_a_slow_drop_still_closes_the_socket`
+(RED under `no_shield`), `test_a_disconnect_that_never_returns_cannot_hold_the_refusal_up` (RED under `no_bound`),
+`test_the_process_kill_net_is_armed` (RED under `net_off`, a harmless no-op `terminate` so nothing real is ended).
+
 Incident to state: the `kill_foreign` mutation terminated "every process but ours" through the real
 `psutil.process_iter()` in the tests that do not patch psutil. It raised on its first process (an access-denied system
 entry) before reaching any user process, and a process census afterwards showed the machine intact, but the mutation was
