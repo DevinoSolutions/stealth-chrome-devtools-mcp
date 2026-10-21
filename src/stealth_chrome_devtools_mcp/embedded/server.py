@@ -350,6 +350,37 @@ if get_settings().xpool_safe_mode:
     apply_disabled_sections()
 
 
+_LOOPBACK_HOST_NAMES = ("127.0.0.1", "localhost", "::1")
+_WILDCARD_BINDS = ("0.0.0.0", "::", "")  # noqa: S104  PERMANENT(compared, never bound: the wildcard spellings the allow-list must NOT gain)
+
+
+def host_origin_guard(bound_host: str) -> dict[str, object]:
+    """F-1013: the keyword arguments that turn on FastMCP's Host/Origin guard.
+
+    The backend is unauthenticated and its tools can ``exec`` in the backend
+    process and read cookies. Binding 127.0.0.1 keeps other machines out and
+    does nothing about a web page whose domain is DNS-rebound to 127.0.0.1: that
+    page is same-origin with ``/mcp``. FastMCP's guard is OFF by default
+    (``http_host_origin_protection=False``) and ``backend_env`` scrubs
+    ``FASTMCP_*``, so it has to be asked for here, at the one place the app is
+    built. ``True`` is the strict mode: every request is checked, Host against
+    the allow-list below (a refusal is 421) and a present Origin against the
+    request's own origin or a loopback pair (403). A request with no Origin, which
+    is how the stdio proxy, the ``stealthy`` CLI and a url-transport client look,
+    is not an Origin question.
+
+    The allow-list is the loopback names plus the host the operator bound with
+    ``--host``, so a deliberate ``--host backend.lan`` keeps serving its own
+    name. A wildcard bind (``0.0.0.0``, ``::``) names no host and adds nothing:
+    the Host header still has to be a loopback name (or the interface address
+    FastMCP appends from the socket), never an attacker's.
+    """
+    hosts = list(_LOOPBACK_HOST_NAMES)
+    if bound_host.strip("[]") not in {*hosts, *_WILDCARD_BINDS}:
+        hosts.append(bound_host)
+    return {"host_origin_protection": True, "allowed_hosts": hosts}
+
+
 def build_arg_parser():
     """Construct the CLI parser for the ``python -m ... server`` entrypoint.
 
@@ -577,6 +608,7 @@ if __name__ == "__main__":
             host=args.host,
             port=args.port,
             path=MCP_PATH,
+            **host_origin_guard(args.host),
             uvicorn_config=backend_uvicorn_config(),
         )
     else:

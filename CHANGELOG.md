@@ -13,6 +13,19 @@ opener and is armed by its caller, so nothing is armed twice; a later `switch_ta
 real headed spawn, a popup in the background reads `visible`, 172 frames and 30 timer ticks in 3 s, against `hidden`, 1 frame and 4 ticks before.
 Best effort: a popup that closes first, a refused command or an arming that takes over 5 s is logged, never raised. Measured on a real headed spawn for `window.open()` and `<a target=_blank rel=noopener>` (both carry an `openerId`), and a tab `open_tab` makes carries none. Each popup now costs a websocket and, with capture armed, `Network.enable` plus entries in `network_data`; nothing caps that. See `audit/stage2/finding_F1012_popups_armed_on_creation.md`.
 
+### The HTTP backend refuses DNS-rebound and foreign-origin requests (F-1013)
+
+The backend binds 127.0.0.1 and has no login, and its tools can `exec` in the backend process (`create_python_binding`) and read every
+cookie. Binding loopback keeps other machines out and does nothing about a web page: a page whose domain is DNS-rebound to 127.0.0.1 is
+same-origin with `/mcp` and could `initialize` and call any tool. fastmcp's Host/Origin guard is off by default
+(`http_host_origin_protection=False`, fastmcp 3.4.8) and `backend_env` scrubs `FASTMCP_*`, so an operator could not enable it either.
+`mcp.run(transport="http")` now passes `host_origin_guard(args.host)`: protection on, allowed Hosts are `127.0.0.1`, `localhost`, `::1` and the
+`--host` the operator bound (a wildcard bind adds nothing). A foreign Host answers `421` and a foreign web Origin `403`, on `/mcp` and the health
+route alike; a request with no Origin (the stdio proxy, `stealthy`, `doctor`, the liveness probes, a url-transport client) is unchanged, and every
+first-party client already sends `Host: 127.0.0.1:<port>`. Not fixed: another local user or process can still connect (no auth; a per-user bearer
+token is the follow-up), and a page served from a loopback origin passes fastmcp's same-origin allowance
+(`audit/stage2/finding_F1013_http_backend_dns_rebinding.md`).
+
 ## 2.1.38
 
 ### Every tab the backend drives stays visible when its window is minimized or another tab is in front (F-1011)
