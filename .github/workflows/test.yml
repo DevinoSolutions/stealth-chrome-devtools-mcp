@@ -9,11 +9,27 @@ on:
   pull_request:
     branches: ['**']
 
+# A new commit on a PR supersedes the run still going for the previous one, so
+# cancel it (a full 3-OS gate per pushed commit was ~3250 wall minutes in 100
+# runs). The cancel is PR-ONLY: pushes to main/dev share the ref-keyed group but
+# are never cancelled, and tag/publish runs (publish.yml) and manual runs are
+# not in this group at all. It lives HERE, in the caller, and not in
+# release-gate.yml: a `concurrency` in a called workflow evaluates in the
+# caller's context, so it would also bind publish.yml/canary.yml's calls and
+# could cancel or deadlock the caller's own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # The entire gate lives in the reusable workflow (plan_RELEASE W2). This caller
   # only wires the PR/push triggers to it — job semantics are NOT duplicated here.
   # W3's publish.yml calls the SAME workflow for tags. The stable required check a
   # ruleset pins is this job's aggregate child: `release-gate / release-gate`.
   release-gate:
-    permissions: write-all # GITHUB_TOKEN defaults + id-token for DevinoSolutions/artifact (OIDC)
+    # Least privilege (T-5586): exactly the cap release-gate.yml declares for itself;
+    # a called workflow can never exceed what its caller grants.
+    permissions:
+      contents: read
+      id-token: write # DevinoSolutions/artifact (OIDC)
     uses: ./.github/workflows/release-gate.yml

@@ -832,9 +832,11 @@ jobs:
           echo "built version ${version}"
       - name: Assert the release tag matches the built version
         if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }} # via env, never interpolated into the script (T-5588)
         run: >-
           python3 tools/package_verify.py assert-version
-          --manifest release-manifest.json --tag "${{ inputs.release_tag }}"
+          --manifest release-manifest.json --tag "$RELEASE_TAG"
       - name: Upload the one immutable dist artifact
         uses: DevinoSolutions/artifact/upload@44df16680dcb504375db03d284d75808db18e4ed # v1.2.1
         with:
