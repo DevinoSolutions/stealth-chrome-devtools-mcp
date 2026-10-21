@@ -167,3 +167,64 @@ class TestConfirmOurs:
         assert [c["method"] for c in browser.connection.sent] == [
             "SystemInfo.getProcessInfo"
         ]
+
+    async def test_a_second_cancel_during_a_slow_drop_still_closes_the_socket(self):
+        """The drop runs while the spawn is already being cancelled, and a caller
+        that cancels again must not abandon a half-open foreign socket: the
+        disconnect is shielded, so it finishes on its own. Without the shield the
+        second cancel kills it mid-flight and the socket stays open."""
+        browser = _browser()
+        browser.connection.behaviour = "hang"
+        started = asyncio.Event()
+
+        async def slow_disconnect():
+            started.set()
+            await asyncio.sleep(0.1)
+            browser.connection.disconnected = True
+
+        browser.connection.disconnect = slow_disconnect
+        task = asyncio.ensure_future(devtools_port.confirm_ours(browser, LAUNCHED))
+        while not browser.connection.sent:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.3)
+        assert browser.connection.disconnected
+
+    async def test_a_disconnect_that_never_returns_cannot_hold_the_refusal_up(
+        self, monkeypatch
+    ):
+        """The drop is bounded by ``DROP_TIMEOUT_SECONDS``: a stuck close of a
+        foreign socket must not turn a refusal into a hang. The outer
+        ``wait_for`` keeps the pin itself from hanging when the bound is gone."""
+        monkeypatch.setattr(devtools_port, "DROP_TIMEOUT_SECONDS", 0.05)
+        release = asyncio.Event()
+        browser = _browser(("browser", OTHER))
+
+        async def stuck_disconnect():
+            await release.wait()
+
+        browser.connection.disconnect = stuck_disconnect
+        try:
+            with pytest.raises(ToolError, match="not the Chrome this spawn launched"):
+                await asyncio.wait_for(
+                    devtools_port.confirm_ours(browser, LAUNCHED), 2.0
+                )
+        finally:
+            release.set()
+
+
+def test_the_process_kill_net_is_armed(monkeypatch):
+    """``forbid_real_process_kills`` is the only thing between these tests and a
+    real ``terminate()``. The pid is our own, so the assertion has to fire
+    BEFORE anything real is ended; a net that is neutered fails here."""
+    attempts = forbid_real_process_kills(monkeypatch)
+
+    with pytest.raises(AssertionError, match=r"real psutil.Process.terminate"):
+        psutil.Process(os.getpid()).terminate()
+
+    assert attempts == ["Process.terminate"]
+    assert list(psutil.process_iter()) == []
