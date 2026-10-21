@@ -34,11 +34,26 @@ on to await the result or ``close()`` it, which only a ``Tab`` can do. Such an
 entry for the new target — one a concurrent ``update_targets`` registered while
 ``getTargetInfo`` was in flight — is replaced in place, so the target is never
 listed twice.
+
+**Popups (F-1012).** A tab the PAGE opens is the one kind nobody opens through
+:func:`open_tab`; :func:`arm_popups` hands it to the arming home when Chrome
+announces it.
 """
 
 from __future__ import annotations
 
+import asyncio
+from typing import TYPE_CHECKING
+
 from nodriver import Browser, Connection, Tab, cdp
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+#: Strong refs to the in-flight popup arming tasks (RUF006).
+_POPUP_TASKS: set[asyncio.Task[None]] = set()
 
 
 async def open_tab(browser: Browser, url: str) -> Tab:
@@ -59,6 +74,49 @@ async def open_tab(browser: Browser, url: str) -> Tab:
         )
     await browser.update_targets()
     return tab
+
+
+def arm_popups(
+    browser: Browser, arm: Callable[..., Awaitable[None]], *args: object
+) -> None:
+    """Arm every popup the PAGE opens, the moment Chrome creates it (F-1012).
+
+    ``window.open`` and ``target=_blank`` make a target no tool asked for, so
+    nothing armed it until a caller ``switch_tab``-ed onto it, and until then it was
+    hidden: no ``rAF``, 1 Hz timers (F-1011). Nodriver already learns of it from
+    ``Target.targetCreated`` on the browser connection, so this adds a second
+    listener on that event and calls ``arm(*args, tab)``; callers pass the ONE
+    arming home (``BrowserManager._arm_tracked_tab``), which a later ``switch_tab``
+    reaches again harmlessly. Only a page target with an ``openerId`` is a popup: a
+    tab ``open_tab`` creates has none and is armed by its caller.
+    """
+
+    def on_created(event: cdp.target.TargetCreated, *_: object) -> None:
+        info = event.target_info
+        if info.type_ != "page" or info.opener_id is None:
+            return
+        task = asyncio.create_task(_arm_popup(browser, info.target_id, arm, args))
+        _POPUP_TASKS.add(task)
+        task.add_done_callback(_POPUP_TASKS.discard)
+
+    browser.connection.add_handler(cdp.target.TargetCreated, on_created)
+
+
+async def _arm_popup(
+    browser: Browser,
+    target_id: cdp.target.TargetID,
+    arm: Callable[..., Awaitable[None]],
+    args: tuple[object, ...],
+) -> None:
+    try:
+        # Nodriver's own handler ran first and registered the target.
+        tab = find(browser, str(target_id))
+        if tab is not None:
+            await arm(*args, tab)
+    except Exception as error:  # noqa: BLE001  PERMANENT(a popup that closed or refused is not worth a task error: the tab works, arming is best effort)
+        debug_logger.log_warning(
+            "tab_open", "_arm_popup", f"{type(error).__name__}: {error}"
+        )
 
 
 def find(browser: Browser, tab_id: str) -> Tab | None:

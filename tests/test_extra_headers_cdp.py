@@ -114,6 +114,8 @@ def post_launch_manager(monkeypatch):
 class _StubBrowser:
     # Truthy so the desktop_launch pid shim (a delegated-launch path) is skipped.
     _process = object()
+    # The browser-level connection nodriver's ``Browser`` has (F-1012 listens on it).
+    connection = FakeTab()
 
 
 async def _run_post_launch(manager, tab, options):

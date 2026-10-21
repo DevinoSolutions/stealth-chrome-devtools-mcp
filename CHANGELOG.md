@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
+
+F-1011 keeps every tab the backend drives visible (`Emulation.setFocusEmulationEnabled`) while its window is minimized or another tab is in front,
+but a tab the PAGE opens (`window.open`, `target=_blank`) was only reached through `switch_tab`, so until a caller moved onto it the popup was hidden:
+no `requestAnimationFrame`, timers clamped to 1 Hz, and it also missed the headers, timezone override and network capture the spawn tab had.
+`tab_open.arm_popups` now listens for `Target.targetCreated` on the browser connection, once per browser (a spawn and a re-attach), and for a page
+target with an `openerId` calls the same `BrowserManager._arm_tracked_tab` that `new_tab` and `switch_tab` use. A tab the backend opened itself has no
+opener and is armed by its caller, so nothing is armed twice; a later `switch_tab` re-arms harmlessly (network capture is keyed by target id). On a
+real headed spawn, a popup in the background reads `visible`, 172 frames and 30 timer ticks in 3 s, against `hidden`, 1 frame and 4 ticks before.
+Best effort: a popup that closes first or a refused command is logged, never raised. See `audit/stage2/finding_F1012_popups_armed_on_creation.md`.
+
 ## 2.1.38
 
 ### Every tab the backend drives stays visible when its window is minimized or another tab is in front (F-1011)

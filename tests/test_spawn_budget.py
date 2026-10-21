@@ -190,6 +190,9 @@ class _OwnProcess:
     def __init__(self, pid) -> None:
         self._pid = pid
 
+    def add_handler(self, event_type, handler) -> None:
+        """F-1012's popup listener: this fake never emits an event."""
+
     async def send(self, command):
         next(command)
         return [nodriver.cdp.system_info.ProcessInfo("browser", self._pid, 0.0)]

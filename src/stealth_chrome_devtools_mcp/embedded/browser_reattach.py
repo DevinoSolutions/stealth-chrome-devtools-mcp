@@ -67,6 +67,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_source,
     reap_guard,
     tab_identity,
+    tab_open,
     tool_errors,
     window_sizing,
 )
@@ -875,6 +876,7 @@ async def _attach_one(
         # timezone here (named in `not_restored`), so this is focus emulation
         # alone (F-1011): CDP state died with the backend that set it.
         await manager._apply_tab_overrides(tab, options)
+        tab_open.arm_popups(browser, manager._arm_tracked_tab, instance_id)  # F-1012
         # Ownership is already ours from the claim; this re-records the entry
         # through the ONE write protocol and adds the in-memory tracking the
         # claim (a record write) could not.

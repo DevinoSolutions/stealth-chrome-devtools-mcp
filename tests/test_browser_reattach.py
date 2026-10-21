@@ -44,6 +44,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_endpoint,
     desktop_launch,
     profile_lock,
+    tab_open,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -1351,6 +1352,42 @@ class TestAnAdoptedInstanceTellsTheTruth:
         tab = FakeTab()
         await self._adopt(tmp_path, tab)
         assert [f["method"] for f in tab.cdp_frames].count(
+            "Emulation.setFocusEmulationEnabled"
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_popup_of_the_adopted_browser_is_armed_on_creation(self, tmp_path):
+        """F-1012: the listener is per browser connection, and the dead backend's
+        died with it, so an adopted browser's popups would be background tabs until
+        a ``switch_tab`` unless the adoption listens again."""
+        from nodriver import cdp
+
+        manager, held = await self._adopt(tmp_path, FakeTab())
+        browser = manager._instances[held.instance_id]["browser"]
+        popup = FakeTab(target_id="T-popup")
+        browser.tabs.append(popup)
+
+        async def get_instance(instance_id):
+            return manager._instances.get(instance_id)
+
+        manager.get_instance = get_instance
+        browser.connection._deliver(
+            cdp.target.TargetCreated(
+                cdp.target.TargetInfo(
+                    target_id=cdp.target.TargetID("T-popup"),
+                    type_="page",
+                    title="",
+                    url="about:blank",
+                    attached=False,
+                    can_access_opener=True,
+                    opener_id=cdp.target.TargetID("T-opener"),
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.gather(*tab_open._POPUP_TASKS)
+
+        assert [f["method"] for f in popup.cdp_frames].count(
             "Emulation.setFocusEmulationEnabled"
         ) == 1
 
