@@ -29,6 +29,7 @@ import nodriver
 import psutil
 import pytest
 
+from fakes import FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
     browser_manager,
@@ -996,7 +997,7 @@ async def test_apply_post_launch_tracks_an_attached_browser(monkeypatch):
     attached = SimpleNamespace(
         _process=None,
         _process_pid=1234,
-        connection=SimpleNamespace(add_handler=lambda *_: None),  # F-1012
+        connection=FakeTab(),  # F-1012
     )
     # The trailing executable is F-806's version reconciliation. It is left LIVE
     # here on purpose: this bare tab has no `send`, so the reconcile's guard

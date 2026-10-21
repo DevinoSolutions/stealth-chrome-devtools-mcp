@@ -19,6 +19,7 @@ import pytest
 import websockets.asyncio.server
 from nodriver.cdp import network as cdp_network
 
+from fakes import FakeTab
 from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -592,7 +593,7 @@ class TestTheSpawnArmsClonesOnly:
         browser = SimpleNamespace(
             _process=None,
             config=None,
-            connection=SimpleNamespace(add_handler=lambda *_: None),  # F-1012
+            connection=FakeTab(),  # F-1012
         )
         await manager._apply_post_launch(
             browser, SimpleNamespace(), options, "iid", options.user_data_dir, True, "c"

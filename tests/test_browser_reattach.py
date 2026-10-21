@@ -43,6 +43,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
+    process_exit,
     profile_lock,
     tab_open,
 )
@@ -1359,37 +1360,62 @@ class TestAnAdoptedInstanceTellsTheTruth:
     async def test_a_popup_of_the_adopted_browser_is_armed_on_creation(self, tmp_path):
         """F-1012: the listener is per browser connection, and the dead backend's
         died with it, so an adopted browser's popups would be background tabs until
-        a ``switch_tab`` unless the adoption listens again."""
+        a ``switch_tab`` unless the adoption listens again. The REAL ``get_instance``
+        answers (only the liveness probe is faked, the fake browser has no process):
+        a stand-in would hide an arming that runs before the instance is stored."""
         from nodriver import cdp
 
-        manager, held = await self._adopt(tmp_path, FakeTab())
-        browser = manager._instances[held.instance_id]["browser"]
-        popup = FakeTab(target_id="T-popup")
-        browser.tabs.append(popup)
-
-        async def get_instance(instance_id):
-            return manager._instances.get(instance_id)
-
-        manager.get_instance = get_instance
-        browser.connection._deliver(
-            cdp.target.TargetCreated(
-                cdp.target.TargetInfo(
-                    target_id=cdp.target.TargetID("T-popup"),
-                    type_="page",
-                    title="",
-                    url="about:blank",
-                    attached=False,
-                    can_access_opener=True,
-                    opener_id=cdp.target.TargetID("T-opener"),
+        with patch.object(process_exit, "browser_is_alive", return_value=True):
+            manager, held = await self._adopt(tmp_path, FakeTab())
+            browser = manager._instances[held.instance_id]["browser"]
+            popup = FakeTab(target_id="T-popup")
+            browser.tabs.append(popup)
+            browser.connection._deliver(
+                cdp.target.TargetCreated(
+                    cdp.target.TargetInfo(
+                        target_id=cdp.target.TargetID("T-popup"),
+                        type_="page",
+                        title="",
+                        url="about:blank",
+                        attached=False,
+                        can_access_opener=True,
+                        opener_id=cdp.target.TargetID("T-opener"),
+                    )
                 )
             )
-        )
-        await asyncio.sleep(0)
-        await asyncio.gather(*tab_open._POPUP_TASKS)
+            await asyncio.sleep(0)
+            await asyncio.gather(*tab_open._POPUP_TASKS)
 
         assert [f["method"] for f in popup.cdp_frames].count(
             "Emulation.setFocusEmulationEnabled"
         ) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_popup_listener_is_registered_once_and_after_the_store(
+        self, tmp_path
+    ):
+        """F-1012: ``_arm_tracked_tab`` arms nothing for an instance it cannot find,
+        and a second listener would arm every popup twice."""
+        from nodriver import cdp
+
+        stored: list[bool] = []
+        real = tab_open.arm_popups
+
+        def spy(browser, arm, *args):
+            stored.append(args[0] in arm.__self__._instances)
+            real(browser, arm, *args)
+
+        with patch.object(tab_open, "arm_popups", spy):
+            manager, held = await self._adopt(tmp_path, FakeTab())
+
+        browser = manager._instances[held.instance_id]["browser"]
+        listeners = [
+            h
+            for evt, h in browser.connection.handlers
+            if evt is cdp.target.TargetCreated
+        ]
+        assert stored == [True]
+        assert len(listeners) == 1
 
     @pytest.mark.asyncio
     async def test_a_dead_egress_proxy_is_adopted_but_stamped(self, tmp_path):

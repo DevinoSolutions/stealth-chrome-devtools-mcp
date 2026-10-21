@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 #: Strong refs to the in-flight popup arming tasks (RUF006).
 _POPUP_TASKS: set[asyncio.Task[None]] = set()
 
+#: How long one popup's arming may take. A popup that closes mid-arm leaves its
+#: pending command unanswered for good (nodriver's listener ends on the closed
+#: socket and resolves nothing), so without a bound the task, the Tab and its
+#: websocket would be pinned for the life of the instance.
+POPUP_ARM_BUDGET_SECONDS = 5.0
+
 
 async def open_tab(browser: Browser, url: str) -> Tab:
     """Open *url* in a new tab of *browser* and return its ``Tab``.
@@ -87,8 +93,10 @@ def arm_popups(
     ``Target.targetCreated`` on the browser connection, so this adds a second
     listener on that event and calls ``arm(*args, tab)``; callers pass the ONE
     arming home (``BrowserManager._arm_tracked_tab``), which a later ``switch_tab``
-    reaches again harmlessly. Only a page target with an ``openerId`` is a popup: a
-    tab ``open_tab`` creates has none and is armed by its caller.
+    reaches again harmlessly. Call it AFTER the instance is stored: arming a popup
+    of an instance ``get_instance`` does not know yet is skipped. Only a page target
+    with an ``openerId`` is a popup: a tab ``open_tab`` creates has none and is armed
+    by its caller.
     """
 
     def on_created(event: cdp.target.TargetCreated, *_: object) -> None:
@@ -112,7 +120,14 @@ async def _arm_popup(
         # Nodriver's own handler ran first and registered the target.
         tab = find(browser, str(target_id))
         if tab is not None:
-            await arm(*args, tab)
+            await asyncio.wait_for(arm(*args, tab), POPUP_ARM_BUDGET_SECONDS)
+    except TimeoutError:
+        debug_logger.log_warning(
+            "tab_open",
+            "_arm_popup",
+            f"arming a popup took over {POPUP_ARM_BUDGET_SECONDS:g} s; gave up "
+            "(it most likely closed first)",
+        )
     except Exception as error:  # noqa: BLE001  PERMANENT(a popup that closed or refused is not worth a task error: the tab works, arming is best effort)
         debug_logger.log_warning(
             "tab_open", "_arm_popup", f"{type(error).__name__}: {error}"
