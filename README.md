@@ -365,6 +365,13 @@ Stripped args are reported in `spawn_diagnostics.stealth_args_stripped`.
 
 On Windows a spawn also launches with `--disable-features=CalculateNativeWinOcclusion`, so a headed window that other windows cover keeps `visibilityState` `visible` at Normal priority instead of being backgrounded (F-1010); the Puppeteer backgrounding switches above stay stripped.
 
+### The backend's HTTP port is local-only (F-1013)
+
+The shared backend listens on `127.0.0.1` and has no login, so it refuses what a web page could send it: a request whose `Host` is
+not a loopback name (a DNS-rebound domain, `421`) or whose `Origin` is a foreign web origin (`403`). Clients with no `Origin` (the stdio
+proxy, `stealthy`, a `uvx` url transport) are unaffected. Another local user or process on the same machine can still connect; a
+per-user token is the follow-up. If you bind another address on purpose (`--host backend.lan`), that name is allowed too.
+
 ### Orphan Recovery
 
 On server restart, the process cleanup system:
