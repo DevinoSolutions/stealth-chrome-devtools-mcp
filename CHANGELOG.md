@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.37
 
 ### A spawn can no longer attach to a sibling's browser through a stolen DevTools port (F-1009)
 
