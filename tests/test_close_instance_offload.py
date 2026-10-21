@@ -375,6 +375,21 @@ async def test_any_other_tab_close_failure_still_warns(error):
 
 
 @pytest.mark.asyncio
+async def test_a_tab_close_that_times_out_names_its_type():
+    """T-5900: ``asyncio.wait_for`` raises ``TimeoutError()`` with NO text, so a
+    tab close that outran its 2 s bound logged ``Failed to close tab for <id>: ``
+    and a CI failure (run 39564101655) said nothing about what had failed. The
+    type is part of the line now; a failure with text keeps it after the type."""
+    (silent,) = await _close_with_tab_send_failing("timeout-tab-1", TimeoutError())
+    assert silent.endswith("timeout-tab-1: TimeoutError"), silent
+
+    (spoken,) = await _close_with_tab_send_failing(
+        "timeout-tab-2", RuntimeError("connection reset")
+    )
+    assert spoken.endswith("timeout-tab-2: RuntimeError: connection reset"), spoken
+
+
+@pytest.mark.asyncio
 async def test_happy_path_fast_kill(monkeypatch):
     """Fast stubbed kill: returns True, instance removed, in_memory_storage called."""
     from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (

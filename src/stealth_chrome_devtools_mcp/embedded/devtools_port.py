@@ -52,14 +52,26 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DROP_TIMEOUT_SECONDS",
+    "IDENTITY_PATIENCE_SECONDS",
+    "IDENTITY_POLL_SECONDS",
     "IDENTITY_TIMEOUT_SECONDS",
     "confirm_ours",
     "owned_pids",
 ]
 
-#: How long the browser gets to say which process it is. A healthy Chrome answers
-#: in milliseconds; this is a ceiling inside the launch phase's budget, not a wait.
+#: How long the browser gets to say which process it is before its launcher is
+#: looked at. A healthy Chrome answers in milliseconds; this is a floor, not a wait.
 IDENTITY_TIMEOUT_SECONDS = 10.0
+
+#: How long the browser gets in all while the process WE launched is still running
+#: (T-5899). A healthy Chrome on a starved CI runner (macOS arm64) did not answer
+#: inside the floor, and refusing it failed the spawn of our own browser. Waiting
+#: longer cannot attach a stranger: the pid in the answer is the whole proof, and a
+#: stranger is refused the moment it answers (or cannot). Inside the launch phase.
+IDENTITY_PATIENCE_SECONDS = 60.0
+
+#: How often the launcher is looked at once the floor has passed.
+IDENTITY_POLL_SECONDS = 0.5
 
 #: How long dropping a refused connection may take. The drop runs on the cancel
 #: path too, so it must not be able to hold a cancellation up for ever.
@@ -102,7 +114,7 @@ def _refusal(browser_pid: int, launched_pid: int) -> ToolError:
 def _unverified(seconds: float) -> ToolError:
     return ToolError(
         f"F-1009: the browser on this spawn's DevTools port did not say which "
-        f"process it is within {seconds:g} s, so it could not be told apart from "
+        f"process it is within {seconds:.0f} s, so it could not be told apart from "
         "another process's browser on that port. The connection was dropped "
         "without closing the browser."
     )
@@ -130,19 +142,64 @@ async def _drop(browser: Browser) -> None:
         )
 
 
-async def _ask(browser: Browser, launched_pid: int) -> None:
+def _running(pid: int) -> bool:
+    """Is *pid* a live process? One pid, not a scan; unreadable counts as not."""
+    try:
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
+
+
+async def _answer(browser: Browser, launched_pid: int) -> list:
+    """The browser's own process list, waiting while OUR launch is still running.
+
+    One request, not a retry: an abandoned CDP transaction can take the listener
+    with it, so the request is waited on (``asyncio.wait`` never cancels it) and
+    cancelled only when the wait is over. The floor is always given; past it the
+    wait goes on, up to ``IDENTITY_PATIENCE_SECONDS``, only while the launched pid
+    is alive. A launcher that is gone, or one that cannot be read, gets no more.
+    """
     from nodriver import cdp
+
+    clock = asyncio.get_running_loop().time
+    started = clock()
+    request = asyncio.ensure_future(
+        browser.connection.send(cdp.system_info.get_process_info())
+    )
+    try:
+        await asyncio.wait({request}, timeout=IDENTITY_TIMEOUT_SECONDS)
+        while (
+            not request.done()
+            and clock() - started < IDENTITY_PATIENCE_SECONDS
+            and _running(launched_pid)
+        ):
+            await asyncio.wait({request}, timeout=IDENTITY_POLL_SECONDS)
+        waited = clock() - started
+        if not request.done():
+            raise _unverified(waited)
+        if waited > IDENTITY_TIMEOUT_SECONDS:
+            debug_logger.log_warning(
+                "devtools_port",
+                "confirm_ours",
+                f"the browser took {waited:.1f} s to say which process it is "
+                f"(floor {IDENTITY_TIMEOUT_SECONDS:g} s); "
+                f"pid {launched_pid} was running",
+            )
+        return request.result()
+    finally:
+        if not request.done():
+            request.cancel()
+            await asyncio.wait({request})
+
+
+async def _ask(browser: Browser, launched_pid: int) -> None:
     from nodriver.core.connection import ProtocolException
 
     try:
-        processes = await asyncio.wait_for(
-            browser.connection.send(cdp.system_info.get_process_info()),
-            IDENTITY_TIMEOUT_SECONDS,
-        )
+        processes = await _answer(browser, launched_pid)
     except ProtocolException:
         raise _unidentifiable() from None
-    except TimeoutError:
-        raise _unverified(IDENTITY_TIMEOUT_SECONDS) from None
     browser_pids = [p.id_ for p in processes or () if p.type_ == _BROWSER_PROCESS]
     if not browser_pids:
         debug_logger.log_warning(

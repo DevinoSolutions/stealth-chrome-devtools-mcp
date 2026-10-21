@@ -22,6 +22,8 @@ end-to-end pin below therefore asserts the *positive* marker
 """
 
 import ast
+import http.client
+import http.server
 import os
 import re
 import runpy
@@ -29,6 +31,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -382,6 +385,28 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _answers_http(port: int) -> bool:
+    """Has the server's event loop turned since it bound *port*?
+
+    ``Application startup complete`` is logged by the LIFESPAN, before uvicorn
+    binds the socket or reaches its ``if self.should_exit: return`` check
+    (T-5901): a SIGTERM that lands in between makes ``Server._serve`` return
+    without ``shutdown()``, so neither ``Application shutdown complete`` nor the
+    lifespan's own exit ever runs. Any HTTP answer, whatever its status, proves the
+    loop is past that check: nothing else runs on it until ``startup()`` has
+    returned, and ``main_loop`` is next.
+    """
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request("GET", "/")
+        connection.getresponse().read()
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+    return True
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal semantics (F-809)")
 def test_sigterm_on_a_real_backend_is_a_clean_shutdown(tmp_path):
@@ -417,7 +442,7 @@ def test_sigterm_on_a_real_backend_is_a_clean_shutdown(tmp_path):
             while time.monotonic() < deadline:
                 if "Application startup complete" in log_path.read_text(
                     encoding="utf-8", errors="replace"
-                ):
+                ) and _answers_http(port):
                     break
                 if proc.poll() is not None:
                     pytest.fail(
@@ -450,3 +475,37 @@ def test_sigterm_on_a_real_backend_is_a_clean_shutdown(tmp_path):
     assert "Application shutdown complete" in log, log
     assert not re.findall(r"(?m)^(?:ERROR|CRITICAL)", log), log
     assert "Traceback" not in log, log
+
+
+class _Quiet(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802  PERMANENT(http.server hook name)
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+
+def test_a_server_is_ready_only_when_it_answers_http():
+    """T-5901: the readiness the SIGTERM pin waits on is an ANSWER, not a log
+    line. A bound port nobody serves (the window between the lifespan's log line
+    and uvicorn's ``should_exit`` check) is not ready; any status is."""
+    free = _free_port()
+    assert not _answers_http(free)
+
+    with socket.socket() as bound:  # accepts in the kernel, never answers
+        bound.bind(("127.0.0.1", 0))
+        bound.listen(1)
+        # The connect succeeds (backlog) and the read times out: still not ready.
+        assert not _answers_http(bound.getsockname()[1])
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Quiet)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert _answers_http(httpd.server_address[1])
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
