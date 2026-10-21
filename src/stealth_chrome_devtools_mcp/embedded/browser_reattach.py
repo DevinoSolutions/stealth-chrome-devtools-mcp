@@ -871,6 +871,10 @@ async def _attach_one(
         # up: an adopted tab carries none of THIS backend's handlers, so a hook
         # on it would be registered and never fire.
         await manager._setup_dynamic_hooks(tab, instance_id)
+        # The per-target overrides the spawn tab got. OPTIONS carries no headers or
+        # timezone here (named in `not_restored`), so this is focus emulation
+        # alone (F-1011): CDP state died with the backend that set it.
+        await manager._apply_tab_overrides(tab, options)
         # Ownership is already ours from the claim; this re-records the entry
         # through the ONE write protocol and adds the in-memory tracking the
         # claim (a record write) could not.

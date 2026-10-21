@@ -1345,6 +1345,16 @@ class TestAnAdoptedInstanceTellsTheTruth:
         assert hooks.call_args.args[1] == held.instance_id
 
     @pytest.mark.asyncio
+    async def test_the_adopted_tab_gets_focus_emulation(self, tmp_path):
+        """F-1011: CDP emulation state died with the backend that set it, so the
+        adopted tab is a background tab again until this backend re-applies it."""
+        tab = FakeTab()
+        await self._adopt(tmp_path, tab)
+        assert [f["method"] for f in tab.cdp_frames].count(
+            "Emulation.setFocusEmulationEnabled"
+        ) == 1
+
+    @pytest.mark.asyncio
     async def test_a_dead_egress_proxy_is_adopted_but_stamped(self, tmp_path):
         """F-888 review M3, decided: ADOPT and say so. Refusing would convert a
         recoverable logged-in browser into a reap on the record path — this

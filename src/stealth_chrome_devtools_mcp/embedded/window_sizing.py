@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, TypedDict
 
+import nodriver as uc
+
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -171,3 +173,22 @@ async def measure(tab: Tab) -> dict[str, int] | None:
         )
         return None
     return actual
+
+
+async def enable_focus_emulation(tab: Tab) -> None:
+    """Make a tab report itself focused and visible however its window is covered,
+    minimized or left behind another tab (F-1011).
+
+    A hidden page gets no ``requestAnimationFrame`` and 1 Hz timers (measured on
+    Chrome 155: 5 timer ticks in 5 s hidden against 47 with this call). It does not
+    touch the renderer's OS priority. Best effort: the tab works without it, so a
+    refusal is logged, never raised.
+    """
+    try:
+        await tab.send(uc.cdp.emulation.set_focus_emulation_enabled(True))
+    except Exception as error:  # noqa: BLE001  PERMANENT(a visibility nicety must never cost a spawn or a tab)
+        debug_logger.log_warning(
+            "window_sizing",
+            "enable_focus_emulation",
+            f"{type(error).__name__}: {error}",
+        )

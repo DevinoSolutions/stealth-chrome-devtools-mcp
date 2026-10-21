@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Every tab the backend drives stays visible when its window is minimized or another tab is in front (F-1011)
+
+A minimized window or a background tab is hidden to its page: `visibilityState` is "hidden", `requestAnimationFrame` stops and a 100 ms timer
+clamps to 1 Hz (measured on Windows, Chrome 155, headed: 49 timer ticks in 5 s in the foreground, 5 ticks hidden). A tab the backend
+drives is now told `Emulation.setFocusEmulationEnabled(true)`, from the one place that already arms a tab's per-target overrides
+(`BrowserManager._apply_tab_overrides`): the spawn's first tab, every tab opened or switched to afterwards (`new_tab`, `switch_tab`, a replaced main tab) and the tab of a
+re-attached browser. The page then reads `visible`, `hasFocus() == true` and keeps its timers (47 ticks in 5 s on a minimized window; on a real spawn,
+171 frames and 30 ticks in 3 s in a background tab, against hidden, 0 frames, 4 ticks for a tab the backend did not arm). Best effort: a refusal is logged and
+never fails a spawn or a tab. Not fixed: focus emulation does not change the renderer's OS priority, so a background tab's renderer stays at Idle priority on a
+starved machine (only `--disable-renderer-backgrounding` would, and it stays stripped as an automation signature, F-1010); the active tab of a minimized window paints
+about one frame per second; a popup opened by the page (`window.open`) is armed only once a tool moves onto it (`switch_tab`)
+(`audit/stage2/finding_F1011_focus_emulation_keeps_background_tabs_visible.md`).
+
 ## 2.1.37
 
 ### A spawn can no longer attach to a sibling's browser through a stolen DevTools port (F-1009)

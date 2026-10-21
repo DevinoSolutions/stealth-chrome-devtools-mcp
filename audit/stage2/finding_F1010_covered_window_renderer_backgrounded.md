@@ -77,6 +77,7 @@ The blocklist is unchanged: both Puppeteer switches stay stripped from caller ar
   `switch_tab` (which activates it) stays slow. The reporter's own verified workaround was "this flag plus a single
   tab" for the same reason. Fixing that needs `--disable-renderer-backgrounding` (option A) or activating the tab a
   tool is about to drive; neither is done here.
+  Followed up in F-1011 (`finding_F1011_focus_emulation_keeps_background_tabs_visible.md`): CDP focus emulation keeps every driven tab visible; the Idle OS priority remains.
 - **Mac and Linux are not covered.** Mac has its own occlusion state (the cross-platform
   `--disable-backgrounding-occluded-windows` is its switch); the report did not come from there and nothing was
   measured, so nothing is emitted.
