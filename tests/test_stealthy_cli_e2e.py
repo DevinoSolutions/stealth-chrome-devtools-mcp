@@ -44,7 +44,12 @@ from pathlib import Path
 
 import pytest
 
-from release_gate_harness import _isolated_env, _pick_free_port, resolve_launcher
+from release_gate_harness import (
+    _isolated_env,
+    _pick_free_port,
+    resolve_launcher,
+    use_isolated_token,
+)
 from stealth_chrome_devtools_mcp.embedded import backend_probe, display_context
 
 pytestmark = pytest.mark.integration
@@ -113,7 +118,7 @@ def _await_backend(url: str, deadline_seconds: int) -> bool:
 
 
 @pytest.fixture()
-def isolated_backend(tmp_path):
+def isolated_backend(tmp_path, monkeypatch):
     """A real HTTP backend in a throwaway home, with the record pointing at it.
 
     **Its stdout goes to a FILE and must never go to a pipe**, and that is not a
@@ -137,6 +142,7 @@ def isolated_backend(tmp_path):
         log_dir=tmp_path / "logs",
         clone_dir=tmp_path / "clones",
     )
+    use_isolated_token(monkeypatch, home)
     port = _pick_free_port()
     console = tmp_path / "backend-console.log"
     with console.open("w", encoding="utf-8") as sink:

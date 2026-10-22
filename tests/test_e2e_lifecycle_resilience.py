@@ -102,6 +102,7 @@ from release_gate_harness import (
     gate_work_dir,
     gate_workspace,
     resolve_launcher,
+    use_isolated_token,
     workspace_backend_logs,
     workspace_proxy_warnings,
 )
@@ -1352,7 +1353,7 @@ async def _s2_kill_and_assert(  # noqa: PLR0913  PERMANENT(one call site, named 
 
 # ── S3 — liveness-probe churn ────────────────────────────────────────────────
 async def test_s3_session_churn_keeps_the_backend_serving_old_and_new_sessions(
-    launcher, space, backend_pid, idle_witness
+    launcher, space, backend_pid, idle_witness, monkeypatch
 ):
     """S3: 30 rapid ``initialize``+DELETE sessions and 5 clean proxy
     connect/disconnect cycles — the backend keeps serving, its pid does not
@@ -1389,6 +1390,9 @@ async def test_s3_session_churn_keeps_the_backend_serving_old_and_new_sessions(
 
     offsets = _log_offsets(space)
     port = space["port"]
+    # The probe runs in THIS process, so it must send the isolated backend's
+    # token, not this process's (F-1018).
+    use_isolated_token(monkeypatch, space["home_dir"])
 
     async with (
         _proxy(launcher, space) as live_a,

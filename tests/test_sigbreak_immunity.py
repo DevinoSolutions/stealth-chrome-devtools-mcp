@@ -45,6 +45,7 @@ from unittest.mock import patch
 import psutil
 import pytest
 
+from release_gate_harness import use_isolated_token
 from stealth_chrome_devtools_mcp.embedded import backend_registry, singleton
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
@@ -228,11 +229,14 @@ def _isolated_env(home: Path, log_dir: Path) -> dict[str, str]:
 
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows console semantics (F-839)")
-def test_a_console_break_to_another_group_does_not_kill_the_backend(tmp_path):
+def test_a_console_break_to_another_group_does_not_kill_the_backend(
+    tmp_path, monkeypatch
+):
     port = _free_port()
     assert port not in FORBIDDEN_PORTS, f"ephemeral port collided with {port}"
     home = tmp_path / "home"
     home.mkdir()
+    use_isolated_token(monkeypatch, home)
     log_dir = tmp_path / "logs"
     launcher_py = tmp_path / "launcher.py"
     launcher_py.write_text(_LAUNCHER, encoding="utf-8")
