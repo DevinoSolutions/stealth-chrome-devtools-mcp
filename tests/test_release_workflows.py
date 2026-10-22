@@ -221,7 +221,8 @@ def test_pr_caller_runs_the_same_reusable_gate():
 # W5: the evidence ledger is wired to the real jobs, not to a parallel list.
 # ---------------------------------------------------------------------------
 def test_only_pull_request_runs_are_ever_cancelled():
-    """Superseded PR runs cancel; main/dev pushes, tags and dispatches never do.
+    """Superseded PR runs cancel; main/dev pushes, tags and dispatches never do,
+    and a pending non-PR run is never replaced either.
 
     The group lives in the CALLER (test.yml): a `concurrency` inside the called
     release-gate.yml would evaluate in publish.yml's/canary.yml's context too.
@@ -229,7 +230,12 @@ def test_only_pull_request_runs_are_ever_cancelled():
     caller = _load(TEST_CALLER)
     conc = caller["concurrency"]
     assert conc["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
-    assert "github.event.pull_request.number || github.ref" in conc["group"]
+    # non-PR runs key on their own run_id: a shared ref key would let a newer
+    # queued run drop a PENDING one (e.g. the middle of two quick main pushes).
+    assert conc["group"].endswith(
+        "github.event.pull_request.number || github.run_id }}"
+    )
+    assert "github.ref" not in conc["group"]
     assert "concurrency" not in _load(RELEASE_GATE)
     assert all("concurrency" not in j for j in _jobs(RELEASE_GATE).values())
     # publish (tags) must stay out of the cancelling group entirely.
@@ -237,17 +243,53 @@ def test_only_pull_request_runs_are_ever_cancelled():
     assert "pull_request" not in _load(PUBLISH)[True]
 
 
-def test_release_tag_reaches_the_shell_only_through_env():
-    """T-5588: no `${{ inputs.* }}` or `github.ref_name` text inside a `run:` script."""
-    for path in (RELEASE_GATE, PUBLISH, TEST_CALLER):
-        for name, job in _jobs(path).items():
-            for run in _all_run_steps(job):
-                assert not re.search(
-                    r"\$\{\{\s*(inputs|github\.(ref_name|head_ref|event\.(?!pull_request\.number)))",
-                    run,
-                ), (
-                    f"{path.name}:{name} interpolates an attacker-influenced value into a script"
-                )
+UNTRUSTED = re.compile(
+    r"inputs\.|github\.(ref|head_ref|base_ref|event\.|actor)(?!_name\b)|github\.ref_name"
+)
+EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+ALL_WORKFLOWS = sorted(WORKFLOWS.glob("*.yml"))
+
+
+def _untrusted_in_run_blocks(doc: dict) -> list[str]:
+    """Every attacker-influenced `${{ }}` expression found inside a `run:` body."""
+    return [
+        f"{name}: {expr.strip()}"
+        for name, job in (doc.get("jobs") or {}).items()
+        for run in _all_run_steps(job)
+        for expr in EXPRESSION.findall(run)
+        if UNTRUSTED.search(expr)
+    ]
+
+
+def test_untrusted_expressions_never_reach_a_run_script():
+    """T-5588: in EVERY workflow, no `inputs.*`/ref/head_ref/event.*/actor expression
+    (searched over the whole expression body) appears inside a `run:` block."""
+    assert ALL_WORKFLOWS, "no workflows found"
+    for path in ALL_WORKFLOWS:
+        assert _untrusted_in_run_blocks(_load(path)) == [], path.name
+
+
+def test_the_untrusted_expression_scan_catches_a_mutated_workflow():
+    mutated = {"jobs": {"j": {"steps": [{"run": 'echo "${{ inputs.release_tag }}"'}]}}}
+    assert _untrusted_in_run_blocks(mutated)
+    # whole-expression search: the value is not at the start of the body
+    late = {
+        "jobs": {
+            "j": {
+                "steps": [
+                    {
+                        "run": "echo ${{ format('{0}', github.event.head_commit.message) }}"
+                    }
+                ]
+            }
+        }
+    }
+    assert _untrusted_in_run_blocks(late)
+    ok = {"jobs": {"j": {"steps": [{"run": 'echo "${{ github.event_name }}"'}]}}}
+    assert _untrusted_in_run_blocks(ok) == []
+
+
+def test_release_tag_reaches_the_shell_through_env():
     steps = _jobs(RELEASE_GATE)["build-dist"]["steps"]
     step = next(s for s in steps if "assert-version" in s.get("run", ""))
     assert step["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
