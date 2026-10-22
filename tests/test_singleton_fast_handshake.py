@@ -17,7 +17,7 @@ import pytest
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCRequest, JSONRPCResponse
 
-from release_gate_harness import _isolated_env
+from release_gate_harness import _isolated_env, use_isolated_token
 from stealth_chrome_devtools_mcp.embedded.singleton import _proxy_streams
 
 
@@ -202,13 +202,18 @@ class TestFastHandshakeEndToEnd:
     initialize response must be swallowed (client sees exactly one)."""
 
     @pytest.mark.asyncio
-    async def test_initialize_local_then_tools_list_forwarded(self, tmp_path):
+    async def test_initialize_local_then_tools_list_forwarded(
+        self, tmp_path, monkeypatch
+    ):
         import subprocess
         import sys
 
         port = _free_port()
         env = _isolated_subprocess_env(tmp_path)
         env["STEALTH_BROWSER_DEBUG"] = "false"
+        # F-1018: `_proxy_streams` runs in THIS process and sends this home's
+        # token; the backend below checks the one it wrote under the isolated home.
+        use_isolated_token(monkeypatch, tmp_path / "home")
 
         backend = subprocess.Popen(
             [
@@ -287,13 +292,16 @@ class TestProxyExitsOnClientDisconnect:
     """
 
     @pytest.mark.asyncio
-    async def test_proxy_returns_when_client_stream_closes(self, tmp_path):
+    async def test_proxy_returns_when_client_stream_closes(self, tmp_path, monkeypatch):
         import subprocess
         import sys
 
         port = _free_port()
         env = _isolated_subprocess_env(tmp_path)
         env["STEALTH_BROWSER_DEBUG"] = "false"
+        # F-1018: `_proxy_streams` runs in THIS process and sends this home's
+        # token; the backend below checks the one it wrote under the isolated home.
+        use_isolated_token(monkeypatch, tmp_path / "home")
 
         backend = subprocess.Popen(
             [

@@ -106,6 +106,19 @@ www.stealthly.io (`ac763235-cd0c-4582-96cc-3b55ebd82210`), stealthy.now (`fd7ca0
 www.stealthy.now (`0848d85b-8d92-441d-96af-6dea8e2f7b0b`) and http://stealthly.io (`d8cd4c48-48c2-4e0a-a8ea-9ea48e3d0ea4`).
 Uptimely checks reachability, not the exact 301 and its Location, so the four redirect hosts are now watched for being up rather than for redirecting.
 
+### The HTTP backend demands a per-user bearer token (F-1018)
+
+F-1013 refused a web page's Host and Origin, but any other local process or OS user could still `initialize` a session and call any tool, including
+`create_python_binding` (`exec` in the backend) and the cookie readers. The backend now keeps one random token per user in `~/.stealth-mcp/backend.token` and answers
+`401` to every request, `/mcp/` and the health route alike, that does not carry `Authorization: Bearer <token>`; a foreign Host is still `421` and a foreign Origin `403` first.
+The file is readable by the current OS user only: POSIX mode `0600`; on Windows a protected DACL with one ACE for the user's SID (measured with `icacls`; the default ACL
+inherited Modify for other groups). One token per user, not per backend, so sibling backends and every client share it. A backend that cannot secure the file does not serve.
+Every first-party client sends it through two seams (`backend_client.http_client` for the proxy's bridge and the CLI, `backend_probe` for the readiness poll, the identity gate, `doctor`/`status` and the
+heartbeat), so nothing changes for a user. Upgrade: a new client against an old backend works (the extra header is ignored); an old proxy against a new backend gets 401 and, if its
+idle backend was replaced, reconnects after its Claude Code session restarts. A raw `curl` must send the header. `--allowed-host NAME` (repeatable) is the new explicit opt-in for an extra Host name (T-5727),
+and `RELEASE_CONTRACT.md`'s authentication row now says so. Not fixed: the token is a shared secret for a loopback socket, not a channel binding, and the same user's own processes can read it
+(`audit/stage2/finding_F1018_backend_bearer_token.md`, DESIGN section 2.10).
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
