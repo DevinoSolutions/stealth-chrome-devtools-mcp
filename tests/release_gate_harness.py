@@ -47,1738 +47,204 @@ isolated ``server.json``, and asserts no child process of this process remains.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import functools
-import importlib.metadata
-import inspect
 import json
-import logging
-import math
-import os
-import re
-import socket
-import sys
-import tempfile
-import threading
-import time
-import uuid
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Any
 
 import psutil
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
-import fixture_routes
-
-_log = logging.getLogger("release_gate_harness")
-
-# ── Contract constants ──────────────────────────────────────────────────────
-# Which declared segment of the ONE gate mechanism `run_release_gate_journey`
-# runs. These are extents/segments, never duplicated machinery: every value
-# below shares the same launcher resolution, isolated env, fixture app, stdio
-# client, and teardown. See that function's docstring for what each claims.
-FULL_JOURNEY = "full"
-HANDSHAKE_ONLY = "handshake"
-COOKIE_ROUND_TRIP = "cookies"
-SOAK_STABILITY = "soak"
-
-SERVER_NAME = "stealth-chrome-devtools-mcp"
-REGISTRY_TOOL_COUNT = 97  # remediation baseline (CLAUDE.md: derived == 97)
-RESULT_SCHEMA_VERSION = 1
-FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
-#: The stand-in for a sign-in (F-958): ``GET /api/login`` sets this cookie
-#: HttpOnly, as a real login's session cookie is, so page script cannot read it
-#: back and only the server's own echo of the ``Cookie`` header can.
-LOGIN_COOKIE = "fleet_login"
-LOGIN_COOKIE_VALUE = "signed-in-f958"
-
-# ── Bounds (every await is wrapped; the pytest --timeout is the outer net) ──
-INIT_TIMEOUT = 60.0  # initialize handshake (answered locally by the proxy)
-LIST_TIMEOUT = 130.0  # first backend-bound call — covers backend cold start
-SPAWN_TIMEOUT = 120.0  # first real Chrome launch
-WARMUP_TIMEOUT = 150.0  # cold Chrome + master-profile bootstrap (best-effort)
-WARMUP_ATTEMPTS = 4  # the cold launch intermittently fails outright, not just slowly
-WARMUP_BACKOFF_SECONDS = 3.0  # multiplied by the attempt number; see _cold_start_warmup
-NAV_TIMEOUT = 60.0
-CALL_TIMEOUT = 45.0
-CLOSE_TIMEOUT = 45.0
-SETTLE_TIMEOUT = 20.0
-TERMINATE_TIMEOUT = 15.0
-CHILD_SETTLE_TIMEOUT = 15.0
-
-# ── Soak bounds (the stability segment; see _soak_journey) ──────────────────
-# THE per-call deadline of the soak. Every measured soak operation is wrapped in
-# it, so "nothing hangs" is an assertion about each individual call rather than
-# about the journey's total runtime: one overdue reply fails the node by NAME.
-# Deliberately far below NAV_TIMEOUT/CALL_TIMEOUT — after the cold path has been
-# paid, a warm local page must answer in seconds, not tens of seconds.
-SOAK_OP_TIMEOUT = 30.0
-SOAK_CYCLES = 3  # mixed-operation rounds against the ONE instance (~17 ops each)
-# A host that cannot resolve. `.invalid` is reserved by RFC 2606 precisely so it
-# can never be registered, so this is a guaranteed DNS failure on any network —
-# no third-party service is contacted and the shape does not depend on the run.
-SOAK_BAD_HOST = "https://definitely-not-a-real-host.invalid/"
-SOAK_PAGES = ("index.html", "interact.html", "extract.html", "hard_dom.html")
-# What the soak ASKS `wait_for_element` to wait for a selector that never appears.
-# The gap between this and what the call actually costs is F-805; the soak
-# measures it (``journey["missing_selector"]``) rather than assuming either value.
-SOAK_MISSING_SELECTOR_WAIT_MS = 2000
-
-# ── Diagnostic caps ─────────────────────────────────────────────────────────
-_STDERR_CAP_BYTES = 64 * 1024
-_STDERR_CAP_LINES = 200
-
-
-# ---------------------------------------------------------------------------
-# Fixture app — THE serving mechanism (conftest.fixture_app_server delegates
-# here). Serves tests/fixture_app plus the plan_E2E §2.2 API routes over an
-# ephemeral 127.0.0.1 port. Moved verbatim from conftest so there is one home.
-# ---------------------------------------------------------------------------
-# Diagnostics only: every request the fixture server received, and how it ended.
-# When a navigation fails there is no other way to tell "Chrome never reached the
-# server" (a network/launch problem) from "Chrome fetched the page but the load
-# never completed" (a CDP/page problem) — the two have identical symptoms at the
-# tool boundary. An entry is written when the request line is parsed, marked
-# ``[unfinished]``, and rewritten when the handler ends: plain when the response
-# was served, ``[reset]`` when the client went away mid-request. So a request
-# Chrome sent and then cancelled, or one still being served, is visible instead
-# of absent (T-4709: "no GET /app.js" used to mean "none served to completion").
-# Bounded, and never asserted on.
-_FIXTURE_HITS: list[str] = []
-_FIXTURE_HITS_CAP = 50
-_HIT_UNFINISHED = " [unfinished]"
-_HIT_RESET = " [reset]"
-
-
-class _FixtureHandler(SimpleHTTPRequestHandler):
-    """Static file server for tests/fixture_app + the plan_E2E §2.2 API routes
-    + W7's dynamic routes (``tests/fixture_routes.py``).
-
-    The W7 shapes need pages that name their *peer* origin, exact response
-    headers, redirects, chunked and event-stream bodies, and a WebSocket
-    upgrade — none of which a file on disk can be. They dispatch through
-    :func:`fixture_routes.dispatch` FIRST and fall through to the static tree
-    when the path is not one of theirs, so there is still exactly one handler,
-    one server, and one fixture mechanism.
-    """
-
-    def __init__(self, *args, origin_state=None, **kwargs):
-        # Set before super().__init__, which handles the whole request inline.
-        self.origin_state = origin_state or fixture_routes.new_origin_state("a")
-        super().__init__(*args, **kwargs)
-
-    def log_message(self, *args, **kwargs):
-        """Silence per-request stderr logging (keeps test output clean)."""
-
-    def parse_request(self):
-        """Record the request the moment its line is parsed (stdlib override)."""
-        parsed = super().parse_request()
-        line = f"{self.client_address[0]} {self.requestline}"
-        if len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
-            _FIXTURE_HITS.append(line + _HIT_UNFINISHED)
-            self._hit = (len(_FIXTURE_HITS) - 1, line)
-        return parsed
-
-    def _end_hit(self, suffix: str) -> None:
-        """Rewrite this request's entry to its outcome; no-op when it was never
-        recorded or the list was cleared for another server since."""
-        hit, self._hit = self._hit, None
-        if hit is None:
-            return
-        index, line = hit
-        if (
-            index < len(_FIXTURE_HITS)
-            and _FIXTURE_HITS[index] == line + _HIT_UNFINISHED
-        ):
-            _FIXTURE_HITS[index] = line + suffix
-
-    def handle_one_request(self):
-        """Serve one request and record how it ended (stdlib override).
-
-        A browser closing a socket while this thread reads or writes raises a
-        ``ConnectionError`` (``ConnectionResetError`` / WinError 10054, or the
-        aborted/broken-pipe pair) out of the stdlib handler, and pytest prints the
-        whole traceback into the node's captured output — where it masks the
-        output a failure is read from (it did exactly that on PR #151's
-        cookie-node failure). The client going away is nothing to report: return.
-        A reset with no request line parsed (a speculative socket) records
-        nothing, because there was no request; one after it records ``[reset]``.
-        """
-        self._hit = None
-        try:
-            super().handle_one_request()
-        except ConnectionError:
-            self.close_connection = True
-            self._end_hit(_HIT_RESET)
-            return
-        self._end_hit("")
-
-    def _send_json(self, payload, status=200, extra_headers=None):
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        for key, value in (extra_headers or {}).items():
-            self.send_header(key, value)
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):  # noqa: N802  stdlib override, PERMANENT(interface)
-        if fixture_routes.dispatch(self, "GET"):
-            return
-        if self.path == "/api/json":
-            self._send_json({"ok": True, "value": 42, "source": "fixture"})
-            return
-        if self.path == "/api/set-cookie":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Set-Cookie", "fixture_cookie=server-set; Path=/")
-            self.end_headers()
-            self.wfile.write(b"cookie set")
-            return
-        if self.path == "/api/login":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header(
-                "Set-Cookie",
-                f"{LOGIN_COOKIE}={LOGIN_COOKIE_VALUE}; Path=/; HttpOnly; Max-Age=3600",
-            )
-            self.end_headers()
-            self.wfile.write(b"signed in")
-            return
-        if self.path == "/redirect":
-            self.send_response(302)
-            self.send_header("Location", "/api/json")
-            self.end_headers()
-            return
-        super().do_GET()
-
-    def do_POST(self):  # noqa: N802  stdlib override, PERMANENT(interface)
-        if fixture_routes.dispatch(self, "POST"):
-            return
-        if self.path == "/api/echo":
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
-            reflected = {key.lower(): value for key, value in self.headers.items()}
-            self._send_json({"body": raw, "headers": reflected})
-            return
-        self.send_response(404)
-        self.end_headers()
-
-    def do_OPTIONS(self):  # noqa: N802  stdlib override, PERMANENT(interface)
-        """CORS preflight (W7 MQ-118). Only dynamic routes answer OPTIONS."""
-        if fixture_routes.dispatch(self, "OPTIONS"):
-            return
-        self.send_response(404)
-        self.end_headers()
-
-
-#: How many connections the fixture server's listening socket queues before
-#: its accept loop takes them (F-934). The stdlib default is 5. A six-browser
-#: fleet opens up to 36 at once (Chrome's six per host, per browser), and when
-#: a busy runner stalls the accept loop the sixth is refused: Windows retries
-#: the SYN for ~2 s and then fails the connect, which Chrome reports as its
-#: error page. 128 is the largest backlog every CI kernel honours as asked
-#: (macOS clamps to ``kern.ipc.somaxconn``, 128 by default).
-FIXTURE_ACCEPT_BACKLOG = 128
-
-
-class _FixtureServer(ThreadingHTTPServer):
-    """The fixture origin's server: stdlib's, with a fleet-sized backlog."""
-
-    request_queue_size = FIXTURE_ACCEPT_BACKLOG
-
-
-def _bind_origin(origin_state: dict) -> tuple[ThreadingHTTPServer, str]:
-    """Bind one ephemeral literal-IPv4 loopback origin (not yet serving).
-
-    Binding is separated from serving because a cross-linked PAIR cannot know
-    either base URL until BOTH sockets have a port — so both bind, both learn
-    the other's URL, and only then does either accept a request.
-    """
-    handler = functools.partial(
-        _FixtureHandler, directory=str(FIXTURE_APP_DIR), origin_state=origin_state
-    )
-    httpd = _FixtureServer(("127.0.0.1", 0), handler)
-    host, port = httpd.server_address
-    return httpd, f"http://{host}:{port}"
-
-
-@contextlib.contextmanager
-def _serving(servers: list[ThreadingHTTPServer], states: list[dict]):
-    """Run each bound server on a daemon thread; shut all of them down on exit.
-
-    Finalization releases every W10 fault controller FIRST. ``shutdown()`` only
-    stops the accept loop — it never interrupts an in-flight request — so a test
-    that failed while a fault route was parked would otherwise leave a handler
-    thread holding a connection past ``server_close()``. Releasing first, then
-    asserting every entered handler actually left, is what makes a failed test
-    unable to wedge pytest.
-    """
-    threads = [
-        threading.Thread(target=httpd.serve_forever, daemon=True) for httpd in servers
-    ]
-    for thread in threads:
-        thread.start()
-    try:
-        yield
-    finally:
-        stuck = [
-            token
-            for state in states
-            for token in fixture_routes.release_all_faults(state)
-        ]
-        for httpd in servers:
-            httpd.shutdown()
-            httpd.server_close()
-        for thread in threads:
-            thread.join(timeout=5)
-        if stuck:
-            raise AssertionError(
-                f"fixture fault handler(s) never terminated after release: {stuck}"
-            )
-
-
-@contextlib.contextmanager
-def serve_fixture_app():
-    """Yield the ``http://127.0.0.1:<port>`` base URL of the fixture app server.
-
-    Binds an ephemeral literal-IPv4 loopback port (so an IPv6-first ``localhost``
-    can never cause a false failure), serves ``tests/fixture_app`` plus the §2.2
-    routes on a daemon thread, and shuts the server down on exit. The caller owns
-    the lifetime; the journey below owns its own instance so it can close it in a
-    ``finally``.
-    """
-    _FIXTURE_HITS.clear()
-    state = fixture_routes.new_origin_state("a")
-    httpd, base_url = _bind_origin(state)
-    state["self_url"] = base_url
-    with _serving([httpd], [state]):
-        yield base_url
-
-
-@contextlib.contextmanager
-def serve_fixture_origin_pair():
-    """Yield ``(origin_a, origin_b)`` — two INDEPENDENT ``127.0.0.1:0`` servers.
-
-    plan_RELEASE W7 needs a genuine second origin (cross-origin frames, a
-    cross-origin CSP ``connect-src`` violation, a redirect that leaves A, and a
-    real CORS preflight); two ephemeral loopback ports differ in port and so are
-    distinct web origins. Each server learns its peer's base URL after both
-    sockets bind and before either accepts, so no request can observe a
-    half-linked pair. Same handler, same fixture tree, same shutdown discipline
-    as the single-origin form above.
-    """
-    _FIXTURE_HITS.clear()
-    states = [
-        fixture_routes.new_origin_state("a"),
-        fixture_routes.new_origin_state("b"),
-    ]
-    bound = [_bind_origin(state) for state in states]
-    urls = [url for _, url in bound]
-    for index, state in enumerate(states):
-        state["self_url"] = urls[index]
-        state["peer_url"] = urls[1 - index]
-    with _serving([httpd for httpd, _ in bound], states):
-        yield urls[0], urls[1]
-
-
-# ---------------------------------------------------------------------------
-# Launcher resolver (standalone — W3 reuses it for each installed environment).
-# ---------------------------------------------------------------------------
-def resolve_launcher(
-    interpreter: str | os.PathLike[str] | None = None,
-    *,
-    name: str = "stealth-chrome-devtools-mcp",
-) -> Path:
-    """Resolve an absolute installed console launcher of this distribution.
-
-    ``name`` selects which of the two declared ``[project.scripts]`` entry points
-    to resolve; it defaults to the MCP server launcher this harness drives. W11's
-    doc-example runner passes the ops CLI name so that both console scripts are
-    resolved by this ONE resolver rather than a second copy of the rule.
-
-    Given a target environment's interpreter (default: this process's), derive the
-    console entry point from that environment's scripts directory —
-    ``Scripts/<name>.exe`` on Windows, ``bin/<name>`` on POSIX — made absolute
-    WITHOUT following
-    symlinks (``Path.absolute()``, never ``Path.resolve()``: on POSIX a venv's
-    ``bin/python`` is a symlink to the base interpreter, so resolving it escapes
-    the venv into a scripts dir that has no entry points — exactly what the first
-    Linux/macOS CI run hit). Requires an absolute, existing executable inside that
-    environment. NEVER uses a bare command, mutates PATH, invokes ``python -m`` from
-    the source tree, or falls back to another checkout.
-    """
-    interp = Path(
-        interpreter if interpreter is not None else _this_executable()
-    ).absolute()
-    scripts_dir = interp.parent
-    exe_name = f"{name}.exe" if os.name == "nt" else name
-    launcher = scripts_dir / exe_name
-    if not launcher.is_absolute():
-        raise ValueError(f"resolved launcher is not absolute: {launcher}")
-    if not launcher.exists() or not launcher.is_file():
-        raise FileNotFoundError(
-            f"console launcher {exe_name!r} not found in {scripts_dir} "
-            f"(resolved from interpreter {interp}); expected an installed entry point"
-        )
-    if os.name != "nt" and not os.access(launcher, os.X_OK):
-        raise PermissionError(f"resolved launcher is not executable: {launcher}")
-    _log.info("resolved absolute launcher: %s", launcher)
-    return launcher
-
-
-def _this_executable() -> str:
-    return sys.executable
-
-
-# ---------------------------------------------------------------------------
-# Isolation helpers.
-# ---------------------------------------------------------------------------
-# The product's own default singleton port (``singleton.DEFAULT_PORT``), restated
-# as a literal for the same reason ``REGISTRY_TOOL_COUNT`` is: this harness
-# drives the installed artifact as a black box.
-DEFAULT_SINGLETON_PORT = 19222
-_PORT_PICK_ATTEMPTS = 32
-
-
-def _os_assigned_port() -> int:
-    """One OS-assigned free loopback port. The single seam ``_pick_free_port``
-    retries through; a test can replace it to hand back a chosen sequence."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _reserved_ports(real_home: Path | None = None) -> frozenset[int]:
-    """Ports an isolated workspace must never bind: the product's default
-    singleton port plus every port the DEVELOPER'S real ``server.json`` records.
-
-    An isolated backend on one of these could not evict a live real backend
-    (bind fails on a port in use) — but with the real backend DOWN it would
-    squat its recorded port, the developer's next real proxy would adopt the
-    throwaway backend through ``adoption_candidates``, and that backend dies at
-    workspace teardown: the exact ``CONNECTION_CLOSED`` the lifecycle suite
-    exists to eliminate, handed to the developer by the suite itself. The
-    Windows dynamic range measured here is 1025-65534 (``netsh int ipv4 show
-    dynamicport tcp``: start 1025, 64510 ports), so an OS pick CAN land there.
-    """
-    home = Path.home() if real_home is None else real_home
-    return frozenset({DEFAULT_SINGLETON_PORT, *_recorded_ports(home)})
-
-
-def _pick_free_port(*, real_home: Path | None = None) -> int:
-    """An OS-assigned free loopback port that is NOT one of
-    :func:`_reserved_ports`, used as a distinct singleton port.
-
-    Retries the OS pick rather than adjusting it: a port this harness cannot
-    prove is safe is not one it may hand out, so exhaustion raises.
-    """
-    reserved = _reserved_ports(real_home)
-    for _ in range(_PORT_PICK_ATTEMPTS):
-        port = _os_assigned_port()
-        if port not in reserved:
-            return port
-    raise RuntimeError(
-        f"no free loopback port outside the reserved set {sorted(reserved)} in "
-        f"{_PORT_PICK_ATTEMPTS} attempts"
-    )
-
-
-def use_isolated_token(monkeypatch, home_dir: Path) -> None:
-    """Make THIS process's first-party clients send the isolated backend's bearer
-    token (F-1018).
-
-    ``backend_token.token_path`` is ``backend_registry.STATE_DIR / "backend.token"``
-    and ``STATE_DIR`` is the TEST process's own home. A backend started under
-    :func:`_isolated_env` wrote its token under ``home_dir`` instead, so an
-    in-process probe of it (``singleton._backend_http_ready``,
-    ``backend_probe.ready``) sent another token, or none, and read the 401 as
-    "not serving". Subprocesses need nothing: their HOME already points there."""
-    from stealth_chrome_devtools_mcp.embedded import backend_registry
-
-    monkeypatch.setattr(backend_registry, "STATE_DIR", home_dir / ".stealth-mcp")
-
-
-def _isolated_env(
-    *, home_dir: Path, session_root: Path, log_dir: Path, clone_dir: Path
-) -> dict[str, str]:
-    """A copy of the parent env with the singleton state dir + all state paths
-    redirected into the throwaway workspace. The parent ``os.environ`` is never
-    mutated; every override is a known ``settings.py`` field or a home var.
-
-    The redirect must be a COHERENT profile: Chrome 136+ on Windows refuses
-    ``--remote-debugging-port`` ("DevTools remote debugging requires a
-    non-default data directory") when ``USERPROFILE`` is redirected while
-    ``LOCALAPPDATA`` still points into the real profile — even with an explicit
-    non-default ``--user-data-dir``. Pointing ``LOCALAPPDATA``/``APPDATA`` at an
-    ``AppData`` skeleton inside the new home restores debugging (empirically
-    verified) and keeps Chrome's crashpad/GCM writes inside the throwaway."""
-    env = dict(os.environ)
-    # Redirect Path.home() so ~/.stealth-mcp (singleton state) is fresh & isolated.
-    env["HOME"] = str(home_dir)
-    env["USERPROFILE"] = str(home_dir)
-    local_appdata = home_dir / "AppData" / "Local"
-    roaming_appdata = home_dir / "AppData" / "Roaming"
-    local_appdata.mkdir(parents=True, exist_ok=True)
-    roaming_appdata.mkdir(parents=True, exist_ok=True)
-    env["LOCALAPPDATA"] = str(local_appdata)
-    env["APPDATA"] = str(roaming_appdata)
-    # Same coherence rule for the macOS home: Chrome derives Application
-    # Support / Caches from HOME with no env var to point at them, so the
-    # skeleton is what makes the redirect coherent there. Created on every OS
-    # (cheap, inert off-macOS) so the isolated home has ONE shape everywhere.
-    for mac_dir in ("Application Support", "Caches", "Preferences"):
-        (home_dir / "Library" / mac_dir).mkdir(parents=True, exist_ok=True)
-    # Known STEALTH_MCP_* settings fields (env has ONE home = settings.py).
-    env["STEALTH_MCP_BROWSER_SESSION_ROOT"] = str(session_root)
-    env["STEALTH_MCP_CLONE_OUTPUT_DIR"] = str(clone_dir)
-    env["STEALTH_MCP_LOG_DIR"] = str(log_dir)
-    # The workspace's logs are EVIDENCE — a failing node's whole post-mortem,
-    # and for the lifecycle suite an oracle. `env = dict(os.environ)` above
-    # inherits the developer's exported settings, so a `STEALTH_MCP_LOG_LEVEL`
-    # of WARNING (a perfectly reasonable thing to export) would silently drop
-    # every INFO line these workspaces read: `backend_watchdog`'s
-    # `was busy, not dead` verdict is INFO while its strikes are WARNING, so a
-    # run where F-820 did exactly the right thing would arrive as strikes with
-    # no verdict — a false RED about the product, caused by the harness. The
-    # level is therefore DECLARED here beside the directory, not inherited: the
-    # harness chooses what the workspace records, as it already chooses where.
-    env["STEALTH_MCP_LOG_LEVEL"] = "INFO"
-    return env
-
-
-def _chrome_process_snapshot() -> list[str]:
-    """The live Chrome process tree by ``--type=``, captured while it is stalled.
-
-    Chrome runs its network stack in a separate ``--type=utility`` process
-    (``network.mojom.NetworkService``). When a navigation hangs but
-    ``about:blank`` returns instantly, whether that process EXISTS separates
-    "Chrome cannot reach the network" from "Chrome never asked it to" — and
-    nothing at the CDP boundary can tell those apart. Diagnostics only.
-    """
-    out: list[str] = []
-    for proc in psutil.process_iter(["name", "cmdline"]):
-        try:
-            name = (proc.info.get("name") or "").lower()
-            if "chrom" not in name:
-                continue
-            cmdline = proc.info.get("cmdline") or []
-            kinds = [
-                arg
-                for arg in cmdline
-                if arg.startswith("--type=") or "utility-sub-type" in arg
-            ]
-            out.append(
-                f"pid={proc.pid} {name} {' '.join(kinds) or '(browser process)'}"
-            )
-        except psutil.Error:
-            continue
-    return out
-
-
-def gate_work_dir(fallback: Path) -> Path:
-    """The throwaway workspace root for a gate journey (profiles, HOME, logs).
-
-    Prefers the CI runner's own temp when ``RUNNER_TEMP`` is set, falling back to
-    the caller's (usually pytest ``tmp_path``) everywhere else.
-
-    Why not just use pytest's tmp_path on CI: on macOS that resolves into
-    ``/private/var/folders/...``, the sandboxed per-user temp, and it is the one
-    concrete difference between the macOS cases that pass and the one that does
-    not — in-process integration runs its Chrome profile under ``RUNNER_TEMP``
-    (``/Users/runner/work/_temp``) and navigates fine, while this journey ran
-    under ``/private/var/folders`` and could not complete ANY network navigation
-    (a connection to a CLOSED port hung too, with Fetch interception proven off,
-    so nothing product-side was pausing it). Same OS, same Chrome, same code.
-
-    The caller still owns the directory's lifetime; W3's install smoke gets this
-    policy for free by calling the same helper.
-    """
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    if runner_temp and Path(runner_temp).is_dir():
-        return Path(tempfile.mkdtemp(prefix="gate-", dir=runner_temp))
-    return fallback
-
-
-def _log_dirs(dirs: tuple[Path, ...]) -> list[Path]:
-    return [
-        d for d in (*dirs, *(p / ".stealth-mcp" / "logs" for p in dirs)) if d.is_dir()
-    ]
-
-
-def _backend_logs(*dirs: Path) -> str:
-    """The isolated backend's own logs, for failures the exception text alone
-    cannot explain.
-
-    The journey runs the backend as a DETACHED child, so a tool failure arrives
-    as a bare protocol error — the reason (Chrome launch args, CDP stalls, the
-    orphan-recovery lines that root-caused B1) is only in the backend's log
-    files, which die with the throwaway home. Cheap on the happy path: only
-    read when the journey has already failed.
-
-    Every ``backend-*.log`` (the per-boot logs and the shared boot log) is
-    included, THEN the two newest other logs. Selecting "the two newest logs"
-    alone was right for a one-proxy journey and wrong for the startup herd:
-    twelve proxies write after the backend does, so three wedge reports in a
-    row (F-859 §9-§11) carried two proxy logs and no backend log, and the
-    absence was read as a fact about the workspace. The proxy fleet's own view
-    is :func:`_proxy_warnings`.
-    """
-    seen: set[Path] = set()
-    chunks: list[str] = []
-    for d in _log_dirs(dirs):
-        by_age = sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime)
-        backend = [p for p in by_age if p.name.startswith("backend-")]
-        others = [p for p in by_age if not p.name.startswith("backend-")][-2:]
-        for log in (*backend, *others):
-            if log in seen:
-                continue
-            seen.add(log)
-            chunks.append(f"[{log.name}]\n{_read_capped(log)}")
-    return "\n".join(chunks) if chunks else "(no backend log files found)"
-
-
-# The proxy digest keeps this many WARNING-or-worse lines, newest last: the end
-# of a wedge is where every proxy says what it concluded.
-_PROXY_DIGEST_LINES = 120
-_WARNING_LINE_RE = re.compile(r"^\S+ \S+ (WARNING|ERROR|CRITICAL) ")
-
-
-def _proxy_warnings(*dirs: Path) -> str:
-    """Every proxy's WARNING-or-worse lines, by file, capped — the fleet's view.
-
-    A herd's proxies write mostly DEBUG probe noise; what decides "one
-    connection dropped" from "every proxy lost the backend in the same second"
-    is which of them warned, and when. One digest instead of twelve raw logs.
-    """
-    entries: list[tuple[str, str]] = []  # (log file, warning line), oldest first
-    for d in _log_dirs(dirs):
-        for log in sorted(d.glob("proxy-*.log"), key=lambda p: p.stat().st_mtime):
-            try:
-                text = log.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            entries.extend(
-                (log.name, ln) for ln in text.splitlines() if _WARNING_LINE_RE.match(ln)
-            )
-    if not entries:
-        return "(no proxy warnings)"
-    elided = len(entries) - _PROXY_DIGEST_LINES
-    out: list[str] = []
-    if elided > 0:
-        entries = entries[-_PROXY_DIGEST_LINES:]
-        out.append(f"(+{elided} earlier warning line(s) elided)")
-    current = None
-    for name, line in entries:
-        if name != current:
-            out.append(f"[{name}]")
-            current = name
-        out.append(line)
-    return "\n".join(out)
-
-
-def _backend_entries(home_dir: Path) -> list[dict[str, object]]:
-    """Every backend entry ``<home_dir>/.stealth-mcp/server.json`` records.
-
-    THE one parse of the record in this harness. Reads ALL THREE schemas — the
-    flat v1 shape (one entry, the record itself), F-808's v2
-    ``{"schema": 2, "backends": {ctx: entry}}`` and F-886's v3
-    ``{"schema": 3, "backends": [entry, ...]}`` — because this harness drives
-    the INSTALLED artifact as a black box and restates the contract rather than
-    importing the package under test (the same reason ``REGISTRY_TOOL_COUNT``
-    is a literal here). A missing, unreadable or malformed record is an empty
-    list, never an error: for the developer's REAL home that means "nothing to
-    avoid", for an isolated home "nothing recorded yet".
-    """
-    state_file = home_dir / ".stealth-mcp" / "server.json"
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return []
-    if not isinstance(state, dict):
-        return []
-    backends = state.get("backends")
-    # v2 keys the entries by display context; v3 (F-886) is a list, so one
-    # context can hold one backend per source IDENTITY. Both normalize to the
-    # same list of entries here, and v1 is the record itself.
-    if isinstance(backends, dict):
-        backends = list(backends.values())
-    if not isinstance(backends, list):
-        return [state]
-    return [e for e in backends if isinstance(e, dict)]
-
-
-def _backend_pid_from_state(home_dir: Path) -> int | None:
-    """The isolated backend's recorded pid — the FIRST entry's.
-
-    An isolated HOME holds one backend per IDENTITY; every gate node runs one
-    identity, so "some recorded entry" and "the one we spawned" are the same
-    thing. The one node that runs two (``test_e2e_lifecycle_resilience``'s S5)
-    reads the first as the incumbent it spawned first, which is exactly the pid
-    that must not change."""
-    entries = _backend_entries(home_dir)
-    pid = entries[0].get("pid") if entries else None
-    return pid if isinstance(pid, int) else None
-
-
-def _backend_pids_from_state(home_dir: Path) -> list[int]:
-    """EVERY backend pid the record names, in recorded order — what teardown
-    consults (F-886).
-
-    A workspace that ran two source identities has two detached backends, and
-    terminating only the first would leak the second past the block that owns
-    it. The singular reader above stays, because every ASSERTION in the suite
-    is about THE backend a node ran on, which is the first."""
-    return [
-        pid
-        for entry in _backend_entries(home_dir)
-        if isinstance(pid := entry.get("pid"), int)
-    ]
-
-
-def _recorded_ports(home_dir: Path) -> frozenset[int]:
-    """Every port ``home_dir``'s record names, across every display context."""
-    return frozenset(
-        port
-        for entry in _backend_entries(home_dir)
-        if isinstance(port := entry.get("port"), int)
-    )
-
-
-def _pid_running(pid: int) -> bool:
-    try:
-        return psutil.Process(pid).is_running()
-    except psutil.Error:
-        return False
-
-
-def _terminate_process_tree(pid: int, timeout: float) -> bool:
-    """Terminate ``pid`` and its descendants (bounded graceful, then kill)."""
-    try:
-        proc = psutil.Process(pid)
-    except psutil.Error:
-        return False
-    procs = []
-    with contextlib.suppress(psutil.Error):
-        procs = proc.children(recursive=True)
-    procs.append(proc)
-    for p in procs:
-        with contextlib.suppress(psutil.Error):
-            p.terminate()
-    _, alive = psutil.wait_procs(procs, timeout=timeout)
-    for p in alive:
-        with contextlib.suppress(psutil.Error):
-            p.kill()
-    return True
-
-
-def _child_pids(parent: psutil.Process) -> set[int]:
-    try:
-        return {c.pid for c in parent.children(recursive=True)}
-    except psutil.Error:
-        return set()
-
-
-def _pid_in_workspace(pid: int, work_dir: Path) -> bool:
-    """Whether *pid* is one this workspace created. A process we cannot inspect
-    is reported as ours: a "no orphan" claim must fail closed."""
-    try:
-        return any(str(work_dir) in arg for arg in psutil.Process(pid).cmdline())
-    except (psutil.NoSuchProcess, psutil.ZombieProcess):
-        return False
-    except psutil.Error:
-        return True
-
-
-def _await_children_settle(
-    parent: psutil.Process, before: set[int], timeout: float
-) -> set[int]:
-    """Poll until children spawned during the run are gone; return any leftover."""
-    deadline = time.monotonic() + timeout
-    while True:
-        new = _child_pids(parent) - before
-        if not new or time.monotonic() >= deadline:
-            return new
-        time.sleep(0.25)
-
-
-def _assert_ipv4_loopback(base_url: str) -> None:
-    host = urlparse(base_url).hostname
-    if host != "127.0.0.1":
-        raise AssertionError(f"fixture URL must be literal IPv4 loopback, got {host!r}")
-
-
-def _read_capped(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return _cap_text(text)
-
-
-def _cap_text(text: str) -> str:
-    lines = text.splitlines()
-    if len(lines) > _STDERR_CAP_LINES:
-        lines = lines[-_STDERR_CAP_LINES:]
-    capped = "\n".join(lines)
-    if len(capped) > _STDERR_CAP_BYTES:
-        capped = capped[-_STDERR_CAP_BYTES:]
-    return capped
-
-
-@contextlib.contextmanager
-def _capture_stderr_fd():
-    """Redirect OS fd 2 to a temp file for the child's lifetime; on exit expose the
-    captured, capped text in ``holder['text']``.
-
-    fastmcp's ``StdioTransport`` wires the child's stderr to ``sys.stderr`` (fd 2);
-    stdout is a private JSON-RPC pipe untouched here. Redirecting fd 2 captures the
-    child's diagnostics without polluting protocol stdout, in or out of pytest.
-    Best-effort: any failure leaves stderr untouched and yields no capture.
-    """
-    holder = {"text": ""}
-    import sys
-
-    try:
-        sys.stderr.flush()
-        saved = os.dup(2)
-    except (OSError, ValueError):
-        yield holder
-        return
-    try:
-        with tempfile.TemporaryFile(mode="w+b") as tmp:
-            os.dup2(tmp.fileno(), 2)
-            try:
-                yield holder
-            finally:
-                with contextlib.suppress(OSError, ValueError):
-                    sys.stderr.flush()
-                with contextlib.suppress(OSError, ValueError):
-                    os.dup2(saved, 2)
-                with contextlib.suppress(OSError, ValueError):
-                    tmp.seek(0)
-                    holder["text"] = _cap_text(tmp.read().decode("utf-8", "replace"))
-    finally:
-        with contextlib.suppress(OSError):
-            os.close(saved)
-
-
-# ---------------------------------------------------------------------------
-# tools/call helpers.
-# ---------------------------------------------------------------------------
-async def _call(
-    client: Client,
-    name: str,
-    args: dict[str, Any],
-    timeout: float,
-    *,
-    raise_on_error: bool = True,
-    allow_fail: bool = False,
-) -> Any:
-    """Call a tool through the real protocol, bounded, returning the plain
-    wire-shape result (raw ``structuredContent`` JSON, not fastmcp's pydantic
-    ``Root`` reconstruction — the release gate asserts what a user's client
-    actually receives)."""
-    coro = client.call_tool(name, args, raise_on_error=raise_on_error)
-    try:
-        result = await asyncio.wait_for(coro, timeout)
-    except Exception:
-        if allow_fail:
-            return None
-        raise
-    return _wire_shape(result)
-
-
-def _wire_shape(result: Any) -> Any:
-    """The plain wire-shape payload of one ``CallToolResult``.
-
-    Factored out of :func:`_call` so the soak's own bounded caller returns the
-    SAME shape without a second unwrapping rule.
-    """
-    structured = result.structured_content
-    if structured is not None:
-        # FastMCP wraps non-object returns as {"result": X} on the wire.
-        if isinstance(structured, dict) and set(structured) == {"result"}:
-            return structured["result"]
-        return structured
-    return result.data
-
-
-async def _eval(client: Client, iid: str, expression: str) -> Any:
-    """Evaluate JS via ``execute_script`` and return its result (assert success)."""
-    result = await _call(
-        client,
-        "execute_script",
-        {"instance_id": iid, "script": expression},
-        CALL_TIMEOUT,
-    )
-    assert isinstance(result, dict) and result.get("success") is True, result
-    return result.get("result")
-
-
-async def _settle_dom(client: Client, iid: str, expect_app: bool = False) -> None:
-    """Bounded-poll ``query_elements('body')`` until the document is queryable.
-
-    After navigation nodriver's cached document node is transiently stale, so the
-    first DOM-node-path call can fail; ``query_elements`` is the safe probe (it
-    returns ``[]`` rather than raising). Mirrors ``navigate_and_settle`` in
-    ``e2e_helpers`` but over the real transport. ``expect_app`` is for a caller that
-    navigated to a page loading ``app.js`` (``interact.html``).
-    """
-    deadline = time.monotonic() + SETTLE_TIMEOUT
-    while True:
-        body = await _call(
-            client,
-            "query_elements",
-            {"instance_id": iid, "selector": "body"},
-            CALL_TIMEOUT,
-            raise_on_error=False,
-            allow_fail=True,
-        )
-        if (isinstance(body, list) and body) or time.monotonic() >= deadline:
-            break  # best-effort; the ready wait below fails loudly if it matters
-        await asyncio.sleep(0.25)
-
-    async def probe(expression: str) -> Any:
-        result = await _call(
-            client,
-            "execute_script",
-            {"instance_id": iid, "script": expression},
-            CALL_TIMEOUT,
-            raise_on_error=False,
-            allow_fail=True,
-        )
-        return result.get("result") if isinstance(result, dict) else None
-
-    # A queryable body is not a wired page: app.js (end of <body>) may not have
-    # attached its listeners yet, and an interaction before that is silently lost.
-    await fixture_routes.wait_fixture_ready(probe, expect_app)
-
-
-def _decode_screenshot(shot: Any) -> bytes:
-    if isinstance(shot, str):
-        return base64.b64decode(shot)
-    if isinstance(shot, dict) and shot.get("file_path"):
-        return Path(shot["file_path"]).read_bytes()
-    raise AssertionError(f"unexpected take_screenshot result: {type(shot).__name__}")
-
-
-# ---------------------------------------------------------------------------
-# Foundation proof + schema/handshake + canonical journey.
-# ---------------------------------------------------------------------------
-async def _foundation_proof(client: Client, record: dict[str, Any]) -> None:
-    """Protocol + server identity + 94-tool registry + a real tool call."""
-    init = client.initialize_result
-    assert init is not None, "no initialize result (handshake did not complete)"
-    server_info = init.serverInfo
-    assert server_info.name == SERVER_NAME, server_info.name
-    installed = importlib.metadata.version(SERVER_NAME)
-    assert server_info.version == installed, (server_info.version, installed)
-    assert init.protocolVersion, "empty protocolVersion"
-    record["server"] = {
-        "name": server_info.name,
-        "version": server_info.version,
-        "protocol_version": init.protocolVersion,
-    }
-
-    tools = await asyncio.wait_for(client.list_tools(), LIST_TIMEOUT)
-    names = [t.name for t in tools]
-    assert len(names) == REGISTRY_TOOL_COUNT, (
-        f"{len(names)} tools != {REGISTRY_TOOL_COUNT}"
-    )
-    assert len(set(names)) == len(names), "duplicate tool names in tools/list"
-    for tool in tools:
-        schema = tool.inputSchema
-        assert isinstance(schema, dict) and schema.get("type") == "object", tool.name
-    record["tool_count"] = len(names)
-
-    instances = await _call(client, "list_instances", {}, CALL_TIMEOUT)
-    assert isinstance(instances, list), instances
-    record["list_instances_initial_count"] = len(instances)
-
-
-async def _representative_parity(client: Client, record: dict[str, Any]) -> None:
-    """One tools/call result is shape-equivalent to the in-process ``.fn`` seam.
-
-    Uses ``list_cdp_commands`` (deterministic, browser-free): the protocol result
-    and the ``get_fn`` seam (``e2e_helpers``) must carry the same set of names,
-    without requiring byte-identical incidental formatting.
-    """
-    try:
-        from e2e_helpers import get_fn
-    except Exception:  # pragma: no cover - only when the src seam is unavailable
-        record["representative_parity"] = {
-            "tool": "list_cdp_commands",
-            "seam_available": False,
-        }
-        return
-    seam = get_fn("list_cdp_commands")()
-    if inspect.isawaitable(seam):
-        seam = await seam
-    proto = await _call(client, "list_cdp_commands", {}, CALL_TIMEOUT)
-    assert isinstance(proto, list) and isinstance(seam, list), (type(proto), type(seam))
-    assert {str(x) for x in proto} == {str(x) for x in seam}, (
-        "protocol vs seam mismatch"
-    )
-    record["representative_parity"] = {
-        "tool": "list_cdp_commands",
-        "protocol_len": len(proto),
-        "seam_len": len(seam),
-        "equal": True,
-        "seam_available": True,
-    }
-
-
-def _headless_spawn_kwargs(**extra: Any) -> dict[str, Any]:
-    """``{'headless': True}`` plus this environment's sandbox policy.
-
-    No ``--use-mock-keychain`` here, deliberately: an earlier round passed it to
-    rule out macOS keychain blocking, and the backend log showed the product's
-    own stealth filter removing it ("Stripped 1 detectable arg(s):
-    --use-mock-keychain stripped: Playwright default"). It never reached Chrome,
-    so it tested nothing — keeping it would be an inert flag that also trips a
-    stealth warning on every spawn.
-    """
-    kwargs: dict[str, Any] = {"headless": True, **extra}
-    with contextlib.suppress(Exception):
-        from e2e_helpers import sandbox_kwargs
-
-        kwargs.update(sandbox_kwargs())
-    return kwargs
-
-
-async def _cold_start_warmup(
-    client: Client, base_url: str, log_dir: Path, record: dict[str, Any]
-) -> None:
-    """Absorb the first-Chrome-launch cost BEFORE the measured journey.
-
-    The backend's first spawn into a fresh browser-session root pays for both a
-    Chrome cold start and the master-profile bootstrap that clone-on-spawn
-    needs. On the macOS CI image that cold path is slow enough to exceed
-    nodriver's internal connect patience (spawn: "Failed to connect to
-    browser") or the product's CDP deadline on the first navigate — while the
-    54 in-process integration tests pass on the same image, every one of them
-    behind :func:`e2e_helpers.warmup_once` ("the first Chrome launch on CI is
-    slow / flaky"). This is that same warmup at the wire level, for the same
-    reason and with the same best-effort contract — not a second warmup
-    convention: the journey drives a SEPARATE backend process, so it cannot
-    share the in-process one.
-
-    It warms BOTH cold paths, because they are separately expensive: the launch
-    (Chrome binary + master-profile bootstrap) and the first page LOAD (network
-    service, renderer, font cache). A spawn-only warmup left the journey's first
-    navigate still cold — which is exactly where macOS kept failing.
-
-    Bounded retry, because the cold launch is not merely slow but intermittently
-    FAILS ("Failed to connect to browser" — seen on the Linux runner defeating
-    even the in-process warmup). Retrying warmup costs nothing and asserts
-    nothing.
-
-    Best-effort by construction: the outcome is recorded and never fatal. It
-    proves nothing and is asserted on by nobody — the canonical journey below
-    remains the sole evidence and is still asserted in full.
-    """
-    warmup: dict[str, Any] = {"attempted": True, "ok": False, "attempts": 0}
-    record["cold_start_warmup"] = warmup
-    for attempt in range(1, WARMUP_ATTEMPTS + 1):
-        warmup["attempts"] = attempt
-        if attempt > 1:
-            # BACK OFF before retrying. "Failed to connect to browser" is a fast
-            # connect failure, not a timeout — a bigger WARMUP_TIMEOUT cannot fix
-            # it, and an immediate retry meets exactly the resource contention
-            # that just failed. Observed defeating both attempts on Linux/X64
-            # runners simultaneously across two PRs, taking `transport` and
-            # `install-smoke (wheel)` down with it. Same shape as the backoff
-            # e2e_helpers.warmup_once already uses for the in-process warmup.
-            await asyncio.sleep(WARMUP_BACKOFF_SECONDS * attempt)
-        iid: str | None = None
-        try:
-            # Chrome's OWN log, into log_dir so the failure dump picks it up with
-            # the backend logs. Neither flag is in the product's stealth-arg
-            # blocklist, so unlike --use-mock-keychain these actually reach
-            # Chrome. Warmup instance only: the canonical journey below stays a
-            # clean default spawn.
-            spawn = await _call(
-                client,
-                "spawn_browser",
-                _headless_spawn_kwargs(
-                    user_data_dir="release-gate-warmup",
-                    browser_args=[
-                        "--enable-logging",
-                        f"--log-file={log_dir / 'chrome-warmup.log'}",
-                    ],
-                ),
-                WARMUP_TIMEOUT,
-            )
-            iid = spawn.get("instance_id") if isinstance(spawn, dict) else None
-            if not iid:
-                continue
-            # Diagnostic probe (recorded, never asserted): "about:blank" needs no
-            # NETWORK request, so Chrome's Fetch interception — which the product
-            # enables catch-all on every spawn even with zero hooks — has nothing
-            # to pause. A real URL does. If blank succeeds where http hangs, the
-            # stall is the paused-request path, not the tab, the CDP session, or
-            # reachability. Cheap, and it turns the next red into an answer.
-            # "refused" targets a port nothing listens on: the OS answers with
-            # an immediate ECONNREFUSED, so Chrome renders an error page fast.
-            # It separates the two remaining causes, which the fixture URL alone
-            # cannot: if a REFUSED connection also hangs, the request never
-            # reached the network stack at all (the paused-Fetch path — a
-            # product bug); if it errors fast while the fixture port hangs, the
-            # network stack is fine and something is dropping that connection
-            # (a runner/environment problem).
-            for label, url in (
-                ("about_blank", "about:blank"),
-                ("refused", "http://127.0.0.1:1/"),
-                ("http", f"{base_url}/index.html"),
-            ):
-                started = time.monotonic()
-                try:
-                    await _call(
-                        client,
-                        "navigate",
-                        {"instance_id": iid, "url": url},
-                        NAV_TIMEOUT,
-                    )
-                    outcome = "ok"
-                except BaseException as exc:  # noqa: BLE001  PERMANENT(probe records the failure shape; the journey below is what actually gates)
-                    outcome = f"{type(exc).__name__}: {exc}"
-                warmup.setdefault("nav_probe", {})[label] = {
-                    "outcome": outcome,
-                    "seconds": round(time.monotonic() - started, 1),
-                }
-                if outcome != "ok" and "chrome_processes" not in warmup:
-                    # Snapshot WHILE the navigation is stalled and Chrome is
-                    # still alive — after teardown the evidence is gone.
-                    warmup["chrome_processes"] = _chrome_process_snapshot()
-            warmup["ok"] = True
-            warmup.pop("error", None)
-            return
-        except BaseException as exc:  # noqa: BLE001  PERMANENT(warmup is best-effort: record the reason, never fail the gate on it)
-            warmup["error"] = f"{type(exc).__name__}: {exc}"
-        finally:
-            if iid:
-                with contextlib.suppress(Exception):
-                    await _call(
-                        client, "close_instance", {"instance_id": iid}, CLOSE_TIMEOUT
-                    )
-
-
-async def _cookie_round_trip(
-    client: Client, iid: str, page_url: str, journey: dict[str, Any]
-) -> None:
-    """plan_RELEASE W5 — the real success path for ``get_cookies``.
-
-    W5's ``get_cookies`` hard block (§2.5) requires a real Chrome + real
-    transport test that **sets a cookie, retrieves it, and asserts its value**;
-    a schema check, a mock, a missing-instance error, or a characterization
-    explicitly cannot satisfy it. This does the full round trip through
-    ``tools/call`` only:
-
-    ``set_cookie`` → ``get_cookies(urls=[page_url])`` → **assert the value** →
-    ``get_cookies()`` (the no-argument default, a different CDP call) →
-    ``document.cookie`` cross-check → ``clear_cookies`` → assert it is gone.
-
-    The value is unique per run, so a stale cookie from an earlier run in a
-    reused profile cannot forge the assertion, and the ``document.cookie``
-    cross-check proves the cookie really reached the browser rather than
-    ``get_cookies`` merely echoing what ``set_cookie`` was handed.
-
-    ``get_cookies`` is declared ``-> list[dict[str, Any]]`` but returns nodriver
-    ``cdp.network.Cookie`` **dataclasses**. pydantic serializes those to correct
-    JSON objects, so ``structuredContent`` — what ``_call`` returns, and what a
-    user's client receives — is a list of cookie dicts. Asserting through
-    fastmcp's ``result.data`` instead would see an opaque ``[Root()]``; that is
-    a property of the reconstruction, not a product defect.
-    """
-    name = "release_gate_cookie"
-    value = f"w5-{uuid.uuid4().hex}"
-    cookies: dict[str, Any] = {"name": name, "value": value}
-    journey["cookies"] = cookies
-
-    assert await _call(
-        client,
-        "set_cookie",
-        {"instance_id": iid, "name": name, "value": value, "url": page_url},
-        CALL_TIMEOUT,
-    ), "set_cookie did not report success"
-
-    # Retrieval #1 — scoped to the page URL (CDP Network.getCookies).
-    scoped = await _call(
-        client, "get_cookies", {"instance_id": iid, "urls": [page_url]}, CALL_TIMEOUT
-    )
-    assert isinstance(scoped, list) and scoped, (
-        f"get_cookies(urls=…) returned {scoped!r}"
-    )
-    assert all(isinstance(c, dict) for c in scoped), (
-        f"get_cookies did not serialize to dicts: {[type(c).__name__ for c in scoped]}"
-    )
-    scoped_hit = next((c for c in scoped if c.get("name") == name), None)
-    assert scoped_hit is not None, f"{name!r} absent from get_cookies(urls=…): {scoped}"
-    # THE assertion W5's hard block turns on.
-    assert scoped_hit.get("value") == value, (scoped_hit.get("value"), value)
-    cookies["scoped_value"] = scoped_hit["value"]
-    cookies["scoped_count"] = len(scoped)
-    cookies["field_names"] = sorted(scoped_hit)
-
-    # Retrieval #2 — the no-argument default (CDP Network.getAllCookies).
-    every = await _call(client, "get_cookies", {"instance_id": iid}, CALL_TIMEOUT)
-    assert isinstance(every, list), f"get_cookies() returned {every!r}"
-    all_hit = next(
-        (c for c in every if isinstance(c, dict) and c.get("name") == name), None
-    )
-    assert all_hit is not None, f"{name!r} absent from get_cookies(): {every}"
-    assert all_hit.get("value") == value, (all_hit.get("value"), value)
-    cookies["all_value"] = all_hit["value"]
-
-    # Ground truth: the cookie is really in the browser, not just in our reply.
-    document_cookie = await _eval(client, iid, "document.cookie")
-    assert f"{name}={value}" in str(document_cookie), document_cookie
-    cookies["document_cookie_confirms"] = True
-
-    # clear_cookies is part of the same real path — prove removal by re-reading,
-    # not by trusting its return value.
-    assert await _call(
-        client, "clear_cookies", {"instance_id": iid, "url": page_url}, CALL_TIMEOUT
-    ), "clear_cookies did not report success"
-    after = await _call(
-        client, "get_cookies", {"instance_id": iid, "urls": [page_url]}, CALL_TIMEOUT
-    )
-    assert isinstance(after, list), after
-    assert not any(isinstance(c, dict) and c.get("name") == name for c in after), (
-        f"{name!r} survived clear_cookies: {after}"
-    )
-    cookies["cleared"] = True
-
-
-async def _cookie_journey(
-    client: Client, base_url: str, record: dict[str, Any]
-) -> None:
-    """W5's segment: spawn → navigate → cookie round trip → close.
-
-    Deliberately minimal — everything here exists to make the cookie assertions
-    meaningful, so a failure reads as a cookie failure rather than as "the
-    journey" failing. A real page (not ``about:blank``) is required because
-    cookies need a real http:// origin, and the fixture app is that origin.
-    """
-    spawn = await _call(
-        client, "spawn_browser", _headless_spawn_kwargs(), SPAWN_TIMEOUT
-    )
-    assert isinstance(spawn, dict) and spawn.get("instance_id"), spawn
-    iid = spawn["instance_id"]
-    journey: dict[str, Any] = {"instance_id": iid}
-    record["journey"] = journey
-    try:
-        url = f"{base_url}/interact.html"
-        await _call(client, "navigate", {"instance_id": iid, "url": url}, NAV_TIMEOUT)
-        journey["navigated_url"] = url
-        await _settle_dom(client, iid, expect_app=True)
-
-        await _cookie_round_trip(client, iid, url, journey)
-    finally:
-        await _call(
-            client,
-            "close_instance",
-            {"instance_id": iid},
-            CLOSE_TIMEOUT,
-            raise_on_error=False,
-            allow_fail=True,
-        )
-
-
-async def _canonical_journey(
-    client: Client, base_url: str, record: dict[str, Any]
-) -> None:
-    """spawn → navigate → tabs → interact → assert oracle+ground truth →
-    structural extraction → PNG screenshot → close, all via ``tools/call``."""
-    spawn = await _call(
-        client, "spawn_browser", _headless_spawn_kwargs(), SPAWN_TIMEOUT
-    )
-    assert isinstance(spawn, dict) and spawn.get("instance_id"), spawn
-    iid = spawn["instance_id"]
-    journey: dict[str, Any] = {"instance_id": iid, "spawn_state": spawn.get("state")}
-    record["journey"] = journey
-    try:
-        url = f"{base_url}/interact.html"
-        await _call(client, "navigate", {"instance_id": iid, "url": url}, NAV_TIMEOUT)
-        journey["navigated_url"] = url
-        await _settle_dom(client, iid, expect_app=True)
-
-        tabs = await _call(client, "list_tabs", {"instance_id": iid}, CALL_TIMEOUT)
-        assert isinstance(tabs, list) and tabs and all("tab_id" in t for t in tabs), (
-            tabs
-        )
-        journey["tabs_count"] = len(tabs)
-        active = await _call(
-            client, "get_active_tab", {"instance_id": iid}, CALL_TIMEOUT
-        )
-        assert isinstance(active, dict) and active.get("tab_id"), active
-
-        assert await _call(
-            client,
-            "click_element",
-            {"instance_id": iid, "selector": "#btn-counter"},
-            CALL_TIMEOUT,
-        )
-        assert await _call(
-            client,
-            "type_text",
-            {"instance_id": iid, "selector": "#text-input", "text": "hello"},
-            CALL_TIMEOUT,
-        )
-        assert await _call(
-            client,
-            "select_option",
-            {"instance_id": iid, "selector": "#select-single", "value": "beta"},
-            CALL_TIMEOUT,
-        )
-
-        # Fixture action oracle (proof the RIGHT action fired) via execute_script.
-        actions = json.loads(
-            await _eval(client, iid, "JSON.stringify(window.__actions)")
-        )
-        assert "click:btn-counter" in actions, actions
-        assert "change:select-single:beta" in actions, actions
-        journey["actions"] = actions
-
-        # Live-DOM ground truth.
-        counter = await _eval(
-            client, iid, "document.getElementById('counter-value').textContent"
-        )
-        assert counter == "1", counter
-        journey["counter_value"] = counter
-        text_value = await _eval(
-            client, iid, "document.getElementById('text-input').value"
-        )
-        assert text_value == "hello", text_value
-        journey["text_input_value"] = text_value
-        select_value = await _eval(
-            client, iid, "document.getElementById('select-single').value"
-        )
-        assert select_value == "beta", select_value
-        journey["select_value"] = select_value
-        title = await _eval(client, iid, "document.title")
-        assert title == "fixture-interact-page", title
-        journey["title"] = title
-
-        content = await _call(
-            client, "get_page_content", {"instance_id": iid}, CALL_TIMEOUT
-        )
-        assert "fixture-interact-page" in json.dumps(content, default=str)
-
-        # One structural extraction.
-        structure = await _call(
-            client,
-            "extract_element_structure",
-            {"instance_id": iid, "selector": "#select-single"},
-            CALL_TIMEOUT,
-        )
-        assert isinstance(structure, dict), structure
-        journey["structure_tag"] = str(
-            structure.get("tag_name") or structure.get("tagName") or ""
-        ).lower()
-
-        # PNG-magic screenshot (format='png' re-encodes through PIL to PNG).
-        shot = await _call(
-            client,
-            "take_screenshot",
-            {"instance_id": iid, "format": "png"},
-            CALL_TIMEOUT,
-        )
-        png = _decode_screenshot(shot)
-        assert png[:8] == b"\x89PNG\r\n\x1a\n", png[:8]
-        journey["screenshot_bytes"] = len(png)
-        journey["screenshot_format"] = "png"
-    finally:
-        await _call(
-            client,
-            "close_instance",
-            {"instance_id": iid},
-            CLOSE_TIMEOUT,
-            raise_on_error=False,
-            allow_fail=True,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Soak (stability) segment — one instance, ~50 bounded mixed operations.
-# ---------------------------------------------------------------------------
-def _percentile(values: list[float], pct: float) -> float:
-    """Nearest-rank percentile of a small sample (no numpy in the test deps)."""
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = max(0, math.ceil(pct / 100.0 * len(ordered)) - 1)
-    return ordered[index]
-
-
-def _reply_shape(value: Any) -> Any:
-    """A compact, log-safe description of one TOLERANT reply (diagnostics only).
-
-    Recorded, printed, and never asserted on: which shape these paths return is
-    exactly what is being changed elsewhere, so the soak reports it instead of
-    pinning it — while still making a silent change of shape visible in the log.
-    """
-    if isinstance(value, dict):
-        shape: dict[str, Any] = {"keys": sorted(value)}
-        if "success" in value:
-            shape["success"] = value["success"]
-        return shape
-    return type(value).__name__
-
-
-async def _soak_op(
-    client: Client,
-    ops: list[dict[str, Any]],
-    label: str,
-    tool: str,
-    args: dict[str, Any],
-    *,
-    timeout: float = SOAK_OP_TIMEOUT,
-    tolerant: bool = False,
-) -> Any:
-    """Run ONE soak operation under an explicit deadline; record its latency.
-
-    Every soak call goes through here, which is what makes "nothing hangs" an
-    assertion rather than a hope: the deadline belongs to the operation, so a
-    single overdue reply raises an ``AssertionError`` **naming the call** instead
-    of stalling until pytest's outer timeout kills the whole session with no clue
-    which tool wedged.
-
-    ``tolerant=True`` marks the operations whose *failure* is a legitimate
-    outcome — a deliberately throwing script, a host that cannot resolve. There
-    the claim is only that a **bounded reply arrived** and the instance survived,
-    so either the current success-shape or a ``ToolError`` is accepted (the error
-    convention for these is being tightened separately; this node must not pin
-    either side of that). ``raise_on_error=False`` is what turns a tool error
-    into a returned result rather than an exception.
-    """
-    started = time.monotonic()
-    entry: dict[str, Any] = {"op": label, "tool": tool}
-    ops.append(entry)
-    try:
-        result = await asyncio.wait_for(
-            client.call_tool(tool, args, raise_on_error=not tolerant), timeout
-        )
-    except TimeoutError as exc:
-        entry["seconds"] = round(time.monotonic() - started, 3)
-        entry["outcome"] = "OVERDUE"
-        raise AssertionError(
-            f"soak operation {label!r} ({tool}) never replied within its "
-            f"{timeout}s deadline — the call hung"
-        ) from exc
-    except BaseException as exc:  # noqa: BLE001  PERMANENT(record the latency+shape of the failing op, then re-raise unchanged)
-        entry["seconds"] = round(time.monotonic() - started, 3)
-        entry["outcome"] = f"raised:{type(exc).__name__}"
-        raise
-    entry["seconds"] = round(time.monotonic() - started, 3)
-    entry["outcome"] = "error" if getattr(result, "is_error", False) else "ok"
-    return _wire_shape(result)
-
-
-async def _soak_cycle(
-    client: Client,
-    iid: str,
-    base_url: str,
-    ops: list[dict[str, Any]],
-    cycle: int,
-    journey: dict[str, Any],
-) -> None:
-    """One mixed-operation round against the ONE live instance.
-
-    The order is deliberate: each hostile operation (a throwing script, an
-    unresolvable host, a tab closed out from under the rediscovery path) is
-    immediately followed by an ordinary one that can only succeed on a healthy
-    instance. That is what turns "it replied" into "it did not wedge".
-    """
-    page = SOAK_PAGES[(cycle - 1) % len(SOAK_PAGES)]
-    url = f"{base_url}/{page}"
-    tag = f"c{cycle}"
-
-    await _soak_op(
-        client, ops, f"{tag}:navigate", "navigate", {"instance_id": iid, "url": url}
-    )
-    await _settle_dom(client, iid)
-    body = await _soak_op(
-        client,
-        ops,
-        f"{tag}:query_elements",
-        "query_elements",
-        {"instance_id": iid, "selector": "body"},
-    )
-    assert isinstance(body, list) and body, (
-        f"{tag}: body not queryable after navigate: {body!r}"
-    )
-
-    ok = await _soak_op(
-        client,
-        ops,
-        f"{tag}:execute_script",
-        "execute_script",
-        {"instance_id": iid, "script": "document.title"},
-    )
-    assert isinstance(ok, dict) and ok.get("success") is True, ok
-
-    # THE hostile one: a script that throws must not wedge the tab.
-    thrown = await _soak_op(
-        client,
-        ops,
-        f"{tag}:execute_script_throwing",
-        "execute_script",
-        {
-            "instance_id": iid,
-            "script": "(function(){ throw new Error('soak-intentional'); })()",
-        },
-        tolerant=True,
-    )
-    journey.setdefault("throwing_script_shapes", []).append(_reply_shape(thrown))
-    # …and the very next ordinary call proves it did not.
-    after = await _soak_op(
-        client,
-        ops,
-        f"{tag}:execute_script_after_throw",
-        "execute_script",
-        {"instance_id": iid, "script": "1 + 1"},
-    )
-    assert isinstance(after, dict) and after.get("success") is True, after
-
-    state = await _soak_op(
-        client,
-        ops,
-        f"{tag}:get_element_state",
-        "get_element_state",
-        {"instance_id": iid, "selector": "body"},
-    )
-    assert isinstance(state, dict), state
-
-    # Two more shapes that can only be proved bounded by *doing* them: a wait for
-    # an element that will never exist (the tool owns its own timeout, so this
-    # measures whether the product's own bound actually fires inside ours) and an
-    # interaction with a selector that resolves to nothing.
-    #
-    # Cycle 1 only, deliberately. See F-805, now HALF fixed: the wait honours
-    # its own 2000ms budget since F-884 (~2.03s), while the click still costs
-    # ~10.5s because THIS call passes no timeout and so spends click_element's
-    # own 10000ms default (it does honour one when given: timeout=2000 -> 2.03s).
-    # The branch that genuinely ignores a declared timeout is text_match, which
-    # this journey does not exercise. Repeating them every cycle would triple the
-    # soak's runtime to buy a repetition of a fact one measurement already
-    # establishes, and would push the node past the integration lane's budget.
-    if cycle == 1:
-        await _soak_op(
-            client,
-            ops,
-            f"{tag}:wait_for_missing_element",
-            "wait_for_element",
-            {
-                "instance_id": iid,
-                "selector": "#soak-never-exists",
-                "timeout": SOAK_MISSING_SELECTOR_WAIT_MS,
-            },
-            tolerant=True,
-        )
-        await _soak_op(
-            client,
-            ops,
-            f"{tag}:click_missing_element",
-            "click_element",
-            {"instance_id": iid, "selector": "#soak-never-exists"},
-            tolerant=True,
-        )
-        alive = await _soak_op(
-            client,
-            ops,
-            f"{tag}:query_elements_after_misses",
-            "query_elements",
-            {"instance_id": iid, "selector": "body"},
-        )
-        assert isinstance(alive, list) and alive, (
-            f"{tag}: the instance did not survive the missing-selector calls: {alive!r}"
-        )
-        by_label = {o["op"]: o for o in ops}
-        journey["missing_selector"] = {
-            "requested_wait_seconds": SOAK_MISSING_SELECTOR_WAIT_MS / 1000,
-            "wait_seconds": by_label[f"{tag}:wait_for_missing_element"]["seconds"],
-            "click_seconds": by_label[f"{tag}:click_missing_element"]["seconds"],
-        }
-    await _soak_op(
-        client,
-        ops,
-        f"{tag}:scroll_page",
-        "scroll_page",
-        {"instance_id": iid, "direction": "down", "amount": 300, "smooth": False},
-    )
-    shot = await _soak_op(
-        client,
-        ops,
-        f"{tag}:take_screenshot",
-        "take_screenshot",
-        {"instance_id": iid, "format": "png"},
-    )
-    assert _decode_screenshot(shot)[:8] == b"\x89PNG\r\n\x1a\n", f"{tag}: not a PNG"
-    cookies = await _soak_op(
-        client, ops, f"{tag}:get_cookies", "get_cookies", {"instance_id": iid}
-    )
-    assert isinstance(cookies, list), cookies
-
-    # ── tab churn ──────────────────────────────────────────────────────────
-    before = await _soak_op(
-        client, ops, f"{tag}:list_tabs", "list_tabs", {"instance_id": iid}
-    )
-    assert isinstance(before, list) and before, before
-    opened = await _soak_op(
-        client,
-        ops,
-        f"{tag}:new_tab",
-        "new_tab",
-        {"instance_id": iid, "url": "about:blank"},
-    )
-    assert isinstance(opened, dict) and opened.get("tab_id"), opened
-    await _soak_op(
-        client,
-        ops,
-        f"{tag}:switch_tab",
-        "switch_tab",
-        {"instance_id": iid, "tab_id": opened["tab_id"]},
-    )
-    await _soak_op(
-        client,
-        ops,
-        f"{tag}:close_tab",
-        "close_tab",
-        {"instance_id": iid, "tab_id": opened["tab_id"]},
-    )
-    # The post-close_tab read is the point of the churn: nodriver's `browser.tabs`
-    # yields raw Connection objects after ANY close, despite its List[Tab]
-    # annotation, so this is where a Tab-only call on a Connection would surface.
-    after_tabs = await _soak_op(
-        client, ops, f"{tag}:list_tabs_after_close", "list_tabs", {"instance_id": iid}
-    )
-    assert isinstance(after_tabs, list) and len(after_tabs) == len(before), (
-        f"{tag}: tab count did not return to {len(before)} after close_tab: {after_tabs}"
-    )
-    inst_state = await _soak_op(
-        client,
-        ops,
-        f"{tag}:get_instance_state",
-        "get_instance_state",
-        {"instance_id": iid},
-    )
-    assert isinstance(inst_state, dict), inst_state
-
-    # ── an unresolvable host must answer, bounded, and leave the tab usable ──
-    if cycle >= 2:
-        bad = await _soak_op(
-            client,
-            ops,
-            f"{tag}:navigate_bad_host",
-            "navigate",
-            {"instance_id": iid, "url": SOAK_BAD_HOST},
-            tolerant=True,
-        )
-        journey.setdefault("bad_host_shapes", []).append(_reply_shape(bad))
-        await _soak_op(
-            client,
-            ops,
-            f"{tag}:navigate_recover",
-            "navigate",
-            {"instance_id": iid, "url": url},
-        )
-        await _settle_dom(client, iid)
-        recovered = await _soak_op(
-            client,
-            ops,
-            f"{tag}:query_elements_recover",
-            "query_elements",
-            {"instance_id": iid, "selector": "body"},
-        )
-        assert isinstance(recovered, list) and recovered, (
-            f"{tag}: the instance did not recover from {SOAK_BAD_HOST}: {recovered!r}"
-        )
-
-    # ── interleaved invariant: still exactly ONE instance, still answering ──
-    instances = await _soak_op(
-        client, ops, f"{tag}:list_instances", "list_instances", {}
-    )
-    assert isinstance(instances, list) and len(instances) == 1, (
-        f"{tag}: expected exactly one live instance, got {instances!r}"
-    )
-    active = await _soak_op(
-        client, ops, f"{tag}:get_active_tab", "get_active_tab", {"instance_id": iid}
-    )
-    assert isinstance(active, dict) and active.get("tab_id"), active
-
-
-async def _soak_journey(client: Client, base_url: str, record: dict[str, Any]) -> None:
-    """The stability segment: ONE instance survives ~50 bounded mixed operations.
-
-    What this claims that the canonical journey does not: the browser stays up
-    across a long, *hostile* sequence — throwing scripts, an unresolvable host,
-    repeated tab open/close churn — with **every** call individually bounded, and
-    it shuts down cleanly at the end leaving no owned Chrome process behind.
-
-    Latency of every operation is recorded so the summary (max / p95 / the five
-    slowest) lands in the CI log on PASS, making stability drift across releases
-    visible instead of invisible-until-it-times-out.
-    """
-    spawn = await _call(
-        client, "spawn_browser", _headless_spawn_kwargs(), SPAWN_TIMEOUT
-    )
-    assert isinstance(spawn, dict) and spawn.get("instance_id"), spawn
-    iid = spawn["instance_id"]
-    ops: list[dict[str, Any]] = []
-    journey: dict[str, Any] = {"instance_id": iid, "cycles": SOAK_CYCLES, "ops": ops}
-    record["journey"] = journey
-    try:
-        journey["navigated_url"] = f"{base_url}/{SOAK_PAGES[0]}"
-        for cycle in range(1, SOAK_CYCLES + 1):
-            await _soak_cycle(client, iid, base_url, ops, cycle, journey)
-
-        # End state: close the instance and prove the registry is empty again.
-        await _soak_op(
-            client,
-            ops,
-            "close_instance",
-            "close_instance",
-            {"instance_id": iid},
-            timeout=CLOSE_TIMEOUT,
-        )
-        remaining = await _soak_op(
-            client, ops, "list_instances_final", "list_instances", {}
-        )
-        assert isinstance(remaining, list) and not remaining, (
-            f"instances remained after close_instance: {remaining!r}"
-        )
-        journey["closed_cleanly"] = True
-    finally:
-        durations = [o["seconds"] for o in ops if "seconds" in o]
-        journey["op_count"] = len(ops)
-        journey["latency"] = {
-            "max_seconds": round(max(durations), 3) if durations else 0.0,
-            "p95_seconds": round(_percentile(durations, 95), 3),
-            "p50_seconds": round(_percentile(durations, 50), 3),
-            "total_seconds": round(sum(durations), 2),
-            "deadline_seconds": SOAK_OP_TIMEOUT,
-            "slowest": sorted(
-                (o for o in ops if "seconds" in o),
-                key=lambda o: o["seconds"],
-                reverse=True,
-            )[:5],
-        }
-        if not journey.get("closed_cleanly"):
-            await _call(
-                client,
-                "close_instance",
-                {"instance_id": iid},
-                CLOSE_TIMEOUT,
-                raise_on_error=False,
-                allow_fail=True,
-            )
+from release_gate_harness_consts import (
+    _STDERR_CAP_BYTES,
+    _STDERR_CAP_LINES,
+    CALL_TIMEOUT,
+    CHILD_SETTLE_TIMEOUT,
+    CLOSE_TIMEOUT,
+    COOKIE_ROUND_TRIP,
+    FIXTURE_APP_DIR,
+    FULL_JOURNEY,
+    HANDSHAKE_ONLY,
+    INIT_TIMEOUT,
+    LIST_TIMEOUT,
+    LOGIN_COOKIE,
+    LOGIN_COOKIE_VALUE,
+    NAV_TIMEOUT,
+    REGISTRY_TOOL_COUNT,
+    RESULT_SCHEMA_VERSION,
+    SERVER_NAME,
+    SETTLE_TIMEOUT,
+    SOAK_BAD_HOST,
+    SOAK_CYCLES,
+    SOAK_MISSING_SELECTOR_WAIT_MS,
+    SOAK_OP_TIMEOUT,
+    SOAK_PAGES,
+    SOAK_STABILITY,
+    SPAWN_TIMEOUT,
+    TERMINATE_TIMEOUT,
+    WARMUP_ATTEMPTS,
+    WARMUP_BACKOFF_SECONDS,
+    WARMUP_TIMEOUT,
+)
+from release_gate_harness_env import (
+    _PORT_PICK_ATTEMPTS,
+    _PROXY_DIGEST_LINES,
+    _WARNING_LINE_RE,
+    DEFAULT_SINGLETON_PORT,
+    _assert_ipv4_loopback,
+    _await_children_settle,
+    _backend_entries,
+    _backend_logs,
+    _backend_pid_from_state,
+    _backend_pids_from_state,
+    _cap_text,
+    _capture_stderr_fd,
+    _child_pids,
+    _chrome_process_snapshot,
+    _isolated_env,
+    _log_dirs,
+    _os_assigned_port,
+    _pick_free_port,
+    _pid_in_workspace,
+    _pid_running,
+    _proxy_warnings,
+    _read_capped,
+    _recorded_ports,
+    _reserved_ports,
+    _terminate_process_tree,
+    _this_executable,
+    gate_work_dir,
+    resolve_launcher,
+    use_isolated_token,
+)
+from release_gate_harness_fixture import (
+    _FIXTURE_HITS,
+    _FIXTURE_HITS_CAP,
+    _HIT_RESET,
+    _HIT_UNFINISHED,
+    FIXTURE_ACCEPT_BACKLOG,
+    _bind_origin,
+    _FixtureHandler,
+    _FixtureServer,
+    _serving,
+    serve_fixture_app,
+    serve_fixture_origin_pair,
+)
+from release_gate_harness_journey import (
+    _call,
+    _canonical_journey,
+    _cold_start_warmup,
+    _cookie_journey,
+    _cookie_round_trip,
+    _decode_screenshot,
+    _eval,
+    _foundation_proof,
+    _headless_spawn_kwargs,
+    _representative_parity,
+    _settle_dom,
+    _wire_shape,
+)
+from release_gate_harness_soak import (
+    _percentile,
+    _reply_shape,
+    _soak_cycle,
+    _soak_journey,
+    _soak_op,
+)
+
+if TYPE_CHECKING:
+    import os
+
+#: Every name that moved to a sibling module stays importable from here (T-6148).
+__all__ = [
+    "CALL_TIMEOUT",
+    "CHILD_SETTLE_TIMEOUT",
+    "CLOSE_TIMEOUT",
+    "COOKIE_ROUND_TRIP",
+    "DEFAULT_SINGLETON_PORT",
+    "FIXTURE_ACCEPT_BACKLOG",
+    "FIXTURE_APP_DIR",
+    "FULL_JOURNEY",
+    "HANDSHAKE_ONLY",
+    "INIT_TIMEOUT",
+    "LIST_TIMEOUT",
+    "LOGIN_COOKIE",
+    "LOGIN_COOKIE_VALUE",
+    "NAV_TIMEOUT",
+    "REGISTRY_TOOL_COUNT",
+    "RESULT_SCHEMA_VERSION",
+    "SERVER_NAME",
+    "SETTLE_TIMEOUT",
+    "SOAK_BAD_HOST",
+    "SOAK_CYCLES",
+    "SOAK_MISSING_SELECTOR_WAIT_MS",
+    "SOAK_OP_TIMEOUT",
+    "SOAK_PAGES",
+    "SOAK_STABILITY",
+    "SPAWN_TIMEOUT",
+    "TERMINATE_TIMEOUT",
+    "WARMUP_ATTEMPTS",
+    "WARMUP_BACKOFF_SECONDS",
+    "WARMUP_TIMEOUT",
+    "_FIXTURE_HITS",
+    "_FIXTURE_HITS_CAP",
+    "_HIT_RESET",
+    "_HIT_UNFINISHED",
+    "_PORT_PICK_ATTEMPTS",
+    "_PROXY_DIGEST_LINES",
+    "_STDERR_CAP_BYTES",
+    "_STDERR_CAP_LINES",
+    "_WARNING_LINE_RE",
+    "_FixtureHandler",
+    "_FixtureServer",
+    "_assert_ipv4_loopback",
+    "_await_children_settle",
+    "_backend_entries",
+    "_backend_logs",
+    "_backend_pid_from_state",
+    "_backend_pids_from_state",
+    "_bind_origin",
+    "_call",
+    "_canonical_journey",
+    "_cap_text",
+    "_capture_stderr_fd",
+    "_child_pids",
+    "_chrome_process_snapshot",
+    "_cold_start_warmup",
+    "_cookie_journey",
+    "_cookie_round_trip",
+    "_decode_screenshot",
+    "_eval",
+    "_foundation_proof",
+    "_headless_spawn_kwargs",
+    "_isolated_env",
+    "_log_dirs",
+    "_os_assigned_port",
+    "_percentile",
+    "_pick_free_port",
+    "_pid_in_workspace",
+    "_pid_running",
+    "_proxy_warnings",
+    "_read_capped",
+    "_recorded_ports",
+    "_reply_shape",
+    "_representative_parity",
+    "_reserved_ports",
+    "_serving",
+    "_settle_dom",
+    "_soak_cycle",
+    "_soak_journey",
+    "_soak_op",
+    "_terminate_process_tree",
+    "_this_executable",
+    "_wire_shape",
+    "gate_work_dir",
+    "resolve_launcher",
+    "serve_fixture_app",
+    "serve_fixture_origin_pair",
+    "use_isolated_token",
+]
 
 
 # ---------------------------------------------------------------------------
