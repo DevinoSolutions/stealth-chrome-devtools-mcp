@@ -47,6 +47,8 @@ alike: no concrete reason to differ, but the headless effect was not measured. N
 - **The active tab of a minimized window paints about one frame per second** (C: rAF 5): timers run, frames barely.
 - **Page-opened popups (`window.open`) were not driven through the home** until a tool moved onto them (`switch_tab` armed them). CLOSED by F-1012
   (`audit/stage2/finding_F1012_popups_armed_on_creation.md`): a `Target.targetCreated` listener hands such a popup to the same `_arm_tracked_tab`.
+- **A background tab that PAINTS still got ~1 frame/s** although it read `visible` (the bare-counter measurement above missed it: a page that changes nothing is not held back). CLOSED by F-1019
+  (`audit/stage2/finding_F1019_background_tab_keeps_frames_when_it_paints.md`): `paint_hold` holds a tab a tool is driving as captured.
 - Mac and Linux were not measured; the call is cross-platform CDP and is sent everywhere.
 - Survival of the emulation across target rediscovery (F-775a) or a `Connection` swap is not measured; `_arm_tracked_tab` re-applies it on every `switch_tab`, which bounds the exposure.
 
