@@ -49,6 +49,10 @@ LINGER_SECONDS = 10.0
 #: is over a year of 60 Hz frames), so the hold costs no encoded frame and no event.
 _NEVER_A_FRAME = 2**31 - 1
 
+#: The most one hold command may cost the tool call it runs ahead of: a wedged
+#: renderer must cost every page tool two seconds and a warning, never a hang.
+SEND_BUDGET_S = 2.0
+
 
 @dataclass
 class _Hold:
@@ -74,10 +78,13 @@ async def hold(tab: Tab) -> None:
         # rediscovered target): the old session's screencast died with it.
         forget(key)
         entry = _held[key] = _Hold(tab, deadline)
-        await tab.send(
-            uc.cdp.page.start_screencast(
-                format_="jpeg", quality=1, every_nth_frame=_NEVER_A_FRAME
-            )
+        await asyncio.wait_for(
+            tab.send(
+                uc.cdp.page.start_screencast(
+                    format_="jpeg", quality=1, every_nth_frame=_NEVER_A_FRAME
+                )
+            ),
+            SEND_BUDGET_S,
         )
         if _held.get(key) is entry:
             entry.task = asyncio.create_task(_expire(key, entry))
@@ -103,7 +110,9 @@ async def _expire(key: str, entry: _Hold) -> None:
         return
     del _held[key]
     try:
-        await entry.tab.send(uc.cdp.page.stop_screencast())
+        await asyncio.wait_for(
+            entry.tab.send(uc.cdp.page.stop_screencast()), SEND_BUDGET_S
+        )
     except Exception as error:  # noqa: BLE001  PERMANENT(the tab usually closed first: nothing to release, and the timer must end either way)
         debug_logger.log_info(
             "paint_hold", "_expire", f"{type(error).__name__}: {error}"
