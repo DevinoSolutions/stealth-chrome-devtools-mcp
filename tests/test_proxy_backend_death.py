@@ -56,6 +56,7 @@ from release_gate_harness import (
     gate_work_dir,
     gate_workspace,
     resolve_launcher,
+    use_isolated_token,
     workspace_backend_logs,
 )
 from stealth_chrome_devtools_mcp.embedded import proxy_selfheal, singleton
@@ -279,6 +280,9 @@ class TestProxyExitsOnBackendDeath:
             clone_dir=clone_dir,
         )
         env["STEALTH_BROWSER_DEBUG"] = "false"
+        # F-1018: `_proxy_streams` forwards from THIS process, so it must send the
+        # token the isolated backend wrote under `home_dir`, not this home's.
+        use_isolated_token(monkeypatch, home_dir)
 
         backend = subprocess.Popen(
             [
