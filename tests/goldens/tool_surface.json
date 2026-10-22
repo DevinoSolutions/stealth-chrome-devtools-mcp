@@ -1148,7 +1148,7 @@
     "tags": []
   },
   "export_debug_logs": {
-    "description": "Export debug logs to a file using the fastest available method with timeout protection.\n\nArgs:\n    filename (str): Name of the file to export to.\n    max_errors (int): Maximum number of errors to export (default: 100).\n    max_warnings (int): Maximum number of warnings to export (default: 100).\n    max_info (int): Maximum number of info logs to export (default: 100).\n    include_all (bool): Include all logs regardless of limits (default: False).\n    format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n                 'auto' chooses fastest format based on data size:\n                 - Small data (<100 items): JSON (human readable)\n                 - Medium data (100-1000 items): Pickle (fast binary)\n                 - Large data (>1000 items): Gzip-Pickle (fastest, compressed)\n\nReturns:\n    str: Path to the exported file.",
+    "description": "Export debug logs to a file using the fastest available method with timeout protection.\n\nArgs:\n    filename (str): Name of the file to export to.\n    max_errors (int): Maximum number of errors to export (default: 100).\n    max_warnings (int): Maximum number of warnings to export (default: 100).\n    max_info (int): Maximum number of info logs to export (default: 100).\n    include_all (bool): Include all logs regardless of limits (default: False).\n    format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n                 'auto' chooses fastest format based on data size:\n                 - Small data (<100 items): JSON (human readable)\n                 - Medium data (100-1000 items): Pickle (fast binary)\n                 - Large data (>1000 items): Gzip-Pickle (fastest, compressed)\n    overwrite (bool): Replace `filename` if it already exists (default: False,\n        an existing file is refused). The file is created owner-only (0600) and\n        may not lie in a credential store, browser profile or this server's state.\n\nReturns:\n    str: Path to the exported file.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1176,6 +1176,10 @@
         "max_warnings": {
           "default": 100,
           "type": "integer"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1195,7 +1199,7 @@
     "tags": []
   },
   "export_network_data": {
-    "description": "Export network data to JSON file.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    filepath (str): Path to save JSON file.\n\nReturns:\n    Dict[str, Any]: ``{\"success\": bool}``, plus a ``capture_note`` when body\n    capture is off (exported responses have no bodies until it is enabled).",
+    "description": "Export network data to JSON file.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    filepath (str): Path to save JSON file. Created owner-only (0600); it may\n        not lie in a credential store, browser profile or this server's state.\n    overwrite (bool): Replace `filepath` if it already exists (default: False,\n        an existing file is refused).\n    include_credentials (bool): Keep the values of Cookie, Set-Cookie and\n        Authorization headers and the request cookies (default: False, each\n        value is exported as \"REDACTED\").\n\nReturns:\n    Dict[str, Any]: ``{\"success\": bool}``, plus a ``capture_note`` when body\n    capture is off (exported responses have no bodies until it is enabled).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1203,8 +1207,16 @@
         "filepath": {
           "type": "string"
         },
+        "include_credentials": {
+          "default": false,
+          "type": "boolean"
+        },
         "instance_id": {
           "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "required": [
@@ -1936,11 +1948,15 @@
     "tags": []
   },
   "get_cookies": {
-    "description": "Get cookies for current page or specific URLs.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    urls (Optional[List[str]]): Optional list of URLs to get cookies for.\n\nReturns:\n    List[Dict[str, Any]]: List of cookies.",
+    "description": "Get cookies for the current page, or for specific URLs.\n\nWith no `urls` this returns the cookies that apply to the page the tab shows\nnow (its live URL; none for a page with no http/https URL). The whole browser jar — every site, HttpOnly included —\nis returned only when `all_sites=True` is passed.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    urls (Optional[List[str]]): Optional list of URLs to get cookies for.\n    all_sites (bool): Return every cookie in the browser, for every site\n        (default: False). Ignored when `urls` is given.\n\nReturns:\n    List[Dict[str, Any]]: List of cookies.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
+        "all_sites": {
+          "default": false,
+          "type": "boolean"
+        },
         "instance_id": {
           "type": "string"
         },
@@ -3754,7 +3770,7 @@
     "tags": []
   },
   "take_screenshot": {
-    "description": "Take a screenshot of the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    full_page (bool): Capture full page (not just viewport).\n    format (str): Image format ('png' or 'jpeg').\n    file_path (Optional[str]): Optional file path to save screenshot to.\n\nReturns:\n    Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.",
+    "description": "Take a screenshot of the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    full_page (bool): Capture full page (not just viewport).\n    format (str): Image format ('png' or 'jpeg').\n    file_path (Optional[str]): Optional file path to save screenshot to. Created\n        owner-only (0600); it may not lie in a credential store, browser profile\n        or this server's state.\n    overwrite (bool): Replace `file_path` if it already exists (default: False,\n        an existing file is refused).\n\nReturns:\n    Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3780,6 +3796,10 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
         },
         "tab_id": {
           "anyOf": [

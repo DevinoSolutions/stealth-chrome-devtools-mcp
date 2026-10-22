@@ -9,9 +9,10 @@ import traceback
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
+from stealth_chrome_devtools_mcp.embedded.path_confinement import open_binary, open_text
 
 # The durable half of F-182/F-304: every log_error/log_warning/log_info call
 # also emits here (unconditionally - see the gate removed in each method
@@ -25,6 +26,13 @@ _backend_logger = logging.getLogger("stealth.backend")
 #: "which TOOL calls are failing" is one lookup in ``component_breakdown``
 #: instead of a scan of whatever component each tool body happened to name.
 TOOL_COMPONENT = "tool"
+
+
+class ExportTarget(NamedTuple):
+    """Where an export lands and whether it may replace what is there (F-1025)."""
+
+    filepath: str
+    overwrite: bool = False
 
 
 class DebugLogger:
@@ -514,13 +522,14 @@ class DebugLogger:
         """
         return self.export_to_file_paginated(filepath)
 
-    def export_to_file_paginated(
+    def export_to_file_paginated(  # noqa: PLR0913  PERMANENT(the tool's own arguments one-to-one: path, three limits, format, overwrite)
         self,
         filepath: str = "debug_log.json",
         max_errors: int | None = None,
         max_warnings: int | None = None,
         max_info: int | None = None,
         fmt: str = "auto",
+        overwrite: bool = False,
     ):
         """
         Export paginated debug logs to a file using fastest method available.
@@ -531,6 +540,8 @@ class DebugLogger:
             max_warnings: Max warnings to export. None for all.
             max_info: Max info logs to export. None for all.
             fmt: Export format ('json'/'pickle'/'gzip-pickle'/'auto').
+            overwrite: Replace *filepath* if it exists; otherwise an existing
+                file is refused (F-1025).
 
         Returns:
             str: The filepath where logs were exported.
@@ -550,7 +561,11 @@ class DebugLogger:
                     "[DEBUG] Lock timeout - falling back to lock-free export"
                 )
                 return self._export_lockfree(
-                    filepath, max_errors, max_warnings, max_info, fmt
+                    ExportTarget(filepath, overwrite),
+                    max_errors,
+                    max_warnings,
+                    max_info,
+                    fmt,
                 )
 
             self._lock_owner = "export_debug_logs"
@@ -569,7 +584,11 @@ class DebugLogger:
         except Exception as e:  # noqa: BLE001  DEBT(F-181)
             self._emit_stderr(f"[DEBUG] Exception in export: {e}")
             return self._export_lockfree(
-                filepath, max_errors, max_warnings, max_info, fmt
+                ExportTarget(filepath, overwrite),
+                max_errors,
+                max_warnings,
+                max_info,
+                fmt,
             )
 
         if fmt == "auto":
@@ -586,14 +605,16 @@ class DebugLogger:
                 fmt = "json"
 
         if fmt == "gzip-pickle":
-            return self._export_gzip_pickle(debug_data, filepath)
+            return self._export_gzip_pickle(
+                debug_data, ExportTarget(filepath, overwrite)
+            )
         if fmt == "pickle":
-            return self._export_pickle(debug_data, filepath)
-        return self._export_json(debug_data, filepath)
+            return self._export_pickle(debug_data, ExportTarget(filepath, overwrite))
+        return self._export_json(debug_data, ExportTarget(filepath, overwrite))
 
     def _export_lockfree(
         self,
-        filepath: str,
+        dest: ExportTarget,
         max_errors: int | None,
         max_warnings: int | None,
         max_info: int | None,
@@ -639,16 +660,24 @@ class DebugLogger:
                 fmt = "json"
 
         if fmt == "gzip-pickle":
-            return self._export_gzip_pickle(debug_data, filepath)
+            return self._export_gzip_pickle(debug_data, dest)
         if fmt == "pickle":
-            return self._export_pickle(debug_data, filepath)
-        return self._export_json(debug_data, filepath)
+            return self._export_pickle(debug_data, dest)
+        return self._export_json(debug_data, dest)
 
-    def _export_gzip_pickle(self, debug_data: dict[str, Any], filepath: str) -> str:
+    def _export_gzip_pickle(
+        self, debug_data: dict[str, Any], dest: ExportTarget
+    ) -> str:
+        filepath = dest.filepath
         if not filepath.endswith(".pkl.gz"):
             filepath = filepath.replace(".json", ".pkl.gz")
 
-        with gzip.open(filepath, "wb") as f:
+        with (
+            open_binary(
+                filepath, tool="export_debug_logs", overwrite=dest.overwrite
+            ) as raw,
+            gzip.GzipFile(fileobj=raw, mode="wb") as f,
+        ):
             pickle.dump(debug_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         file_size = Path(filepath).stat().st_size
@@ -660,12 +689,15 @@ class DebugLogger:
         )
         return filepath
 
-    def _export_pickle(self, debug_data: dict[str, Any], filepath: str) -> str:
+    def _export_pickle(self, debug_data: dict[str, Any], dest: ExportTarget) -> str:
         """Export using pickle (fast for medium data)."""
+        filepath = dest.filepath
         if not filepath.endswith(".pkl"):
             filepath = filepath.replace(".json", ".pkl")
 
-        with Path(filepath).open("wb") as f:
+        with open_binary(
+            filepath, tool="export_debug_logs", overwrite=dest.overwrite
+        ) as f:
             pickle.dump(debug_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         file_size = Path(filepath).stat().st_size
@@ -677,9 +709,12 @@ class DebugLogger:
         )
         return filepath
 
-    def _export_json(self, debug_data: dict[str, Any], filepath: str) -> str:
+    def _export_json(self, debug_data: dict[str, Any], dest: ExportTarget) -> str:
         """Export using JSON (human readable but slower)."""
-        with Path(filepath).open("w") as f:
+        filepath = dest.filepath
+        with open_text(
+            filepath, tool="export_debug_logs", overwrite=dest.overwrite
+        ) as f:
             json.dump(debug_data, f, separators=(",", ":"), default=str)
 
         file_size = Path(filepath).stat().st_size

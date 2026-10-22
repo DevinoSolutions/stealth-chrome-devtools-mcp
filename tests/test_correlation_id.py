@@ -95,6 +95,7 @@ _GOLDEN_SCHEMA_JSON = r"""
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "all_sites": {"default": false, "type": "boolean"},
         "instance_id": {"type": "string"},
         "tab_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
         "urls": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null}

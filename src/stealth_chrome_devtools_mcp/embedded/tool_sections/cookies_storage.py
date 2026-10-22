@@ -25,19 +25,38 @@ SECTION = "cookies-storage"
 
 
 async def get_cookies(
-    instance_id: str, urls: list[str] | None = None
+    instance_id: str, urls: list[str] | None = None, all_sites: bool = False
 ) -> list[dict[str, Any]]:
     """
-    Get cookies for current page or specific URLs.
+    Get cookies for the current page, or for specific URLs.
+
+    With no `urls` this returns the cookies that apply to the page the tab shows
+    now (its live URL; none for a page with no http/https URL). The whole browser jar — every site, HttpOnly included —
+    is returned only when `all_sites=True` is passed.
 
     Args:
         instance_id (str): Browser instance ID.
         urls (Optional[List[str]]): Optional list of URLs to get cookies for.
+        all_sites (bool): Return every cookie in the browser, for every site
+            (default: False). Ignored when `urls` is given.
 
     Returns:
         List[Dict[str, Any]]: List of cookies.
     """
     tab = await _require_tab(rt.browser_manager, instance_id)
+    if not urls and not all_sites:
+        # F-1025: the same question set_cookie asks, through the same home for
+        # "what is this tab showing now" — `tab.url` is a cached TargetInfo that
+        # can still read about:blank right after a navigation (F-995).
+        browser = await rt.browser_manager.get_browser(instance_id)
+        live = await rt._with_cdp_timeout(
+            tab_identity.refreshed(browser, tab), instance_id=instance_id
+        )
+        if not live["url"].startswith(("http://", "https://")):
+            # about:blank, chrome://, a file: page: no cookie applies, which is
+            # an answer, not an error (and not a reason to widen to the jar).
+            return []
+        urls = [live["url"]]
     return await rt._with_cdp_timeout(
         rt.network_interceptor.get_cookies(tab, urls), instance_id=instance_id
     )
