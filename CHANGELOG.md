@@ -9,6 +9,16 @@ with `cancel-in-progress` true for `pull_request` events only, so a new commit
 stops the previous full 3-OS gate. Pushes to main/dev, `v*` tag runs and manual
 runs are never cancelled. A test pins the shape.
 
+### CI runs the not-integration suite once per cell (T-6149)
+
+`release-gate.yml` ran `pytest -m "not integration"` twice on py3.12 on every OS,
+once in `unit-tests` and again in `coverage`. The `coverage` job (floor, per-OS
+`coverage-*` artifact, evidence record) is now the py3.12 run and `unit-tests`
+covers py3.11, py3.13 and the Linux py3.14 cell, so three full suite runs per
+gate are gone. The required check (`release-gate / release-gate`) is unchanged;
+the evidence ledger's `unit-tests/*-py3.12` cells are now `coverage/*`. A test
+pins that no (OS, python) cell runs the suite twice.
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)

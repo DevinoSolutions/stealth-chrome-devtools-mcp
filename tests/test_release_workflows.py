@@ -385,6 +385,33 @@ def test_every_declared_required_cell_emits_its_record(gate_jobs):
     )
 
 
+def test_the_not_integration_suite_runs_once_per_os_and_python_cell(gate_jobs):
+    """T-6149: `-m "not integration"` is never run twice on one (OS, python) cell.
+
+    `unit-tests` and `coverage` used to both run the whole suite on py3.12 on
+    every OS. `coverage` is now THE py3.12 run (with the coverage floor), so the
+    two jobs' cells must be disjoint, and no other job may run the suite.
+    """
+    cells: dict[tuple[str, str], list[str]] = {}
+    for name, job in gate_jobs.items():
+        script = "\n".join(_all_run_steps(job))
+        if 'pytest -m "not integration"' not in script:
+            continue
+        py_pinned = job["strategy"]["matrix"]["include"]
+        for c in py_pinned:
+            py = c.get("python-version") or "3.12"
+            cells.setdefault((c["runner_os"], py), []).append(name)
+    doubled = {k: v for k, v in cells.items() if len(v) > 1}
+    assert not doubled, f"the not-integration suite runs twice on: {doubled}"
+    assert {n for v in cells.values() for n in v} == {"unit-tests", "coverage"}
+    for os_ in ("Linux", "Windows", "macOS"):
+        assert cells[(os_, "3.12")] == ["coverage"], (
+            f"{os_} py3.12 must be run by the coverage job (floor + xml artifact)"
+        )
+    cov = "\n".join(_all_run_steps(gate_jobs["coverage"]))
+    assert "--cov-fail-under=" in cov and "--cov-report=xml:coverage.xml" in cov
+
+
 def test_every_emitting_job_uploads_what_it_emitted(gate_jobs):
     for name, job in gate_jobs.items():
         steps = job.get("steps", [])
