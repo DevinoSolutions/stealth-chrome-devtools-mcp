@@ -136,6 +136,33 @@ async def _undriven_rate(iid: str, tab_id: str) -> int:
     return await counted() - before
 
 
+async def _display_paints(iid: str, tab_id: str) -> int:
+    """Best frame count of a foreground tab NO tool touches, polled up to
+    :data:`ARMING_BUDGET_SECONDS`: whether this display paints a window at all."""
+    browser = await runtime.browser_manager.get_browser(iid)
+    await tab_open.find(browser, tab_id).evaluate(
+        START_LOOP_JS.replace("return true;", "true;"), return_by_value=True
+    )
+    best, deadline = 0, time.monotonic() + ARMING_BUDGET_SECONDS
+    while best < MIN_FRAMES and time.monotonic() < deadline:
+        best = max(best, await _undriven_rate(iid, tab_id))
+    return best
+
+
+def _skip_if_display_does_not_paint(headless: bool, painted: int) -> None:
+    """The premise every node rests on is a PLATFORM fact: the display paints a
+    foreground tab. Headed Chrome 156 on the Linux CI cell's bare Xvfb (no window
+    manager) painted 0 frames in every tab of one run while Chrome 155 there
+    painted ~120, so it is measured; where the display paints, a held tab that
+    does not is a product failure and still fails."""
+    if not headless and sys.platform.startswith("linux") and painted < MIN_FRAMES:
+        pytest.skip(
+            f"headed Chrome on this Linux display painted {painted} frames in "
+            f"{MEASURE_MS} ms in a foreground tab no tool touched (bare Xvfb, no "
+            f"window manager): there is nothing to hold or throttle here"
+        )
+
+
 async def _spawn(tmp_path, headless: bool) -> str:
     result = await get_fn("spawn_browser")(
         headless=headless,
@@ -154,7 +181,10 @@ async def test_a_driven_background_tab_keeps_painting(tmp_path, headless):
         background = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
         foreground = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
 
-        control = await _frames(iid, foreground)
+        _skip_if_display_does_not_paint(
+            headless, await _display_paints(iid, foreground)
+        )
+        control = await _frames_when_armed(iid, foreground)
         assert control["frames"] >= MIN_FRAMES, f"control tab did not paint: {control}"
 
         answer = await _frames_when_armed(iid, background)
@@ -188,7 +218,11 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
     try:
         driven = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
         undriven = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
-        await new_tab(instance_id=iid, url="about:blank")  # both are now background
+        # Both are now background.
+        foreground = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
+        _skip_if_display_does_not_paint(
+            headless, await _display_paints(iid, foreground)
+        )
 
         # The un-driven tab: its loop is started straight through CDP, never a tool.
         browser = await runtime.browser_manager.get_browser(iid)
