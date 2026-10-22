@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### The gated load page is a registered fixture route (F-1000, T-3102)
-
-- **The F-1000 gated load page is an ordinary route (T-3102).** `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
-
 ### Four CI integration flakes (F-1014, F-1015, F-1016, F-1022)
 
 - **A slow Chrome is no longer refused as a stranger (F-1014, T-5899).** `devtools_port.confirm_ours` gave the browser 10 s to answer
@@ -67,6 +63,10 @@ bound now; a stale page's iframe loading no longer counts as the navigation havi
 (it is `min(10 s, timeout / 3)`), so a CPU-starved first navigation that is silent for more than 10 s is treated as stale: the tab is replaced and the
 navigation retried once; a PINNED caller gets a `ToolError` after 10 s of silence and no retry. Once the main frame has started, the attempt keeps the
 whole budget before it is called stale. The `Page.frameStartedLoading` listener is pinned to be removed however the attempt ends.
+
+### The gated load page is a registered fixture route (F-1000, T-3102)
+
+- **The F-1000 gated load page is an ordinary route (T-3102).** `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
 
 ## 2.1.40
 
