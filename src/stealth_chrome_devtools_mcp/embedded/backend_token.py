@@ -88,10 +88,10 @@ UNAUTHORIZED = (
 )
 
 #: ``secrets.token_urlsafe(32)`` is 43 characters of this alphabet. A file that
-#: is shorter or holds anything else (empty, hand-edited, truncated) is not a
-#: token and is replaced rather than trusted.
+#: is shorter or longer or holds anything else (empty, hand-edited, appended to,
+#: truncated) is not a token and is replaced rather than trusted.
 _TOKEN_BYTES = 32
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43,}")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 #: At most one refusal is logged per this many seconds: a local process hammering
 #: the port must not turn the backend's log into the thing it is flooded through.
@@ -100,6 +100,9 @@ _LOG_EVERY_SECONDS = 60.0
 # Win32 values, spelled out because the type gate also runs on Linux.
 _SDDL_REVISION_1 = 1
 _SE_FILE_OBJECT = 1
+_OWNER_SECURITY_INFORMATION = 0x00000001
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PATH_NOT_FOUND = 3
 _DACL_SECURITY_INFORMATION = 0x00000004
 _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 _TOKEN_QUERY = 0x0008  # TOKEN_QUERY
@@ -158,18 +161,40 @@ def _read_file(path: Path) -> str | None:
 
 
 def _refuse_a_foreign_file(path: Path) -> None:
-    """POSIX: a token file another user owns is not ours to trust or to tighten."""
+    """A token file another user owns is not ours to trust or to tighten.
+
+    POSIX compares the file's uid with ours; Windows compares the owner SID with
+    the current user's (:func:`_file_owner_sid`, :func:`_user_sid`). A file that
+    is not there is nothing to refuse, and on Windows an owner that cannot be read
+    is refused (fail closed) rather than assumed to be ours.
+    """
     if sys.platform == "win32":
+        try:
+            owner, me = _file_owner_sid(path), _user_sid()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ToolError(
+                f"{path}: its owner could not be read ({exc}); refusing to serve "
+                "with a token that may be readable by another user. Remove it and "
+                "start the backend again."
+            ) from exc
+        if owner != me:
+            raise ToolError(_foreign_owner(path, f"SID {owner}"))
         return
     try:
-        owner = path.stat().st_uid
+        owner_uid = path.stat().st_uid
     except OSError:
         return
-    if owner != os.geteuid():
-        raise ToolError(
-            f"{path} is owned by another user (uid {owner}); refusing to serve "
-            "with a token that user can read. Remove it and start the backend again."
-        )
+    if owner_uid != os.geteuid():
+        raise ToolError(_foreign_owner(path, f"uid {owner_uid}"))
+
+
+def _foreign_owner(path: Path, who: str) -> str:
+    return (
+        f"{path} is owned by another user ({who}); refusing to serve "
+        "with a token that user can read. Remove it and start the backend again."
+    )
 
 
 def _create(path: Path) -> str:
@@ -302,11 +327,6 @@ def _user_sid() -> str:
         wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
     ]
-    advapi32.ConvertSidToStringSidW.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(wintypes.LPWSTR),
-    ]
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     process_token = wintypes.HANDLE()
     if not advapi32.OpenProcessToken(
@@ -324,16 +344,73 @@ def _user_sid() -> str:
         ):
             raise OSError("GetTokenInformation failed")
         # TOKEN_USER starts with a SID_AND_ATTRIBUTES: first field is the SID pointer.
-        sid_pointer = ctypes.c_void_p.from_buffer(buffer).value
-        text = wintypes.LPWSTR()
-        if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(text)):
-            raise OSError("ConvertSidToStringSidW failed")
-        try:
-            return str(text.value)
-        finally:
-            kernel32.LocalFree(text)
+        return _sid_string(ctypes.c_void_p.from_buffer(buffer).value)
     finally:
         kernel32.CloseHandle(process_token)
+
+
+def _sid_string(sid_pointer: int | None) -> str:
+    """A SID, by pointer, as its string form (``S-1-5-21-...``)."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.windll.advapi32
+    kernel32 = ctypes.windll.kernel32
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    text = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(text)):
+        raise OSError("ConvertSidToStringSidW failed")
+    try:
+        return str(text.value)
+    finally:
+        kernel32.LocalFree(text)
+
+
+def _file_owner_sid(path: Path) -> str:
+    """The SID that OWNS ``path`` as a string. ``FileNotFoundError`` when it is
+    not there; ``OSError`` for any other failure to read the owner."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.windll.advapi32
+    kernel32 = ctypes.windll.kernel32
+    pointer = ctypes.POINTER(ctypes.c_void_p)
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        pointer,
+        pointer,
+        pointer,
+        pointer,
+        pointer,
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+    failed = advapi32.GetNamedSecurityInfoW(
+        str(path),
+        _SE_FILE_OBJECT,
+        _OWNER_SECURITY_INFORMATION,
+        ctypes.byref(owner),
+        None,
+        None,
+        None,
+        ctypes.byref(descriptor),
+    )
+    if failed in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
+        raise FileNotFoundError(str(path))
+    if failed:
+        raise OSError(f"GetNamedSecurityInfoW failed (error {failed})")
+    try:
+        # The owner SID points INTO the descriptor, so read it before freeing.
+        return _sid_string(owner.value)
+    finally:
+        kernel32.LocalFree(descriptor)
 
 
 # ---------------------------------------------------------------- the guard

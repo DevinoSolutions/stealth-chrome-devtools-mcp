@@ -45,6 +45,14 @@ back to :func:`ready`, so mixed versions keep working. The cold-start poll and
 the identity gate stay on ``initialize``: they are rare, and a first contact
 should prove the MCP layer end to end.
 
+**A 401 is its own verdict, and not a strike** (F-1018 follow-up). The backend
+answered, so it is alive; what is wrong is OUR credential (the token file deleted,
+unreadable behind an antivirus lock, or another user's). :meth:`Heartbeat.verdict`
+says :data:`VERDICT_UNAUTHORIZED` for it, :meth:`Heartbeat.alive` stays True, and the
+watchdog never strikes a healthy backend for something only this client can fix —
+which, with the confirmation probe 401ing the same way, used to condemn a backend
+that owned browsers. The cause is logged at WARNING once per run of 401s, not per beat.
+
 **Never raises.** Every failure — connection refused, timeout, a malformed
 answer — resolves to False. That is ``singleton._server_is_healthy``'s
 fail-closed contract: a probe error reads as "not ready" and never propagates,
@@ -93,6 +101,15 @@ _READY_STATUS = 200
 
 #: What a backend that predates :data:`HEALTH_PATH` answers there.
 _NO_ROUTE_STATUS = 404
+
+#: What a backend that enforces the bearer token answers a client without it
+#: (``backend_token``): proof that it is alive and that THIS client cannot talk to it.
+_UNAUTHORIZED_STATUS = 401
+
+#: The three things a :class:`Heartbeat` beat can conclude.
+VERDICT_ALIVE = "alive"
+VERDICT_UNAUTHORIZED = "unauthorized"
+VERDICT_DEAD = "dead"
 
 #: What a probe calls itself, so a backend's logs can tell the two apart from
 #: each other and from a real client.
@@ -179,14 +196,22 @@ class Heartbeat:
         self._lock = threading.Lock()
         self._client: httpx.Client | None = None
         self._legacy = False
+        self._said_unauthorized = False
 
     def alive(self, timeout: float) -> bool:
-        """True iff the backend's session manager is running (see the module doc)."""
+        """False only for :data:`VERDICT_DEAD`: the session manager is running, or
+        the backend answered and refused us (:data:`VERDICT_UNAUTHORIZED`, which is
+        not a strike). See the module doc; :meth:`verdict` says which."""
+        return self.verdict(timeout) != VERDICT_DEAD
+
+    def verdict(self, timeout: float) -> str:
+        """One beat: :data:`VERDICT_ALIVE`, :data:`VERDICT_UNAUTHORIZED` or
+        :data:`VERDICT_DEAD`. Never raises."""
         if self._legacy:
             if ready(self._mcp_url, timeout):
-                return True
+                return VERDICT_ALIVE
             self._legacy = False  # a replaced backend may serve the route now
-            return False
+            return VERDICT_DEAD
         try:
             resp = self._connection().get(
                 self._health_url, timeout=timeout, headers=backend_token.auth_headers()
@@ -194,14 +219,24 @@ class Heartbeat:
         except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not alive")
             _logger.debug("liveness heartbeat failed", exc_info=exc)
             self.close()
-            return False
+            return VERDICT_DEAD
         if resp.status_code == _NO_ROUTE_STATUS:
             _logger.debug(
                 "backend has no %s route; probing with initialize", HEALTH_PATH
             )
             self._legacy = True
-            return self.alive(timeout)
-        return resp.status_code == _READY_STATUS
+            return self.verdict(timeout)
+        if resp.status_code == _UNAUTHORIZED_STATUS:
+            if not self._said_unauthorized:
+                self._said_unauthorized = True
+                _logger.warning(
+                    "liveness heartbeat: %s; the backend is answering, so this is "
+                    "not counted as a failed beat",
+                    backend_token.UNAUTHORIZED,
+                )
+            return VERDICT_UNAUTHORIZED
+        self._said_unauthorized = False
+        return VERDICT_ALIVE if resp.status_code == _READY_STATUS else VERDICT_DEAD
 
     def close(self) -> None:
         """Drop the connection. Best-effort; a later :meth:`alive` reopens it."""
