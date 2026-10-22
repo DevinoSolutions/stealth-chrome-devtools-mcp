@@ -509,7 +509,7 @@ def test_a_non_browser_cell_may_not_record_chrome(ledger: Path):
 
 # ── pytest-evidence rejections ──────────────────────────────────────────────
 def test_a_cell_that_owes_pytest_evidence_may_not_omit_it(ledger: Path):
-    _mutate(ledger, "unit-tests/Linux-X64-py3.12", lambda r: r.update({"pytest": None}))
+    _mutate(ledger, "unit-tests/Linux-X64-py3.11", lambda r: r.update({"pytest": None}))
     _, problems = _aggregate(ledger)
     assert any("owes pytest evidence" in p for p in problems)
 
@@ -682,7 +682,7 @@ def test_a_real_github_image_id_with_hyphens_is_accepted(ledger: Path):
     """
     _mutate(
         ledger,
-        "unit-tests/Windows-X64-py3.12",
+        "unit-tests/Windows-X64-py3.11",
         lambda r: r["runner"].update({"image_os": "win25-vs2026"}),
     )
     _, problems = _aggregate(ledger)

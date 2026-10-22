@@ -113,7 +113,11 @@ jobs:
           path: release-evidence
           if-no-files-found: error
 
-  # ── Unit tests on all three OSes, py3.11–3.13, plus one Linux py3.14 cell ───────────────────
+  # ── Unit tests on all three OSes, py3.11 and py3.13, plus one Linux py3.14 cell ─────────────
+  # py3.12 is NOT in this matrix: the `coverage` job below runs the SAME
+  # `-m "not integration"` suite on py3.12 on each OS, with the coverage floor, so a
+  # second py3.12 run here would execute the whole suite twice on the same cell
+  # (T-6149). The ledger still owes a py3.12 pytest record per OS — `coverage/<os>`.
   unit-tests:
     name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -123,15 +127,12 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.11" }
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.12" }
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.13" }
           # 3.14 is Linux-only and unit-tests-only (T-4804): F-1005 gates an `__annotate__` fix on 3.14, and no other cell would run it.
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.14" }
           - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.11" }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.12" }
           - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.13" }
           - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.11" }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.12" }
           - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.13" }
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

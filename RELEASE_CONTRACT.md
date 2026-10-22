@@ -69,16 +69,13 @@ aggregate unless every cell below is present, current, and successful.
 | `unit-tests` | `Linux-X64-py3.11` | Linux/X64 | 3.11 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `Windows-X64-py3.11` | Windows/X64 | 3.11 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `macOS-ARM64-py3.11` | macOS/ARM64 | 3.11 | — | hermetic unit suite (`-m 'not integration'`) |
-| `unit-tests` | `Linux-X64-py3.12` | Linux/X64 | 3.12 | — | hermetic unit suite (`-m 'not integration'`) |
-| `unit-tests` | `Windows-X64-py3.12` | Windows/X64 | 3.12 | — | hermetic unit suite (`-m 'not integration'`) |
-| `unit-tests` | `macOS-ARM64-py3.12` | macOS/ARM64 | 3.12 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `Linux-X64-py3.13` | Linux/X64 | 3.13 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `Windows-X64-py3.13` | Windows/X64 | 3.13 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `macOS-ARM64-py3.13` | macOS/ARM64 | 3.13 | — | hermetic unit suite (`-m 'not integration'`) |
 | `unit-tests` | `Linux-X64-py3.14` | Linux/X64 | 3.14 | — | hermetic unit suite (`-m 'not integration'`) |
-| `coverage` | `Linux-X64` | Linux/X64 | 3.12 | — | per-OS coverage floor (no merged report hides a red OS) |
-| `coverage` | `Windows-X64` | Windows/X64 | 3.12 | — | per-OS coverage floor (no merged report hides a red OS) |
-| `coverage` | `macOS-ARM64` | macOS/ARM64 | 3.12 | — | per-OS coverage floor (no merged report hides a red OS) |
+| `coverage` | `Linux-X64` | Linux/X64 | 3.12 | — | hermetic unit suite on py3.12 with the per-OS coverage floor |
+| `coverage` | `Windows-X64` | Windows/X64 | 3.12 | — | hermetic unit suite on py3.12 with the per-OS coverage floor |
+| `coverage` | `macOS-ARM64` | macOS/ARM64 | 3.12 | — | hermetic unit suite on py3.12 with the per-OS coverage floor |
 | `integration` | `Linux-X64` | Linux/X64 | 3.12 | launched + identity asserted | real-Chrome integration suite + Chrome identity |
 | `integration` | `Windows-X64` | Windows/X64 | 3.12 | launched + identity asserted | real-Chrome integration suite + Chrome identity |
 | `integration` | `macOS-ARM64` | macOS/ARM64 | 3.12 | launched + identity asserted | real-Chrome integration suite + Chrome identity MINUS the transport journey (F-773) |

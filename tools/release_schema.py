@@ -177,7 +177,10 @@ def _build_required_cells() -> tuple[CellSpec, ...]:
             "p",
             "hermetic unit suite (`-m 'not integration'`)",
         )
-        for py in ("3.11", "3.12", "3.13")
+        # py3.12 is the `coverage` job's cell (T-6149): it runs this same suite
+        # once per OS with the coverage floor, so a unit-tests py3.12 cell would
+        # run the not-integration suite twice on one runner.
+        for py in ("3.11", "3.13")
         for cell in ALL_OS
     ]
     # 3.14 is one Linux cell, not a column: F-1005's `__annotate__` fix is gated
@@ -197,7 +200,7 @@ def _build_required_cells() -> tuple[CellSpec, ...]:
             cell,
             "3.12",
             "p",
-            "per-OS coverage floor (no merged report hides a red OS)",
+            "hermetic unit suite on py3.12 with the per-OS coverage floor",
         )
         for cell in ALL_OS
     ]
