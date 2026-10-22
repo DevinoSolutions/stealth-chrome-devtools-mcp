@@ -29,6 +29,17 @@ prefix is stripped before comparing. UNC (``\\server\share``, ``\\localhost\C$``
 local root can be compared against, so they are REFUSED outright, both as typed
 and as resolved (a symlink to a share is the same route).
 
+**Win32 name folding (N1).** Win32 drops trailing dots and spaces from every path
+segment before it reaches the file system, so ``~/.kube.`` IS ``~/.kube`` and a
+destination that does not exist yet (``precreate_private`` creates it) slipped past
+a plain string comparison. :func:`_win_canonical` strips them per segment and
+:func:`_fold`, the one place the deny-list compares, applies it on Windows.
+
+**Chrome profiles wherever they sit (N3).** ``spawn_browser(user_data_dir=<path>)``
+may put a profile anywhere, outside every root above. A directory is a profile
+when it carries our clone marker or one of ``profile_seed.LOGIN_WITNESSES`` (the
+repo's own two definitions, not a third), and everything under one is refused.
+
 **One writer for the export tools.** :func:`open_text` / :func:`open_binary` are
 the only places an export file is opened: the deny-list check, then ``os.open``
 with ``O_EXCL`` (an existing file is refused unless the caller passed
@@ -43,10 +54,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import sys
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
+from stealth_chrome_devtools_mcp.embedded import profile_seed
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: Created files are owner-only. ``os.open``'s mode is masked by the umask, which
@@ -96,9 +109,35 @@ _BROWSER_PROFILE_DIRS = (
 )
 
 
+_SEPARATORS = re.compile(r"([\\/])")
+
+#: ``/proc/<pid>/environ`` is the process's environment, i.e. every secret passed
+#: by variable. ``self`` and ``thread-self`` resolve to a pid under ``realpath``;
+#: the pattern keeps them so the rule holds for a path that was never resolved.
+_PROC_ENVIRON = re.compile(r"^/proc/(?:self|thread-self|\d+)(?:/task/\d+)?/environ$")
+
+
+def _win_canonical(path: str) -> str:
+    r"""*path* spelled as Win32 reads it: every segment loses trailing dots/spaces.
+
+    Pure string logic (testable on any OS; :func:`_fold` applies it on Windows
+    only, because on POSIX ``.kube.`` is a different directory). ``.`` and ``..``
+    are navigation, not names, and a segment made only of dots is left alone.
+    """
+    parts = _SEPARATORS.split(path)
+    for index in range(0, len(parts), 2):
+        stripped = parts[index].rstrip(". ")
+        if parts[index] not in {".", ".."} and stripped:
+            parts[index] = stripped
+    return "".join(parts)
+
+
 def _fold(path: str) -> str:
-    """The comparison form of a real path: case-folded where the FS folds."""
+    """The comparison form of a real path: case-folded where the FS folds, and
+    on Windows with Win32's trailing dot/space dropping applied."""
     normal = os.path.normcase(path)
+    if os.name == "nt":
+        normal = _win_canonical(normal)
     return normal.lower() if _CASE_INSENSITIVE else normal
 
 
@@ -163,6 +202,8 @@ def _secret_roots() -> list[tuple[str, Path]]:
         ("~/.config/git (git credentials)", home / ".config" / "git" / "credentials"),
         ("~/.docker (registry credentials)", home / ".docker"),
         ("~/.kube (cluster credentials)", home / ".kube"),
+        ("~/.pgpass (PostgreSQL passwords)", home / ".pgpass"),
+        ("~/.vault-token (HashiCorp Vault token)", home / ".vault-token"),
         ("~/.azure (Azure credentials)", home / ".azure"),
         ("~/.claude (agent credentials and transcripts)", home / ".claude"),
         ("macOS keychains", home / "Library" / "Keychains"),
@@ -170,6 +211,12 @@ def _secret_roots() -> list[tuple[str, Path]]:
     # %APPDATA% / %LOCALAPPDATA% are these two unless the machine redirects them;
     # env access has one home (settings), so the redirect is not read here.
     app_data = [home / "AppData" / "Roaming", home / "AppData" / "Local"]
+    roots.append(
+        (
+            "AppData/Roaming/postgresql (PostgreSQL passwords)",
+            app_data[0] / "postgresql",
+        )
+    )
     roots.extend(
         ("the Windows credential store", base / "Microsoft" / name)
         for base in app_data
@@ -214,11 +261,53 @@ def _secret_roots() -> list[tuple[str, Path]]:
     return roots
 
 
+def proc_environ_path(real: str) -> bool:
+    """Whether *real* names a Linux process environment (``/proc/<pid>/environ``).
+
+    Pure string logic, applied on every OS: a resolved Windows path starts with a
+    drive, so it can never match, and no platform branch is needed to keep it so.
+    """
+    return _PROC_ENVIRON.match(real) is not None
+
+
+def _profile_rule(real: str) -> str | None:
+    """The label when *real* lies in a Chrome profile directory wherever it is.
+
+    A profile is a directory with our clone marker or a login store
+    (``profile_seed.MARKER_NAME`` / ``LOGIN_WITNESSES``), so a profile that
+    ``spawn_browser(user_data_dir=...)`` placed outside every named root is
+    still refused. A directory that cannot be read is not a profile.
+    """
+    witnesses = (profile_seed.MARKER_NAME, *profile_seed.LOGIN_WITNESSES)
+    start = Path(real)
+    for directory in (start, *start.parents):
+        for witness in witnesses:
+            with contextlib.suppress(OSError):
+                if (directory / witness).is_file():
+                    return "a Chrome profile directory (clone marker or login store)"
+    return None
+
+
 def _env_file_rule(name: str) -> bool:
     lowered = name.lower()
     if lowered == ".env":
         return True
     return lowered.startswith(".env.") and not lowered.endswith(_ENV_TEMPLATE_SUFFIXES)
+
+
+def _file_name_rule(real: str) -> str | None:
+    """The label when what *real* IS, rather than where it lies, is denied: a
+    process environment, a ``.env`` file, or a credential file by name."""
+    if proc_environ_path(real):
+        return "/proc/<pid>/environ (a process's environment variables)"
+    name = Path(real).name
+    if os.name == "nt":
+        name = _win_canonical(name)
+    if _env_file_rule(name):
+        return ".env files (secrets by convention)"
+    if _fold(name) in _CREDENTIAL_FILE_NAMES:
+        return f"{name} files (credentials by convention)"
+    return None
 
 
 def secret_location_rule(path: str | os.PathLike[str]) -> str | None:
@@ -228,15 +317,13 @@ def secret_location_rule(path: str | os.PathLike[str]) -> str | None:
     real = _real(path)
     if os.name == "nt" and _remote_or_device(real):
         return _REMOTE_RULE
-    name = Path(real).name
-    if _env_file_rule(name):
-        return ".env files (secrets by convention)"
-    if _fold(name) in _CREDENTIAL_FILE_NAMES:
-        return f"{name} files (credentials by convention)"
+    by_name = _file_name_rule(real)
+    if by_name is not None:
+        return by_name
     for label, root in _secret_roots():
         if _is_under(real, _real(root)):
             return label
-    return None
+    return _profile_rule(real)
 
 
 def refuse_secret_path(path: str | os.PathLike[str], *, tool: str, action: str) -> Path:
