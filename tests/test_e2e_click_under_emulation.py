@@ -49,12 +49,13 @@ async def _warmup():
     yield
 
 
-async def _hits(iid: str) -> list[dict]:
-    """What the page's own capturing listener recorded, within a bounded wait."""
+async def _hits(iid: str, wait: bool = True) -> list[dict]:
+    """What the page's own capturing listener recorded, within a bounded wait
+    (``wait=False``: what it has recorded right now)."""
     deadline = asyncio.get_running_loop().time() + HIT_BUDGET_S
     while True:
         seen = json.loads(await eval_js(iid, "JSON.stringify(window.__hits)"))
-        if seen or asyncio.get_running_loop().time() > deadline:
+        if seen or not wait or asyncio.get_running_loop().time() > deadline:
             return seen
         await asyncio.sleep(0.1)
 
@@ -362,3 +363,47 @@ async def test_a_child_of_a_disabled_button_is_reported_disabled_not_unverified(
         assert record["reason"] == "disabled", record
 
     await _in_a_page(fixture_app_server, body)
+
+
+@pytest.mark.parametrize(
+    ("selector", "disabled"),
+    [
+        ("#fdiv", False),
+        ("#fbtn", True),
+        ("#dchild", True),
+        ("#lbtn", False),
+    ],
+    ids=[
+        "div-in-disabled-fieldset",
+        "button-in-disabled-fieldset",
+        "span-in-disabled-button",
+        "button-in-first-legend",
+    ],
+)
+async def test_only_a_disabled_form_control_counts_as_disabled(
+    fixture_app_server, tmp_empty_root, selector, disabled
+):
+    """RED before the fix for the div and the legend button: ``closest(':disabled')``
+    matched ``<fieldset disabled>`` itself, so a click Chrome DELIVERED (a plain
+    ``<div>``, or a button in the fieldset's first ``<legend>``) was reported
+    ``disabled`` and exempted from press verification. Each case is judged by the
+    page's own capturing ``mousedown`` listener, not by the tool's record."""
+
+    async def body(iid):
+        record = await get_fn("click_element")(instance_id=iid, selector=selector)
+        hits = await _hits_settled(iid)
+        if disabled:
+            assert hits == [], (record, hits)
+            assert record["reason"] == "disabled", record
+        else:
+            assert [h["id"] for h in hits] == [selector[1:]], (record, hits)
+            assert record["reason"] is None, record
+
+    await _in_a_page(fixture_app_server, body)
+
+
+async def _hits_settled(iid: str) -> list[dict]:
+    """Like :func:`_hits`, but for a press that may NEVER arrive: waits the bounded
+    budget out once, then answers whatever the page recorded."""
+    await asyncio.sleep(0.5)
+    return await _hits(iid, wait=False)

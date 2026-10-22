@@ -138,14 +138,27 @@ DISABLED = "disabled"
 #: ``getBoundingClientRect()``, which answers an all-zero rect there and would
 #: invent a click point at the viewport origin.
 #:
-#: ``disabled`` is ``closest(':disabled')`` (the element or an ancestor; a child of a
-#: disabled ``<button>`` gets no mousedown either) and NOT the ``elem.disabled`` IDL
-#: attribute. Measured, Chrome 152: a ``<button>`` inside a ``<fieldset disabled>``
-#: reports ``elem.disabled === false`` while ``:disabled`` matches, it hit-tests to
-#: ITSELF, and the page receives nothing — so the IDL read produced exactly the
-#: false "the click reached it" this module exists to retire. ``:disabled`` also
-#: covers ``<option disabled>`` and every other inherited-disabled form.
+#: ``disabled`` / ``under_disabled`` ask whether a node is an INERT FORM CONTROL: it
+#: matches ``:disabled`` itself, or its nearest ``button, input, select, textarea,
+#: optgroup, option`` ancestor does (a child of a disabled ``<button>`` gets no
+#: mousedown either). It is NOT ``elem.disabled`` and NOT ``closest(':disabled')``.
+#: Not the IDL attribute: measured, Chrome 152, a ``<button>`` inside a
+#: ``<fieldset disabled>`` reports ``elem.disabled === false`` while ``:disabled``
+#: matches, it hit-tests to ITSELF, and the page receives nothing. Not
+#: ``closest(':disabled')`` either: ``fieldset[disabled]`` itself matches
+#: ``:disabled``, so every ``<div>`` or ``<span>`` inside one would read as
+#: disabled although only the form controls in it are (and not the ones in the
+#: fieldset's first ``<legend>``) — a click on that ``<div>`` is delivered, and
+#: calling it disabled would also have skipped its press verification. The
+#: fieldset is deliberately left out of the ancestor list for that reason: the
+#: CONTROL's own ``:disabled`` already applies the fieldset and legend rules.
 AIM_JS = """(elem) => {
+    const inert = (node) => {
+        if (!node) return false;
+        if (node.matches(':disabled')) return true;
+        const owner = node.closest('button,input,select,textarea,optgroup,option');
+        return !!owner && owner.matches(':disabled');
+    };
     const rects = elem.getClientRects();
     const box = rects.length ? rects[0] : null;
     const style = window.getComputedStyle(elem);
@@ -182,8 +195,8 @@ AIM_JS = """(elem) => {
         target: shape(elem),
         hit: hit,
         hit_is_target: hitIsTarget,
-        disabled: !!elem.closest(':disabled'),
-        under_disabled: !!(under && under.closest(':disabled')),
+        disabled: inert(elem),
+        under_disabled: inert(under),
         pointer_events: String(style.pointerEvents),
         visibility: String(style.visibility)
     });
@@ -374,8 +387,9 @@ def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measur
             return POINTER_EVENTS_NONE
         return COVERED
     # The click reached the target. The one thing that can still make it inert is
-    # the target being disabled — including by an ancestor ``<fieldset disabled>``,
-    # which is why ``AIM_JS`` asks ``:disabled`` and not ``elem.disabled``.
+    # the target being a disabled form control — including one disabled by an
+    # ancestor ``<fieldset disabled>``, which is why ``AIM_JS`` asks ``:disabled``
+    # and not ``elem.disabled``.
     if facts.get("disabled"):
         return DISABLED
     return None
@@ -474,13 +488,39 @@ async def _let_go(tab: Tab, at: tuple[float, float]) -> str | None:
     """Best-effort, bounded ``mouseReleased``: never leave the button held.
 
     Errors are swallowed because the failure already in flight is the one worth
-    reporting; a cancellation arriving DURING this release still propagates.
+    reporting. Call it through :func:`_wind_down`, which shields it from a
+    cancellation arriving DURING the release.
     """
     try:
         await _send_mouse(tab, "mouseReleased", *at)
     except Exception as exc:  # noqa: BLE001  PERMANENT(cleanup must not mask the failure being raised)
         return type(exc).__name__
     return None
+
+
+async def _wind_down(
+    tab: Tab, element: Element, at: tuple[float, float], *, disarm: bool
+) -> None:
+    """Release the button (and dispose the probe if *disarm*) EVEN IF cancelled.
+
+    The cleanup runs as its own task behind :func:`asyncio.shield`, so a second
+    cancellation (or an outer timeout) landing while it runs cannot skip the
+    release or the disarm. That cancellation is then waited out for at most the
+    cleanup's own two :data:`INPUT_BUDGET_S` bounds and RE-RAISED, so a
+    cancellation always stays a cancellation and the whole cleanup stays bounded.
+    """
+
+    async def cleanup() -> None:
+        await _let_go(tab, at)
+        if disarm:
+            await _disarm(element)
+
+    work = asyncio.ensure_future(cleanup())
+    try:
+        await asyncio.shield(work)
+    except asyncio.CancelledError:
+        await asyncio.wait({work}, timeout=2 * INPUT_BUDGET_S)
+        raise
 
 
 async def _moved(
@@ -651,8 +691,7 @@ async def click(
     except BaseException as failure:
         # A timeout or a cancellation does not prove the press was not delivered,
         # so the button is let go whatever happened.
-        await _let_go(tab, at)
-        await _disarm(element)
+        await _wind_down(tab, element, at, disarm=True)
         if not isinstance(failure, Exception):
             raise
         raise ToolError(
@@ -668,12 +707,18 @@ async def click(
     except Exception as failure:  # noqa: BLE001  PERMANENT(the page may navigate on mousedown; the press already went out)
         gone = type(failure).__name__
     except BaseException:
-        await _let_go(tab, at)
+        await _wind_down(tab, element, at, disarm=False)
         raise
     try:
         await _send_mouse(tab, "mouseReleased", *at)
     except BaseException as failure:
-        await _let_go(tab, at)
+        # N2, accepted: a release whose reply was lost may HAVE been delivered, and
+        # this sends a second one, so the page can see a duplicate ``mouseup``. The
+        # alternative is to send none and risk a button left held, which is the
+        # worse failure; the two cases cannot be told apart from here (a timeout
+        # proves nothing), and a stray ``mouseup`` with no press pending does
+        # nothing in Chrome's click machinery.
+        await _wind_down(tab, element, at, disarm=False)
         if not isinstance(failure, Exception):
             raise
         raise ToolError(
