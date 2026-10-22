@@ -68,6 +68,21 @@ whole budget before it is called stale. The `Page.frameStartedLoading` listener 
 
 - **The F-1000 gated load page is an ordinary route (T-3102).** `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
 
+### A 401 is its own heartbeat verdict, not a strike; the token regex is exact; Windows refuses a foreign-owned token file (F-1018, T-6367)
+
+Follow-ups from the F-1018 bearer-token review. The watchdog's `Heartbeat` read a 401 as "dead", so a client that could not read the token file
+(deleted, locked by antivirus, another user's) struck a HEALTHY backend three times, the confirmation probe 401ed the same way, and the backend was
+condemned and replaced (one that owned browsers was spared by F-886, an idle one was killed), with only a debug line to show for it. `Heartbeat.verdict`
+now answers `alive`, `unauthorized` or `dead`; `alive()` is False only for `dead`, so a 401 is never a strike, and the 401 sentence
+(`backend_token.UNAUTHORIZED`) is logged at WARNING once per run of 401s instead of per beat. The readiness and identity probes (`ready`, `await_ready`)
+are unchanged and still read a 401 as not ready. `backend_token`'s token pattern is `{43}`, not `{43,}`, so a file that was appended to is replaced
+instead of trusted. On Windows `_refuse_a_foreign_file` now compares the file's owner SID (`GetNamedSecurityInfoW`) with the current user's and
+refuses a token file owned by anyone else, or whose owner cannot be read, with the same sentence POSIX gives; before it returned at once on Windows, so
+a pre-existing token file owned by another principal was accepted (it was only re-ACLed, and its owner keeps implicit WRITE_DAC). A token file made by
+an elevated process is owned by the Administrators group (the token's default owner) rather than the user, so the token's user and its default owner are both accepted and any other owner is refused. A 401 to the heartbeat after an outage or a 200 logs the warning again. Not done: the cold-start and self-heal paths still read a 401 as not ready, so a client that cannot read the token can still have an idle healthy backend replaced (T-6550); and a
+canary that an `Authorization` header never reaches a Sentry event (`observability._scrub_event` removes no headers by name; safety rests on the
+SDK's defaults, and a real canary needs a live Sentry client).
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
