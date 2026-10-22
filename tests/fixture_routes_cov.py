@@ -26,12 +26,13 @@ from fixture_routes_handlers import _query_value
 COV_PLAIN_SENTINEL = "fixture-cov-plain"
 COV_SLOW_LOAD_SENTINEL = "fixture-cov-slow-load"
 COV_SLOW_PAGE_SENTINEL = "fixture-cov-slow-page"
+COV_SHELL_SENTINEL = "fixture-cov-shell"
+COV_FORM_SENTINEL = "fixture-cov-form"
+
 #: The page whose ``load`` the TEST holds (F-1000): the document commits and
 #: reaches ``DOMContentLoaded`` at once, and ``load`` waits on one ``<img>``
 #: that ``/fault/slow`` withholds until ``/fault/release``.
 COV_GATED_LOAD_PATH = "/cov/gated_load.html"
-COV_SHELL_SENTINEL = "fixture-cov-shell"
-COV_FORM_SENTINEL = "fixture-cov-form"
 
 #: Titles, named here because the fleet node asserts ``list_instances`` reports
 #: them — a page renamed in this file must fail at the import, not as a

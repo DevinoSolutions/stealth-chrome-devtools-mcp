@@ -4,7 +4,7 @@
 
 ### The gated load page is a registered fixture route (F-1000, T-3102)
 
-- `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
+- **The F-1000 gated load page is an ordinary route (T-3102).** `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
 
 ### Four CI integration flakes (F-1014, F-1015, F-1016, F-1022)
 

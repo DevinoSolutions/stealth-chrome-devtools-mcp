@@ -66,6 +66,8 @@ point (nothing waits for one to finish before doing something else), it is
 capped at :data:`COV_MAX_DELAY_MS` whatever the URL asks for, a request with no
 ``?ms=`` answers immediately so the hermetic route enumeration cannot park a
 thread, and a peer that gave up first is recorded rather than raised.
+``/cov/gated_load.html`` (F-1000) parks nothing itself: its one ``<img>`` waits on
+``/fault/slow`` for the test's token, so it falls under the fault rule above.
 """
 
 from __future__ import annotations
