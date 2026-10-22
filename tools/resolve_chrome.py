@@ -80,23 +80,67 @@ def _resolve_path() -> Path:
     )
 
 
-def _version_via_cli(path: Path) -> str:
-    """Best-effort version string from ``<chrome> --version`` (POSIX)."""
+class ChromeVersionError(RuntimeError):
+    """The Chrome version could not be read; the message names the cause."""
+
+
+def _looks_like_version(text: str) -> bool:
+    return text[:1].isdigit() and "." in text
+
+
+def _version_via_dpkg() -> str:
+    """The .deb package version (``130.0.1-1`` -> ``130.0.1``), or ``""``.
+
+    A dpkg database read: unlike ``<chrome> --version`` it does not load the
+    browser, so a cold runner disk cannot make it time out.
+    """
     try:
-        completed = subprocess.run(  # noqa: S603  PERMANENT(runs the resolved absolute Chrome binary to read its version; no shell, no untrusted input)
-            [str(path), "--version"],
+        completed = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Version}", "google-chrome-stable"],  # noqa: S607  PERMANENT(fixed argv, no shell; dpkg-query's location is distro-defined)
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=15,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
-    line = (completed.stdout or "").strip()
-    for token in line.split():
-        if token[:1].isdigit() and "." in token:
-            return token
-    return line
+    version = (completed.stdout or "").strip().split("-")[0]
+    return version if completed.returncode == 0 and _looks_like_version(version) else ""
+
+
+def _version_via_cli(
+    path: Path, *, attempts: int = 1, timeout: float = 30, strict: bool = False
+) -> str:
+    """Version string from ``<chrome> --version`` (POSIX), retried ``attempts`` times.
+
+    Non-strict returns ``""`` on failure. Strict raises :class:`ChromeVersionError`
+    naming the last cause (timeout, launch failure or no output) so a cold runner
+    fails the step instead of writing an empty version into the evidence.
+    """
+    cause = "no attempt made"
+    for attempt in range(1, attempts + 1):
+        try:
+            completed = subprocess.run(  # noqa: S603  PERMANENT(runs the resolved absolute Chrome binary to read its version; no shell, no untrusted input)
+                [str(path), "--version"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            cause = f"timed out after {timeout:g}s (attempt {attempt}/{attempts})"
+            continue
+        except (OSError, subprocess.SubprocessError) as exc:
+            cause = f"{type(exc).__name__}: {exc} (attempt {attempt}/{attempts})"
+            continue
+        line = (completed.stdout or "").strip()
+        for token in line.split():
+            if _looks_like_version(token):
+                return token
+        cause = f"no version in output {line!r} (attempt {attempt}/{attempts})"
+    if strict:
+        raise ChromeVersionError(f"cannot read the version of {path}: {cause}")
+    return ""
 
 
 def _read_version(path: Path) -> str:
@@ -104,7 +148,8 @@ def _read_version(path: Path) -> str:
 
     ``chrome.exe --version`` prints nothing on Windows, so the versioned sibling
     ``Application\\<version>\\`` directory is authoritative there. macOS carries
-    the version in the app bundle's ``Info.plist``. Linux answers ``--version``.
+    the version in the app bundle's ``Info.plist``. Linux reads the dpkg version,
+    then ``--version`` (retried; fails loudly).
     """
     system = platform.system().lower()
     if system == "windows":
@@ -125,7 +170,11 @@ def _read_version(path: Path) -> str:
         if isinstance(version, str) and version:
             return version
         return _version_via_cli(path)
-    return _version_via_cli(path)
+    # Linux: a cold runner can take >30 s to start Chrome once, so prefer the
+    # package database and bound the CLI fallback at 2 x 45 s (T-6555).
+    return _version_via_dpkg() or _version_via_cli(
+        path, attempts=2, timeout=45, strict=True
+    )
 
 
 def resolve_chrome() -> dict[str, str]:
@@ -320,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         identity = resolve_chrome()
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ChromeVersionError) as exc:
         print(f"resolve_chrome: {exc}", file=sys.stderr)
         return 1
 

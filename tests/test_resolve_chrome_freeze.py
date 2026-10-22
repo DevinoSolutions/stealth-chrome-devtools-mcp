@@ -320,3 +320,61 @@ class TestTheFreezePrecedesTheReading:
         monkeypatch.setattr(resolve_chrome, "_read_version", lambda path: "151.0.0.0")
         resolve_chrome.resolve_chrome()
         assert run_recorder.calls == []
+
+
+# ---------------------------------------------------------------------------
+# T-6555: a cold Linux runner must not write an empty version.
+# ---------------------------------------------------------------------------
+CHROME = Path("/opt/google/chrome/chrome")
+
+
+def _linux(monkeypatch, fake_run):
+    monkeypatch.setattr(resolve_chrome.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(resolve_chrome.subprocess, "run", fake_run)
+
+
+def _done(stdout="", rc=0):
+    return subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
+
+
+def test_linux_dpkg_version_wins_without_running_chrome(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv[0])
+        return _done("131.0.6778.85-1")
+
+    _linux(monkeypatch, fake_run)
+    assert resolve_chrome._read_version(CHROME) == "131.0.6778.85"
+    assert calls == ["dpkg-query"]
+
+
+def test_linux_timeout_then_retry_succeeds(monkeypatch):
+    chrome_calls = []
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "dpkg-query":
+            return _done("", rc=1)
+        chrome_calls.append(kwargs["timeout"])
+        if len(chrome_calls) == 1:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return _done("Google Chrome 131.0.6778.85")
+
+    _linux(monkeypatch, fake_run)
+    assert resolve_chrome._read_version(CHROME) == "131.0.6778.85"
+    assert chrome_calls == [45, 45]
+
+
+def test_linux_total_failure_raises_naming_the_timeout(monkeypatch, capsys):
+    def fake_run(argv, **kwargs):
+        if argv[0] == "dpkg-query":
+            raise OSError("no dpkg")
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    _linux(monkeypatch, fake_run)
+    with pytest.raises(resolve_chrome.ChromeVersionError, match="timed out after 45s"):
+        resolve_chrome._read_version(CHROME)
+
+    monkeypatch.setattr(resolve_chrome, "_resolve_path", lambda: CHROME)
+    assert resolve_chrome.main([]) == 1
+    assert "timed out" in capsys.readouterr().err
