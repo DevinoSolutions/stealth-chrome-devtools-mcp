@@ -1,0 +1,297 @@
+{
+ "version": "2.1.40",
+ "source": "PyPI wheel stealth-chrome-devtools-mcp==2.1.40 in a clean venv; isolated HTTP backend on 127.0.0.1:41240 (own browser-session root, shared state dir and token); fastmcp Client over streamable HTTP; unnamed HEADED clone",
+ "host_devicePixelRatio": 2.5,
+ "token_handshake_http_status": {
+  "no_token": 401,
+  "wrong_token": 401,
+  "with_token": 307,
+  "slash_no_token": 401,
+  "slash_with_token": 200,
+  "token_file_present": true
+ },
+ "tool_count_over_token_session": 97,
+ "t5907": {
+  "t5907_w360-dsf2-scale0.8": {
+   "override": {
+    "width": 360,
+    "height": 740,
+    "deviceScaleFactor": 2,
+    "mobile": true,
+    "scale": 0.8
+   },
+   "page": {
+    "iw": 360,
+    "dpr": 2.0000000298023224,
+    "rect": {
+     "x": 250,
+     "y": 560,
+     "width": 90,
+     "height": 60,
+     "top": 560,
+     "right": 340,
+     "bottom": 620,
+     "left": 250
+    }
+   },
+   "click": {
+    "selector": "#t",
+    "dispatch": "coordinate",
+    "point": {
+     "x": 295.0,
+     "y": 590.0
+    },
+    "size": {
+     "width": 90.0,
+     "height": 60.0
+    },
+    "target": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit_is_target": true,
+    "reason": null
+   },
+   "page_hits": [
+    {
+     "id": "t",
+     "x": 295,
+     "y": 591,
+     "trusted": true
+    }
+   ]
+  },
+  "t5907_w360-dsf2-scale1.25": {
+   "override": {
+    "width": 360,
+    "height": 740,
+    "deviceScaleFactor": 2,
+    "mobile": true,
+    "scale": 1.25
+   },
+   "page": {
+    "iw": 360,
+    "dpr": 2.0000000298023224,
+    "rect": {
+     "x": 250,
+     "y": 560,
+     "width": 90,
+     "height": 60,
+     "top": 560,
+     "right": 340,
+     "bottom": 620,
+     "left": 250
+    }
+   },
+   "click": {
+    "selector": "#t",
+    "dispatch": "coordinate",
+    "point": {
+     "x": 295.0,
+     "y": 590.0
+    },
+    "size": {
+     "width": 90.0,
+     "height": 60.0
+    },
+    "target": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit_is_target": true,
+    "reason": null
+   },
+   "page_hits": [
+    {
+     "id": "t",
+     "x": 295,
+     "y": 590,
+     "trusted": true
+    }
+   ]
+  },
+  "t5907_w360-dsf0-noscale-control": {
+   "override": {
+    "width": 360,
+    "height": 740,
+    "deviceScaleFactor": 0,
+    "mobile": true
+   },
+   "page": {
+    "iw": 360,
+    "dpr": 2.5,
+    "rect": {
+     "x": 250,
+     "y": 560,
+     "width": 90,
+     "height": 60,
+     "top": 560,
+     "right": 340,
+     "bottom": 620,
+     "left": 250
+    }
+   },
+   "click": {
+    "selector": "#t",
+    "dispatch": "coordinate",
+    "point": {
+     "x": 295.0,
+     "y": 590.0
+    },
+    "size": {
+     "width": 90.0,
+     "height": 60.0
+    },
+    "target": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit_is_target": true,
+    "reason": null
+   },
+   "page_hits": [
+    {
+     "id": "t",
+     "x": 295,
+     "y": 590,
+     "trusted": true
+    }
+   ]
+  },
+  "t5907_w360-dsf2-scale0.8-covered": {
+   "override": {
+    "width": 360,
+    "height": 740,
+    "deviceScaleFactor": 2,
+    "mobile": true,
+    "scale": 0.8
+   },
+   "page": {
+    "iw": 360,
+    "dpr": 2.0000000298023224,
+    "rect": {
+     "x": 250,
+     "y": 560,
+     "width": 90,
+     "height": 60,
+     "top": 560,
+     "right": 340,
+     "bottom": 620,
+     "left": 250
+    }
+   },
+   "click": {
+    "selector": "#t",
+    "dispatch": "coordinate",
+    "point": {
+     "x": 295.0,
+     "y": 590.0
+    },
+    "size": {
+     "width": 90.0,
+     "height": 60.0
+    },
+    "target": {
+     "tag": "button",
+     "id": "t",
+     "classes": []
+    },
+    "hit": {
+     "tag": "div",
+     "id": "cov",
+     "classes": []
+    },
+    "hit_is_target": false,
+    "reason": "covered"
+   },
+   "page_hits": [
+    {
+     "id": "cov",
+     "x": 295,
+     "y": 591,
+     "trusted": true
+    }
+   ]
+  },
+  "t5907_w360-dsf2-scale0.8-forced-miss": {
+   "override": {
+    "width": 360,
+    "height": 740,
+    "deviceScaleFactor": 2,
+    "mobile": true,
+    "scale": 0.8
+   },
+   "page": {
+    "iw": 360,
+    "dpr": 2.0000000298023224,
+    "rect": {
+     "x": 250,
+     "y": 560,
+     "width": 90,
+     "height": 60,
+     "top": 560,
+     "right": 340,
+     "bottom": 620,
+     "left": 250
+    }
+   },
+   "click": {
+    "__error__": "Error calling tool 'click_element': Failed to click element: click on '#t' missed: aimed at CSS (295, 590) where the hit-test names the element, but the page's mousedown landed at (295, 591) on {'tag': 'html', 'id': '', 'classes': []}"
+   },
+   "page_hits": [
+    {
+     "id": "HTML",
+     "x": 295,
+     "y": 591,
+     "trusted": true
+    }
+   ]
+  }
+ },
+ "t5903": {
+  "background_tab_A": {
+   "visibilityState": "visible",
+   "hidden": false,
+   "hasFocus": true,
+   "rAF_in_3s": 180,
+   "timer100ms_in_3s": 30
+  },
+  "foreground_tab_B": {
+   "visibilityState": "visible",
+   "hidden": false,
+   "hasFocus": true,
+   "rAF_in_3s": 180,
+   "timer100ms_in_3s": 30
+  }
+ },
+ "pr275_frame_id_vs_target_id": {
+  "A": {
+   "target_id": "140AD350A046EDA18CC6CD6AF01AF907",
+   "main_frame_id": "140AD350A046EDA18CC6CD6AF01AF907",
+   "equal": true
+  },
+  "B": {
+   "target_id": "545B9944C4019311667FF154D1FCA01A",
+   "main_frame_id": "545B9944C4019311667FF154D1FCA01A",
+   "equal": true
+  }
+ }
+}
