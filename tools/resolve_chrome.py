@@ -88,12 +88,21 @@ def _looks_like_version(text: str) -> bool:
     return text[:1].isdigit() and "." in text
 
 
-def _version_via_dpkg() -> str:
+#: Where the ``google-chrome-stable`` .deb installs the browser. Its package
+#: version describes THAT binary only.
+_DEB_CHROME_DIR = "/opt/google/chrome/"
+
+
+def _version_via_dpkg(path: Path) -> str:
     """The .deb package version (``130.0.1-1`` -> ``130.0.1``), or ``""``.
 
     A dpkg database read: unlike ``<chrome> --version`` it does not load the
-    browser, so a cold runner disk cannot make it time out.
+    browser, so a cold runner disk cannot make it time out. Asked only when
+    ``path`` is the .deb's own binary, so another Chrome (Chrome for Testing,
+    Chromium) is never given the package's version.
     """
+    if not path.as_posix().startswith(_DEB_CHROME_DIR):
+        return ""
     try:
         completed = subprocess.run(
             ["dpkg-query", "-W", "-f=${Version}", "google-chrome-stable"],  # noqa: S607  PERMANENT(fixed argv, no shell; dpkg-query's location is distro-defined)
@@ -172,7 +181,7 @@ def _read_version(path: Path) -> str:
         return _version_via_cli(path)
     # Linux: a cold runner can take >30 s to start Chrome once, so prefer the
     # package database and bound the CLI fallback at 2 x 45 s (T-6555).
-    return _version_via_dpkg() or _version_via_cli(
+    return _version_via_dpkg(path) or _version_via_cli(
         path, attempts=2, timeout=45, strict=True
     )
 
