@@ -65,6 +65,12 @@ window.__frames = 0;
 return true;
 """
 
+#: :data:`START_LOOP_JS` as a CDP expression that stops once ``window.__stopped`` is set.
+PROBE_LOOP_JS = START_LOOP_JS.replace("return true;", "true;").replace(
+    "requestAnimationFrame(frame);",
+    "if (!window.__stopped) requestAnimationFrame(frame);",
+)
+
 FRAMES_JS = f"""
 return await new Promise(resolve => {{
   let frames = 0, live = true;
@@ -140,12 +146,17 @@ async def _display_paints(iid: str, tab_id: str) -> int:
     """Best frame count of a foreground tab NO tool touches, polled up to
     :data:`ARMING_BUDGET_SECONDS`: whether this display paints a window at all."""
     browser = await runtime.browser_manager.get_browser(iid)
-    await tab_open.find(browser, tab_id).evaluate(
-        START_LOOP_JS.replace("return true;", "true;"), return_by_value=True
-    )
+    tab = tab_open.find(browser, tab_id)
+    await tab.evaluate(PROBE_LOOP_JS, return_by_value=True)
     best, deadline = 0, time.monotonic() + ARMING_BUDGET_SECONDS
-    while best < MIN_FRAMES and time.monotonic() < deadline:
-        best = max(best, await _undriven_rate(iid, tab_id))
+    try:
+        while best < MIN_FRAMES and time.monotonic() < deadline:
+            best = max(best, await _undriven_rate(iid, tab_id))
+    finally:
+        # A foreground loop left running is a variable the other tabs' readings
+        # never had: the first CI run with it running read an undriven background
+        # tab at 120 frames headless on Linux, where it had read throttled before.
+        await tab.evaluate("window.__stopped = true", return_by_value=True)
     return best
 
 
@@ -220,9 +231,6 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         undriven = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
         # Both are now background.
         foreground = (await new_tab(instance_id=iid, url="about:blank"))["tab_id"]
-        _skip_if_display_does_not_paint(
-            headless, await _display_paints(iid, foreground)
-        )
 
         # The un-driven tab: its loop is started straight through CDP, never a tool.
         browser = await runtime.browser_manager.get_browser(iid)
@@ -251,6 +259,10 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
             )
         assert undriven_rate <= MAX_UNHELD_FRAMES, (
             f"undriven background tab counted {undriven_rate} frames"
+        )
+        # Measured AFTER the undriven reading, so no probe loop precedes it.
+        _skip_if_display_does_not_paint(
+            headless, await _display_paints(iid, foreground)
         )
 
         # A tool call starts the driven tab's loop: it is held from that call on.
