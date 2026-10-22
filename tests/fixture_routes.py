@@ -203,6 +203,7 @@ from fixture_routes_cov import (
     COV_CLICKED_TITLE,
     COV_FORM_SENTINEL,
     COV_FORM_TITLE,
+    COV_GATED_LOAD_PATH,
     COV_MAX_DELAY_MS,
     COV_PLAIN_SENTINEL,
     COV_PLAIN_TITLE,
@@ -215,6 +216,7 @@ from fixture_routes_cov import (
     _cov_bounded_ms,
     _r_cov_app_shell,
     _r_cov_form,
+    _r_cov_gated_load,
     _r_cov_plain,
     _r_cov_slow_asset,
     _r_cov_slow_load,
@@ -378,6 +380,7 @@ __all__ = [
     "COV_CLICKED_TITLE",
     "COV_FORM_SENTINEL",
     "COV_FORM_TITLE",
+    "COV_GATED_LOAD_PATH",
     "COV_MAX_DELAY_MS",
     "COV_PLAIN_SENTINEL",
     "COV_PLAIN_TITLE",
@@ -521,6 +524,7 @@ __all__ = [
     "_r_cors_echo_post",
     "_r_cov_app_shell",
     "_r_cov_form",
+    "_r_cov_gated_load",
     "_r_cov_plain",
     "_r_cov_slow_asset",
     "_r_cov_slow_load",
@@ -886,6 +890,7 @@ ROUTES.update(
         ("GET", "/cov/slow_page.html"): _r_cov_slow_page,
         ("GET", "/cov/app_shell.html"): _r_cov_app_shell,
         ("GET", "/cov/form.html"): _r_cov_form,
+        ("GET", COV_GATED_LOAD_PATH): _r_cov_gated_load,
     }
 )
 
@@ -896,5 +901,6 @@ DYNAMIC_PAGES.update(
         "/cov/slow_page.html": COV_SLOW_PAGE_SENTINEL,
         "/cov/app_shell.html": COV_SHELL_SENTINEL,
         "/cov/form.html": COV_FORM_SENTINEL,
+        COV_GATED_LOAD_PATH: COV_SLOW_LOAD_SENTINEL,
     }
 )

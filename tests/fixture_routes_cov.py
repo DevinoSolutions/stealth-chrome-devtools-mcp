@@ -26,6 +26,10 @@ from fixture_routes_handlers import _query_value
 COV_PLAIN_SENTINEL = "fixture-cov-plain"
 COV_SLOW_LOAD_SENTINEL = "fixture-cov-slow-load"
 COV_SLOW_PAGE_SENTINEL = "fixture-cov-slow-page"
+#: The page whose ``load`` the TEST holds (F-1000): the document commits and
+#: reaches ``DOMContentLoaded`` at once, and ``load`` waits on one ``<img>``
+#: that ``/fault/slow`` withholds until ``/fault/release``.
+COV_GATED_LOAD_PATH = "/cov/gated_load.html"
 COV_SHELL_SENTINEL = "fixture-cov-shell"
 COV_FORM_SENTINEL = "fixture-cov-form"
 
@@ -214,3 +218,29 @@ def _r_cov_app_shell(handler, query: str) -> None:
 
 def _r_cov_form(handler, query: str) -> None:
     _send_html(handler, cov_form_page())
+
+
+def _r_cov_gated_load(handler, query: str) -> None:
+    """The host page: ``/fault/slow``'s response IS the image ``load`` waits on.
+
+    The controller answers with HTML, which Blink cannot decode, so the image
+    ends in ``error`` once released. That is still the end of its fetch, and an
+    ``<img>`` that has finished loading for any reason stops blocking ``load``.
+    """
+    token = _query_value(query, "token")
+    script = """
+window.__covLoaded = false;
+window.addEventListener('load', function () {
+  document.title = '__AFTER__';
+  window.__covLoaded = true;
+});
+"""
+    body = (
+        "<h1 id='heading'>COV GATED LOAD</h1>"
+        f"<img id='gated-asset' alt='' src='/fault/slow?token={token}'>"
+        f"<script>{_fill(script, after=COV_TITLE_AFTER_LOAD)}</script>"
+    )
+    _send_html(
+        handler,
+        _page(COV_TITLE_BEFORE_LOAD, COV_SLOW_LOAD_SENTINEL, body),
+    )
