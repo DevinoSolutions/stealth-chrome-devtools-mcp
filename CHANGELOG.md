@@ -97,6 +97,15 @@ waited out first and checked again, because its browsers are not in `list_instan
 (`_EXIT_IF_UNADOPTED = args.exit_if_unadopted`) by executing `server.py` as `__main__`; `tests/test_lifespan_reentrancy.py` pins the lifespan wiring. The
 pinned launch-cmd shape in `tests/test_singleton_backend_logging.py` gains the flag deliberately.
 
+### The stealthly.io liveness probe moved from a workflow to Uptimely (T-6150)
+
+`.github/workflows/site-liveness.yml` (a 15-minute cron that curled stealthly.io and opened an issue on failure) is deleted.
+Uptimely (project Devino Team) now watches the same seven URLs as Website monitors: stealthly.io (`231089a7-0132-4d9d-9c31-67ea08ea809a`),
+/bot-detection (`5e4e8b91-7e81-4bb8-9e5f-2a3f85cd4652`), /sitemap.xml (`29d7d1be-d28a-4699-91ec-ea218f473606`),
+www.stealthly.io (`ac763235-cd0c-4582-96cc-3b55ebd82210`), stealthy.now (`fd7ca022-8e5f-48a4-a5f8-fb52b74fffeb`),
+www.stealthy.now (`0848d85b-8d92-441d-96af-6dea8e2f7b0b`) and http://stealthly.io (`d8cd4c48-48c2-4e0a-a8ea-9ea48e3d0ea4`).
+Uptimely checks reachability, not the exact 301 and its Location, so the four redirect hosts are now watched for being up rather than for redirecting.
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
