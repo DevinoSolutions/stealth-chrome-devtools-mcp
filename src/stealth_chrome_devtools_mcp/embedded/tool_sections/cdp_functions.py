@@ -336,6 +336,13 @@ async def create_python_binding(
     """
     Create a binding that allows JavaScript to call Python functions.
 
+    The Python code runs with `exec` and full builtins inside the backend process
+    on the host. There is no sandbox: the function can read files and start
+    programs like any code this process runs. The binding answers only script in
+    the page context that was current on this tab when it was created, and is
+    dropped when that page navigates or reloads. Script in that page can still
+    call it, so create one only on a page you trust.
+
     Args:
         instance_id (str): Browser instance ID.
         binding_name (str): Name for the binding.

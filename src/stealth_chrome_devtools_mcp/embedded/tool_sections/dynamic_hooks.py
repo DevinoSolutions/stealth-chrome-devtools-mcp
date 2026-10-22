@@ -41,6 +41,11 @@ async def create_dynamic_hook(
     This is the new powerful hook system that allows AI to write custom Python functions
     that process network requests in real-time with no pending state.
 
+    The function_code and any requirements custom_condition run as Python in the
+    backend process on the host, through `exec` and `eval`. The trimmed builtins they
+    are given are a convenience, not a sandbox: they are not a security boundary, and
+    the code can reach the host (for example through the `fnmatch` module it is given).
+
     Args:
         name (str): Human-readable hook name
         requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)
