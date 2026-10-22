@@ -244,7 +244,8 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     reuse a stale, legacy or edited-source backend; F-829: an unreadable digest
     is unknown, not a contradiction — see ``fingerprint_mismatch``) — and it
     answers a real ``initialize`` in the patience window (F-301/F-501: a wedged
-    backend holds its socket open, so only the app-level probe counts).
+    backend holds its socket open, so only the app-level probe counts). A 401 is
+    alive and refusing only THIS client's token (T-6550): True, never replaced.
 
     THE one consumer of :func:`_adoptable_identity`, so "same identity" here has
     always meant "one we would reuse" — since F-889 (d) that includes a build
@@ -278,6 +279,8 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     while not _backend_http_ready(port, timeout=per_attempt):
         if not _server_is_healthy(port) and not _is_our_backend(entry.get("pid")):
             return False  # no socket and no live process: dead, not busy
+        if backend_probe.refused(_backend_http_url(port), LIVENESS_PROBE_TIMEOUT):
+            return True
         if window.expired():
             return False
         window.nap(0.25)
@@ -473,15 +476,12 @@ def _backend_http_url(port: int) -> str:
 
 def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -> bool:
     """Single-shot, synchronous app-level liveness probe: True iff the backend
-    on ``port`` answers a real ``initialize`` with HTTP 200.
+    on ``port`` answers a real ``initialize`` with HTTP 200 ("can I talk to it":
+    a 401 is False here; the reuse gate reads 401 as alive).
 
     A binding, for the reason every binding in this file is one (see
-    `_probe_port`): the suite patches THIS name, and what it knows that
-    `backend_probe` must not is which URL a PORT of ours means. The probe
-    itself - the `initialize` payload, the throwaway-session DELETE and the
-    fail-closed contract - is `backend_probe.ready`'s, which is where the ~10
-    lines this used to copy from `_await_backend_http` now live once (the
-    plan_M1 SS2.2 #4 debt this docstring carried, paid by the F-889 review).
+    `_probe_port`): the suite patches THIS name, and it alone knows which URL a
+    PORT of ours means. The probe itself is `backend_probe.ready`'s.
     """
     return backend_probe.ready(_backend_http_url(port), timeout)
 
