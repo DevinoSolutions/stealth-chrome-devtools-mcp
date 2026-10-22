@@ -46,7 +46,8 @@ async def switch_tab(instance_id: str, tab_id: str) -> bool:
     """
     Switch to a specific tab by bringing it to front. It becomes THIS session's
     tab: page tools called without tab_id act on it from now on (other sessions
-    sharing the browser keep their own).
+    sharing the browser keep their own). While a tool drives a background tab,
+    Chrome repaints every painting background tab in that window for up to 10 s.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -117,7 +118,9 @@ async def get_active_tab(instance_id: str) -> dict[str, Any]:
 async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
     """
     Open a new tab in the browser instance. It becomes THIS session's tab:
-    page tools called without tab_id act on it from now on.
+    page tools called without tab_id act on it from now on. While a tool drives a
+    background tab, Chrome repaints every painting background tab in that window
+    for up to 10 s.
 
     Args:
         instance_id (str): Browser instance ID.

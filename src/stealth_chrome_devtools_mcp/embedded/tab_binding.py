@@ -37,7 +37,7 @@ import inspect
 import sys
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import backend_client, tab_open
+from stealth_chrome_devtools_mcp.embedded import backend_client, paint_hold, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
@@ -123,7 +123,15 @@ async def tab_for_caller(
     The ``tab_id`` the call passed, else the caller's bound tab, else the
     instance's own tab — claimed for this caller when nobody holds it, and
     refused when another caller does. Raises when the tab named is not open.
+    The tab it returns is kept painting while it is driven (F-1019).
     """
+    tab = await _resolve(browser_manager, instance_id)
+    if tab is not None:
+        await paint_hold.hold(tab)
+    return tab
+
+
+async def _resolve(browser_manager: BrowserManager, instance_id: str) -> Tab | None:
     requested = _requested.get()
     who = caller()
     wanted = requested or (_bound.get((who, instance_id)) if who else None)
@@ -176,6 +184,7 @@ def forget_tab(instance_id: str, target_id: str) -> None:
     for key, bound in list(_bound.items()):
         if key[1] == instance_id and bound == str(target_id):
             del _bound[key]
+    paint_hold.forget(str(target_id))
 
 
 def forget_instance(instance_id: str) -> None:
