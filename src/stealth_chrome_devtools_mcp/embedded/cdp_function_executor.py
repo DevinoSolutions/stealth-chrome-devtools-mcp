@@ -20,7 +20,7 @@ from typing import Any
 import nodriver as uc
 from nodriver import Tab
 
-from stealth_chrome_devtools_mcp.embedded import cdp_params, python_binding
+from stealth_chrome_devtools_mcp.embedded import cdp_params, paint_hold, python_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -231,12 +231,12 @@ class CDPFunctionExecutor:
             await self.enable_runtime(tab)
             cdp_method, tried = resolve_cdp_command(command)
             if not cdp_method:
-                # ToolError, not ValueError: a caller naming a command that does
-                # not exist is the error CONVENTION reporting an expected
-                # failure, and observability's before_send drops those by type.
-                # As a ValueError it was an unhandled-crash shape, and shipped.
+                # ToolError, not ValueError: a caller naming a command that does not
+                # exist is an expected failure, which observability's before_send
+                # drops by type; as a ValueError it was a crash shape, and shipped.
                 raise ToolError(f"Unknown CDP command: {command} (tried {tried})")  # noqa: TRY301  plan_M4ph1
             result = await tab.send(build_cdp_call(cdp_method, params))
+            paint_hold.note_command(tab, cdp_method)  # F-1019: a caller's screencast
             debug_logger.log_info(
                 "cdp_function_executor",
                 "execute_cdp_command",

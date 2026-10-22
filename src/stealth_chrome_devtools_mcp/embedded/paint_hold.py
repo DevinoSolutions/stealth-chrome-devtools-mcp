@@ -25,7 +25,11 @@ is released when its timer expires, which is at most one linger.
 One timer task per held tab, all in the event loop, so there is no lock: a call on a
 held tab only moves its deadline; the entry is claimed BEFORE the first await, so
 concurrent calls on one tab send one start. Best effort throughout: a refusal is
-logged, never raised.
+logged, never raised. A start that is cancelled or times out may still reach Chrome,
+so its entry keeps a timer that sends the stop (and a wedged tab pays the budget once,
+not on every call); a start Chrome refused leaves no entry, and only the hold's own
+entry is ever dropped, never a newer one. A caller's own ``Page.startScreencast`` via
+``execute_cdp_command`` takes the tab over (:func:`note_command`): no hold, no stop.
 """
 
 from __future__ import annotations
@@ -64,20 +68,30 @@ class _Hold:
 #: target id -> the hold on it. Entries leave through :func:`_expire` or :func:`forget`.
 _held: dict[str, _Hold] = {}
 
+#: Targets whose caller started a screencast of their own (``execute_cdp_command``):
+#: Chrome has one screencast per tab, so the hold must neither replace it nor stop it.
+_caller_owned: set[str] = set()
+
+
+def _key(tab: Tab) -> str:
+    return str(getattr(getattr(tab, "target", None), "target_id", ""))
+
 
 async def hold(tab: Tab) -> None:
     """Keep *tab* painting until :data:`LINGER_SECONDS` after the last call."""
+    key = _key(tab)
+    entry: _Hold | None = None
     try:
-        key = str(tab.target.target_id)
-        deadline = asyncio.get_running_loop().time() + LINGER_SECONDS
+        now = asyncio.get_running_loop().time()
+        if key in _caller_owned:
+            return
         current = _held.get(key)
         if current is not None and current.tab is tab:
-            current.deadline = deadline
+            current.deadline = now + LINGER_SECONDS
             return
-        # A different Tab object for the same target is a new CDP session (a
-        # rediscovered target): the old session's screencast died with it.
-        forget(key)
-        entry = _held[key] = _Hold(tab, deadline)
+        if current is not None:
+            await _release_rediscovered(key, current)
+        entry = _held[key] = _Hold(tab, now + LINGER_SECONDS)
         await asyncio.wait_for(
             tab.send(
                 uc.cdp.page.start_screencast(
@@ -86,20 +100,66 @@ async def hold(tab: Tab) -> None:
             ),
             SEND_BUDGET_S,
         )
-        if _held.get(key) is entry:
-            entry.task = asyncio.create_task(_expire(key, entry))
-    except Exception as error:  # noqa: BLE001  PERMANENT(a paint hold must never cost a tool call: the tab works throttled, so a refusal is logged only)
-        _held.pop(str(getattr(getattr(tab, "target", None), "target_id", "")), None)
-        debug_logger.log_warning(
-            "paint_hold", "hold", f"{type(error).__name__}: {error}"
-        )
+        _arm(key, entry)
+    except BaseException as error:  # a cancelled start leaves no stuck entry
+        # Cancelled or timed out, the start may still reach Chrome (the transport
+        # shields it): keep the entry and let the timer send the stop. That also
+        # makes a wedged tab cost its first call the budget, not every call.
+        if isinstance(error, (asyncio.CancelledError, TimeoutError)):
+            _arm(key, entry)
+        elif entry is not None and _held.get(key) is entry:
+            del _held[key]  # Chrome refused the start: nothing to release
+        if isinstance(error, Exception):
+            debug_logger.log_warning(
+                "paint_hold", "hold", f"{type(error).__name__}: {error}"
+            )
+        else:
+            raise
+
+
+def _arm(key: str, entry: _Hold | None) -> None:
+    """Give *entry* its release timer, if it is still the hold on *key*."""
+    if entry is not None and entry.task is None and _held.get(key) is entry:
+        entry.task = asyncio.create_task(_expire(key, entry))
+
+
+async def _release_rediscovered(key: str, old: _Hold) -> None:
+    """A different Tab object for one target is a new CDP session (a rediscovered
+    target): end the old session's timer and, if its connection is still open, its
+    screencast too (bounded, best effort) rather than assume it died with it."""
+    forget(key)
+    if not getattr(old.tab, "closed", False):
+        await _stop(old.tab, "_release_rediscovered")
+
+
+async def _stop(tab: Tab, where: str) -> None:
+    try:
+        await asyncio.wait_for(tab.send(uc.cdp.page.stop_screencast()), SEND_BUDGET_S)
+    except Exception as error:  # noqa: BLE001  PERMANENT(the tab usually closed first: nothing to release, and the timer must end either way)
+        debug_logger.log_info("paint_hold", where, f"{type(error).__name__}: {error}")
 
 
 def forget(target_id: str) -> None:
     """Drop the hold on a tab that was closed: its timer ends, nothing is sent."""
+    _caller_owned.discard(str(target_id))
     entry = _held.pop(str(target_id), None)
     if entry is not None and entry.task is not None:
         entry.task.cancel()
+
+
+def note_command(tab: Tab, method: object) -> None:
+    """A caller's ``Page.startScreencast`` / ``stopScreencast`` (from
+    ``execute_cdp_command``, the one place a caller's CDP command is dispatched):
+    Chrome has one screencast per tab, so theirs replaces the hold, which then
+    leaves the tab alone (no start over it, no stop that would end it) until they
+    stop it. Their stop ends the hold's too; the next call holds again."""
+    started = method is uc.cdp.page.start_screencast
+    if not started and method is not uc.cdp.page.stop_screencast:
+        return
+    key = _key(tab)
+    forget(key)
+    if started:
+        _caller_owned.add(key)
 
 
 async def _expire(key: str, entry: _Hold) -> None:
@@ -109,11 +169,4 @@ async def _expire(key: str, entry: _Hold) -> None:
     if _held.get(key) is not entry:
         return
     del _held[key]
-    try:
-        await asyncio.wait_for(
-            entry.tab.send(uc.cdp.page.stop_screencast()), SEND_BUDGET_S
-        )
-    except Exception as error:  # noqa: BLE001  PERMANENT(the tab usually closed first: nothing to release, and the timer must end either way)
-        debug_logger.log_info(
-            "paint_hold", "_expire", f"{type(error).__name__}: {error}"
-        )
+    await _stop(entry.tab, "_expire")
