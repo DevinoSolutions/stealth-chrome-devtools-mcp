@@ -128,7 +128,8 @@ def _cpu_times() -> object | None:
     """The machine CPU times now, or ``None`` when unreadable (never raises)."""
     try:
         return psutil.cpu_times()
-    except Exception:  # noqa: BLE001  PERMANENT(a baseline taken inside the spawn path must not fail the spawn)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(a baseline taken inside the spawn path must not fail the spawn)
+        debug_logger.log_warning("spawn_leak", "cpu_times", f"unreadable: {exc!r}")
         return None
 
 

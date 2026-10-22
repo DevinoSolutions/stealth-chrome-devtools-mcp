@@ -54,6 +54,49 @@ answers `Page.navigate` only when the response headers arrive (measured: a serve
 reply at +12.04 s), so a slow server keeps the whole budget, pinned or not. Pins cover a silent stale tab (the retry gets a real budget) and a
 slow server (one navigation, no retry).
 
+### A CPU-starved launch is no longer reported as "out of process capacity" (F-1024)
+
+F-811's spawn diagnostic counted every process whose name contains `chrom` against a fixed 120, so a launch whose Chrome DID start and was merely
+late under CPU load (nodriver's connect deadline is fixed) was reported as a machine out of process capacity and sent the operator to reap browsers
+that were not the problem. On the maintainer's box the count included 29 `stealth-chrome-devtools-mcp.exe` proxies beside 243 `chrome.exe`;
+`chromedriver`, `ChromeSetup` and Electron helpers matched too. `spawn_exhaustion` now counts exact Chromium browser names only, and
+`exhaustion_hint` takes a `LaunchEvidence` (the attempt's own Chrome was running, the launch failed on its DevTools deadline, and the machine CPU over
+that launch): a started Chrome at >= 90% CPU gets a CPU-starved paragraph that says not to reap.
+
+Review of PR 269 changed three things. (1) The starved verdict is made ONLY for a launch that missed its DevTools deadline (nodriver's
+"Failed to connect to browser", or the launch stage's own budget); a failure after the launch (first page, post-launch setup, hooks) on a busy
+machine keeps its own error, because the CPU reading explains nothing about it. (2) A process count AT the limit now wins: it keeps the
+"out of process capacity" answer and the CPU reading is added to it ("the machine CPU also read N%"), instead of the CPU relabelling a real capacity
+failure as "not capacity-limited". A machine at the 120-process cap is usually pegged too, so the earlier rule (a started Chrome on a hot CPU beat the
+count) hid the one decisive fact behind a global reading a neighbour process can also cause; the test that pinned the opposite is rewritten to pin this.
+(3) The CPU is no longer sampled with `psutil.cpu_percent(interval=0.2)`, a synchronous sleep on the backend's event loop inside the failure handler:
+`spawn_leak.Attempt` records the machine CPU times when the attempt begins and the handler subtracts them, so the reading is the average over THIS launch
+and nothing sleeps. `tests/test_spawn_exhaustion_hint.py` pins each branch, including a real `spawn_budget` stall and nodriver's own source.
+
+### A backend the cold start spawned for a proxy that never came exits instead of idling forever (F-1023)
+
+A proxy closed before the backend it spawned finished booting (51 s on a swapping machine) left that backend listening with no client and nothing to end
+it (~139 MB, measured in an isolated HOME); the browser idle reaper reaps browsers and the liveness machinery judges backends someone is talking to. A
+spawned backend now carries `--exit-if-unadopted`, and `session_hygiene.exit_if_unadopted` (the module that already owns "a client never came / is gone")
+stops the process after 300 s when no request ever reached `/mcp` and it hosts no browser. A backend that was reached even once, or hosts a browser, is
+never touched.
+
+Which launches carry the flag: every backend `singleton._start_server_process` spawns, that is the proxy cold start, the `proxy_selfheal` heal (both through
+`ensure_server_running`), and the operator `stealthy restart` verb (`restart_backend`), on every platform. A backend an operator starts by hand
+(`serve --http`, or a Task Scheduler entry that runs it) does not get the flag and is never touched. `restart` carries it on purpose: it is the same spawn
+sequence as the cold start (no second spawn path), it is run while clients exist, and a restarted backend nobody connects to inside five minutes is
+re-spawned by the next proxy in seconds. It is safe for a spawn a live proxy waits on, because that proxy polls `initialize` for 120 s and the heal
+backoff is at most 60 s, so it reaches the backend inside the 300 s grace. `tests/test_singleton_backend_logging.py` pins the restart path.
+
+Review of PR 269 closed three races. The exit re-reads "was a request served" and "is a re-attach pass running" after the browser question's await and
+immediately before stopping, so a proxy that connects while the backend is listing its browsers aborts the exit (a request counts from the moment it
+ENTERS the handler, so one still in flight protects the backend too). A re-attach pass still running (`browser_reattach.in_progress()`, the pass lock) is
+waited out first and checked again, because its browsers are not in `list_instances` until adopted. Any request to `/mcp` counts as a client, an
+`initialize` probe included; that fails safe (the backend stays) and is the documented rule, while the `/_stealth/health` heartbeat does not count.
+`tests/test_unadopted_backend_exit.py` pins the race, the in-flight request, the re-attach cases, the health route and the `__main__` stamp
+(`_EXIT_IF_UNADOPTED = args.exit_if_unadopted`) by executing `server.py` as `__main__`; `tests/test_lifespan_reentrancy.py` pins the lifespan wiring. The
+pinned launch-cmd shape in `tests/test_singleton_backend_logging.py` gains the flag deliberately.
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
