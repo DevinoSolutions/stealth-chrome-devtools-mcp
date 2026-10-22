@@ -29,8 +29,31 @@ REDACTED = "REDACTED"
 
 #: Header names whose VALUE is a credential, lower-cased for comparison.
 CREDENTIAL_HEADERS = frozenset(
-    {"cookie", "set-cookie", "authorization", "proxy-authorization"}
+    {
+        "cookie",
+        "set-cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "x-amz-security-token",
+    }
 )
+
+#: A header whose NAME contains one of these is a credential too (``x-session-
+#: token``, ``x-client-secret``, ``x-goog-api-key``): the named set cannot list
+#: every vendor's spelling.
+CREDENTIAL_HEADER_MARKERS = ("token", "secret", "api-key", "apikey")
+
+
+def is_credential_header(name: str) -> bool:
+    """Whether the header called *name* carries a credential, case-blind."""
+    lowered = name.lower()
+    return lowered in CREDENTIAL_HEADERS or any(
+        marker in lowered for marker in CREDENTIAL_HEADER_MARKERS
+    )
 
 
 def redacted_headers(headers: dict[str, str], hide: bool) -> dict[str, str]:
@@ -41,7 +64,7 @@ def redacted_headers(headers: dict[str, str], hide: bool) -> dict[str, str]:
     if not hide:
         return headers
     return {
-        name: REDACTED if name.lower() in CREDENTIAL_HEADERS else value
+        name: REDACTED if is_credential_header(name) else value
         for name, value in headers.items()
     }
 

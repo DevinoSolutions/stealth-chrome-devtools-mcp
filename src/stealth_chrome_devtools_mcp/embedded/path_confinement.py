@@ -1,4 +1,4 @@
-"""The one home for what a path-taking tool may read or write (F-1025).
+r"""The one home for what a path-taking tool may read or write (F-1025).
 
 Four tools take a path from the caller and a hostile page can steer an agent
 into choosing it: ``upload_file`` READS one and hands it to the page's own
@@ -21,6 +21,13 @@ handed (no check-then-swap).
 Refusals raise :class:`~.tool_errors.ToolError` and NAME THE RULE, never the path
 (F-877: an absolute path names the operating user and the message reaches the
 debug ring and Sentry).
+
+**Windows spellings.** ``os.path.realpath`` keeps a long ``\\?\C:\...`` prefix, so
+such a path never starts with the plain-drive root of a deny-list entry; the
+prefix is stripped before comparing. UNC (``\\server\share``, ``\\localhost\C$``,
+``\\?\UNC\...``) and device (``\\.\``, ``\??\``) paths reach a file by a route no
+local root can be compared against, so they are REFUSED outright, both as typed
+and as resolved (a symlink to a share is the same route).
 
 **One writer for the export tools.** :func:`open_text` / :func:`open_binary` are
 the only places an export file is opened: the deny-list check, then ``os.open``
@@ -51,16 +58,39 @@ _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 
 _CASE_INSENSITIVE = sys.platform in {"win32", "darwin"}
 
+#: Files that hold credentials wherever they sit, so matched by NAME like ``.env``.
+_CREDENTIAL_FILE_NAMES = frozenset(
+    {".netrc", "_netrc", ".git-credentials", ".npmrc", ".pypirc"}
+)
+
+#: The label for a UNC / device path (never contains the path itself).
+_REMOTE_RULE = "a network share or device path (UNC or a device namespace)"
+
 _BROWSER_PROFILE_DIRS = (
     ("Google", "Chrome"),
     ("Google", "Chrome Beta"),
+    ("Google", "Chrome Dev"),
+    ("Google", "Chrome SxS"),
+    ("Google", "Chrome Canary"),
     ("google-chrome",),
+    ("google-chrome-beta",),
+    ("google-chrome-unstable",),
     ("Chromium",),
     ("chromium",),
     ("Microsoft", "Edge"),
+    ("Microsoft", "Edge Beta"),
+    ("Microsoft", "Edge Dev"),
+    ("Microsoft", "Edge SxS"),
     ("Microsoft Edge",),
     ("microsoft-edge",),
+    ("microsoft-edge-beta",),
+    ("microsoft-edge-dev",),
     ("BraveSoftware",),
+    ("Vivaldi",),
+    ("vivaldi",),
+    ("Opera Software",),
+    ("com.operasoftware.Opera",),
+    ("opera",),
     ("Firefox",),
     ("Mozilla",),
 )
@@ -72,13 +102,58 @@ def _fold(path: str) -> str:
     return normal.lower() if _CASE_INSENSITIVE else normal
 
 
+def _drive_path(text: str) -> bool:
+    return text[:1].isalpha() and text[1:2] == ":"
+
+
+def _remote_or_device(text: str) -> bool:
+    r"""Whether *text* spells a UNC share or a Windows device path.
+
+    Pure string logic (slashes are folded first, as Windows does), so it is
+    testable on any OS; :func:`secret_location_rule` applies it on Windows only,
+    because on POSIX a leading backslash is an ordinary file name. ``\\?\C:\...``
+    is the long spelling of a LOCAL drive path (see :func:`_real`) and is not
+    remote; every other ``\\?\`` form (``UNC``, a volume GUID, ``GLOBALROOT``)
+    and all of ``\\.\`` and ``\??\`` are.
+    """
+    spelled = text.replace("/", "\\")
+    if spelled.startswith("\\??\\"):
+        return True
+    if not spelled.startswith("\\\\"):
+        return False
+    if spelled[2:4] == "?\\":
+        return not _drive_path(spelled[4:])
+    return True
+
+
 def _real(path: str | os.PathLike[str]) -> str:
-    return os.path.realpath(os.fspath(path))
+    r"""The real path, with a ``\\?\<drive>:`` long prefix removed.
+
+    ``os.path.realpath`` keeps the prefix it was handed, and a prefixed path
+    never starts with the unprefixed deny-list root it lies in.
+    """
+    real = os.path.realpath(os.fspath(path))
+    if real.startswith("\\\\?\\") and _drive_path(real[4:]):
+        return real[4:]
+    return real
 
 
 def _is_under(target: str, root: str) -> bool:
     target, root = _fold(target), _fold(root)
     return target == root or target.startswith(root.rstrip("\\/") + os.sep)
+
+
+def _platform_default_session_root(home: Path) -> Path:
+    """``STEALTH_MCP_BROWSER_SESSION_ROOT``'s default, whatever it is set to now.
+
+    Mirrors ``clone_storage.default_session_root``'s unset branch (which is
+    inline there and that file is at its line budget); a test pins that the two
+    agree. Denied alongside the configured root so redirecting the setting does
+    not un-protect the profiles left in the default place.
+    """
+    if os.name == "nt":
+        return Path(r"C:\stealth-mcp-browser-sessions")
+    return home / ".stealth-mcp-browser-sessions"
 
 
 def _secret_roots() -> list[tuple[str, Path]]:
@@ -97,14 +172,28 @@ def _secret_roots() -> list[tuple[str, Path]]:
             home / "AppData" / "Roaming" / "gcloud",
         ),
         ("~/.gnupg (GPG keys)", home / ".gnupg"),
+        ("~/.config/gh (GitHub CLI token)", home / ".config" / "gh"),
+        ("~/.config/git (git credentials)", home / ".config" / "git" / "credentials"),
+        ("~/.docker (registry credentials)", home / ".docker"),
+        ("~/.kube (cluster credentials)", home / ".kube"),
+        ("~/.azure (Azure credentials)", home / ".azure"),
+        ("~/.claude (agent credentials and transcripts)", home / ".claude"),
+        ("macOS keychains", home / "Library" / "Keychains"),
     ]
+    # %APPDATA% / %LOCALAPPDATA% are these two unless the machine redirects them;
+    # env access has one home (settings), so the redirect is not read here.
+    app_data = [home / "AppData" / "Roaming", home / "AppData" / "Local"]
+    roots.extend(
+        ("the Windows credential store", base / "Microsoft" / name)
+        for base in app_data
+        for name in ("Credentials", "Protect", "Vault")
+    )
     # Browser profile roots, under every place the three platforms keep them.
     profile_bases = (
         home / ".config",
         home / ".mozilla",
         home / "Library" / "Application Support",
-        home / "AppData" / "Local",
-        home / "AppData" / "Roaming",
+        *app_data,
     )
     roots.append(("a browser profile root", home / ".mozilla"))
     roots.extend(
@@ -119,10 +208,14 @@ def _secret_roots() -> list[tuple[str, Path]]:
     # imports this module, so a top-level import is a cycle.
     from stealth_chrome_devtools_mcp.embedded import backend_registry, clone_storage
 
-    roots.append(("the stealth state directory", backend_registry.STATE_DIR))
+    roots.extend(
+        ("the stealth state directory", directory)
+        for directory in (backend_registry.STATE_DIR, home / ".stealth-mcp")
+    )
     roots.extend(
         ("the stealth browser-session root", directory)
         for directory in (
+            _platform_default_session_root(home),
             clone_storage.default_session_root(),
             clone_storage.clone_root_dir(),
             clone_storage.master_profile_dir(),
@@ -141,9 +234,16 @@ def _env_file_rule(name: str) -> bool:
 
 def secret_location_rule(path: str | os.PathLike[str]) -> str | None:
     """The label of the denied location *path* really lies in, or ``None``."""
+    if os.name == "nt" and _remote_or_device(os.fspath(path)):
+        return _REMOTE_RULE
     real = _real(path)
-    if _env_file_rule(Path(real).name):
+    if os.name == "nt" and _remote_or_device(real):
+        return _REMOTE_RULE
+    name = Path(real).name
+    if _env_file_rule(name):
         return ".env files (secrets by convention)"
+    if _fold(name) in _CREDENTIAL_FILE_NAMES:
+        return f"{name} files (credentials by convention)"
     for label, root in _secret_roots():
         if _is_under(real, _real(root)):
             return label
@@ -160,11 +260,22 @@ def refuse_secret_path(path: str | os.PathLike[str], *, tool: str, action: str) 
     if rule is not None:
         raise ToolError(
             f"{tool} refuses to {action} a file in {rule}: path tools may not "
-            "touch credential stores, browser profiles or this server's own "
-            "state (rule: secret-location deny-list, F-1025). Choose a path "
-            "outside them."
+            "touch credential stores, browser profiles, network or device "
+            "paths or this server's own state (rule: secret-location "
+            "deny-list, F-1025). Choose a local path outside them."
         )
     return Path(_real(path))
+
+
+def _unwritable(exc: OSError, real: Path, tool: str) -> ToolError:
+    """A ToolError for a destination that cannot be written: the file's NAME and
+    the OS reason, never the directory (F-877: ``str(OSError)`` embeds the whole
+    absolute path, and the message reaches the debug ring and Sentry)."""
+    reason = exc.strerror or type(exc).__name__
+    return ToolError(
+        f"{tool} cannot write {real.name!r}: {reason}. Check that its folder "
+        "exists and is writable, or choose another path."
+    )
 
 
 def _open_fd(real: Path, *, overwrite: bool, tool: str) -> int:
@@ -183,6 +294,8 @@ def _open_fd(real: Path, *, overwrite: bool, tool: str) -> int:
             "overwrite, F-1025). Pass overwrite=True to replace it, or choose "
             "a new path."
         ) from None
+    except OSError as exc:
+        raise _unwritable(exc, real, tool) from None
     if hasattr(os, "fchmod"):
         # An export overwriting an older, looser file must not keep its mode.
         os.fchmod(fd, PRIVATE_FILE_MODE)
@@ -225,7 +338,10 @@ def precreate_private(
     a failed write can remove exactly the empty file it left.
     """
     real = refuse_secret_path(path, tool=tool, action="write to")
-    real.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        real.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _unwritable(exc, real, tool) from None
     created = not real.exists()
     os.close(_open_fd(real, overwrite=overwrite, tool=tool))
     return real, created
