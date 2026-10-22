@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Four CI integration flakes (F-1014, F-1015, F-1016, F-1022)
+
+- **A slow Chrome is no longer refused as a stranger (F-1014, T-5899).** `devtools_port.confirm_ours` gave the browser 10 s to answer
+  `SystemInfo.getProcessInfo`, and on a starved macOS runner our own healthy Chrome did not, so the spawn failed with "did not say which process it
+  is". The 10 s stays as a floor; past it the SAME request keeps being waited on, up to `IDENTITY_PATIENCE_SECONDS` (60 s), for as long as the pid we
+  launched is running. The proof is unchanged (the answer's `browser` pid must be ours or a descendant's, a stranger is refused the moment it answers),
+  a launcher that is gone gets no extra wait, silence past the patience is still a refusal, and a late answer is logged with how long it took.
+- **The SIGTERM pin waits for a server that is serving (F-1015, T-5901).** `test_sigterm_on_a_real_backend_is_a_clean_shutdown` sent SIGTERM as soon as
+  `Application startup complete` was logged, which the lifespan writes BEFORE uvicorn binds the socket; a signal in that window makes uvicorn's
+  `_serve` return without `shutdown()` and the log has no `Application shutdown complete`. The pin now also waits for an HTTP answer. Test-only: no
+  product code changes (the same early return noises a stop sent in that few-millisecond window, which is left as is).
+- **A failed tab close names its type (F-1016, T-5900).** `asyncio.wait_for` raises `TimeoutError()` with no text, so the warning read
+  `Failed to close tab for <id>: ` and a CI failure said nothing. The line is now `...: TimeoutError` / `...: <Type>: <text>`. Diagnosis only: the
+  race behind that one occurrence is not proven (`audit/stage2/finding_F1016_tab_close_failure_names_no_type.md`).
+- **`close_instance` of a crashed browser answers `closed: True` whichever call noticed the crash (F-1022, T-5956, closes F-789).** A browser that died on its
+  own was discarded by the next tool call, after which `close_instance` found nothing and answered `False`; when the failure surfaced first, the same close
+  answered `True`, so `test_crash_recovery_after_the_owned_chrome_is_killed` flipped on macOS. The discard now records the id and the next `close_instance`
+  claims it once (True; a second close, or an id never held, is False). The resilience pin asserts `True`; both orderings are pinned hermetically.
+  The two orderings now also end in the same STATE, not only the same answer. The discard used to pop the spawn's `profile_selection` that `close_instance`
+  reads, so a close arriving second skipped what the same close does when it notices the crash itself: it left the crashed clone's directory in
+  `clone_protection.PROTECTED` (sweep-exempt until a backend restart, a disk leak), skipped the `default` seed refresh, and never refused an unnamed close
+  of a crashed `fleet` or `default` browser. A crash discard now releases the clone directory itself (`clone_protection.release_selection`, the one rule for
+  "is this a disposable clone", also used by `close_instance`), and keeps the selection until that browser is closed. The
+  `close_instance` tool still does no instance lookup (a lookup discards a dead browser, F-966): the manager notes, as it claims an instance, that its
+  process was already dead, so both orderings answer alike; because a discard already released the directory (which a respawn may since have reserved), a
+  close of a discarded id never releases it again. **Decisions:** the seed is NOT refreshed from a `default` browser known to have crashed (its profile may be torn and master-profile
+  loss is top severity): the answer is `seed_refreshed: false, seed_error: "default-crashed"` in both orderings; the shared-session refusal is kept (an unnamed close still names
+  the `fleet`/`default` profile it was, and a refused close does not consume the claim, so `session="fleet"` still answers `closed: True`).
+  **A discard record never unlocks the shared-session guard:** a re-attach reuses recorded instance ids (F-888), so a record for an id could outlive and outrank the LIVE
+  selection under it (three `fleet` close-guard pins failed in the full lane for exactly that, green alone). The live selection is now authoritative, an unnamed close is refused when
+  EITHER the live or the discarded selection is `fleet`/`default`, a stale record is dropped when a live browser's close succeeds, and the suite clears `tool_errors`' departed
+  stores before each test.
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
