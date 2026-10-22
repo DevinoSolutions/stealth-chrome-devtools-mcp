@@ -54,6 +54,8 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import backend_token
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -183,7 +185,8 @@ def http_client(read_seconds: float | None) -> httpx.AsyncClient:
     would be pinning a double instead of the SDK.
 
     The two clocks are what is decided here (plus F-962's caller header,
-    see :data:`CALLER_HEADER`), and they are two
+    see :data:`CALLER_HEADER`, and F-1018's bearer token, see
+    :mod:`backend_token`, read once when the client is built), and they are two
     because ``httpx.Timeout(connect_and_write, read=…)`` is two. Connecting
     always keeps :data:`CONNECT_TIMEOUT_SECONDS`, so a backend whose socket is
     gone is reported in seconds rather than at the end of a long read budget.
@@ -207,7 +210,7 @@ def http_client(read_seconds: float | None) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         follow_redirects=True,
         timeout=httpx.Timeout(CONNECT_TIMEOUT_SECONDS, read=read_seconds),
-        headers={CALLER_HEADER: CALLER_ID},
+        headers={CALLER_HEADER: CALLER_ID, **backend_token.auth_headers()},
     )
 
 

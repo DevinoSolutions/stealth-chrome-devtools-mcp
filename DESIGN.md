@@ -408,6 +408,47 @@ then `close_instance`d it, taking every later clone's live seed with it. F-834 h
   instance up (that discards a dead one). The heal closes through the same tool and passes
   the name; every other instance ignores `session`.
 
+### 2.10 The backend demands a per-user bearer token (F-1018)
+
+F-1013's Host/Origin guard keeps a web page out of the HTTP backend. It does nothing about another process on the
+machine, or another OS user: anything that could reach the port could `initialize` and call `create_python_binding`
+(`exec` in the backend) or the cookie readers. `backend_token.py` is the ONE home of the answer, and
+`server.bearer_token_guard()` sits beside `host_origin_guard()` in the one `mcp.run(transport="http")` call.
+
+* **One token per user, not per backend.** `<state dir>/backend.token`, 43 URL-safe characters from `secrets.token_urlsafe(32)`. The
+  registry holds one backend per (display context, identity) (§2.2), so a token minted per backend startup would make each new
+  backend lock out its siblings' clients and make `stealthy` guess which token to send. `ensure` creates the file once, before the
+  backend binds its port (so a client never finds a listening backend without it), and reuses it while it is well-formed. Rotating it
+  is deleting the file and restarting the backends; a backend that cannot secure the file raises `ToolError` and does not serve.
+* **Who can read it** (measured on Windows 11, not assumed). A new file in the state dir inherits Modify for other principals (a
+  `CodexSandboxUsers` group on the measuring machine). The file is therefore created empty, its DACL is replaced with a protected one
+  holding one ACE, full control for the current user's SID (`SetNamedSecurityInfoW`, one call, so an existing widened file is narrowed
+  by the same path), and only then is the secret written, to a scratch name hard-linked into place. `icacls` afterwards lists exactly
+  one entry, `<DOMAIN>\<user>:(F)`, nothing inherited. POSIX: created `0600`, re-`chmod`ed on every `ensure`, and a file owned by another
+  uid is refused.
+* **Who sends it.** Every first-party caller, found by census (a new HTTP caller must come through one of these two seams, never its own
+  client): `backend_client.http_client` (the CLI's sessions and the stdio proxy's bridge) and `backend_probe._headers()` / the
+  `Heartbeat` GET (the readiness poll, the identity gate behind `_same_identity_backend_ready`, `doctor`/`status`, the watchdog
+  heartbeat, the self-heal re-probe). `tools/probe_backend_memory.py` reads an isolated home's file. The header is read from the file
+  when the client or request is built; a client with no readable file sends none and gets the 401.
+* **What a 401 does.** The middleware runs after FastMCP's guard, so a foreign Host is still `421` and a foreign Origin `403` before the
+  token is looked at. A missing token, another scheme and a wrong value are the same 401 (constant-time compare, no hint, one throttled
+  WARNING). The health route is behind it too. Probes read 401 as "not ready" / "not alive", the existing fail-closed verdict; the CLI
+  turns it into `backend_token.UNAUTHORIZED` and `EXIT_NO_BACKEND`. A token file deleted under a RUNNING backend locks its clients out (they find no file and send no
+  header) until that backend is restarted (`stealthy restart`), which writes a new one: the backend's own loop is still alive, so the
+  watchdog's second witness (F-889, `backend_liveness.self_report`) does not condemn it.
+* **Upgrade path.** *New client, old backend:* an old backend ignores the extra header, so a new `stealthy` or proxy talks to one it
+  has found; the identity gate (§2.3) still refuses to ADOPT it, so it is evicted if idle or spared and run beside if it owns live
+  browsers (§2.3a), exactly as for any version bump. *Old client, new backend:* it sends no header and gets 401, which an old proxy's
+  `initialize` probe reads as "not ready", the same verdict its identity gate already gives a backend of another version. Its idle
+  stranger is replaced by its own old backend (the mixed-install ping-pong already known and documented), and a backend that owns browsers is
+  never evicted. The one real cost: a Claude Code session whose proxy predates this release and whose idle backend is replaced by a
+  new one cannot re-bridge until that session restarts. Nothing else is needed on upgrade; the first new backend creates the file.
+* **What it is not.** A shared secret for a loopback socket, not a channel binding: a client sends it to `127.0.0.1:<recorded port>`
+  without proving who answers, so a hostile local user who binds a dead backend's port before the next launch reads it from the first
+  probe. It does nothing about the same user's own processes, which can read the file and the profiles. `--host 0.0.0.0` remains the
+  operator's decision. `--allowed-host NAME` (repeatable) is the explicit opt-in for an extra Host name a reverse proxy uses; `*` is refused.
+
 ## 3. The observability spine
 
 File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`

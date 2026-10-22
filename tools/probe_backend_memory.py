@@ -47,6 +47,7 @@ from release_gate_harness import (
     gate_workspace,
     resolve_launcher,
 )
+from stealth_chrome_devtools_mcp.embedded import backend_token
 
 PAGES = ["https://en.wikipedia.org/wiki/Main_Page", "https://www.python.org/"]
 INITIALIZE_PARAMS = {
@@ -68,6 +69,11 @@ def rss_mb(proc: psutil.Process) -> float:
     return proc.memory_info().rss / (1024 * 1024)
 
 
+#: F-1018: the isolated backend's bearer token lives in ITS throwaway home, so
+#: ``main`` points this at it; ``None`` reads the real ``~/.stealth-mcp`` file.
+_TOKEN_FILE: Path | None = None
+
+
 class Http:
     """Minimal streamable-HTTP MCP client that can ABANDON a session."""
 
@@ -78,7 +84,10 @@ class Http:
         self._id = 0
 
     async def _post(self, payload: dict[str, object]) -> dict[str, object] | None:
-        headers = {"Accept": "application/json, text/event-stream"}
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            **backend_token.auth_headers(_TOKEN_FILE),
+        }
         if self.session_id:
             headers["mcp-session-id"] = self.session_id
         r = await self.client.post(self.url, json=payload, headers=headers)
@@ -124,7 +133,11 @@ class Http:
         if self.session_id:
             with contextlib.suppress(httpx.HTTPError):
                 await self.client.delete(
-                    self.url, headers={"mcp-session-id": self.session_id}
+                    self.url,
+                    headers={
+                        "mcp-session-id": self.session_id,
+                        **backend_token.auth_headers(_TOKEN_FILE),
+                    },
                 )
         await self.client.aclose()
 
@@ -201,9 +214,11 @@ async def linger(seconds: float, backend: psutil.Process, log_dir: Path) -> None
 
 
 async def main(args: argparse.Namespace) -> None:
+    global _TOKEN_FILE  # noqa: PLW0603  PERMANENT(one-shot evidence tool: the isolated home is only known here)
     launcher = resolve_launcher()
     work_dir = Path(tempfile.mkdtemp(prefix="f862-"))
     with gate_workspace(work_dir) as space:
+        _TOKEN_FILE = space["home_dir"] / ".stealth-mcp" / backend_token.TOKEN_FILE_NAME
         # The backend under measurement must never ship to Sentry.
         space["env"]["STEALTH_MCP_NO_ERROR_REPORTING"] = "1"
         space["env"]["PYTHONUTF8"] = "1"
