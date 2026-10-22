@@ -341,7 +341,7 @@ async def create_python_binding(
     programs like any code this process runs. The binding answers only script in
     the page context that was current on this tab when it was created, and is
     dropped when that page navigates or reloads. Script in that page can still
-    call it, so create one only on a page you trust.
+    call it, including same-origin frames, so create one only on a page you trust.
 
     Args:
         instance_id (str): Browser instance ID.

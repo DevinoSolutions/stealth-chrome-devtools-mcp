@@ -6,8 +6,8 @@ binding concern:
 
 * :func:`build_wrapper_script` — the page-side wrapper that turns
   ``window[name](...args)`` into a Promise;
-* :func:`install_binding` — ``Runtime.addBinding`` + the ``bindingCalled``
-  handler + wrapper injection;
+* :func:`install_binding` — ``Runtime.addBinding`` + wrapper injection, on the
+  tab's one :class:`TabWatch`;
 * :func:`on_binding_called` — the handler that runs the Python function and
   dispatches the result back into the page;
 * :func:`call_python_from_js` — the Python-side dispatch (moved here);
@@ -18,14 +18,22 @@ frame of the tab and survives navigations, and the Python behind it runs in the
 backend process with real builtins — so a binding that answered any caller would
 hand host-Python execution to every script the tab ever loads, cross-origin
 iframes included. A binding is therefore bound to ONE tab (the registry key is
-``(target_id, name)``, not a name shared by every instance) and to the
-execution context that was current when it was created: ``bindingCalled``
-carries the calling ``executionContextId`` and a call from any other context is
-dropped with a WARNING naming the contexts, never the payload. When that
-context is destroyed (any navigation or reload of the document) the binding is
-dropped: ``Runtime.removeBinding`` plus the registry entry. Page script in the
-creating context itself can still call it — that is what a binding is for; the
-tool description says so.
+``(target_id, name)``, not a name shared by every instance) and to ONE execution
+context: the main frame's default context, as the protocol reports it. Each tab
+carries one :class:`TabWatch` — a single handler set that tracks
+``Runtime.executionContextCreated`` (replayed for every existing context when
+``Runtime.enable`` is re-issued) and keeps that context's ``id`` AND its
+``uniqueId``, because ids are per-isolate counters that repeat across renderer
+processes and only ``uniqueId`` is system-wide. ``bindingCalled`` carries the
+calling ``executionContextId`` and a call from any other context is dropped
+with a WARNING naming the contexts, never the payload. The binding is dropped
+(``Runtime.removeBinding`` plus the registry entry) on ANY of: that context
+destroyed, ``executionContextsCleared``, a context created with the same id but
+another ``uniqueId``, or a main-frame ``Page.frameNavigated`` — and a creation
+that sees any of these between reading the context and finishing the install
+fails closed. Page script in the creating context itself, same-origin frames
+included, can still call it — that is what a binding is for; the tool
+description says so.
 
 How the round-trip actually works (the old code never wired it): ``addBinding``
 exposes ``window[name]`` as a function that, when called with a **single
@@ -66,6 +74,7 @@ class BoundPython:
     function: Callable[..., Any]
     target_id: str
     context_id: int
+    unique_id: str
     refused: set[int] = field(default_factory=set)
 
     @property
@@ -73,7 +82,12 @@ class BoundPython:
         return (self.target_id, self.name)
 
 
-Bindings = dict[tuple[str, str], BoundPython]
+class Bindings(dict[tuple[str, str], BoundPython]):
+    """The live bindings, keyed ``(target_id, name)``, and each tab's one watch."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.watches: dict[str, TabWatch] = {}
 
 
 def build_wrapper_script(binding_name: str) -> str:
@@ -186,14 +200,12 @@ async def on_binding_called(
 ) -> None:
     """Handle one ``Runtime.bindingCalled`` event for ``bound``.
 
-    Each installed binding registers its own handler filtered to its name, so
-    handlers for different bindings on the same tab never cross-process an event.
     A call is answered only while ``bound`` is still the registered binding for
     its tab and only from the execution context it was created in; anything
     else is dropped without running the Python function.
     """
-    if event.name != bound.name or bindings.get(bound.key) is not bound:
-        return  # another binding's event, or this one has been dropped
+    if bindings.get(bound.key) is not bound:
+        return  # dropped while the event was in flight
     calling_context = getattr(event, "execution_context_id", None)
     if calling_context != bound.context_id:
         _refuse(bound, calling_context)
@@ -213,17 +225,17 @@ async def on_binding_called(
     await _dispatch_response(tab, bound.name, call_id, outcome)
 
 
-async def drop_binding(tab: Tab, bindings: Bindings, bound: BoundPython) -> None:
-    """End ``bound``: remove it from the registry and unsubscribe the tab.
-
-    Idempotent. A binding that is no longer the registered one for its tab (it
-    was dropped, or replaced by a newer binding of the same name) is left alone,
-    so a late context-destroyed event for an old document cannot unsubscribe
-    its replacement.
-    """
+def _forget(bindings: Bindings, bound: BoundPython) -> bool:
+    """Take ``bound`` out of the registry; False when it is no longer the
+    registered binding for its tab and name (dropped, or replaced)."""
     if bindings.get(bound.key) is not bound:
-        return
+        return False
     del bindings[bound.key]
+    return True
+
+
+async def _unexpose(tab: Tab, bound: BoundPython) -> None:
+    """``Runtime.removeBinding`` for a binding already out of the registry."""
     try:
         await tab.send(uc.cdp.runtime.remove_binding(name=bound.name))
     except Exception as e:
@@ -235,20 +247,133 @@ async def drop_binding(tab: Tab, bindings: Bindings, bound: BoundPython) -> None
     )
 
 
-async def _current_context_id(tab: Tab) -> int:
-    """The execution context the page's own script runs in right now.
+async def drop_binding(tab: Tab, bindings: Bindings, bound: BoundPython) -> None:
+    """End ``bound``: remove it from the registry and unsubscribe the tab.
 
-    A throwing evaluate answers with ``exceptionDetails.executionContextId``.
-    Raises :class:`ToolError` when Chrome does not name one: a binding that
-    cannot be tied to a context must not exist.
+    Idempotent. A binding that is no longer the registered one for its tab (it
+    was dropped, or replaced by a newer binding of the same name) is left alone,
+    so a late context-destroyed event for an old document cannot unsubscribe
+    its replacement.
     """
-    _, details = await tab.send(
-        uc.cdp.runtime.evaluate(expression="throw null", return_by_value=True)
-    )
-    context_id = getattr(details, "execution_context_id", None)
-    if context_id is None:
-        raise ToolError("Could not identify the page's execution context")
-    return int(context_id)
+    if _forget(bindings, bound):
+        await _unexpose(tab, bound)
+
+
+@dataclass(eq=False)
+class TabWatch:
+    """The ONE handler set of a tab, whatever number of bindings it carries.
+
+    Every handler is synchronous so that, in nodriver's listener, it has run for
+    every event that precedes a command's reply before that command returns.
+    ``main`` is ``(id, unique_id)`` of the main frame's default context as last
+    reported, ``None`` when none is known.
+    """
+
+    tab: Tab
+    bindings: Bindings
+    target_id: str
+    main: tuple[int, str] | None = None
+    replayed: bool = False
+    _removals: set[asyncio.Task[None]] = field(default_factory=set)
+
+    def attach(self) -> None:
+        rt = uc.cdp.runtime
+        self.tab.add_handler(rt.BindingCalled, self._on_binding_called)
+        self.tab.add_handler(rt.ExecutionContextCreated, self._on_created)
+        self.tab.add_handler(rt.ExecutionContextDestroyed, self._on_destroyed)
+        self.tab.add_handler(rt.ExecutionContextsCleared, self._on_cleared)
+        self.tab.add_handler(uc.cdp.page.FrameNavigated, self._on_navigated)
+
+    async def replay_contexts(self) -> None:
+        """Make Chrome report every existing context again.
+
+        ``Runtime.enable`` sends ``executionContextCreated`` for each existing
+        context, but only on a real enable and the domain is normally enabled
+        already, so it is disabled first. Run once per watch, with the handlers
+        attached; the replies come after the events they follow.
+        """
+        await self.tab.send(uc.cdp.runtime.disable())
+        await self.tab.send(uc.cdp.runtime.enable())
+        self.replayed = True
+
+    def _tab_bindings(self) -> list[BoundPython]:
+        return [b for b in self.bindings.values() if b.target_id == self.target_id]
+
+    def drop(self, bound: BoundPython) -> None:
+        """Forget ``bound`` now (so the next event already finds nothing) and
+        remove it from the page in the background."""
+        if _forget(self.bindings, bound):
+            task = asyncio.create_task(_unexpose(self.tab, bound))
+            self._removals.add(task)
+            task.add_done_callback(self._removals.discard)
+
+    def _on_binding_called(self, event: Any) -> Any:
+        bound = self.bindings.get((self.target_id, event.name))
+        if bound is None:
+            return None  # another script's binding, or one already dropped
+        return asyncio.create_task(
+            on_binding_called(self.tab, event, bound, self.bindings)
+        )
+
+    def _on_created(self, event: Any) -> None:
+        context = event.context
+        context_id, unique_id = int(context.id_), str(context.unique_id)
+        aux = context.aux_data or {}
+        is_main = bool(aux.get("isDefault")) and aux.get("frameId") == self.target_id
+        if is_main:
+            self.main = (context_id, unique_id)
+        for bound in self._tab_bindings():
+            # A context with this binding's id but another uniqueId is another
+            # process's context (ids repeat); a NEW main context means the page
+            # is another document. Either way this binding's context is gone.
+            if bound.unique_id != unique_id and (
+                context_id == bound.context_id or is_main
+            ):
+                self.drop(bound)
+
+    def _on_destroyed(self, event: Any) -> None:
+        context_id = int(event.execution_context_id)
+        unique_id = str(event.execution_context_unique_id)
+        if self.main is not None and (context_id, unique_id) == self.main:
+            self.main = None
+        for bound in self._tab_bindings():
+            if bound.unique_id == unique_id or bound.context_id == context_id:
+                self.drop(bound)
+
+    def _on_cleared(self, _event: Any) -> None:
+        self.main = None
+        for bound in self._tab_bindings():
+            self.drop(bound)
+
+    def _on_navigated(self, event: Any) -> None:
+        if event.frame.parent_id is None:  # the main frame
+            for bound in self._tab_bindings():
+                self.drop(bound)
+
+
+async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
+    """The watch of ``tab``, attached and replayed (made on first use)."""
+    target_id = str(tab.target.target_id)
+    watch = bindings.watches.get(target_id)
+    if watch is None or watch.tab is not tab:
+        # First use, or a new connection to the same target: bindings made on the
+        # old connection do not exist on this one.
+        for stale in [b for b in bindings.values() if b.target_id == target_id]:
+            await drop_binding(tab, bindings, stale)
+        watch = bindings.watches[target_id] = TabWatch(tab, bindings, target_id)
+        watch.attach()
+    if not watch.replayed:
+        await watch.replay_contexts()
+    return watch
+
+
+def _ensure_current(bindings: Bindings, bound: BoundPython) -> None:
+    """Fail closed when the context ``bound`` was made for ended since."""
+    if bindings.get(bound.key) is not bound:
+        raise ToolError(
+            f"The page changed while binding {bound.name!r} was being created; "
+            "create it again once the page has loaded"
+        )
 
 
 async def install_binding(
@@ -259,47 +384,35 @@ async def install_binding(
 ) -> dict[str, Any]:
     """Wire the genuine round-trip for ``binding_name`` on ``tab``.
 
-    Registers the binding for this tab and its current execution context, the
-    ``bindingCalled`` and context-lifetime handlers, and injects the page-side
-    wrapper. A binding of the same name already on this tab is replaced. Raises
-    :class:`ToolError` on failure. The handlers stay on the tab for its life
-    (nodriver's ``remove_handler`` drops every handler of a type); once the
-    binding is dropped they find nothing registered and return.
+    Registers the binding for this tab and the main frame's default context,
+    then ``Runtime.addBinding`` and the page-side wrapper. The binding is in the
+    registry before the first await after the context was read, so the tab's
+    watch drops it if that context ends meanwhile, and the install then fails
+    closed. A binding of the same name already on this tab is replaced. Raises
+    :class:`ToolError` on failure.
     """
     try:
         target_id = str(tab.target.target_id)
         previous = bindings.get((target_id, binding_name))
         if previous is not None:
             await drop_binding(tab, bindings, previous)
-        bound = BoundPython(
-            binding_name, python_function, target_id, await _current_context_id(tab)
-        )
+        watch = await _watch_for(tab, bindings)
+        if watch.main is None:
+            raise ToolError("Could not identify the page's execution context")
+        bound = BoundPython(binding_name, python_function, target_id, *watch.main)
         bindings[bound.key] = bound
-
-        async def on_destroyed(event: Any) -> None:
-            if event.execution_context_id == bound.context_id:
-                await drop_binding(tab, bindings, bound)
-
-        async def on_cleared(_event: Any) -> None:
-            await drop_binding(tab, bindings, bound)
-
         try:
             await tab.send(uc.cdp.runtime.add_binding(name=binding_name))
-            tab.add_handler(
-                uc.cdp.runtime.BindingCalled,
-                lambda event: asyncio.create_task(
-                    on_binding_called(tab, event, bound, bindings)
-                ),
-            )
-            tab.add_handler(uc.cdp.runtime.ExecutionContextDestroyed, on_destroyed)
-            tab.add_handler(uc.cdp.runtime.ExecutionContextsCleared, on_cleared)
+            _ensure_current(bindings, bound)
             result = await tab.send(
                 uc.cdp.runtime.evaluate(
                     expression=build_wrapper_script(binding_name),
                     return_by_value=True,
                     await_promise=True,
+                    unique_context_id=bound.unique_id,
                 )
             )
+            _ensure_current(bindings, bound)
             if result and result[0] and result[0].value:
                 return result[0].value
             raise ToolError(f"Failed to install binding {binding_name!r}")

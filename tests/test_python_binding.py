@@ -38,7 +38,9 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 runtime = cdp.runtime
+page = cdp.page
 CREATING_CONTEXT = 7
+CREATING_UNIQUE = "unique-7"
 
 
 def _event(name: str, call_id: str, args: list[Any], context: int) -> Any:
@@ -50,54 +52,106 @@ def _event(name: str, call_id: str, args: list[Any], context: int) -> Any:
     )
 
 
-def _destroyed(context: int) -> Any:
-    return runtime.ExecutionContextDestroyed(
-        execution_context_id=runtime.ExecutionContextId(context),
-        execution_context_unique_id=f"unique-{context}",
+def _created(
+    context: int,
+    unique: str | None = None,
+    frame: str = "T-a",
+    is_default: bool = True,
+) -> Any:
+    """``Runtime.executionContextCreated``, parsed by nodriver from the wire shape."""
+    return runtime.ExecutionContextCreated.from_json(
+        {
+            "context": {
+                "id": context,
+                "origin": "https://page.example",
+                "name": "",
+                "uniqueId": unique or f"unique-{context}",
+                "auxData": {
+                    "isDefault": is_default,
+                    "type": "default" if is_default else "isolated",
+                    "frameId": frame,
+                },
+            }
+        }
     )
+
+
+def _destroyed(context: int, unique: str | None = None) -> Any:
+    return runtime.ExecutionContextDestroyed.from_json(
+        {
+            "executionContextId": context,
+            "executionContextUniqueId": unique or f"unique-{context}",
+        }
+    )
+
+
+def _navigated(frame: str = "T-a", parent: str | None = None) -> Any:
+    """``Page.frameNavigated``; a frame with a ``parent`` is a child frame."""
+    frame_json = {
+        "id": frame,
+        "loaderId": "loader-1",
+        "url": "https://page.example/",
+        "domainAndRegistry": "page.example",
+        "securityOrigin": "https://page.example",
+        "mimeType": "text/html",
+        "secureContextType": "Secure",
+        "crossOriginIsolatedContextType": "NotIsolated",
+        "gatedAPIFeatures": [],
+    }
+    if parent is not None:
+        frame_json["parentId"] = parent
+    return page.FrameNavigated.from_json({"frame": frame_json, "type": "Navigation"})
 
 
 class _FakeTab:
     """Answers the CDP commands a binding install and a call issue.
 
     nodriver CDP commands are generators that yield a ``{"method", "params"}``
-    dict on first advance — ``send`` records that frame and answers by method:
-    a ``Runtime.evaluate`` of ``throw null`` with the exception details Chrome
-    gives it (carrying the page's current execution context), the wrapper with
-    its success value, anything else with nothing.
+    dict on first advance — ``send`` records that frame and answers by method.
+    The page's contexts are reported the way Chrome reports them: as
+    ``executionContextCreated`` events, replayed only by a ``Runtime.enable``
+    that follows a ``Runtime.disable`` (an enable of an enabled domain does
+    nothing). No command answer carries a context id: the page's execution
+    context is only ever learned from those events.
+
+    ``on_send[method]`` runs while that command is in flight, before it is
+    answered — where a page navigates under a call.
     """
 
     def __init__(self, target_id: str = "T-a", context: int | None = CREATING_CONTEXT):
         self.target = types.SimpleNamespace(target_id=target_id)
-        self.context = context
+        self.main: tuple[int, str] | None = (
+            None if context is None else (context, f"unique-{context}")
+        )
         self.frames: list[dict[str, Any]] = []
         self.handlers: list[tuple[type, Any]] = []
         self.wrapper_value: Any = {"success": True}
+        self.runtime_enabled = True
+        self.on_send: dict[str, Any] = {}
 
     async def send(self, cdp_command):
         frame = next(cdp_command)
         cdp_command.close()
         self.frames.append(frame)
-        if frame["method"] != "Runtime.evaluate":
-            return None
-        expression = frame["params"]["expression"]
-        if expression == "throw null":
-            context = (
-                None
-                if self.context is None
-                else runtime.ExecutionContextId(self.context)
-            )
-            return (
-                runtime.RemoteObject(type_="object"),
-                runtime.ExceptionDetails(
-                    exception_id=1,
-                    text="Uncaught",
-                    line_number=0,
-                    column_number=0,
-                    execution_context_id=context,
-                ),
-            )
-        if "window.__" in expression:  # the page-side wrapper
+        method = frame["method"]
+        result: Any = None
+        if method == "Runtime.disable":
+            self.runtime_enabled = False
+        elif method == "Runtime.enable" and not self.runtime_enabled:
+            self.runtime_enabled = True
+            if self.main is not None:
+                await self.deliver(_created(*self.main, frame=self.target.target_id))
+        elif method == "Runtime.evaluate":
+            result = self._evaluate(frame["params"])
+        if method in self.on_send:
+            await self.on_send[method]()
+        return result
+
+    def _evaluate(self, params: dict[str, Any]) -> Any:
+        if "window.__" in params["expression"]:  # the page-side wrapper
+            unique = params.get("uniqueContextId")
+            if unique is not None and (self.main is None or unique != self.main[1]):
+                raise RuntimeError("Cannot find context with specified id")
             return (
                 runtime.RemoteObject(type_="object", value=self.wrapper_value),
                 None,
@@ -121,13 +175,25 @@ class _FakeTab:
 
     async def deliver(self, event: Any) -> None:
         """Hand *event* to every handler registered for its type, the way
-        nodriver's listener does, and let what they scheduled finish."""
+        nodriver's listener does (a plain call), and let what they scheduled
+        finish."""
         for event_type, handler in list(self.handlers):
             if event_type is not type(event):
                 continue
             outcome = handler(event)
             if asyncio.iscoroutine(outcome) or isinstance(outcome, asyncio.Task):
                 await outcome
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    async def navigate(self, context: int, unique: str | None = None) -> None:
+        """The page loads another document: its context ends and a new one starts."""
+        old = self.main
+        self.main = (context, unique or f"unique-{context}")
+        if old is not None:
+            await self.deliver(_destroyed(*old))
+        await self.deliver(_navigated(self.target.target_id))
+        await self.deliver(_created(*self.main, frame=self.target.target_id))
 
 
 def _detail_of(expression: str) -> dict[str, Any]:
@@ -169,7 +235,7 @@ async def test_creating_context_call_runs_python_and_dispatches_response():
         calls.append((a, b))
         return a + b
 
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "add", add, bindings)
 
@@ -189,7 +255,7 @@ async def test_foreign_execution_context_is_refused_and_python_never_runs(warnin
     is dropped: the Python never runs, nothing is dispatched, and the WARNING
     names the contexts but not what the call carried."""
     ran = []
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "steal", lambda *a: ran.append(a), bindings)
     frames_before = len(tab.frames)
@@ -208,7 +274,7 @@ async def test_foreign_execution_context_is_refused_and_python_never_runs(warnin
 async def test_refusal_is_logged_once_per_calling_context(warnings):
     """A hostile page can mint contexts at will; one WARNING per context, and a
     bounded number of them, keeps the log from being its to flood."""
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "b", lambda *a: None, bindings)
 
@@ -226,7 +292,7 @@ async def test_binding_is_per_tab_and_another_tab_cannot_reach_it(warnings):
     only its own function, and a call carrying the OTHER tab's context is
     refused."""
     ran = []
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab_a = _FakeTab("T-a", context=7)
     tab_b = _FakeTab("T-b", context=21)
     await _install(tab_a, "helper", lambda: ran.append("a"), bindings)
@@ -246,7 +312,7 @@ async def test_navigation_drops_the_binding(warnings):
     leaves the registry, ``Runtime.removeBinding`` is sent, and a later call —
     from the old context id or the new document's — runs nothing."""
     ran = []
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "nav", lambda: ran.append(1), bindings)
 
@@ -259,9 +325,21 @@ async def test_navigation_drops_the_binding(warnings):
     assert ran == []
 
 
+async def test_destroyed_event_naming_the_unique_id_drops_it():
+    """The unique id is system-wide: a destroyed event carrying it ends the
+    binding whatever integer id the event reports."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "uid", lambda: 1, bindings)
+
+    await tab.deliver(_destroyed(CREATING_CONTEXT + 40, unique=CREATING_UNIQUE))
+
+    assert bindings == {}
+
+
 async def test_other_contexts_ending_do_not_drop_it():
     """An iframe's context going away is not the page's navigation."""
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "keep", lambda: 1, bindings)
 
@@ -272,7 +350,7 @@ async def test_other_contexts_ending_do_not_drop_it():
 
 
 async def test_contexts_cleared_drops_the_binding():
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "clr", lambda: 1, bindings)
 
@@ -283,15 +361,31 @@ async def test_contexts_cleared_drops_the_binding():
 
 
 async def test_recreating_a_name_replaces_it_and_runs_once():
-    """Re-creating a name on the same tab (after a navigation, say) leaves ONE
-    live binding: the old handlers stay on the tab but are inert, so a call runs
-    the new function exactly once, and a late destroyed event for the OLD
-    document cannot unsubscribe its replacement."""
+    """Re-creating a name on the same tab leaves ONE live binding: the old one
+    is dropped first, so a call runs the new function exactly once."""
     ran = []
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "same", lambda: ran.append("old"), bindings)
+    await _install(tab, "same", lambda: ran.append("new"), bindings)
+
+    await tab.deliver(_event("same", "1", [], CREATING_CONTEXT))
+
+    assert ran == ["new"]
+    assert set(bindings) == {("T-a", "same")}
+    assert tab.methods().count("Runtime.removeBinding") == 1  # the old one
+
+
+async def test_a_late_event_for_the_old_document_leaves_the_replacement_alone():
+    """After a navigation the binding is made again for the new document; a late
+    (repeated) destroyed event for the OLD document cannot unsubscribe it, and a
+    call from the old context is refused."""
+    ran = []
+    bindings = python_binding.Bindings()
     tab = _FakeTab(context=7)
     await _install(tab, "same", lambda: ran.append("old"), bindings)
-    tab.context = 9
+    await tab.navigate(9)
+    assert bindings == {}
     await _install(tab, "same", lambda: ran.append("new"), bindings)
     removals = tab.methods().count("Runtime.removeBinding")
 
@@ -305,9 +399,9 @@ async def test_recreating_a_name_replaces_it_and_runs_once():
 
 
 async def test_no_execution_context_means_no_binding():
-    """Chrome not naming the context fails closed: nothing is registered or
-    exposed."""
-    bindings: python_binding.Bindings = {}
+    """No default context for the main frame reported by Chrome fails closed:
+    nothing is registered or exposed."""
+    bindings = python_binding.Bindings()
     tab = _FakeTab(context=None)
 
     with pytest.raises(ToolError, match="execution context"):
@@ -317,8 +411,168 @@ async def test_no_execution_context_means_no_binding():
     assert "Runtime.addBinding" not in tab.methods()
 
 
+async def test_the_context_comes_from_the_replayed_created_events():
+    """The context is learned from ``executionContextCreated``, which Chrome
+    replays only on a real enable: the tab's watch disables and re-enables
+    Runtime (handlers already attached) BEFORE anything is exposed."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab(context=41)
+
+    await _install(tab, "ctx", lambda: 1, bindings)
+
+    methods = tab.methods()
+    assert methods[:2] == ["Runtime.disable", "Runtime.enable"]
+    assert methods.index("Runtime.enable") < methods.index("Runtime.addBinding")
+    bound = bindings[("T-a", "ctx")]
+    assert (bound.context_id, bound.unique_id) == (41, "unique-41")
+
+
+async def test_only_the_main_frames_default_context_is_taken():
+    """An isolated world of the main frame and a default context of a child frame
+    are not the page's own script: with only those on offer there is no binding,
+    and a later main default context is the one taken."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab(context=None)
+
+    async def create_noise():
+        await tab.deliver(_created(50, frame="T-a", is_default=False))
+        await tab.deliver(_created(51, frame="child-frame"))
+
+    tab.on_send["Runtime.enable"] = create_noise
+    with pytest.raises(ToolError, match="execution context"):
+        await _install(tab, "iso", lambda: 1, bindings)
+    assert bindings == {}
+
+    tab.main = (52, "unique-52")
+    await tab.deliver(_created(52))  # the main frame's default context
+    await _install(tab, "iso", lambda: 1, bindings)
+    assert bindings[("T-a", "iso")].context_id == 52
+
+
+async def test_a_context_with_the_same_id_and_another_unique_id_drops_it():
+    """Ids are per-isolate counters: another process's context reuses the
+    integer. Its ``uniqueId`` differs, so the binding is dropped even though no
+    destroyed event ever arrived — and the integer no longer matches anything."""
+    ran = []
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "dup", lambda: ran.append(1), bindings)
+
+    await tab.deliver(_created(CREATING_CONTEXT, unique="another-process", frame="x"))
+
+    assert bindings == {}
+    assert tab.methods().count("Runtime.removeBinding") == 1
+    await tab.deliver(_event("dup", "1", [], CREATING_CONTEXT))
+    assert ran == []
+
+
+async def test_the_same_context_reported_again_does_not_drop_it():
+    """The replay (or a repeat) of the binding's own context — same id, same
+    uniqueId — is not another document."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "keep", lambda: 1, bindings)
+
+    await tab.deliver(_created(CREATING_CONTEXT, CREATING_UNIQUE))
+    await tab.deliver(_created(CREATING_CONTEXT + 1, frame="child-frame"))
+
+    assert ("T-a", "keep") in bindings
+
+
+async def test_main_frame_navigation_drops_it_but_a_child_frames_does_not():
+    """``Page.frameNavigated`` of the main frame ends the document even if no
+    context event is seen; a child frame navigating is not the page's."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "nv", lambda: 1, bindings)
+
+    await tab.deliver(_navigated("child-frame", parent="T-a"))
+    assert ("T-a", "nv") in bindings
+
+    await tab.deliver(_navigated("T-a"))
+    assert bindings == {}
+    assert tab.methods().count("Runtime.removeBinding") == 1
+
+
+async def test_a_navigation_between_the_read_and_addbinding_fails_closed():
+    """The page navigates while ``Runtime.addBinding`` is in flight: the context
+    read a moment ago is gone. The creation raises, nothing stays registered, and
+    ``Runtime.removeBinding`` takes the binding back out of the page."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab(context=7)
+
+    async def navigate_now():
+        await tab.navigate(9)
+
+    tab.on_send["Runtime.addBinding"] = navigate_now
+    with pytest.raises(ToolError, match="page changed"):
+        await _install(tab, "race", lambda: 1, bindings)
+    await asyncio.sleep(0)
+
+    assert bindings == {}
+    assert "Runtime.removeBinding" in tab.methods()
+    assert not any(
+        "window.__race_binding" in f.get("params", {}).get("expression", "")
+        for f in tab.frames
+    )  # the wrapper was never injected
+
+
+async def test_a_navigation_during_the_wrapper_injection_fails_closed():
+    """The same, after the binding was added: the wrapper must not be reported
+    installed for a page that is no longer the one the binding answers."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab(context=7)
+
+    async def navigate_now():
+        await tab.navigate(9)
+
+    tab.on_send["Runtime.evaluate"] = navigate_now
+    with pytest.raises(ToolError):
+        await _install(tab, "race2", lambda: 1, bindings)
+    await asyncio.sleep(0)
+
+    assert bindings == {}
+    assert "Runtime.removeBinding" in tab.methods()
+
+
+async def test_one_handler_set_per_tab_however_many_bindings():
+    """Every create used to add three more handlers to the tab for its whole
+    life; the tab's one watch dispatches by registry lookup instead, so the
+    count is fixed — and each binding still reaches only its own function."""
+    ran = []
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "first", lambda: ran.append("first"), bindings)
+    baseline = len(tab.handlers)
+
+    for i in range(10):
+        await _install(tab, f"b{i}", lambda i=i: ran.append(i), bindings)
+        await _install(tab, "first", lambda: ran.append("first"), bindings)
+
+    assert len(tab.handlers) == baseline == 5
+    await tab.deliver(_event("b3", "1", [], CREATING_CONTEXT))
+    await tab.deliver(_event("first", "2", [], CREATING_CONTEXT))
+    assert ran == [3, "first"]
+
+
+async def test_a_new_connection_to_the_same_target_gets_its_own_handlers():
+    """A tab object that is not the one the watch was made for (a reconnect)
+    cannot rely on its handlers or on bindings made on the old connection: the
+    old ones are dropped and the new tab is watched."""
+    bindings = python_binding.Bindings()
+    old = _FakeTab()
+    await _install(old, "x", lambda: 1, bindings)
+    new = _FakeTab()
+
+    await _install(new, "y", lambda: 1, bindings)
+
+    assert set(bindings) == {("T-a", "y")}
+    assert len(new.handlers) == 5
+    assert "Runtime.removeBinding" in new.methods()  # x, off the new connection
+
+
 async def test_failed_install_leaves_nothing_registered():
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     tab.wrapper_value = None
 
@@ -333,7 +587,7 @@ async def test_binding_called_ignores_other_bindings_name():
     """A handler filtered to 'add' must ignore an event for a different binding
     (prevents cross-processing when several bindings live on one tab)."""
     ran = []
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "add", lambda *a: ran.append(a), bindings)
     frames_before = len(tab.frames)
@@ -350,7 +604,9 @@ async def test_call_python_from_js_supports_coroutine_functions():
     async def amul(a, b):
         return a * b
 
-    bound = python_binding.BoundPython("amul", amul, "T-a", CREATING_CONTEXT)
+    bound = python_binding.BoundPython(
+        "amul", amul, "T-a", CREATING_CONTEXT, CREATING_UNIQUE
+    )
     outcome = await python_binding.call_python_from_js(bound, [4, 5])
     assert outcome["success"] is True
     assert outcome["result"] == 20
@@ -363,7 +619,7 @@ async def test_binding_result_error_is_dispatched_not_raised():
     def boom():
         raise ValueError("kaboom")
 
-    bindings: python_binding.Bindings = {}
+    bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "boom", boom, bindings)
 
