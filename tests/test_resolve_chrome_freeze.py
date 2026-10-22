@@ -349,6 +349,25 @@ def test_linux_dpkg_version_wins_without_running_chrome(monkeypatch):
     assert calls == ["dpkg-query"]
 
 
+def test_linux_a_chrome_outside_the_deb_dir_never_takes_the_package_version(
+    monkeypatch,
+):
+    """dpkg's google-chrome-stable version describes /opt/google/chrome only;
+    a Chrome for Testing binary must report its OWN version."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv[0])
+        if argv[0] == "dpkg-query":
+            return _done("131.0.6778.85-1")
+        return _done("Google Chrome for Testing 140.0.7339.0")
+
+    _linux(monkeypatch, fake_run)
+    cft = Path("/home/runner/cft/chrome-linux64/chrome")
+    assert resolve_chrome._read_version(cft) == "140.0.7339.0"
+    assert "dpkg-query" not in calls
+
+
 def test_linux_timeout_then_retry_succeeds(monkeypatch):
     chrome_calls = []
 
