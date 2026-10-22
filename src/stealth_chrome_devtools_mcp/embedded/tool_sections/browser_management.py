@@ -780,14 +780,17 @@ async def close_instance(
         used to go into a dict this tool discarded, which is how F-910 hid a
         seed that had silently stopped moving.
     """
+    # F-1022: notice a crash HERE, so a dead browser is always the discarded one
+    # whichever call saw it first. The discard already released its clone dir and
+    # popped its diagnostics; the selection it spawned with is kept for this close.
+    await rt.browser_manager.get_instance(instance_id)
     spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(instance_id)
     profile_selection = {}
     if isinstance(spawn_diagnostics, dict):
         profile_selection = spawn_diagnostics.get("profile_selection") or {}
-    # F-1022: a browser that crashed was discarded by an earlier tool call, which
-    # popped its diagnostics; the selection it spawned with is kept for exactly this
-    # close, so the answer below is the same whichever call noticed the crash first.
-    profile_selection = profile_selection or tool_errors.exited_selection(instance_id)
+    crashed_selection = tool_errors.exited_selection(instance_id)
+    crashed = crashed_selection is not None
+    profile_selection = crashed_selection or profile_selection
     rt.shared_session.require_shared_session_named(
         instance_id, profile_selection, session
     )
@@ -808,13 +811,16 @@ async def close_instance(
         rt.dynamic_hook_system.remove_instance(instance_id)
         # Instance is gone — lift sweep protection for its disposable clone so the
         # storage cap can reclaim it later if the on-close delete was deferred.
-        clone_protection.release_selection(profile_selection)
-        # A `default` browser that CRASHED refreshes the seed too: the copy is the
-        # same `_refresh_master_snapshot_if_safe` (it refuses a held profile), and the
-        # next clone's `_refresh_snapshot_if_stale` would copy the same unclean
-        # profile anyway, so skipping would only defer it and make the two orderings
-        # answer differently (F-1022).
-        if should_refresh_snapshot:
+        # A crashed browser's discard released it already, and the directory may
+        # since belong to a NEW spawn, so releasing again would unprotect that one.
+        if not crashed:
+            clone_protection.release_selection(profile_selection)
+        # Never refresh the seed from a `default` browser KNOWN to have crashed: its
+        # profile may be torn and the good seed must stay. Same answer either way.
+        if should_refresh_snapshot and crashed:
+            answer["seed_refreshed"] = False
+            answer["seed_error"] = "default-crashed"
+        elif should_refresh_snapshot:
             refresh = await asyncio.to_thread(
                 rt.clone_storage._refresh_master_snapshot_if_safe,
                 "after-default-close",

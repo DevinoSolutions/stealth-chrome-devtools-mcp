@@ -527,10 +527,14 @@ def _closing_server(patched_server, *, role: str, refresh: dict | None):
     async def _clear(instance_id):
         return None
 
+    async def _get_instance(instance_id):
+        return {"live": True}
+
     server = patched_server(
         browser_manager=SimpleNamespace(
             close_instance=_close,
             get_spawn_diagnostics=_spawn_diagnostics,
+            get_instance=_get_instance,
         ),
         network_interceptor=SimpleNamespace(clear_instance_data=_clear),
         dynamic_hook_system=SimpleNamespace(remove_instance=MagicMock()),
@@ -635,8 +639,8 @@ async def test_a_crashed_clone_is_released_to_the_sweep_whichever_call_noticed(
 ):
     """F-1022 review: the discard popped the spawn diagnostics, so the tool saw no
     clone and left its dir in ``clone_protection.PROTECTED`` (sweep-exempt) until a
-    backend restart. The discard itself now releases it — the browser is gone
-    whether or not anyone ever calls ``close_instance`` — and the close that follows
+    backend restart. The discard itself now releases it - the browser is gone
+    whether or not anyone ever calls ``close_instance`` - and the close that follows
     answers the same as when it noticed the crash itself."""
     clone = tmp_path / "clone-1"
     clone.mkdir()
@@ -662,17 +666,76 @@ async def test_a_crashed_clone_is_released_to_the_sweep_whichever_call_noticed(
         clone_protection.release(clone)
 
 
+@pytest.mark.asyncio
+async def test_closing_a_crashed_id_never_unprotects_a_respawn_in_its_dir(
+    patched_server, call_tool, tmp_path
+):
+    """F-1022 review 2: clone dirs are deterministic per client session, so once the
+    discard frees one, a respawn reserves it again. The later ``close_instance`` of
+    the OLD crashed id must not release it a second time: that is the NEW spawn's
+    in-flight protection (F-834)."""
+    clone = tmp_path / "clone-1"
+    clone.mkdir()
+    clone_protection.protect(clone)
+    try:
+        server, manager = _crashed_browser_server(
+            patched_server,
+            {"profile_role": "clone", "user_data_dir": str(clone)},
+            [],
+        )
+        assert await manager.get_instance("crash-1") is None  # discard releases
+        clone_protection.protect(clone)  # a respawn reserves the same dir
+
+        answer = await call_tool(server, "close_instance", instance_id="crash-1")
+
+        assert answer["closed"] is True, answer
+        assert clone_protection.is_protected(clone), (
+            "closing the old crashed id unprotected the NEW spawn's clone dir"
+        )
+    finally:
+        clone_protection.release(clone)
+
+
+@pytest.mark.parametrize(
+    "noticed_first", [True, False], ids=["discard-first", "close-first"]
+)
+@pytest.mark.parametrize("role", ["default", "fleet", "named"])
+@pytest.mark.asyncio
+async def test_a_crashed_non_clone_dir_is_never_unprotected(
+    patched_server, call_tool, tmp_path, role, noticed_first
+):
+    """F-1022 review 2: only a disposable clone's dir is ever released. A crashed
+    named, ``fleet`` or ``default`` session's dir is left exactly as it was by the
+    discard and by the close, in both orderings."""
+    directory = tmp_path / role
+    directory.mkdir()
+    clone_protection.protect(directory)
+    try:
+        server, manager = _crashed_browser_server(
+            patched_server, {"profile_role": role, "user_data_dir": str(directory)}, []
+        )
+        if noticed_first:
+            assert await manager.get_instance("crash-1") is None
+            assert clone_protection.is_protected(directory), "the discard released it"
+
+        await call_tool(server, "close_instance", instance_id="crash-1", session=role)
+
+        assert clone_protection.is_protected(directory), role
+    finally:
+        clone_protection.release(directory)
+
+
 @pytest.mark.parametrize(
     "noticed_first", [True, False], ids=["discard-first", "close-first"]
 )
 @pytest.mark.asyncio
-async def test_a_crashed_default_browser_refreshes_the_seed_either_way_round(
+async def test_a_crashed_default_browser_never_refreshes_the_seed(
     patched_server, call_tool, noticed_first
 ):
-    """F-1022 review: the seed refresh is kept for a crashed ``default`` browser.
-    The copy is the guarded ``_refresh_master_snapshot_if_safe``, and the next
-    clone's stale-seed refresh would copy the same unclean profile, so skipping only
-    deferred it and made the two orderings answer differently (``None`` vs ``True``)."""
+    """F-1022 review 2: master-profile loss is top severity, so the good seed is not
+    overwritten from a profile whose browser crashed. Both orderings answer alike:
+    ``seed_refreshed: False`` with ``seed_error: "default-crashed"``, and the refresh
+    never runs. (A live ``default`` close still refreshes: the tests above.)"""
     refreshes: list[str] = []
     server, manager = _crashed_browser_server(
         patched_server,
@@ -689,8 +752,12 @@ async def test_a_crashed_default_browser_refreshes_the_seed_either_way_round(
         server, "close_instance", instance_id="crash-1", session="default"
     )
 
-    assert refreshes == ["after-default-close"], refreshes
-    assert answer == {"closed": True, "seed_refreshed": True}, answer
+    assert refreshes == [], refreshes
+    assert answer == {
+        "closed": True,
+        "seed_refreshed": False,
+        "seed_error": "default-crashed",
+    }, answer
 
 
 @pytest.mark.parametrize(
@@ -700,7 +767,7 @@ async def test_a_crashed_default_browser_refreshes_the_seed_either_way_round(
 async def test_an_unnamed_close_of_a_crashed_fleet_browser_is_refused_either_way_round(
     patched_server, call_tool, noticed_first
 ):
-    """F-1022 review: the refusal keeps its one rule — it names which profile the id
+    """F-1022 review: the refusal keeps its one rule - it names which profile the id
     was, so the answer does not depend on which call noticed the crash. Refused,
     the claim is NOT consumed: closing it with its session name still answers True."""
     server, manager = _crashed_browser_server(
