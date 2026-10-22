@@ -203,7 +203,7 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
         self._instances.pop(instance_id, None)
         self._exited.append((instance_id, data))
-        tool_errors.remember_departed(instance_id, data)
+        tool_errors.remember_departed(instance_id, data, exited=True)
         self._spawn_diagnostics.pop(instance_id, None)
         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
         if proxy_forwarder is not None:
@@ -831,7 +831,7 @@ class BrowserManager:
         # -- Phase 1: claim (under lock, O(microseconds)) --------------------
         async with self._lock:
             if instance_id not in self._instances:
-                return False
+                return tool_errors.claim_exited(instance_id)  # F-1022
             data = self._instances.pop(instance_id)
             tool_errors.remember_departed(instance_id, data)
             self._spawn_diagnostics.pop(instance_id, None)
