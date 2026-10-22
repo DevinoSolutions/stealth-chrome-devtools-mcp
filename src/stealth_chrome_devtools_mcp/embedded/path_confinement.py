@@ -143,19 +143,6 @@ def _is_under(target: str, root: str) -> bool:
     return target == root or target.startswith(root.rstrip("\\/") + os.sep)
 
 
-def _platform_default_session_root(home: Path) -> Path:
-    """``STEALTH_MCP_BROWSER_SESSION_ROOT``'s default, whatever it is set to now.
-
-    Mirrors ``clone_storage.default_session_root``'s unset branch (which is
-    inline there and that file is at its line budget); a test pins that the two
-    agree. Denied alongside the configured root so redirecting the setting does
-    not un-protect the profiles left in the default place.
-    """
-    if os.name == "nt":
-        return Path(r"C:\stealth-mcp-browser-sessions")
-    return home / ".stealth-mcp-browser-sessions"
-
-
 def _secret_roots() -> list[tuple[str, Path]]:
     """``(rule label, directory)`` for every denied tree, computed at call time.
 
@@ -215,7 +202,9 @@ def _secret_roots() -> list[tuple[str, Path]]:
     roots.extend(
         ("the stealth browser-session root", directory)
         for directory in (
-            _platform_default_session_root(home),
+            # The default too, so redirecting the setting does not un-protect
+            # the profiles left in the default place.
+            clone_storage.platform_default_session_root(),
             clone_storage.default_session_root(),
             clone_storage.clone_root_dir(),
             clone_storage.master_profile_dir(),

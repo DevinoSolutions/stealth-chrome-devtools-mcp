@@ -287,7 +287,7 @@ async def test_the_session_root_is_denied_wherever_the_setting_puts_it(
             get_settings.cache_clear()
             with pytest.raises(ToolError, match="browser-session root"):
                 await _upload(srv, cookies)
-            default_root = path_confinement._platform_default_session_root(home)
+            default_root = clone_storage.platform_default_session_root()
             rule = path_confinement.secret_location_rule(
                 default_root / "master" / "Default" / "Cookies"
             )
@@ -304,7 +304,7 @@ async def test_the_session_root_is_denied_wherever_the_setting_puts_it(
             lambda: SimpleNamespace(browser_session_root=""),
         )
         assert clone_storage.default_session_root() == (
-            path_confinement._platform_default_session_root(Path.home())
+            clone_storage.platform_default_session_root()
         )
 
 
