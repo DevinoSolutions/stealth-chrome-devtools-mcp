@@ -283,7 +283,9 @@ def doomed_manager(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(BrowserManager, "_launch_browser", failing_launch)
     monkeypatch.setattr(process_cleanup, "pid_file", tmp_path / "browser_pids.json")
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
     return BrowserManager()
 
 

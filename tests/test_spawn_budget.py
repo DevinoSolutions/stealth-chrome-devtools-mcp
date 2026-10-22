@@ -112,7 +112,9 @@ def pid_file(tmp_path, monkeypatch):
 def _short_budgets(monkeypatch):
     monkeypatch.setattr(spawn_budget, "LAUNCH_BUDGET_SECONDS", AMPLE_BUDGET)
     monkeypatch.setattr(spawn_budget, "POST_LAUNCH_BUDGET_SECONDS", AMPLE_BUDGET)
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
     monkeypatch.setattr(spawn_contention, "contention_hint", lambda n: None)
     monkeypatch.setattr(google_rotation_guard, "arm", _no_arm)
     monkeypatch.setattr(

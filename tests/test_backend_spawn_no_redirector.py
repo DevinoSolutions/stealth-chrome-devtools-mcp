@@ -82,6 +82,7 @@ def test_the_command_runs_the_base_interpreter_not_the_redirector():
         "4321",
         "--host",
         "127.0.0.1",
+        "--exit-if-unadopted",  # F-1023
     ]
     if _REDIRECTOR:
         assert cmd[0] == sys._base_executable

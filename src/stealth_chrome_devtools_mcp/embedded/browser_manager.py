@@ -744,6 +744,7 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
             raise
         except Exception as e:
+            ev = spawn_exhaustion.observe(spawn_leak.started(launch_attempt))
             await self._teardown_failed_spawn(
                 "error",
                 instance_id,
@@ -757,9 +758,8 @@ class BrowserManager:
             except (OSError, psutil.Error, ProcessLookupError) as err:
                 self._warn_spawn_cleanup("Process kill", "error", instance_id, err)
             instance.state = BrowserState.ERROR
-            # Two independent causes, two homes, one composition site: each hint
-            # carries its own "\n\n", so this stays a bare concatenation.
-            hint = spawn_exhaustion.exhaustion_hint(process_cleanup.pid_file) or ""
+            # Each hint carries its own "\n\n", so this stays a bare concatenation.
+            hint = spawn_exhaustion.exhaustion_hint(process_cleanup.pid_file, ev) or ""
             hint += spawn_contention.contention_hint(self._spawn_peak_in_flight) or ""
             # No "Failed to spawn browser:" prefix here: the spawn_browser tool in
             # server.py wraps this exception with exactly one, and carrying a second

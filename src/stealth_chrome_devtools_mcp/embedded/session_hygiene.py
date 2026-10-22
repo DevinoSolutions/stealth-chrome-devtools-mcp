@@ -63,7 +63,7 @@ from starlette.responses import JSONResponse
 from stealth_chrome_devtools_mcp.embedded.backend_probe import HEALTH_PATH
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 
     from fastmcp import FastMCP
     from starlette.requests import Request
@@ -75,6 +75,11 @@ if TYPE_CHECKING:
 # thinking. Read at sweep time so a test can shrink them.
 ABANDONED_AFTER_SECONDS = 300.0
 SWEEP_INTERVAL_SECONDS = 30.0
+# F-1023: how long a backend spawned by a cold start (``--exit-if-unadopted``) waits
+# for its FIRST client before it concludes nobody is coming. The same five minutes as
+# above, for the same reason: it is "gone", not "thinking" (a proxy waits at most
+# BACKEND_READY_TIMEOUT, 120 s, from its own start, and connects the moment we answer).
+UNADOPTED_AFTER_SECONDS = ABANDONED_AFTER_SECONDS
 
 _SESSION_HEADER = b"mcp-session-id"
 _logger = logging.getLogger("stealth.backend")
@@ -89,6 +94,7 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self.last_seen: dict[str, float] = {}
         self.reaped_total = 0
+        self.ever_served = False  # F-1023: any client has reached /mcp, even once
         _managers.append(weakref.ref(self))
 
     def note_activity(self, session_id: str, *, now: float | None = None) -> None:
@@ -101,6 +107,7 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
         return group is not None and not group.cancel_scope.cancel_called
 
     async def handle_request(self, scope: Scope, receive: Receive, send: Send) -> None:
+        self.ever_served = True
         session_id = _session_id(scope.get("headers") or ())
         if session_id:
             self.note_activity(session_id)
@@ -178,6 +185,41 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
                 self.reaped_total,
             )
         return reaped
+
+
+async def exit_if_unadopted(
+    has_browsers: Callable[[], Awaitable[bool]], stop: Callable[[], None]
+) -> bool:
+    """Stop this backend if no client ever came for it (F-1023); True iff it did.
+
+    A cold start spawns a backend for a proxy, and the proxy can be gone before the
+    backend ever listens (a slow, swapping machine; a client that quit). Nothing else
+    ends such a backend: the browser idle reaper has no browsers to reap and the
+    liveness machinery only judges backends someone is talking to, so it sat idle for
+    as long as the machine stayed up (measured 2026-10-21: ~140 MB, no client).
+
+    After :data:`UNADOPTED_AFTER_SECONDS` it ends the process through *stop* only when
+    BOTH hold: no request ever reached ``/mcp`` (so no one adopted it, and an adopted
+    backend is never touched however quiet it later goes), and it hosts no browser (a
+    persistent-profile browser a previous backend left, adopted by F-888, is a reason to
+    stay). Anything unclear leaves it running. Never raises into the lifespan."""
+    await anyio.sleep(UNADOPTED_AFTER_SECONDS)
+    manager = active_manager()
+    if manager is None or manager.ever_served:
+        return False
+    try:
+        if await has_browsers():
+            return False
+    except Exception as error:  # noqa: BLE001  PERMANENT(an unanswerable question keeps the backend)
+        _logger.warning("unadopted-backend check could not list browsers: %r", error)
+        return False
+    _logger.warning(
+        "no client reached this backend in %.0fs and it hosts no browser; exiting "
+        "(F-1023)",
+        UNADOPTED_AFTER_SECONDS,
+    )
+    stop()
+    return True
 
 
 def _session_id(headers: Iterable[tuple[bytes, bytes]]) -> str | None:

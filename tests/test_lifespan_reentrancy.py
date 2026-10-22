@@ -177,3 +177,57 @@ async def test_the_priority_is_raised_once_and_before_any_browser_work(
     order = spies["order"]
     assert order.count("raise_priority") == 1
     assert order.index("raise_priority") < order.index("start_idle_reaper")
+
+
+class _SpyHygiene:
+    """Records the one call the lifespan makes to ``session_hygiene`` (F-1023)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, Any]] = []
+
+    async def exit_if_unadopted(self, has_browsers, stop) -> bool:
+        self.calls.append((has_browsers, stop))
+        return False
+
+
+async def test_a_cold_started_backend_arms_the_unadopted_exit(
+    monkeypatch, spies, patched_server
+):
+    """F-1023: ``--exit-if-unadopted`` + http starts the watch, once, with a browser
+    question that asks the live manager and a stop that raises SIGTERM."""
+    hygiene = _SpyHygiene()
+    patched_server(session_hygiene=hygiene)
+    monkeypatch.setattr(server, "_SERVE_TRANSPORT", "http", raising=False)
+    monkeypatch.setattr(server, "_EXIT_IF_UNADOPTED", True, raising=False)
+    raised: list[int] = []
+    monkeypatch.setattr(server.signal, "raise_signal", raised.append)
+    spies["bm"].list_instances = _list_instances  # type: ignore[method-assign]
+
+    async with server.app_lifespan(None):
+        await server._UNADOPTED_WATCH
+    async with server.app_lifespan(None):
+        pass
+
+    assert len(hygiene.calls) == 1
+    has_browsers, stop = hygiene.calls[0]
+    assert await has_browsers() is False
+    stop()
+    assert raised == [server.signal.SIGTERM]
+
+
+async def test_an_operator_started_backend_never_arms_it(
+    monkeypatch, spies, patched_server
+):
+    hygiene = _SpyHygiene()
+    patched_server(session_hygiene=hygiene)
+    monkeypatch.setattr(server, "_SERVE_TRANSPORT", "http", raising=False)
+    monkeypatch.setattr(server, "_EXIT_IF_UNADOPTED", False, raising=False)
+
+    async with server.app_lifespan(None):
+        pass
+
+    assert hygiene.calls == []
+
+
+async def _list_instances() -> list[Any]:
+    return []
