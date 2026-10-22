@@ -30,9 +30,6 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 WINDOWS_ONLY = pytest.mark.skipif(
     sys.platform != "win32", reason="Win32 drops trailing dots and spaces"
 )
-POSIX_ONLY = pytest.mark.skipif(
-    sys.platform == "win32", reason="/proc is a Linux file system"
-)
 LINUX_ONLY = pytest.mark.skipif(
     not Path("/proc/self/environ").exists(), reason="needs a Linux /proc"
 )
@@ -139,6 +136,16 @@ REDACTED_NAMES = [
     "password",
     "X-Password",
     "x-passwd",
+    # Key headers named outright (a generic `-key` suffix would hide
+    # sec-websocket-key, which is a handshake nonce).
+    "x-auth-key",
+    "X_Access_Key",
+    "ocp-apim-subscription-key",
+    "x-functions-key",
+    "x-amzn-oidc-data",
+    "x-amzn-oidc-accesstoken",
+    "x-hub-signature",
+    "X-Hub-Signature-256",
     # The names the first rule already caught keep being caught, spelled both ways.
     "x-api-key",
     "x_auth_token",
@@ -159,6 +166,12 @@ VISIBLE_NAMES = [
     "cache-control",
     "x-request-id",
     "content_length",
+    # Names a credential marker is a substring of, or that sit beside one.
+    "access-control-allow-credentials",
+    "Access-Control-Allow-Credentials",
+    "sec-fetch-site",
+    "sec-ch-ua",
+    "sec-websocket-key",
 ]
 
 
@@ -283,7 +296,6 @@ def test_the_deny_list_applies_the_proc_environ_rule_on_every_os(monkeypatch, sp
 
 
 @LINUX_ONLY
-@POSIX_ONLY
 @pytest.mark.parametrize(
     "spelling", ["/proc/self/environ", "/proc/thread-self/environ"]
 )
@@ -295,12 +307,92 @@ def test_a_live_proc_environ_is_refused_under_every_spelling(spelling):
 
 
 @LINUX_ONLY
-@POSIX_ONLY
 def test_the_pid_spelling_of_proc_environ_is_refused_too():
     assert "environ" in str(_refused(Path(f"/proc/{os.getpid()}/environ")))
 
 
 @LINUX_ONLY
-@POSIX_ONLY
 def test_other_proc_files_are_not_swept_up_by_the_environ_rule():
     assert path_confinement.secret_location_rule("/proc/self/status") is None
+
+
+def test_a_proc_environ_with_trailing_text_is_not_the_environment():
+    # ``$`` would let a trailing newline through; the name is exactly environ.
+    assert path_confinement.proc_environ_path("/proc/self/environ\n") is False
+    assert path_confinement.proc_environ_path("/proc/self/environ") is True
+
+
+# ------------------------------------------------ review of the first cut ----
+
+
+def test_an_unresolvable_path_is_a_tool_error_that_names_no_path(home, monkeypatch):
+    private = str(home / "secretuser" / ".pgpass::$INDEX_ALLOCATION")
+
+    def boom(_path):
+        raise NotADirectoryError(20, "The directory name is invalid", private)
+
+    monkeypatch.setattr(path_confinement.os.path, "realpath", boom)
+
+    for call in (
+        lambda: path_confinement.secret_location_rule(private),
+        lambda: path_confinement.refuse_secret_path(
+            private, tool="export_debug_logs", action="write to"
+        ),
+    ):
+        with pytest.raises(ToolError) as err:
+            call()
+        assert "secretuser" not in str(err.value)
+        assert "resolve" in str(err.value)
+        assert err.value.__cause__ is None
+        assert err.value.__suppress_context__
+
+
+def test_a_null_byte_path_is_a_tool_error_too(home):
+    with pytest.raises(ToolError, match="resolve"):
+        path_confinement.secret_location_rule(str(home / "a\x00b"))
+
+
+@WINDOWS_ONLY
+def test_an_alternate_data_stream_spelling_of_a_denied_file_is_a_tool_error(home):
+    (home / ".pgpass").write_text(SECRET, encoding="utf-8")
+    spelled = str(home / ".pgpass") + "::$INDEX_ALLOCATION"
+
+    with pytest.raises(ToolError) as err:
+        path_confinement.refuse_secret_path(
+            spelled, tool="export_debug_logs", action="write to"
+        )
+
+    assert str(home) not in str(err.value)
+    assert not isinstance(err.value.__cause__, OSError)
+
+
+@pytest.mark.parametrize(
+    "witness",
+    [
+        profile_seed.PROFILE_STATE_FILE,
+        *("Profile 1/" + w.partition("/")[2] for w in profile_seed.LOGIN_WITNESSES),
+        "Profile 12/Network/Cookies",
+    ],
+)
+def test_a_profile_with_only_local_state_or_a_numbered_profile_is_refused(
+    home, tmp_path, witness
+):
+    profile = tmp_path / "chrome-user-data"
+    (profile / witness).parent.mkdir(parents=True)
+    (profile / witness).write_text("x", encoding="utf-8")
+
+    for target in (
+        profile,
+        profile / "Profile 1" / "Preferences",
+        profile / "out.json",
+    ):
+        assert "Chrome profile" in str(_refused(target)), target
+
+
+def test_a_folder_named_profile_without_a_login_store_is_not_a_profile(home, tmp_path):
+    folder = tmp_path / "docs"
+    (folder / "Profile 1").mkdir(parents=True)
+    (folder / "Profile 1" / "resume.txt").write_text("x", encoding="utf-8")
+    (folder / "Local-State.txt").write_text("x", encoding="utf-8")
+
+    assert path_confinement.secret_location_rule(folder / "out.json") is None

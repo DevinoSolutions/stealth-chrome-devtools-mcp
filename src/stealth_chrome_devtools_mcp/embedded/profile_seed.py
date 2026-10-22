@@ -95,6 +95,12 @@ LOGIN_WITNESSES: tuple[str, ...] = (
     "Default/Web Data",
 )
 
+# The one file only a Chrome user-data-dir root carries, at its TOP level (it
+# holds the os_crypt key and the profile list). ``path_confinement`` reads it,
+# with the marker and ``LOGIN_WITNESSES`` (also under ``Profile N/``), to tell a
+# profile Chrome created from any other directory.
+PROFILE_STATE_FILE = "Local State"
+
 # What a marker that predates F-895 says about its seed: nothing at all.
 UNKNOWN_SEED = "unknown"
 

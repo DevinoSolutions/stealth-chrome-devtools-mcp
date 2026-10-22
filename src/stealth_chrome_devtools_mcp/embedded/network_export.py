@@ -39,8 +39,20 @@ CREDENTIAL_HEADERS = frozenset(
         "x-csrf-token",
         "x-xsrf-token",
         "x-amz-security-token",
+        "x-auth-key",
+        "x-access-key",
+        "ocp-apim-subscription-key",
+        "x-functions-key",
+        "x-amzn-oidc-data",
+        "x-amzn-oidc-accesstoken",
+        "x-hub-signature",
+        "x-hub-signature-256",
     }
 )
+
+#: Names a marker would catch that carry no secret. ``Access-Control-Allow-
+#: Credentials`` is the CORS flag, whose value is ``true``.
+HARMLESS_HEADERS = frozenset({"access-control-allow-credentials"})
 
 #: A header whose NAME contains one of these is a credential too (``x-session-
 #: token``, ``x-client-secret``, ``x-goog-api-key``, ``cf-access-jwt-assertion``,
@@ -64,6 +76,8 @@ def is_credential_header(name: str) -> bool:
     """Whether the header called *name* carries a credential, case-blind and
     with ``-`` and ``_`` treated alike."""
     lowered = name.lower().replace("_", "-")
+    if lowered in HARMLESS_HEADERS:
+        return False
     return lowered in CREDENTIAL_HEADERS or any(
         marker in lowered for marker in CREDENTIAL_HEADER_MARKERS
     )
