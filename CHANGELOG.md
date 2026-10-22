@@ -43,6 +43,17 @@ a differing `screenWidth` were measured and do NOT misplace input: only the over
 coordinates it is given, a touch override's `Input.dispatchTouchEvent` is not used by any tool, and inside an iframe under a scale a probe can fall outside
 the frame, in which case the click raises rather than missing (`audit/stage2/finding_F1017_click_under_device_metrics_scale.md`).
 
+### An unanswered `Page.navigate` no longer starves the stale-tab recovery retry (F-1026, T-6363)
+
+`navigate` caps the whole call at `timeout + 5` s, but when Chrome never answered the first `Page.navigate` the attempt waited the full
+`timeout` (30 s), so F-824's one stale-tab recovery retry had ~5 s and was cancelled mid-send (`CDP operation timed out after 35s`, seen on
+main CI in `test_list_tabs_after_close_tab`). `navigation_milestone.navigate` now gives up on a tab that shows NO sign of life:
+no `Page.frameStartedLoading` within `ACCEPT_SECONDS` (10 s, and at most a third of the caller's `timeout`). The `TimeoutError` it raises is
+the one the existing recovery already retries, so no second retry path exists. The bound is on silence, not on the reply, because Chrome
+answers `Page.navigate` only when the response headers arrive (measured: a server that sleeps 12 s gets `frameStartedLoading` at +9 ms and the
+reply at +12.04 s), so a slow server keeps the whole budget, pinned or not. Pins cover a silent stale tab (the retry gets a real budget) and a
+slow server (one navigation, no retry).
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
