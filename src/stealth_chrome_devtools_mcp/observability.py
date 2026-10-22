@@ -22,13 +22,17 @@ collision entirely.
 
 Every outgoing event goes through :func:`_scrub_event` first. Reporting is on by
 default for people who never chose it, so the events must not identify them —
-neither the machine nor the pages it drives. Four removals, all universal:
+neither the machine nor the pages it drives. Five removals, all universal:
 
 * the machine's ``server_name``;
 * the home-directory segment of every path, replaced with ``~``;
 * every email address, replaced with ``[redacted-email]`` (F-826);
 * every URL's query, fragment and userinfo, replaced with
-  ``[redacted-query]`` / ``[redacted-fragment]`` / ``[redacted]@`` (F-826).
+  ``[redacted-query]`` / ``[redacted-fragment]`` / ``[redacted]@`` (F-826);
+* every credential shape — ``Cookie:``/``Authorization:`` values, ``token=``/
+  ``secret=``/``password=`` values, JWTs, and the value of a request header named
+  authorization/cookie/set-cookie — replaced with ``[redacted-secret]`` (F-I,
+  T-6534). Breadcrumbs are covered because the walk covers the whole event.
 
 Everything a maintainer debugs from — release, environment, correlation ids, the
 exception type and mechanism, the module path after the home segment, a URL's
@@ -172,6 +176,43 @@ _EMAIL_TLD_RE = re.compile(r"\A[A-Za-z]{2,}\Z")
 #: with no dot is not an address a person can be reached at.
 _EMAIL_MIN_DOMAIN_LABELS = 2
 
+#: A header-shaped credential: ``Cookie: a=b; c=d``, ``Authorization: Bearer x``,
+#: ``document.cookie='sid=1'``. The VALUE runs to the end of the line or the next
+#: quote, because a cookie header and a ``Bearer <token>`` pair both contain
+#: spaces and ``;`` and stopping at the first one would leave the secret behind.
+#: The key and separator are kept so the report still says WHICH credential it
+#: was. The look-behind keeps it linear for the same reason as the rules above.
+_HEADER_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?P<key>(?:set-cookie|cookie|(?:proxy-)?authorization)[\"']?\s*[:=]\s*[\"']?)"
+    r"(?P<value>[^\r\n\"']++)",
+    re.IGNORECASE,
+)
+
+#: A typed secret: ``token=...``, ``"client_secret": "..."``, ``password: ...``.
+#: One whitespace-free run, so ``token=abc failed`` keeps its prose.
+_TYPED_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?P<key>(?:token|secret|password)[\"']?\s*[:=]\s*[\"']?)"
+    r"(?P<value>[^\s\"']++)",
+    re.IGNORECASE,
+)
+
+#: A JSON Web Token: three base64url segments, the first of which is ``{"``
+#: encoded (``eyJ``). Matched by shape so it is caught with no key beside it.
+_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{4,}+\.[A-Za-z0-9_\-]{4,}+\.[A-Za-z0-9_\-]*+"
+)
+
+#: Header names whose VALUE never leaves the machine, whatever it looks like
+#: (T-6534). Compared case-folded against a dict key, so an event's
+#: ``request.headers`` is covered without knowing where the SDK nests it.
+_SECRET_HEADER_NAMES = frozenset(
+    {"authorization", "proxy-authorization", "cookie", "set-cookie"}
+)
+
+_REDACTED_CREDENTIAL = "[redacted-secret]"
+
 _REDACTED_EMAIL = "[redacted-email]"
 _REDACTED_USERINFO = "[redacted]@"
 _REDACTED_QUERY = "?[redacted-query]"
@@ -245,10 +286,15 @@ def _redact_text(text: str) -> str:
 
     Order matters exactly once. The URL rule runs first so that a proxy URL's
     ``user:pass@host`` is already gone before the email rule looks for an ``@``;
-    afterwards the two cannot see each other's output. The home rule is last and
-    is independent of both.
+    afterwards the two cannot see each other's output. The three secret rules
+    (JWT shape, header-shaped credential, typed secret; F-I) run before the email
+    rule so a ``Cookie:`` value holding an address is gone whole. The home rule is
+    last and is independent of all of them.
     """
     text = _URL_RE.sub(_redact_url, text)
+    text = _JWT_RE.sub(_REDACTED_CREDENTIAL, text)
+    text = _HEADER_SECRET_RE.sub(rf"\g<key>{_REDACTED_CREDENTIAL}", text)
+    text = _TYPED_SECRET_RE.sub(rf"\g<key>{_REDACTED_CREDENTIAL}", text)
     text = _EMAIL_RE.sub(_redact_email, text)
     return _HOME_SEGMENT_RE.sub(lambda m: f"{m.group('prefix')}{_ANONYMOUS_USER}", text)
 
@@ -267,7 +313,14 @@ def _anonymize(value: object, depth: int = 0) -> object:
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, dict):
-        return {key: _anonymize(item, depth + 1) for key, item in value.items()}
+        return {
+            key: (
+                _REDACTED_CREDENTIAL
+                if isinstance(key, str) and key.lower() in _SECRET_HEADER_NAMES
+                else _anonymize(item, depth + 1)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_anonymize(item, depth + 1) for item in value]
     if isinstance(value, tuple):
@@ -446,12 +499,16 @@ def _scrub_event(
        :mod:`expected_events`;
     1. everything that survives is scrubbed.
 
-    Four removals, all universal — there is no maintainer-only path:
+    Five removals, all universal — there is no maintainer-only path:
 
     * ``server_name``, which is the machine's own hostname;
     * the home-directory segment of every path, which is the account name;
     * every email address (F-826);
-    * every URL's userinfo, query and fragment (F-826).
+    * every URL's userinfo, query and fragment (F-826);
+    * credential shapes in any string (``Cookie:``/``Authorization:`` values,
+      ``token=``/``secret=``/``password=`` values, JWTs) and the value of a
+      header NAMED authorization/cookie/set-cookie, in messages, breadcrumbs and
+      request headers alike (F-I, T-6534).
 
     Step 0 runs FIRST and that ordering is load-bearing in both directions: an
     expected ``ToolError`` is dropped whole, page content and all, so the rules

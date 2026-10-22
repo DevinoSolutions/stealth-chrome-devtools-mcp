@@ -3,15 +3,47 @@
 import contextlib
 import dataclasses
 import json
+import os
 import re
+import stat
+import sys
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+
+def _ensure_owner_only_dir(path: Path) -> None:
+    """Create ``path`` mode 0700, and narrow it if it already exists looser (F-J).
+
+    The spill directory holds whole tool results — page content, request
+    captures, extraction output — so on a shared POSIX host its mode is the only
+    thing between those and every other local user. ``mkdir``'s ``mode`` only
+    applies to a directory it creates, hence the explicit narrowing of one an
+    earlier version made with the umask default. Windows has no POSIX mode to
+    set; the per-user profile ACL is what protects the directory there. A
+    directory we do not own cannot be narrowed: that is logged, not raised,
+    because a spill that cannot be hardened is still better than a handler that
+    cannot be imported.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if sys.platform == "win32":
+        return
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            path.chmod(0o700)
+    except OSError as exc:
+        debug_logger.log_warning(
+            "response_handler",
+            "_ensure_owner_only_dir",
+            f"cannot restrict {path} to its owner",
+            error=exc,
+        )
 
 
 def default_clone_output_dir() -> Path:
@@ -225,7 +257,7 @@ class ResponseHandler:
             self.clone_dir = default_clone_output_dir()
         else:
             self.clone_dir = Path(clone_dir)
-        self.clone_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_owner_only_dir(self.clone_dir)
 
     def estimate_tokens(self, data: Any) -> int:
         """
@@ -299,8 +331,12 @@ class ResponseHandler:
             "data": data,
         }
 
-        # Save to file
-        with Path(file_path).open("w", encoding="utf-8") as f:
+        # Save to file. Created 0600 (F-J): the payload can carry cookies and
+        # headers, and the file outlives the call until ``cleanup_clone_files``.
+        # ``O_EXCL`` because the name is a fresh uuid, so an existing file is
+        # not ours to open.
+        descriptor = os.open(file_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
             # ``default=str`` guards the caller-supplied ``metadata`` too: a
             # half-written spill file would be worse than an approximate one.
             json.dump(file_content, f, indent=2, ensure_ascii=False, default=str)

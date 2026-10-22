@@ -240,7 +240,7 @@ class CDPFunctionExecutor:
             debug_logger.log_info(
                 "cdp_function_executor",
                 "execute_cdp_command",
-                f"Executed {command} with params: {params}",
+                f"Executed {command} with params: {sorted(params or {})}",
             )
             return {
                 "success": True,
@@ -840,7 +840,7 @@ class CDPFunctionExecutor:
             debug_logger.log_info(
                 "cdp_function_executor",
                 "execute_python_in_browser",
-                f"Translated JS: {js_code}",
+                f"Translated JS: {debug_logger.fingerprint(js_code)}",
             )
 
             return await asyncio.wait_for(
@@ -886,7 +886,7 @@ class CDPFunctionExecutor:
             debug_logger.log_info(
                 "cdp_function_executor",
                 "_translate_python_to_js",
-                f"py2js generated: {js_code}",
+                f"py2js generated: {debug_logger.fingerprint(js_code)}",
             )
 
             lines = python_code.strip().split("\n")
@@ -924,7 +924,7 @@ class CDPFunctionExecutor:
                 "cdp_function_executor",
                 "_translate_python_to_js",
                 e,
-                {"python_code": python_code},
+                {"python_code": debug_logger.fingerprint(python_code)},
             )
             return self._fallback_python_to_js(python_code)
 

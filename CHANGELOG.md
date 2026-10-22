@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
+
+`execute_python_in_browser` logged the translated JavaScript, and its failure
+path logged the Python source, at INFO on `stealth.backend`: the durable log
+under `~/.stealth-mcp/logs`, and a Sentry breadcrumb on the next error event, so
+a script such as `document.cookie='sid=...'` left the machine verbatim. Those
+lines now carry a length and a short sha256 (`DebugLogger.fingerprint`), and
+`execute_cdp_command` logs the parameter names rather than their values
+(`Network.setCookie`, `Runtime.evaluate` and `setExtraHTTPHeaders` params are
+credentials and script bodies by construction). The Sentry scrubber
+(`observability._scrub_event`, still the one hook) gained the rule it lacked:
+`Cookie:`/`Set-Cookie:`/`Authorization:` values, `token=`/`secret=`/`password=`
+values and JWT shapes are replaced in every string it walks, which includes
+messages and breadcrumbs, and the value of a request header NAMED authorization,
+proxy-authorization, cookie or set-cookie is dropped whatever it looks like
+(T-6534). The spill directory for over-size tool results is created 0700 (and
+narrowed if an earlier version made it looser), and each spill file is created
+0600, on POSIX. Not done: the same permissions for the other state, lock and
+profile directories (F-K's general `ensure_private_dir` sweep), `get_cookies`
+returning the whole jar (F-H), and a sweep of every other free-text log line for
+secrets, which the scrubber rule now backstops only for Sentry, not for the
+local log file.
+
 ### CI cancels a pull request's superseded runs (T-5430)
 
 `test.yml` now has a `concurrency` group keyed on the PR number (or the ref)
