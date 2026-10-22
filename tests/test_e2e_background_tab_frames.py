@@ -27,6 +27,7 @@ spawn closed in ``finally``. Hermetic: ``about:blank`` and ``window.open`` only.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 
 import pytest
@@ -200,8 +201,12 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         # per 2 s with nothing holding it. So the premise is MEASURED, and the
         # throttle-dependent assertions run only where it is observable; the product
         # claim (a tool-driven background tab ticks) is asserted on every platform.
+        # The exemption is macOS-only: on Windows and Linux (measured throttled) an
+        # unthrottled undriven tab is a product regression and must FAIL, not skip.
         undriven_rate = await _undriven_rate(iid, undriven)
         throttles = undriven_rate <= MAX_UNHELD_FRAMES
+        if sys.platform != "darwin":
+            assert throttles, f"undriven background tab counted {undriven_rate} frames"
 
         # A tool call starts the driven tab's loop: it is held from that call on.
         await execute(instance_id=iid, script=START_LOOP_JS, tab_id=driven)
@@ -219,7 +224,7 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
 
         if not throttles:
             pytest.skip(
-                f"this platform does not throttle an undriven background tab: its "
+                f"Chrome on this macOS host does not throttle an undriven background tab: its "
                 f"rAF loop counted {undriven_rate} frames in {MEASURE_MS} ms with no "
                 f"tool acting on it (throttled is <= {MAX_UNHELD_FRAMES}), so 'stays "
                 f"throttled' and 'falls back after the linger' cannot be observed "
