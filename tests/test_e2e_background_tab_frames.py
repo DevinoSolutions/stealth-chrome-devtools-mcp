@@ -177,8 +177,9 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
     A tab no tool acts on stays at its throttled rate, a driven one paints, and one
     that was driven falls back ``LINGER_SECONDS`` after the last call. "Stays
     throttled" is measured, not assumed: where Chrome does not throttle an untouched
-    background tab (the macOS CI runner has no display) the two throttle-dependent
-    assertions are skipped by name; the driven-tab assertions always run.
+    background tab (the macOS CI runner has no display) there is nothing for a hold
+    to lift, so the node skips by name; the product claim (a tool-driven background
+    tab paints) is the two other nodes', which run there.
     """
     monkeypatch.setattr(paint_hold, "LINGER_SECONDS", SHORT_LINGER_SECONDS)
     new_tab, close = get_fn("new_tab"), get_fn("close_instance")
@@ -200,13 +201,23 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         # and does not throttle a hidden tab's rAF: 62 frames headless, 121 headed
         # per 2 s with nothing holding it. So the premise is MEASURED, and the
         # throttle-dependent assertions run only where it is observable; the product
-        # claim (a tool-driven background tab ticks) is asserted on every platform.
+        # claim (a tool-driven background tab ticks) is the two other nodes'.
+        # Nothing here is observable without the throttle: the held rate measured
+        # after the call is then the runner's own, 17 frames per 2 s against the
+        # untouched tab's 62 on one macOS run, so a bar on it measures the runner.
         # The exemption is macOS-only: on Windows and Linux (measured throttled) an
         # unthrottled undriven tab is a product regression and must FAIL, not skip.
         undriven_rate = await _undriven_rate(iid, undriven)
-        throttles = undriven_rate <= MAX_UNHELD_FRAMES
-        if sys.platform != "darwin":
-            assert throttles, f"undriven background tab counted {undriven_rate} frames"
+        if sys.platform == "darwin" and undriven_rate > MAX_UNHELD_FRAMES:
+            pytest.skip(
+                f"Chrome on this macOS host does not throttle an undriven background "
+                f"tab: its rAF loop counted {undriven_rate} frames in {MEASURE_MS} ms "
+                f"with no tool acting on it (throttled is <= {MAX_UNHELD_FRAMES}), so "
+                f"there is no throttle for a hold to lift here"
+            )
+        assert undriven_rate <= MAX_UNHELD_FRAMES, (
+            f"undriven background tab counted {undriven_rate} frames"
+        )
 
         # A tool call starts the driven tab's loop: it is held from that call on.
         await execute(instance_id=iid, script=START_LOOP_JS, tab_id=driven)
@@ -214,22 +225,12 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
 
         # Without another call it falls back after the linger.
         await asyncio.sleep(SHORT_LINGER_SECONDS + 1)
-        if throttles:
-            assert await _undriven_rate(iid, driven) <= MAX_UNHELD_FRAMES
-            assert await _undriven_rate(iid, undriven) <= MAX_UNHELD_FRAMES
+        assert await _undriven_rate(iid, driven) <= MAX_UNHELD_FRAMES
+        assert await _undriven_rate(iid, undriven) <= MAX_UNHELD_FRAMES
 
         # A new call holds it again.
         await execute(instance_id=iid, script="return 1", tab_id=driven)
         assert await _undriven_rate(iid, driven) >= MIN_FRAMES
-
-        if not throttles:
-            pytest.skip(
-                f"Chrome on this macOS host does not throttle an undriven background tab: its "
-                f"rAF loop counted {undriven_rate} frames in {MEASURE_MS} ms with no "
-                f"tool acting on it (throttled is <= {MAX_UNHELD_FRAMES}), so 'stays "
-                f"throttled' and 'falls back after the linger' cannot be observed "
-                f"here; the driven-tab assertions above ran and passed"
-            )
     finally:
         await close(instance_id=iid)
 
