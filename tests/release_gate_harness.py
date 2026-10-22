@@ -489,6 +489,21 @@ def _pick_free_port(*, real_home: Path | None = None) -> int:
     )
 
 
+def use_isolated_token(monkeypatch, home_dir: Path) -> None:
+    """Make THIS process's first-party clients send the isolated backend's bearer
+    token (F-1018).
+
+    ``backend_token.token_path`` is ``backend_registry.STATE_DIR / "backend.token"``
+    and ``STATE_DIR`` is the TEST process's own home. A backend started under
+    :func:`_isolated_env` wrote its token under ``home_dir`` instead, so an
+    in-process probe of it (``singleton._backend_http_ready``,
+    ``backend_probe.ready``) sent another token, or none, and read the 401 as
+    "not serving". Subprocesses need nothing: their HOME already points there."""
+    from stealth_chrome_devtools_mcp.embedded import backend_registry
+
+    monkeypatch.setattr(backend_registry, "STATE_DIR", home_dir / ".stealth-mcp")
+
+
 def _isolated_env(
     *, home_dir: Path, session_root: Path, log_dir: Path, clone_dir: Path
 ) -> dict[str, str]:
