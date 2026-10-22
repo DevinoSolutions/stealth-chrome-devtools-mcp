@@ -48,11 +48,11 @@ to the real `FastMCP.run_async` with only `uvicorn.Server.serve` captured, and d
 loopback spelling with no Origin; the readiness probe, the proxy bridge's SDK session and the CLI's `list_tools` over the real
 `backend_client.http_client`; a wildcard bind and a named bind (`--host backend.lan`) keep refusing a foreign Host while serving
 their own name. Mutation (runtime rebinding of `host_origin_guard`, in a `git archive` export, not the worktree): guard
-returning `{}` (= the pre-fix app) fails 10 of 16, `allowed_hosts=["*"]` fails 7, a guard that ignores `--host` fails 1.
+returning `{}` (= the pre-fix app) fails 10 of 17, `allowed_hosts=["*"]` fails 7, a guard that ignores `--host` fails 1.
 
 ## Residuals
 
-* **No authentication.** Another local user or process on the same machine can still connect and call any tool. Follow-up: a
+* **No authentication.** Another local user or process on the same machine can still connect and call any tool. Fixed by F-1018: a
   per-user bearer token (file in the state dir, sent by the proxy/CLI/probes), which also closes the cross-user case.
 * A web page served from a **loopback origin** (another app on `localhost:<other port>`) passes fastmcp's loopback-pair
   same-origin allowance. A DNS-rebound page is not that case: its Origin is its own foreign name.

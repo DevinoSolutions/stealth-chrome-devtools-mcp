@@ -5,11 +5,13 @@ import json
 import os
 import signal
 import sys
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastmcp import FastMCP
 
+from stealth_chrome_devtools_mcp.embedded import backend_token
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.backend_probe import MCP_PATH
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
@@ -375,11 +377,13 @@ _LOOPBACK_HOST_NAMES = ("127.0.0.1", "localhost", "::1")
 _WILDCARD_BINDS = ("0.0.0.0", "::", "")  # noqa: S104  PERMANENT(compared, never bound: the wildcard spellings the allow-list must NOT gain)
 
 
-def host_origin_guard(bound_host: str) -> dict[str, object]:
+def host_origin_guard(
+    bound_host: str, extra_hosts: Sequence[str] = ()
+) -> dict[str, object]:
     """F-1013: the keyword arguments that turn on FastMCP's Host/Origin guard.
 
-    The backend is unauthenticated and its tools can ``exec`` in the backend
-    process and read cookies. Binding 127.0.0.1 keeps other machines out and
+    The backend's tools can ``exec`` in the backend process and read cookies
+    (F-1018's bearer token is the answer to every other caller). Binding 127.0.0.1 keeps other machines out and
     does nothing about a web page whose domain is DNS-rebound to 127.0.0.1: that
     page is same-origin with ``/mcp``. FastMCP's guard is OFF by default
     (``http_host_origin_protection=False``) and ``backend_env`` scrubs
@@ -395,11 +399,34 @@ def host_origin_guard(bound_host: str) -> dict[str, object]:
     name. A wildcard bind (``0.0.0.0``, ``::``) names no host and adds nothing:
     the Host header still has to be a loopback name (or the interface address
     FastMCP appends from the socket), never an attacker's.
+
+    ``extra_hosts`` is ``--allowed-host``: the explicit opt-in for a name the
+    backend is reached by that is neither loopback nor ``--host`` (a reverse
+    proxy's or a tunnel's hostname). Nothing is added unless the operator asks
+    for it by name, and a ``*`` is refused: it would turn the guard back off.
     """
     hosts = list(_LOOPBACK_HOST_NAMES)
     if bound_host.strip("[]") not in {*hosts, *_WILDCARD_BINDS}:
         hosts.append(bound_host)
+    for name in extra_hosts:
+        if "*" in name or not name.strip():
+            raise ValueError(f"--allowed-host {name!r} is not a host name")
+        hosts.append(name.strip())
     return {"host_origin_protection": True, "allowed_hosts": hosts}
+
+
+def bearer_token_guard() -> dict[str, object]:
+    """F-1018: the keyword argument that makes the HTTP backend demand its token.
+
+    The Host/Origin guard above keeps a web page out; this keeps every other
+    local process and OS user out. ``backend_token.middleware()`` creates the
+    owner-only token file if it is not there yet (a backend started by hand, not
+    by a proxy) and RAISES if it cannot, so the backend fails to start rather
+    than serving unauthenticated. The middleware is appended after FastMCP's own
+    guard, so a foreign Host is still 421 and a foreign Origin 403 before the
+    token is even looked at.
+    """
+    return {"middleware": [backend_token.middleware()]}
 
 
 def build_arg_parser():
@@ -432,8 +459,8 @@ def build_arg_parser():
         "--host",
         default="127.0.0.1",
         help="Host for HTTP transport. Defaults to loopback because "
-        "the backend is unauthenticated and drives logged-in "
-        "browser profiles; pass 0.0.0.0 only to deliberately "
+        "the backend drives logged-in browser profiles and its only "
+        "login is a bearer token; pass 0.0.0.0 only to deliberately "
         "expose it.",
     )
 
@@ -445,6 +472,15 @@ def build_arg_parser():
         "a backend for a proxy, never by an operator running `serve`.",
     )
 
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="An extra Host header name the HTTP backend accepts (repeatable), "
+        "e.g. a reverse proxy's hostname. Loopback names and --host are always "
+        "accepted; nothing else is unless named here.",
+    )
     parser.add_argument(
         "--disable-browser-management",
         action="store_true",
@@ -638,7 +674,8 @@ if __name__ == "__main__":
             host=args.host,
             port=args.port,
             path=MCP_PATH,
-            **host_origin_guard(args.host),
+            **host_origin_guard(args.host, args.allowed_host),
+            **bearer_token_guard(),
             uvicorn_config=backend_uvicorn_config(),
         )
     else:

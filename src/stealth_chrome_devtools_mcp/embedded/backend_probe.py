@@ -63,6 +63,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import backend_token
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -110,6 +112,13 @@ _HEADERS = {
 }
 
 
+def _headers() -> dict[str, str]:
+    """What every probe request sends: the JSON-RPC content types plus F-1018's
+    bearer token (empty when there is none, which an old backend ignores and a
+    new one answers 401 - "not ready", the same fail-closed verdict)."""
+    return {**_HEADERS, **backend_token.auth_headers()}
+
+
 def _request(client_name: str) -> dict[str, object]:
     """THE one ``initialize`` payload. Both probes send exactly this."""
     from mcp.types import DEFAULT_NEGOTIATED_VERSION
@@ -132,7 +141,7 @@ def ready(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> bo
 
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
-            resp = client.post(url, json=_request(client_name), headers=_HEADERS)
+            resp = client.post(url, json=_request(client_name), headers=_headers())
             if resp.status_code != _READY_STATUS:
                 return False
             _discard_session(client.delete, url, resp.headers.get("mcp-session-id"))
@@ -179,7 +188,9 @@ class Heartbeat:
             self._legacy = False  # a replaced backend may serve the route now
             return False
         try:
-            resp = self._connection().get(self._health_url, timeout=timeout)
+            resp = self._connection().get(
+                self._health_url, timeout=timeout, headers=backend_token.auth_headers()
+            )
         except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not alive")
             _logger.debug("liveness heartbeat failed", exc_info=exc)
             self.close()
@@ -229,7 +240,7 @@ async def await_ready(
         while time.monotonic() < deadline:
             try:
                 resp = await client.post(
-                    url, json=_request(client_name), headers=_HEADERS
+                    url, json=_request(client_name), headers=_headers()
                 )
                 if resp.status_code == _READY_STATUS:
                     await _discard_session_async(
@@ -256,7 +267,7 @@ def _discard_session(
     if not session_id:
         return
     try:
-        delete(url, headers={**_HEADERS, "mcp-session-id": session_id})
+        delete(url, headers={**_headers(), "mcp-session-id": session_id})
     except Exception:  # noqa: BLE001  PERMANENT(cleanup after an already-successful probe)
         _logger.debug("probe session cleanup failed", exc_info=True)
 
@@ -268,6 +279,6 @@ async def _discard_session_async(
     if not session_id:
         return
     try:
-        await delete(url, headers={**_HEADERS, "mcp-session-id": session_id})
+        await delete(url, headers={**_headers(), "mcp-session-id": session_id})
     except Exception:  # noqa: BLE001  PERMANENT(cleanup after an already-successful probe)
         _logger.debug("probe session cleanup failed", exc_info=True)

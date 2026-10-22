@@ -372,6 +372,13 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
     # errno, and it has to precede the transport row's `OSError` (review M2).
     if _reader_gone(exc):
         return EXIT_BROKEN_PIPE, ""
+    # F-1018: ahead of the transport row, whose `httpx.HTTPError` would say
+    # "could not reach the backend" about a backend that answered, and answered
+    # with the one sentence that names the cause and the fix.
+    if _unauthorized(exc):
+        from stealth_chrome_devtools_mcp.embedded import backend_token
+
+        return EXIT_NO_BACKEND, f"error: {backend_token.UNAUTHORIZED}"
     for kinds, code, message in judgements:
         if isinstance(exc, kinds):
             return code, message(exc)
@@ -383,6 +390,18 @@ def _verdict(exc: BaseException) -> tuple[int, str]:
 
 #: A name and not an inline test so the suite can pin BOTH arms on every cell.
 _WINDOWS = sys.platform == "win32"
+
+_HTTP_UNAUTHORIZED = 401
+
+
+def _unauthorized(exc: BaseException) -> bool:
+    """Did the backend answer HTTP 401 (F-1018's bearer token missing or wrong)?"""
+    import httpx
+
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code == _HTTP_UNAUTHORIZED
+    )
 
 
 def _reader_gone(exc: BaseException) -> bool:

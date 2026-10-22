@@ -256,7 +256,8 @@ THREAT_CONTRACT: tuple[ThreatRow, ...] = (
         "caller trust",
         "TRUSTED. The client spawns the server as a child process and already "
         "has the user's privileges; there is nothing to escalate.",
-        "TRUSTED. Anything that can reach the port is treated as the user.",
+        "TRUSTED. Anything that presents the user's bearer token (F-1018) is "
+        "treated as the user.",
         "documented — an untrusted MCP client is OUT OF SCOPE for this "
         "release. No test simulates a hostile caller, because the design "
         "grants a caller everything a hostile one would want.",
@@ -277,17 +278,30 @@ THREAT_CONTRACT: tuple[ThreatRow, ...] = (
     ThreatRow(
         "authentication",
         "NONE, and none is meaningful: the caller owns the process.",
-        "NONE. There is no token, no session auth, no allow-list. The port is "
-        "the only boundary, and loopback is the only thing enforcing it.",
-        "documented — the gate runs no live HTTP acceptance test at all, so "
-        "HTTP stays DESCRIBED, never qualified.",
+        "A per-user bearer token (F-1018). The backend keeps one in "
+        "`<state dir>/backend.token` (POSIX mode `0600`; on Windows a DACL "
+        "granting only the current user) and answers `401` to any request "
+        "without `Authorization: Bearer <token>`, after F-1013's Host (`421`) "
+        "and Origin (`403`) checks; every first-party client sends it. It is "
+        "one shared secret per user, not a channel binding: it keeps other OS "
+        "users and local processes without the file out, and does nothing "
+        "about the same user's own processes, which can read the file and the "
+        "browser profiles. A backend that cannot secure the file does not "
+        "serve. `--host 0.0.0.0` stays the operator's decision.",
+        "documented — pinned outside this section, in the unit lane, by "
+        "`tests/test_http_host_origin_guard.py` (no token 401, wrong token 401, "
+        "right token 200 over a real socket; mode `0600` or exactly one ACE on "
+        "Windows; every first-party client sends it) and end to end by "
+        "`tests/test_backend_bearer_token_e2e.py` (an integration node). The "
+        "gate runs no live HTTP acceptance test, so HTTP stays DESCRIBED, "
+        "never qualified.",
     ),
     ThreatRow(
         "host-code execution",
         "YES, by design. `create_python_binding`, the two hook-creation tools "
         "and `validate_hook_function` run caller-supplied Python through "
         "`exec`/`eval` IN THE SERVER PROCESS, at the user's privileges.",
-        "Identical, reachable by anything that reaches the port.",
+        "Identical, reachable by anything that presents the user's bearer token.",
         "TESTED as an INVENTORY, not as isolation — `::"
         "test_host_python_execution_sites_are_exactly_the_declared_set` "
         "AST-scans `src/` so a new host-exec site cannot appear unannounced. "
@@ -337,7 +351,7 @@ THREAT_CONTRACT: tuple[ThreatRow, ...] = (
         "secrets",
         "The server holds no credential of its own, but it drives the user's "
         "real logged-in browser profiles and can read anything they can.",
-        "Identical, without even a loopback caller check.",
+        "Identical, behind only the user's bearer token and the loopback bind.",
         "TESTED for the DIAGNOSTIC path only — `::TestRedactionPolicy` proves "
         "every one of the eight secret classes is absent from "
         "policy-processed output while error type/code/correlation survive. "
