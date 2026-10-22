@@ -70,6 +70,24 @@ _DEPARTED_KEPT = 64
 _exited: dict[str, dict[str, object]] = {}
 
 
+#: ids ``close_instance`` itself claimed while their process was already dead, until
+#: the tool layer has read it (F-1022): the close-first twin of ``_exited``, so the
+#: tool knows a crash without a lookup (a lookup discards, F-966).
+_dead_on_close: dict[str, None] = {}
+
+
+def note_dead_on_close(instance_id: str) -> None:
+    """Record that the close now claiming *instance_id* found its process dead."""
+    _dead_on_close[instance_id] = None
+    while len(_dead_on_close) > _DEPARTED_KEPT:
+        del _dead_on_close[next(iter(_dead_on_close))]
+
+
+def take_dead_on_close(instance_id: str) -> bool:
+    """Whether the close that just claimed *instance_id* found it dead; read once."""
+    return _dead_on_close.pop(instance_id, 0) is None
+
+
 def claim_exited(instance_id: str) -> bool:
     """Whether *instance_id* is a browser that died on its own and nobody has closed
     since: one close claims it, so a second reports a miss like any double close."""

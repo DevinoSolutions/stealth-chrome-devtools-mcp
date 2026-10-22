@@ -527,14 +527,10 @@ def _closing_server(patched_server, *, role: str, refresh: dict | None):
     async def _clear(instance_id):
         return None
 
-    async def _get_instance(instance_id):
-        return {"live": True}
-
     server = patched_server(
         browser_manager=SimpleNamespace(
             close_instance=_close,
             get_spawn_diagnostics=_spawn_diagnostics,
-            get_instance=_get_instance,
         ),
         network_interceptor=SimpleNamespace(clear_instance_data=_clear),
         dynamic_hook_system=SimpleNamespace(remove_instance=MagicMock()),
