@@ -146,6 +146,13 @@ async def test_load_is_waited_for_and_a_page_that_never_loads_times_out(
     assert replacements == []
 
 
+def _no_started_listener(*tabs: FakeTab) -> None:
+    """The ``Page.frameStartedLoading`` listener ``navigate`` arms for its bound
+    must be gone however the attempt ended (answered, cancelled, retried)."""
+    for tab in tabs:
+        assert not any(e is cdp.page.FrameStartedLoading for e, _ in tab.handlers)
+
+
 class _UnansweringTab(FakeTab):
     """A tab whose ``Page.navigate`` never answers — the hang-before-headers
     shape, where Chrome has not accepted anything and the tab may be stale."""
@@ -221,6 +228,15 @@ async def test_an_unanswered_navigate_leaves_the_recovery_retry_a_real_budget(
     assert len(replacements) == 1
     assert _navigate_frames(stale) == [URL]
     assert _navigate_frames(fresh) == [URL]
+    _no_started_listener(stale, fresh)
+
+
+def _announce_started(tab: FakeTab, frame_id: str) -> None:
+    """Deliver ``Page.frameStartedLoading`` for *frame_id* to the tab's listeners."""
+    event = cdp.page.FrameStartedLoading(frame_id=cdp.page.FrameId(frame_id))
+    for event_type, handler in list(tab.handlers):
+        if event_type is cdp.page.FrameStartedLoading:
+            handler(event)
 
 
 class _SlowServerTab(FakeTab):
@@ -232,10 +248,7 @@ class _SlowServerTab(FakeTab):
 
     async def send(self, cdp_obj, *args, **kwargs):
         if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
-            event = cdp.page.FrameStartedLoading(frame_id=cdp.page.FrameId("F-main"))
-            for event_type, handler in list(self.handlers):
-                if event_type is cdp.page.FrameStartedLoading:
-                    handler(event)
+            _announce_started(self, str(self.target.target_id))
             await asyncio.sleep(self.delay)
         return await super().send(cdp_obj, *args, **kwargs)
 
@@ -269,6 +282,81 @@ async def test_a_slow_server_whose_navigation_started_keeps_the_whole_budget(
     assert result["url"] == URL
     assert _navigate_frames(tab) == [URL]
     assert replacements == []
+    _no_started_listener(tab)
+
+
+class _StartedThenSilentTab(_UnansweringTab):
+    """Announces ``Page.frameStartedLoading`` for *frame_id*, then never answers
+    ``Page.navigate`` (the server never sends headers)."""
+
+    frame_id: str | None = None  # None: the tab's own main frame
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
+            _announce_started(self, self.frame_id or str(self.target.target_id))
+        return await super().send(cdp_obj, *args, **kwargs)
+
+
+async def test_a_started_navigation_whose_reply_never_comes_waits_the_whole_budget(
+    monkeypatch, manager
+):
+    """T-6363 (F-1026): the bound is lifted by the main frame's start, and from
+    then on the attempt spends the caller's full budget before it is called stale
+    (Chrome answers only when the headers arrive). ``ACCEPT_SECONDS`` is 50 ms
+    here; the first attempt must outlast it by the budget's size, and then end in
+    the one TimeoutError-turned-ToolError, its listener removed."""
+    monkeypatch.setattr(navigation_milestone, "ACCEPT_SECONDS", 0.05)
+    tab = _StartedThenSilentTab()
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    first_retry_after: list[float] = []
+
+    async def get_navigation_tab(self, instance_id):
+        return tab
+
+    async def replace_main_tab(self, instance_id, reason, close_existing=True):
+        first_retry_after.append(loop.time() - began)
+        return tab
+
+    monkeypatch.setattr(BrowserManager, "get_navigation_tab", get_navigation_tab)
+    monkeypatch.setattr(BrowserManager, "_replace_main_tab", replace_main_tab)
+
+    with pytest.raises(ToolError, match="timed out"):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=300)
+
+    assert first_retry_after[0] >= 0.28  # the budget, not the 50 ms bound
+    _no_started_listener(tab)
+
+
+async def test_an_iframe_starting_to_load_does_not_lift_the_bound(monkeypatch, manager):
+    """T-6363 item: only the MAIN frame's ``frameStartedLoading`` is a sign of
+    life. A stale page's iframe loading is not, so the silent first attempt is
+    still called stale at the bound and the recovery retry has its real budget:
+    RED when any frame counts (attempt 1 then spends the whole 3 s)."""
+    monkeypatch.setattr(navigation_milestone, "ACCEPT_SECONDS", 0.05)
+    stale = _StartedThenSilentTab()
+    stale.frame_id = "F-an-iframe"
+    fresh = _SlowServerTab()  # starts at once (main frame), answers after 0.3 s
+    tabs = iter([stale, fresh])
+    replacements: list[str] = []
+
+    async def get_navigation_tab(self, instance_id):
+        return next(tabs)
+
+    async def replace_main_tab(self, instance_id, reason, close_existing=True):
+        replacements.append(reason)
+        return next(tabs)
+
+    monkeypatch.setattr(BrowserManager, "get_navigation_tab", get_navigation_tab)
+    monkeypatch.setattr(BrowserManager, "_replace_main_tab", replace_main_tab)
+
+    result = await asyncio.wait_for(
+        manager.navigate(instance_id="iid-1", url=URL, timeout=3000), timeout=1.0
+    )
+
+    assert result["url"] == URL
+    assert len(replacements) == 1
+    _no_started_listener(stale, fresh)
 
 
 async def test_the_recovery_retry_still_carries_the_referrer(monkeypatch, manager):

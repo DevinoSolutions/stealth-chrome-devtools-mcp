@@ -91,6 +91,11 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: is gone.
 CONNECT_TIMEOUT_SECONDS = 30.0
 
+#: How many times the transport re-dials a connection that was REFUSED or timed
+#: out before any request byte went out (F-1026 part 2): a loopback listener
+#: that is mid-restart answers the next dial. Never a retry of a sent request.
+CONNECT_RETRIES = 3
+
 #: The read clock for the STDIO PROXY'S BRIDGE, which is this seam's second
 #: consumer (F-900) — and it is ``None``, meaning no read deadline at all.
 #:
@@ -207,7 +212,13 @@ def http_client(read_seconds: float | None) -> httpx.AsyncClient:
     """
     import httpx
 
+    # ``retries`` is httpcore's CONNECTION-SETUP retry: it re-dials only on a
+    # ``ConnectError``/``ConnectTimeout``, i.e. before a single byte of the
+    # request has been written, so a tool can never run twice because of it
+    # (F-1026 part 2; the replay after a request was sent is proxy_selfheal's
+    # call and is deliberately not widened here).
     return httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(retries=CONNECT_RETRIES),
         follow_redirects=True,
         timeout=httpx.Timeout(CONNECT_TIMEOUT_SECONDS, read=read_seconds),
         headers={CALLER_HEADER: CALLER_ID, **backend_token.auth_headers()},

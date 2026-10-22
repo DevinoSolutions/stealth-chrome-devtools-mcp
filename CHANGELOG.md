@@ -91,6 +91,20 @@ a differing `screenWidth` were measured and do NOT misplace input: only the over
 coordinates it is given, a touch override's `Input.dispatchTouchEvent` is not used by any tool, and inside an iframe under a scale a probe can fall outside
 the frame, in which case the click raises rather than missing (`audit/stage2/finding_F1017_click_under_device_metrics_scale.md`).
 
+### A refused loopback dial is retried, and the navigate bound counts only the main frame (F-1026, T-6363 part 2)
+
+`backend_client.http_client`, the one transport every CLI verb and the stdio proxy's bridge ride, now builds its `httpx.AsyncClient` over
+`httpx.AsyncHTTPTransport(retries=3)`, so a backend that is mid-restart and refuses (or times out) the first dial is dialled again instead of failing
+the call. httpcore retries only connection establishment (`ConnectError`, `ConnectTimeout`), before a single request byte is written, so a tool can
+never run twice because of it; `proxy_selfheal`'s replay is untouched. Pins drive the real client against a real loopback listener whose first dial is
+refused (it fails with `retries=0`), and a request that WAS sent and whose connection was then dropped is seen by the server exactly once.
+
+Three follow-ups to the navigate bound above. Only the MAIN frame's `Page.frameStartedLoading` (the frame whose id is the tab's target id) lifts the
+bound now; a stale page's iframe loading no longer counts as the navigation having started. The 10 s ceiling also applies when the budget is larger
+(it is `min(10 s, timeout / 3)`), so a CPU-starved first navigation that is silent for more than 10 s is treated as stale: the tab is replaced and the
+navigation retried once; a PINNED caller gets a `ToolError` after 10 s of silence and no retry. Once the main frame has started, the attempt keeps the
+whole budget before it is called stale. The `Page.frameStartedLoading` listener is pinned to be removed however the attempt ends.
+
 ### An unanswered `Page.navigate` no longer starves the stale-tab recovery retry (F-1026, T-6363)
 
 `navigate` caps the whole call at `timeout + 5` s, but when Chrome never answered the first `Page.navigate` the attempt waited the full
