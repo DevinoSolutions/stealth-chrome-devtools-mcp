@@ -174,7 +174,12 @@ def started(attempt: Attempt | None) -> bool:
     (the launch was never reached) and a launch we cannot name are both False."""
     try:
         return attempt is not None and launched_pid(attempt) is not None
-    except Exception:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+        debug_logger.log_warning(
+            "spawn_leak",
+            "started",
+            f"launch probe failed, treated as not started: {exc!r}",
+        )
         return False
 
 
