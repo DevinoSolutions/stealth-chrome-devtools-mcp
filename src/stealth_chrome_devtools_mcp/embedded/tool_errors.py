@@ -76,10 +76,10 @@ def claim_exited(instance_id: str) -> bool:
     return _exited.pop(instance_id, None) is not None
 
 
-def exited_selection(instance_id: str) -> dict[str, object]:
-    """The ``profile_selection`` of an unclaimed browser that died on its own, else
-    ``{}``; reading it does not claim it."""
-    return _exited.get(instance_id, {})
+def exited_selection(instance_id: str) -> dict[str, object] | None:
+    """The ``profile_selection`` of an unclaimed browser that died on its own, or
+    ``None`` when *instance_id* is not one; reading it does not claim it."""
+    return _exited.get(instance_id)
 
 
 def remember_departed(
