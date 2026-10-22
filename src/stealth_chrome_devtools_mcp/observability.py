@@ -189,12 +189,28 @@ _HEADER_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A typed secret: ``token=...``, ``"client_secret": "..."``, ``password: ...``.
-#: One whitespace-free run, so ``token=abc failed`` keeps its prose.
+#: A typed secret: ``token=...``, ``"client_secret": "..."``, ``password: ...``,
+#: ``api_key=...``, ``x-api-key: ...``. An UNQUOTED value is one whitespace-free
+#: run, so ``token=abc failed`` keeps its prose (a ``Bearer `` scheme in front of
+#: it is part of the credential and goes with it). A QUOTED value runs to its
+#: closing quote, or to the end of the line when there is none, because a
+#: password or a ``Bearer`` pair inside quotes can hold spaces. ``(?P=q)`` is the
+#: same quote character that opened it, so ``"it's"`` is one value. The tempered
+#: run cannot cross a line, so the unterminated case stays linear.
 _TYPED_SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"(?P<key>(?:token|secret|password)[\"']?\s*[:=]\s*[\"']?)"
-    r"(?P<value>[^\s\"']++)",
+    r"(?P<key>(?:secret[_-]?key|api[_-]?key|token|secret|password)[\"']?\s*[:=]\s*)"
+    r"(?:(?P<q>[\"'])(?:(?!(?P=q))[^\r\n])*+(?P<close>(?P=q))?+"
+    r"|(?:Bearer\s++)?[^\s\"']++)",
+    re.IGNORECASE,
+)
+
+#: A bare ``Bearer <token>`` with no ``Authorization:`` in front of it, as it
+#: appears in a quoted request line or a log of a header value. The first token
+#: character must be alphanumeric, so ``f"Bearer {token}"`` and ``Bearer %s``
+#: (source, not a credential) are left alone.
+_BEARER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<key>Bearer\s++)(?P<value>[A-Za-z0-9][A-Za-z0-9._~+/=\-]*+)",
     re.IGNORECASE,
 )
 
@@ -208,8 +224,25 @@ _JWT_RE = re.compile(
 #: (T-6534). Compared case-folded against a dict key, so an event's
 #: ``request.headers`` is covered without knowing where the SDK nests it.
 _SECRET_HEADER_NAMES = frozenset(
-    {"authorization", "proxy-authorization", "cookie", "set-cookie"}
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+    }
 )
+
+#: Sentry's source-line fields. They hold CODE, not runtime data, so the two
+#: key-value rules (header-shaped and typed secret) are not run on them:
+#: ``def login(self, password: str, token: str)`` is a signature, and the rules
+#: would eat its parameter list. The shape rules (URL, JWT, bearer, email, home)
+#: still run.
+_SOURCE_LINE_KEYS = frozenset({"context_line", "pre_context", "post_context"})
+
+#: A header as a pair: ``[name, value]``.
+_HEADER_PAIR_LENGTH = 2
 
 _REDACTED_CREDENTIAL = "[redacted-secret]"
 
@@ -281,25 +314,40 @@ def _redact_email(match: "re.Match[str]") -> str:
     return f"{_REDACTED_EMAIL}{domain[len(core) :]}"
 
 
-def _redact_text(text: str) -> str:
+def _redact_text(text: str, *, source_code: bool = False) -> str:
     """THE per-string rule: every redaction this module performs, in one place.
 
     Order matters exactly once. The URL rule runs first so that a proxy URL's
     ``user:pass@host`` is already gone before the email rule looks for an ``@``;
-    afterwards the two cannot see each other's output. The three secret rules
-    (JWT shape, header-shaped credential, typed secret; F-I) run before the email
-    rule so a ``Cookie:`` value holding an address is gone whole. The home rule is
-    last and is independent of all of them.
+    afterwards the two cannot see each other's output. The secret rules (JWT
+    shape, header-shaped credential, typed secret, bare bearer; F-I) run before
+    the email rule so a ``Cookie:`` value holding an address is gone whole. The
+    home rule is last and is independent of all of them. ``source_code`` skips
+    the two key-value rules, which read a signature or an assignment in source
+    as a credential (see :data:`_SOURCE_LINE_KEYS`).
     """
     text = _URL_RE.sub(_redact_url, text)
     text = _JWT_RE.sub(_REDACTED_CREDENTIAL, text)
-    text = _HEADER_SECRET_RE.sub(rf"\g<key>{_REDACTED_CREDENTIAL}", text)
-    text = _TYPED_SECRET_RE.sub(rf"\g<key>{_REDACTED_CREDENTIAL}", text)
+    if not source_code:
+        text = _HEADER_SECRET_RE.sub(rf"\g<key>{_REDACTED_CREDENTIAL}", text)
+        text = _TYPED_SECRET_RE.sub(_redact_typed_secret, text)
+    text = _BEARER_RE.sub(rf"\g<key>{_REDACTED_CREDENTIAL}", text)
     text = _EMAIL_RE.sub(_redact_email, text)
     return _HOME_SEGMENT_RE.sub(lambda m: f"{m.group('prefix')}{_ANONYMOUS_USER}", text)
 
 
-def _anonymize(value: object, depth: int = 0) -> object:
+def _redact_typed_secret(match: "re.Match[str]") -> str:
+    """Keep the key and the quotes around a typed secret; replace what they held."""
+    quote = match.group("q") or ""
+    closing = quote if match.group("close") else ""
+    return f"{match.group('key')}{quote}{_REDACTED_CREDENTIAL}{closing}"
+
+
+def _is_secret_header_name(name: object) -> bool:
+    return isinstance(name, str) and name.lower() in _SECRET_HEADER_NAMES
+
+
+def _anonymize(value: object, depth: int = 0, *, source_code: bool = False) -> object:
     """Return ``value`` with :func:`_redact_text` applied to every string in it.
 
     Applied to the whole event rather than to a list of known fields: paths, URLs
@@ -307,24 +355,37 @@ def _anonymize(value: object, depth: int = 0) -> object:
     exception messages, in log messages and their params, and in breadcrumbs. A
     field list would have to grow every time the SDK grows one. The transform is
     a no-op on anything that matches no rule, so nothing else can be damaged.
+
+    A credential header's value is dropped by NAME in all three shapes headers
+    travel in: a mapping ``{"Cookie": v}``, a ``{"name": "Cookie", "value": v}``
+    entry, and a ``["Cookie", v]`` pair. ``source_code`` is set while walking
+    the frame source-line fields (:data:`_SOURCE_LINE_KEYS`).
     """
     if depth > _MAX_EVENT_DEPTH:
         return value
     if isinstance(value, str):
-        return _redact_text(value)
+        return _redact_text(value, source_code=source_code)
     if isinstance(value, dict):
+        named_header = _is_secret_header_name(value.get("name"))
         return {
             key: (
                 _REDACTED_CREDENTIAL
-                if isinstance(key, str) and key.lower() in _SECRET_HEADER_NAMES
-                else _anonymize(item, depth + 1)
+                if _is_secret_header_name(key) or (named_header and key == "value")
+                else _anonymize(
+                    item,
+                    depth + 1,
+                    source_code=source_code
+                    or (isinstance(key, str) and key in _SOURCE_LINE_KEYS),
+                )
             )
             for key, item in value.items()
         }
-    if isinstance(value, list):
-        return [_anonymize(item, depth + 1) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_anonymize(item, depth + 1) for item in value)
+    if isinstance(value, (list, tuple)):
+        if len(value) == _HEADER_PAIR_LENGTH and _is_secret_header_name(value[0]):
+            return type(value)((value[0], _REDACTED_CREDENTIAL))
+        return type(value)(
+            _anonymize(item, depth + 1, source_code=source_code) for item in value
+        )
     return value
 
 
@@ -507,8 +568,9 @@ def _scrub_event(
     * every URL's userinfo, query and fragment (F-826);
     * credential shapes in any string (``Cookie:``/``Authorization:`` values,
       ``token=``/``secret=``/``password=`` values, JWTs) and the value of a
-      header NAMED authorization/cookie/set-cookie, in messages, breadcrumbs and
-      request headers alike (F-I, T-6534).
+      header NAMED authorization/cookie/set-cookie/x-api-key/x-auth-token, in
+      messages, breadcrumbs and request headers alike (F-I, T-6534), and the
+      request's ``cookies`` entry itself.
 
     Step 0 runs FIRST and that ordering is load-bearing in both directions: an
     expected ``ToolError`` is dropped whole, page content and all, so the rules
@@ -533,6 +595,9 @@ def _scrub_event(
         scrubbed = _anonymize(event)
         if isinstance(scrubbed, dict):
             scrubbed.pop("server_name", None)
+            request = scrubbed.get("request")
+            if isinstance(request, dict):
+                request.pop("cookies", None)
             return cast("Event", scrubbed)
     except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
         # DEBUG on purpose: the logging integration turns INFO into breadcrumbs

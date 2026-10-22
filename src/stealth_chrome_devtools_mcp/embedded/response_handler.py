@@ -18,21 +18,31 @@ from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 
+def _default_spill_dir() -> Path:
+    """The directory this product owns when nothing is configured."""
+    return STATE_DIR / "element_clones"
+
+
 def _ensure_owner_only_dir(path: Path) -> None:
-    """Create ``path`` mode 0700, and narrow it if it already exists looser (F-J).
+    """Create ``path`` mode 0700; narrow it only if it is OUR default spill dir (F-J).
 
     The spill directory holds whole tool results — page content, request
     captures, extraction output — so on a shared POSIX host its mode is the only
-    thing between those and every other local user. ``mkdir``'s ``mode`` only
-    applies to a directory it creates, hence the explicit narrowing of one an
-    earlier version made with the umask default. Windows has no POSIX mode to
-    set; the per-user profile ACL is what protects the directory there. A
-    directory we do not own cannot be narrowed: that is logged, not raised,
-    because a spill that cannot be hardened is still better than a handler that
-    cannot be imported.
+    thing between those and every other local user. ``mkdir``'s ``mode`` applies
+    to a directory it creates (a umask can only narrow it further), so a leaf
+    made here needs no ``chmod``. The one directory narrowed after the fact is
+    the default ``STATE_DIR/element_clones``, which an earlier version made with
+    the umask default. A directory the caller CONFIGURED
+    (``STEALTH_MCP_CLONE_OUTPUT_DIR``, or ``clone_dir``) that already existed is
+    theirs: it may be a shared group directory or their home, and tightening it
+    at import would break that. Spill FILES are 0600 wherever they land.
+    Windows has no POSIX mode to set; the per-user profile ACL protects the
+    directory there. A directory we do not own cannot be narrowed: that is
+    logged, not raised, because a spill that cannot be hardened is still better
+    than a handler that cannot be imported.
     """
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if sys.platform == "win32":
+    if sys.platform == "win32" or path != _default_spill_dir():
         return
     try:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
@@ -60,7 +70,7 @@ def default_clone_output_dir() -> Path:
     configured = get_settings().clone_output_dir
     if configured and configured.strip():
         return Path(configured).expanduser()
-    return STATE_DIR / "element_clones"
+    return _default_spill_dir()
 
 
 #: Estimated-token ceiling for an INLINE tool result; above it the payload is

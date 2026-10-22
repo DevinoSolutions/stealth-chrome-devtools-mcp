@@ -13,17 +13,30 @@ lines now carry a length and a short sha256 (`DebugLogger.fingerprint`), and
 (`Network.setCookie`, `Runtime.evaluate` and `setExtraHTTPHeaders` params are
 credentials and script bodies by construction). The Sentry scrubber
 (`observability._scrub_event`, still the one hook) gained the rule it lacked:
-`Cookie:`/`Set-Cookie:`/`Authorization:` values, `token=`/`secret=`/`password=`
-values and JWT shapes are replaced in every string it walks, which includes
-messages and breadcrumbs, and the value of a request header NAMED authorization,
-proxy-authorization, cookie or set-cookie is dropped whatever it looks like
-(T-6534). The spill directory for over-size tool results is created 0700 (and
-narrowed if an earlier version made it looser), and each spill file is created
-0600, on POSIX. Not done: the same permissions for the other state, lock and
-profile directories (F-K's general `ensure_private_dir` sweep), `get_cookies`
-returning the whole jar (F-H), and a sweep of every other free-text log line for
-secrets, which the scrubber rule now backstops only for Sentry, not for the
-local log file.
+`Cookie:`/`Set-Cookie:`/`Authorization:` values, `token=`/`secret=`/`password=`/
+`api_key=`/`apikey=`/`secret_key=` values (so also `access_token`, `refresh_token`,
+`x-api-key`, `x-auth-token`), a bare `Bearer <token>` and JWT shapes are replaced
+in every string it walks, which includes messages and breadcrumbs. A quoted value
+runs to its closing quote, so `password: "two words"` goes whole. The rules are
+not run on a stack frame's `context_line`/`pre_context`/`post_context`, which are
+source code (`def login(self, password: str, token: str)` used to lose its
+parameter list); the URL, JWT, bearer, email and home-path rules still are. The
+value of a request header NAMED authorization, proxy-authorization, cookie,
+set-cookie, x-api-key or x-auth-token is dropped whatever it looks like, whether
+the headers are a mapping, a list of `["Name", "value"]` pairs or a list of
+`{"name": ..., "value": ...}` entries, and the request's `cookies` entry is
+dropped (T-6534). The spill directory for over-size tool results is created 0700
+and each spill file 0600, on POSIX; the default `~/.stealth-mcp/element_clones`
+is also narrowed if an earlier version made it looser, but a directory you set
+with `STEALTH_MCP_CLONE_OUTPUT_DIR` that already exists keeps its mode (it may be
+a shared group directory or your home). Not done: the same permissions for the
+other state, lock and profile directories (F-K's general `ensure_private_dir`
+sweep), `get_cookies` returning the whole jar (F-H), `log_error` rendering
+`str(exc)` into the local log file, the dynamic-hook sandbox `print` and
+compile/exec-error lines at INFO (a hook can print a header, and an error can
+quote hook source), query strings in the URLs the hook and clone logs record,
+and a sweep of every other free-text log line for secrets, which the scrubber
+rules backstop only for Sentry, not for the local log file.
 
 ### CI cancels a pull request's superseded runs (T-5430)
 

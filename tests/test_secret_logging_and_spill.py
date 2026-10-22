@@ -262,6 +262,149 @@ def test_scrub_event_secret_rules_stay_linear_on_hostile_text():
     assert time.perf_counter() - start < 2.0
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "def login(self, password: str, token: str) -> bool:",
+        "client = Client(token=self._token)",
+    ],
+)
+def test_scrub_event_keeps_source_lines_in_a_frame(line):
+    """A frame's ``context_line``/``pre_context``/``post_context`` are code. The
+    key-value rules read ``password: str`` as a credential and ate the signature;
+    a message with a real ``password=hunter2`` is still redacted."""
+    event = {
+        "exception": {
+            "values": [
+                {
+                    "stacktrace": {
+                        "frames": [
+                            {
+                                "context_line": line,
+                                "pre_context": [line],
+                                "post_context": [line],
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        "message": "login failed password=hunter2 retrying",
+    }
+    out = observability._scrub_event(event)
+    assert out is not None
+    frame = out["exception"]["values"][0]["stacktrace"]["frames"][0]
+    assert frame["context_line"] == line
+    assert frame["pre_context"] == [line]
+    assert frame["post_context"] == [line]
+    assert "hunter2" not in out["message"]
+
+
+def test_scrub_event_still_runs_shape_rules_on_source_lines():
+    line = f"url = 'https://h.example/p?token=abc' ; jwt = '{JWT}'"
+    frame = {"context_line": line}
+    out = _scrubbed({"exception": {"values": [{"stacktrace": {"frames": [frame]}}]}})
+    assert "token=abc" not in out
+    assert JWT not in out
+
+
+@pytest.mark.parametrize(
+    ("text", "leaked"),
+    [
+        ("sent Bearer opaqueTok123 upstream", "opaqueTok123"),
+        ("token: Bearer opaqueTok123 end", "opaqueTok123"),
+        ('{"token": "Bearer opaqueTok123"}', "opaqueTok123"),
+        ("api_key=ak-not-real-1 x", "ak-not-real-1"),
+        ("apikey=ak-not-real-2 x", "ak-not-real-2"),
+        ("secret_key=sk-not-real-3 x", "sk-not-real-3"),
+        ("access_token=at-not-real-4 x", "at-not-real-4"),
+        ("refresh_token=rt-not-real-5 x", "rt-not-real-5"),
+        ("x-api-key: xk-not-real-6 x", "xk-not-real-6"),
+        ("x-auth-token: xt-not-real-7 x", "xt-not-real-7"),
+        ('password: "my secret phrase" after', "phrase"),
+        ("password: 'two words' after", "words"),
+    ],
+)
+def test_scrub_event_redacts_the_credential_shapes_the_first_cut_missed(text, leaked):
+    out = _scrubbed({"message": text})
+    assert leaked not in out
+
+
+def test_scrub_event_quoted_secret_keeps_its_quotes_and_the_prose_after():
+    assert (
+        observability._redact_text('password: "a b c" and more')
+        == 'password: "[redacted-secret]" and more'
+    )
+
+
+def test_scrub_event_leaves_bearer_in_source_alone():
+    for text in ('f"Bearer {token}"', "headers = 'Bearer %s' % tok"):
+        assert observability._redact_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "\"password='" * 20000,
+        'password: "' + "a" * 100_000,
+        "Bearer " * 20000,
+        "Bearer " + "a" * 100_000,
+        "api_key" * 15000 + "=" + "b" * 50_000,
+        "token: Bearer " * 8000,
+    ],
+    ids=[
+        "quote-runs",
+        "unterminated-quote",
+        "bearer-repeats",
+        "bearer-long-token",
+        "key-repeats",
+        "typed-bearer-repeats",
+    ],
+)
+def test_scrub_event_new_rules_stay_linear_on_100k_hostile_text(hostile):
+    start = time.perf_counter()
+    observability._redact_text(hostile)
+    assert time.perf_counter() - start < 2.0
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [["Cookie", "sid=pair-secret-1"], ["Accept", "x"]],
+        [("Authorization", "Bearer pair-secret-1"), ("Accept", "x")],
+        [
+            {"name": "Cookie", "value": "sid=pair-secret-1"},
+            {"name": "Accept", "value": "x"},
+        ],
+        {"X-Api-Key": "pair-secret-1", "Accept": "x"},
+        [["x-auth-token", "pair-secret-1"]],
+    ],
+)
+def test_scrub_event_drops_credential_header_values_in_every_header_shape(headers):
+    out = _scrubbed({"request": {"headers": headers}})
+    assert "pair-secret-1" not in out
+
+
+def test_scrub_event_keeps_ordinary_headers_in_every_shape():
+    event = {
+        "request": {
+            "headers": [
+                ["Accept", "application/json"],
+                {"name": "User-Agent", "value": "ua/1"},
+            ]
+        }
+    }
+    out = _scrubbed(event)
+    assert "application/json" in out and "ua/1" in out
+
+
+def test_scrub_event_drops_the_request_cookies_entry():
+    request = {"cookies": {"sid": "cookie-secret-1"}, "url": "https://h.example/x"}
+    out = _scrubbed({"request": request})
+    assert "cookie-secret-1" not in out
+    assert "h.example" in out
+
+
 # ---------------------------------------------------------------------------
 # F-J: the spill directory and file are owner-only
 # ---------------------------------------------------------------------------
@@ -283,14 +426,32 @@ def test_spill_directory_is_created_owner_only(tmp_path):
 
 
 @posix_only
-def test_existing_loose_spill_directory_is_narrowed(tmp_path):
-    spill = tmp_path / "spill"
+def test_existing_loose_default_spill_directory_is_narrowed(tmp_path, monkeypatch):
+    monkeypatch.setattr(response_handler, "STATE_DIR", tmp_path)
+    spill = tmp_path / "element_clones"
     spill.mkdir()
     spill.chmod(0o755)
 
     ResponseHandler(clone_dir=str(spill))
 
     assert stat.S_IMODE(spill.stat().st_mode) == 0o700
+
+
+@posix_only
+def test_existing_configured_directory_keeps_its_mode(tmp_path):
+    """``STEALTH_MCP_CLONE_OUTPUT_DIR`` may name a shared group directory or a
+    home: it is the user's, and import must not tighten it. Its spill FILES are
+    still 0600."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    before = stat.S_IMODE(shared.stat().st_mode)
+
+    handler = ResponseHandler(max_tokens=10, clone_dir=str(shared))
+    result = handler.handle_response({"cookies": "x" * 500})
+
+    assert stat.S_IMODE(shared.stat().st_mode) == before
+    assert stat.S_IMODE((shared / result["filename"]).stat().st_mode) == 0o600
 
 
 def test_spill_requests_owner_only_modes_on_every_platform(tmp_path, monkeypatch):
@@ -321,10 +482,11 @@ def test_spill_requests_owner_only_modes_on_every_platform(tmp_path, monkeypatch
     assert opened == [0o600]
 
 
-def test_loose_existing_spill_directory_gets_a_chmod_on_posix(tmp_path, monkeypatch):
+def _pretend_posix_loose(monkeypatch) -> list[int]:
     """Windows' ``stat`` reports 0777 for every directory, so on the real platform
     this reads as "loose" everywhere; the module-local ``sys`` stands in for POSIX
-    so the narrowing branch runs on every developer machine."""
+    so the narrowing branch runs on every developer machine. Returns the list the
+    ``chmod`` requests land in."""
     narrowed: list[int] = []
     monkeypatch.setattr(
         response_handler, "sys", types.SimpleNamespace(platform="linux")
@@ -333,10 +495,31 @@ def test_loose_existing_spill_directory_gets_a_chmod_on_posix(tmp_path, monkeypa
         Path, "stat", lambda self, **_kw: types.SimpleNamespace(st_mode=0o40755)
     )
     monkeypatch.setattr(Path, "chmod", lambda self, mode, **_kw: narrowed.append(mode))
+    return narrowed
+
+
+def test_loose_existing_default_spill_directory_gets_a_chmod_on_posix(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(response_handler, "STATE_DIR", tmp_path)
+    spill = tmp_path / "element_clones"
+    spill.mkdir()
+    narrowed = _pretend_posix_loose(monkeypatch)
+
+    ResponseHandler(clone_dir=str(spill))
+
+    assert narrowed == [0o700]
+
+
+def test_configured_existing_directory_is_never_chmodded(tmp_path, monkeypatch):
+    """The portable pin for the user-owned directory: no ``chmod`` is requested
+    for a directory that already existed and is not the default spill dir."""
+    monkeypatch.setattr(response_handler, "STATE_DIR", tmp_path / "state")
+    narrowed = _pretend_posix_loose(monkeypatch)
 
     ResponseHandler(clone_dir=str(tmp_path))
 
-    assert narrowed == [0o700]
+    assert narrowed == []
 
 
 def test_spill_content_is_unchanged_by_the_private_write(tmp_path):
