@@ -462,9 +462,10 @@ def _main_frame_listener(
     starting to load is a sign of life: an iframe of the stale page loading would
     lift the bound while the navigation we sent is still unseen. With no target
     id to compare, any frame counts (the older, looser behaviour). The id equality
-    is the CDP convention, not measured here: a case that broke it (prerender
-    activation, BFCache restore) would make the attempt read stale at the bound,
-    so the tab is replaced and the navigation retried, never a hang.
+    is the CDP convention, measured on real Chrome 155 (two tabs, Windows, the
+    2.1.40 prove): a case that broke it (prerender activation, BFCache restore)
+    would make the attempt read stale at the bound, so the tab is replaced and
+    the navigation retried, never a hang.
     """
     main_frame = getattr(getattr(tab, "target", None), "target_id", None)
 
