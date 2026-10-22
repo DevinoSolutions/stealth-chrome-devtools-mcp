@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### The gated load page is a registered fixture route (F-1000, T-3102)
+
+- `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
+
 ### Four CI integration flakes (F-1014, F-1015, F-1016, F-1022)
 
 - **A slow Chrome is no longer refused as a stranger (F-1014, T-5899).** `devtools_port.confirm_ours` gave the browser 10 s to answer
