@@ -162,7 +162,7 @@ class CDPFunctionExecutor:
         """
         Initializes the CDPFunctionExecutor instance.
         """
-        self._python_bindings: python_binding.Bindings = {}
+        self._python_bindings = python_binding.Bindings()
         self._persistent_functions: dict[str, dict[str, str]] = {}
 
     async def enable_runtime(self, tab: Tab) -> bool:
