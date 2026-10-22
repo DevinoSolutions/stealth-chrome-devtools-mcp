@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-import release_gate_harness as harness
+import release_gate_harness_env as harness  # T-6148: where _pick_free_port looks up
 from release_gate_harness import (
     _PORT_PICK_ATTEMPTS,
     DEFAULT_SINGLETON_PORT,
