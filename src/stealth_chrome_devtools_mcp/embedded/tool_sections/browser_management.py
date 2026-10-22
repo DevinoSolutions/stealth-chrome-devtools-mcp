@@ -780,17 +780,14 @@ async def close_instance(
         used to go into a dict this tool discarded, which is how F-910 hid a
         seed that had silently stopped moving.
     """
-    # F-1022: notice a crash HERE, so a dead browser is always the discarded one
-    # whichever call saw it first. The discard already released its clone dir and
-    # popped its diagnostics; the selection it spawned with is kept for this close.
-    await rt.browser_manager.get_instance(instance_id)
+    # No instance lookup here: it discards a dead browser (F-966). A browser an
+    # earlier call already discarded has its selection kept for this close (F-1022).
     spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(instance_id)
     profile_selection = {}
     if isinstance(spawn_diagnostics, dict):
         profile_selection = spawn_diagnostics.get("profile_selection") or {}
-    crashed_selection = tool_errors.exited_selection(instance_id)
-    crashed = crashed_selection is not None
-    profile_selection = crashed_selection or profile_selection
+    discarded = tool_errors.exited_selection(instance_id)
+    profile_selection = discarded or profile_selection
     rt.shared_session.require_shared_session_named(
         instance_id, profile_selection, session
     )
@@ -811,12 +808,14 @@ async def close_instance(
         rt.dynamic_hook_system.remove_instance(instance_id)
         # Instance is gone — lift sweep protection for its disposable clone so the
         # storage cap can reclaim it later if the on-close delete was deferred.
-        # A crashed browser's discard released it already, and the directory may
-        # since belong to a NEW spawn, so releasing again would unprotect that one.
-        if not crashed:
+        # A discard released it already, and the directory may since belong to a NEW
+        # spawn, so releasing again would unprotect that one.
+        if discarded is None:
             clone_protection.release_selection(profile_selection)
-        # Never refresh the seed from a `default` browser KNOWN to have crashed: its
-        # profile may be torn and the good seed must stay. Same answer either way.
+        # Never refresh the seed from a `default` browser KNOWN to have crashed
+        # (discarded earlier, or dead when this close claimed it): its profile may
+        # be torn and the good seed must stay. Same answer either way.
+        crashed = tool_errors.take_dead_on_close(instance_id) or discarded is not None
         if should_refresh_snapshot and crashed:
             answer["seed_refreshed"] = False
             answer["seed_error"] = "default-crashed"

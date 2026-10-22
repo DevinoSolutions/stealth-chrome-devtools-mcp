@@ -837,6 +837,8 @@ class BrowserManager:
                 return tool_errors.claim_exited(instance_id)  # F-1022
             data = self._instances.pop(instance_id)
             tool_errors.remember_departed(instance_id, data)
+            if not process_exit.browser_is_alive(data["browser"]):
+                tool_errors.note_dead_on_close(instance_id)  # F-1022
             self._spawn_diagnostics.pop(instance_id, None)
             proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
             # F-899: the store cross-checks `_instances`, so no `await` may
@@ -1393,10 +1395,8 @@ class BrowserManager:
             )
 
         except Exception as e:
-            # F-869: ONE place a collection failure is recorded, at WARNING with
-            # its traceback. It used to be INFO'd as "storage unavailable" and
-            # dropped. This reaches the caller (get_instance_state's partial
-            # record) and a post-mortem; NOT Sentry — see the finding's §8.
+            # F-869: ONE place a collection failure is recorded, at WARNING with its
+            # traceback; it reaches the caller (partial record), NOT Sentry (§8).
             debug_logger.log_warning(
                 "browser_manager",
                 "get_page_state",
