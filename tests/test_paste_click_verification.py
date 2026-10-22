@@ -29,6 +29,7 @@ Hermetic (``FakeTab`` + ``FakeTextField`` + ``FakeClickTarget`` from
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -506,3 +507,89 @@ async def test_a_disabled_control_that_reports_no_press_is_not_a_miss():
 
     assert result["reason"] == "disabled"
     assert len(_presses(target)) == 1
+
+
+# ---------------------------------------------------------------------------
+# click_element -- second review of F-1017: the button is never left held
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError(), RuntimeError("socket closed")],
+    ids=["timeout", "error"],
+)
+async def test_a_press_whose_reply_is_lost_does_not_leave_the_button_held(failure):
+    """RED before the fix: the press was delivered, its reply timed out, and no
+    ``mouseReleased`` followed -- the page stayed in the pressed state."""
+    tab, target = _click_tab(fail_on={"mousePressed": (failure, True)})
+
+    with pytest.raises(ToolError):
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert target.held is False
+    assert "click" not in target.calls
+
+
+async def test_a_cancelled_press_releases_and_stays_a_cancellation():
+    """RED before the fix: ``CancelledError`` became ``ToolError`` and the button
+    stayed held."""
+    tab, target = _click_tab(fail_on={"mousePressed": (asyncio.CancelledError(), True)})
+
+    with pytest.raises(asyncio.CancelledError):
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert target.held is False
+
+
+async def test_a_cancelled_read_between_press_and_release_releases():
+    tab, target = _click_tab(read_error=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert target.held is False
+
+
+async def test_a_release_that_fails_is_retried_and_reported():
+    tab, target = _click_tab(fail_on={"mouseReleased": (TimeoutError(), False)})
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert "could not release" in str(caught.value)
+    assert target.held is False
+
+
+async def test_a_cancelled_release_retries_and_stays_a_cancellation():
+    tab, target = _click_tab(
+        fail_on={"mouseReleased": (asyncio.CancelledError(), False)}
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert target.held is False
+
+
+async def test_a_small_aimed_point_is_not_accepted_with_a_two_pixel_error():
+    """RED before the fix: an absolute 2 px tolerance accepted x=10 landing at 8
+    (scale 1.25) as "there", pressed unscaled, and missed a 2 px target."""
+    tab, target = _click_tab(rect=(9.0, 9.0, 2.0, 2.0), input_scale=1.25)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    ((_, x, y, inside),) = _presses(target)
+    assert inside, (x, y)
+    assert result["reason"] is None
+
+
+async def test_a_disabled_control_under_the_point_exempts_press_verification():
+    """RED before the fix: an enabled wrapper around a disabled child hit-tests to
+    the child, Chrome sends no mousedown, and the click was called unverified."""
+    tab, target = _click_tab(hit_disabled=True, swallows_press=True)
+
+    result = await DOMHandler.click_element(tab, CLICK_SELECTOR)
+
+    assert len(_presses(target)) == 1
+    assert result["dispatch"] == "coordinate"

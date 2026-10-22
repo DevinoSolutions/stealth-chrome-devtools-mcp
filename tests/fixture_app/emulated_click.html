@@ -13,6 +13,8 @@
   <!-- An element hard against the right edge: under a scale below 1 an input
        aimed at it lands BEYOND the emulated viewport and is dropped. -->
   <button id="edge" style="position:absolute;left:280px;top:640px;width:70px;height:40px">Edge</button>
+  <!-- A child of a disabled button: Chrome sends it no mousedown. -->
+  <button id="dbtn" disabled style="position:absolute;left:150px;top:100px;width:120px;height:40px"><span id="dchild">Disabled child</span></button>
   <script>
     window.__hits = [];
     // A frame (its events are frame-relative; the click point is top-level) and a
