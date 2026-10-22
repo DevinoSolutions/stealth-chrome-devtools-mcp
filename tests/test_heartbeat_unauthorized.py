@@ -69,6 +69,36 @@ def test_the_cause_is_logged_at_warning_once_per_run_of_401s(monkeypatch, caplog
     assert "bearer token" in warnings[0].getMessage()
 
 
+def _beat_answering_in_turn(monkeypatch, answers) -> backend_probe.Heartbeat:
+    """Each beat takes the next answer: a status, or ``None`` for a refused dial."""
+    beat = backend_probe.Heartbeat(URL)
+    queue = list(answers)
+
+    def answer(request):
+        status = queue.pop(0)
+        if status is None:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(status)
+
+    transport = httpx.MockTransport(answer)
+    monkeypatch.setattr(beat, "_connection", lambda: httpx.Client(transport=transport))
+    return beat
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [[401, 401, 200, 401], [401, 401, None, 401]],
+    ids=["after-a-200", "after-an-outage"],
+)
+def test_the_warning_re_arms_for_each_new_run_of_401s(monkeypatch, caplog, answers):
+    beat = _beat_answering_in_turn(monkeypatch, answers)
+    with caplog.at_level(logging.DEBUG, logger="stealth.proxy"):
+        for _ in answers:
+            beat.verdict(1.0)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+
+
 async def test_a_backend_answering_401_never_reaches_the_condemn_threshold(
     monkeypatch,
 ):

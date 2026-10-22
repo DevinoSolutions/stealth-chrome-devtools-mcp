@@ -219,6 +219,7 @@ class Heartbeat:
         except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not alive")
             _logger.debug("liveness heartbeat failed", exc_info=exc)
             self.close()
+            self._said_unauthorized = False  # a 401 after an outage is a new run
             return VERDICT_DEAD
         if resp.status_code == _NO_ROUTE_STATUS:
             _logger.debug(
