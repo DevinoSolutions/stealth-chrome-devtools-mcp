@@ -155,4 +155,7 @@ class TestBootLogRedirect:
             "4321",
             "--host",
             "127.0.0.1",
+            # F-1023: the cold start's one deliberate addition; the backend
+            # exits only if no request ever reached it and it hosts no browser.
+            "--exit-if-unadopted",
         ]
