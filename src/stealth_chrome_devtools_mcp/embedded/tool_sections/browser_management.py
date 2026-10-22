@@ -783,14 +783,14 @@ async def close_instance(
     # No instance lookup here: it discards a dead browser (F-966). A browser an
     # earlier call already discarded has its selection kept for this close (F-1022).
     spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(instance_id)
-    profile_selection = {}
-    if isinstance(spawn_diagnostics, dict):
-        profile_selection = spawn_diagnostics.get("profile_selection") or {}
-    discarded = tool_errors.exited_selection(instance_id)
-    profile_selection = discarded or profile_selection
-    rt.shared_session.require_shared_session_named(
-        instance_id, profile_selection, session
-    )
+    diagnostics = spawn_diagnostics if isinstance(spawn_diagnostics, dict) else {}
+    live = diagnostics.get("profile_selection") or {}
+    # F-888 reuses ids, so a discard record can be stale: live wins, either guards.
+    stale = tool_errors.exited_selection(instance_id)
+    for selection in (live, stale or {}):
+        rt.shared_session.require_shared_session_named(instance_id, selection, session)
+    discarded = None if live else stale
+    profile_selection = live or discarded or {}
     should_refresh_snapshot = (
         profile_selection.get("profile_role") == rt.profile_seed.DEFAULT_SESSION
     )
@@ -812,6 +812,7 @@ async def close_instance(
         # spawn, so releasing again would unprotect that one.
         if discarded is None:
             clone_protection.release_selection(profile_selection)
+            tool_errors.claim_exited(instance_id)  # drop a stale record of this id
         # Never refresh the seed from a `default` browser KNOWN to have crashed
         # (discarded earlier, or dead when this close claimed it): its profile may
         # be torn and the good seed must stay. Same answer either way.

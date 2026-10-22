@@ -35,6 +35,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_reattach,
     clone_storage,
     profile_seed,
+    tool_errors,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -334,6 +335,75 @@ class TestCloseGuard:
             )
 
         assert closing.manager.closed == []
+
+    @pytest.mark.parametrize("instance_id", ["i-default", "i-fleet"])
+    @pytest.mark.parametrize("stale_kind", ["clone", "work", "empty"])
+    async def test_a_stale_discard_never_unlocks_a_shared_close(
+        self, closing, call_tool, tmp_session_root, instance_id, stale_kind
+    ):
+        """F-1022: a re-attach reuses a recorded instance id, so a discard record
+        for that id (a clone's, another session's, or none recorded) can outlive and
+        sit beside a LIVE shared browser. It must not override the live selection."""
+        stale = {
+            "clone": {
+                "user_data_dir": str(tmp_session_root["sessions"] / "sess-old"),
+                "profile_role": "clone",
+            },
+            "work": {
+                "user_data_dir": str(tmp_session_root["sessions"] / "work"),
+                "profile_role": "explicit",
+            },
+            "empty": {},
+        }[stale_kind]
+        tool_errors.remember_departed(instance_id, {}, exited=stale)
+
+        with pytest.raises(ToolError, match="other chats"):
+            await call_tool(closing.srv, "close_instance", instance_id=instance_id)
+
+        assert closing.manager.closed == [], "the browser was touched"
+
+    @pytest.mark.parametrize("instance_id", ["i-default", "i-fleet"])
+    async def test_a_stale_shared_discard_does_not_unlock_a_live_clone_unnamed(
+        self, closing, call_tool, tmp_session_root, instance_id
+    ):
+        """The other direction: a record that says a shared browser stays refusing
+        until the caller names it, whatever the live selection says."""
+        shared_directory = {
+            "i-default": tmp_session_root["master"],
+            "i-fleet": tmp_session_root["sessions"] / "fleet",
+        }[instance_id]
+        closing.manager.add(
+            "i-reused", tmp_session_root["sessions"] / "sess-live", role="clone"
+        )
+        tool_errors.remember_departed(
+            "i-reused",
+            {},
+            exited={"user_data_dir": str(shared_directory), "profile_role": "explicit"}
+            if instance_id == "i-fleet"
+            else {"user_data_dir": str(shared_directory), "profile_role": SHARED},
+        )
+
+        with pytest.raises(ToolError, match="other chats"):
+            await call_tool(closing.srv, "close_instance", instance_id="i-reused")
+
+        assert closing.manager.closed == []
+
+    async def test_a_stale_record_is_dropped_once_the_live_browser_closes(
+        self, closing, call_tool, tmp_session_root
+    ):
+        tool_errors.remember_departed(
+            "i-clone",
+            {},
+            exited={
+                "user_data_dir": str(tmp_session_root["sessions"] / "sess-old"),
+                "profile_role": "clone",
+            },
+        )
+
+        answer = await call_tool(closing.srv, "close_instance", instance_id="i-clone")
+
+        assert answer["closed"] is True
+        assert tool_errors.exited_selection("i-clone") is None
 
     @pytest.mark.parametrize("instance_id", ["i-clone", "i-work"])
     async def test_every_other_instance_closes_exactly_as_before(
