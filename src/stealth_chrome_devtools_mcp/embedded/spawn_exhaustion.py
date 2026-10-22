@@ -29,6 +29,14 @@ degrades to ``None``; and it logs at ``log_debug`` rather than ``log_error``
 because it fires only when the machine is already unhealthy, which is exactly
 when adding Sentry volume to the issue we are closing would be perverse.
 
+**A CPU-starved launch is a third answer, not a variant of the second (F-1024).**
+nodriver gives a launched Chrome a fixed connect deadline, so a Chrome that DID start
+and is merely late under CPU load fails exactly like one that never could. Naming
+"out of process capacity" for it sent an operator to reap browsers that were not the
+problem, while the machine was starved of CPU. :class:`LaunchEvidence` carries the two
+facts that tell them apart, both read at the moment of failure and before the teardown
+ends the late Chrome: whether the attempt's Chrome was running, and the machine CPU.
+
 A leaf module: ``psutil``, ``debug_logger`` and ``browser_pid_registry`` only.
 Never ``process_cleanup``, never ``singleton``, never ``server``.
 
@@ -40,7 +48,7 @@ by an unbound local would raise from inside the error handler.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import psutil
 
@@ -59,18 +67,52 @@ if TYPE_CHECKING:
 # universal defaults over config knobs.
 _EXHAUSTION_PROCESS_THRESHOLD = 120
 
+# Machine CPU at which a Chrome that started and was still late is put down to load
+# rather than to capacity. Sampled over a short window at the moment of failure, so
+# it is "busy NOW", not an average of a quiet minute. A module constant on purpose
+# (see above): an unknown STEALTH_MCP_* key crashes get_settings().
+_STARVED_CPU_PERCENT = 90.0
+_CPU_SAMPLE_SECONDS = 0.2
+
+# The names a Chromium BROWSER tree runs under, measured on the maintainer's box
+# (tasklist, 2026-10-21: 243 chrome.exe beside 29 stealth-chrome-devtools-mcp.exe, our
+# own stdio proxy, which the old "chrom" substring counted). Exact names, ``.exe``
+# stripped and lower-cased: ``chromedriver``, ``ChromeSetup``, ``chrome-devtools-mcp``,
+# ``ChromeRemoteDesktopHost`` and every Electron app that happens to say "chrome" are
+# not a browser and must not move a process-capacity verdict.
+_BROWSER_NAMES = frozenset(
+    {
+        "chrome",
+        "chrome_proxy",
+        "chrome_crashpad_handler",
+        "chromium",
+        "chromium-browser",
+        "chromium-browser-sandbox",
+        "chrome-sandbox",
+    }
+)
+# macOS spells the family with a bundle name and a role in parentheses.
+_BROWSER_PREFIXES = ("google chrome", "chromium helper", "chromium")
+
 _SKIPPABLE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 
+def _is_browser_name(name: str) -> bool:
+    """Whether a process name is a Chromium browser process (see ``_BROWSER_NAMES``)."""
+    lowered = name.lower().removesuffix(".exe")
+    return lowered in _BROWSER_NAMES or lowered.startswith(_BROWSER_PREFIXES)
+
+
 def live_chromium_processes() -> int:
-    """Machine-wide count of live Chromium-family processes.
+    """Machine-wide count of live Chromium-family BROWSER processes.
 
     ``process_iter(["name"])`` asks for the name and nothing else: reading
     ``cmdline`` for the whole process table costs one PEB read per process on
-    Windows and this question never needs it. The single ``"chrom"`` substring
-    covers every platform's spelling at once — ``chrome.exe`` /
+    Windows and this question never needs it. The names are matched exactly
+    (:func:`_is_browser_name`), covering every platform's spelling — ``chrome.exe`` /
     ``chrome_proxy.exe``, ``chrome`` / ``chromium`` / ``chromium-browser`` /
-    ``chrome_crashpad_handler``, ``Google Chrome Helper (Renderer)``.
+    ``chrome_crashpad_handler``, ``Google Chrome Helper (Renderer)`` — and nothing
+    that merely contains "chrom" (F-1024).
 
     A process that dies mid-walk (``/proc`` entries vanish) or belongs to
     another user (``AccessDenied`` on macOS) is skipped, not fatal: both are
@@ -82,9 +124,57 @@ def live_chromium_processes() -> int:
             name = proc.info.get("name") or ""
         except _SKIPPABLE:
             continue
-        if "chrom" in name.lower():
+        if _is_browser_name(name):
             live += 1
     return live
+
+
+class LaunchEvidence(NamedTuple):
+    """What a failed launch looked like when it failed (F-1024)."""
+
+    chrome_started: bool
+    """The attempt's own Chrome was running (it started and was late, or hung)."""
+    cpu_percent: float | None
+    """Machine CPU over a short window at the failure, or ``None`` if unreadable."""
+
+    def starved(self) -> bool:
+        """A Chrome that started on a machine whose CPU is at the ceiling."""
+        return (
+            self.chrome_started
+            and self.cpu_percent is not None
+            and self.cpu_percent >= _STARVED_CPU_PERCENT
+        )
+
+
+def observe(chrome_started: bool) -> LaunchEvidence:
+    """The evidence for a launch that just failed. Never raises: an unreadable CPU
+    is ``None``, which :meth:`LaunchEvidence.starved` reads as "not starved". The
+    0.2 s CPU window is spent only when a Chrome started: without one the verdict
+    cannot be "starved", so a launch that never began costs the loop nothing."""
+    try:
+        cpu = (
+            psutil.cpu_percent(interval=_CPU_SAMPLE_SECONDS) if chrome_started else None
+        )
+    except Exception as error:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+        debug_logger.log_debug(
+            "spawn_exhaustion", "observe", f"CPU not readable: {error}"
+        )
+        cpu = None
+    return LaunchEvidence(chrome_started=chrome_started, cpu_percent=cpu)
+
+
+def _starved_text(evidence: LaunchEvidence, live: int, tracked: int) -> str:
+    """The CPU-starved paragraph, carrying its own leading separator."""
+    return (
+        "\n\nSpawn diagnostics: this launch was CPU-starved, not capacity-limited "
+        "(F-1024). Chrome started, but the machine CPU read "
+        f"{evidence.cpu_percent:.0f}% when the launch failed, so the browser "
+        "missed its DevTools port deadline under load. "
+        f"{live} Chromium-family processes are live and {tracked} browser(s) are "
+        "tracked, which is not the cause here.\n"
+        "Do not reap browsers for this. Retry once the machine is idle, or spawn "
+        "one browser at a time while it is busy."
+    )
 
 
 def _hint_text(live: int, tracked: int) -> str:
@@ -105,11 +195,16 @@ def _hint_text(live: int, tracked: int) -> str:
     )
 
 
-def exhaustion_hint(pid_file: Path) -> str | None:
-    """The exhaustion paragraph to append to a failed spawn's error, or ``None``.
+def exhaustion_hint(
+    pid_file: Path, evidence: LaunchEvidence | None = None
+) -> str | None:
+    """The paragraph to append to a failed spawn's error, or ``None``.
 
-    Returns ``None`` below the threshold and on any internal failure, so the
-    call site is one line plus an ``or ""``. The returned string already starts
+    A launch whose Chrome started on a CPU-starved machine (*evidence*) gets the
+    starvation paragraph whatever the process count; otherwise the process-capacity
+    paragraph, only when the count is really at the limit. Returns ``None``
+    otherwise and on any internal failure, so the call site is one line plus an
+    ``or ""``. The returned string already starts
     with ``"\\n\\n"``: the call site does no formatting.
 
     ``pid_file`` is required and never defaults. The caller's binding is what
@@ -119,7 +214,8 @@ def exhaustion_hint(pid_file: Path) -> str | None:
     """
     try:
         live = live_chromium_processes()
-        if live < _EXHAUSTION_PROCESS_THRESHOLD:
+        starved = evidence is not None and evidence.starved()
+        if live < _EXHAUSTION_PROCESS_THRESHOLD and not starved:
             return None
         tracked = len(browser_pid_registry.read_entries(pid_file))
     except Exception as error:  # noqa: BLE001  PERMANENT(hint must never raise)
@@ -129,4 +225,6 @@ def exhaustion_hint(pid_file: Path) -> str | None:
             f"Exhaustion probe failed, spawn error left undecorated: {error}",
         )
         return None
+    if evidence is not None and starved:
+        return _starved_text(evidence, live, tracked)
     return _hint_text(live, tracked)

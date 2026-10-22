@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import signal
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -131,6 +132,16 @@ _SERVE_TRANSPORT = "stdio"
 # ``server.json`` it is a claim about. ``None`` until an http serve sets it, so
 # an imported-but-not-served module stamps nothing.
 _SERVE_PORT: int | None = None
+# F-1023: this backend was spawned by a cold start and exits if no client ever
+# comes for it, stamped by ``__main__`` from ``--exit-if-unadopted``. False for a
+# backend an operator started on purpose (``serve --http``).
+_EXIT_IF_UNADOPTED = False
+# Held so the task is not garbage-collected mid-flight (``backend_liveness``'s precedent).
+_UNADOPTED_WATCH: asyncio.Task | None = None
+
+
+async def _hosts_browsers() -> bool:
+    return bool(await rt.browser_manager.list_instances())
 
 
 @asynccontextmanager
@@ -141,7 +152,7 @@ async def app_lifespan(server):
     Args:
         server (Any): The server instance for which the lifespan is being managed.
     """
-    global _LIFESPAN_STARTED
+    global _LIFESPAN_STARTED, _UNADOPTED_WATCH
     if not _LIFESPAN_STARTED:
         _LIFESPAN_STARTED = True
         _install_asyncio_close_noise_filter()
@@ -166,6 +177,14 @@ async def app_lifespan(server):
                 rt.backend_registry.SERVER_STATE_FILE, _SERVE_PORT, os.getpid()
             )
         await rt.browser_manager.start_idle_reaper()
+        if _EXIT_IF_UNADOPTED and _SERVE_TRANSPORT == "http":
+            # SIGTERM through the handler chain, so uvicorn unwinds and the tracked
+            # browsers are cleaned exactly as for any other stop.
+            _UNADOPTED_WATCH = asyncio.create_task(
+                rt.session_hygiene.exit_if_unadopted(
+                    _hosts_browsers, lambda: signal.raise_signal(signal.SIGTERM)
+                )
+            )
         # F-963: the probe-and-heal loop for persistent-profile browsers, started
         # where the reaper is and independent of its idle-timeout setting. The
         # close path and the interception arming are handed in, because the
@@ -417,6 +436,14 @@ def build_arg_parser():
     )
 
     parser.add_argument(
+        "--exit-if-unadopted",
+        action="store_true",
+        help="HTTP only: exit if no client ever reaches the backend within "
+        "five minutes and it hosts no browser. Set by the cold start that spawns "
+        "a backend for a proxy, never by an operator running `serve`.",
+    )
+
+    parser.add_argument(
         "--disable-browser-management",
         action="store_true",
         help="Disable browser management tools (spawn, navigate, close, etc.)",
@@ -595,6 +622,7 @@ if __name__ == "__main__":
     # never run the lifespan's teardown, whenever FastMCP leaves it (see B1 above).
     _SERVE_TRANSPORT = args.transport
     _SERVE_PORT = args.port  # F-889 (b): which server.json entry we may stamp
+    _EXIT_IF_UNADOPTED = args.exit_if_unadopted
 
     if args.transport == "http":
         # F-862: the backend reaps MCP sessions their client abandoned (a

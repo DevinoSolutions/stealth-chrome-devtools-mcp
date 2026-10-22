@@ -317,7 +317,9 @@ async def test_a_mismatch_never_touches_the_foreign_browser(
     table.launch(OUR_PID, str(profile))
     table.launch(SIBLING_PID, str(tmp_path / "fleet"))
     monkeypatch.setattr(process_cleanup, "pid_file", tmp_path / "browser_pids.json")
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
     monkeypatch.setattr(spawn_contention, "contention_hint", lambda n: None)
     monkeypatch.setattr(
         BrowserManager,

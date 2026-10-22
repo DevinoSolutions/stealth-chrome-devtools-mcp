@@ -256,7 +256,7 @@ async def test_the_hint_lands_in_the_raised_error_when_the_seam_reads_high(
     sentinel = "\n\nSENTINEL-EXHAUSTION-PARAGRAPH"
     seen = []
 
-    def fake_hint(path):
+    def fake_hint(path, evidence=None):
         seen.append(path)
         return sentinel
 
@@ -277,7 +277,9 @@ async def test_the_hint_lands_in_the_raised_error_when_the_seam_reads_high(
 
 
 async def test_no_hint_when_the_seam_returns_none(monkeypatch, doomed_manager):
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
 
     with pytest.raises(Exception) as err:
         await doomed_manager.spawn_browser(BrowserOptions())
@@ -291,6 +293,149 @@ def test_no_public_function_defaults_its_path_parameter():
     """pid_file can never acquire a default — the structural guarantee that a
     future edit cannot route a test at the developer's live record."""
     assert_no_default_paths(spawn_exhaustion)
+
+
+# ---------------------------------------------------------------------------
+# F-1024 / T-5632: a CPU-starved launch is not "out of process capacity"
+#
+# Measured on the maintainer's box (tasklist, 2026-10-21): 243 chrome.exe and 29
+# stealth-chrome-devtools-mcp.exe. The second is OUR OWN stdio proxy, and the
+# "chrom" substring counted it, so a launch that failed because Chrome was late
+# under CPU load was reported as a lack of process capacity and sent the operator
+# to reap browsers that were not the problem.
+# ---------------------------------------------------------------------------
+
+STARVED = spawn_exhaustion.LaunchEvidence(chrome_started=True, cpu_percent=97.0)
+NOT_STARTED = spawn_exhaustion.LaunchEvidence(chrome_started=False, cpu_percent=97.0)
+IDLE_CPU = spawn_exhaustion.LaunchEvidence(chrome_started=True, cpu_percent=12.0)
+NO_CPU_READING = spawn_exhaustion.LaunchEvidence(chrome_started=True, cpu_percent=None)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "stealth-chrome-devtools-mcp.exe",
+        "stealth-chrome-devtools-mcp",
+        "chromedriver.exe",
+        "chromedriver",
+        "ChromeSetup.exe",
+        "chrome-devtools-mcp",
+        "ChromeRemoteDesktopHost.exe",
+    ],
+)
+def test_a_lookalike_name_is_not_a_browser_process(monkeypatch, name):
+    install_process_table(monkeypatch, [*chrome_procs(3), *[FakeProc(name)] * 300])
+    assert spawn_exhaustion.live_chromium_processes() == 3
+
+
+def test_a_starved_launch_names_the_cpu_not_the_process_cap(monkeypatch, pid_file):
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD - 1))
+    hint = spawn_exhaustion.exhaustion_hint(pid_file, STARVED)
+    assert hint is not None
+    assert hint.startswith("\n\n")
+    assert "CPU" in hint
+    assert "97%" in hint
+    assert "F-1024" in hint
+    assert "out of process capacity" not in hint
+    assert "kill-orphans" not in hint
+
+
+def test_a_starved_launch_stays_starved_when_the_count_is_also_high(
+    monkeypatch, pid_file
+):
+    """The count at the limit does not outvote a Chrome that started late."""
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD + 40))
+    hint = spawn_exhaustion.exhaustion_hint(pid_file, STARVED)
+    assert "CPU" in hint
+    assert "out of process capacity" not in hint
+    assert f"{THRESHOLD + 40}" in hint  # still reported, as a number
+
+
+def test_a_chrome_that_never_started_is_not_called_starved(monkeypatch, pid_file):
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD))
+    hint = spawn_exhaustion.exhaustion_hint(pid_file, NOT_STARTED)
+    assert "out of process capacity" in hint
+    assert "CPU-starved" not in hint
+
+
+@pytest.mark.parametrize("evidence", [IDLE_CPU, NO_CPU_READING])
+def test_started_chrome_without_a_hot_cpu_below_the_cap_says_nothing(
+    monkeypatch, pid_file, evidence
+):
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD - 1))
+    assert spawn_exhaustion.exhaustion_hint(pid_file, evidence) is None
+
+
+@pytest.mark.parametrize("evidence", [IDLE_CPU, NO_CPU_READING, None])
+def test_the_cap_is_named_only_when_the_count_is_at_the_limit(
+    monkeypatch, pid_file, evidence
+):
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD))
+    assert "out of process capacity" in spawn_exhaustion.exhaustion_hint(
+        pid_file, evidence
+    )
+
+
+def test_observe_samples_the_machine_cpu(monkeypatch):
+    monkeypatch.setattr(psutil, "cpu_percent", lambda interval=None: 83.5)
+    assert spawn_exhaustion.observe(True) == spawn_exhaustion.LaunchEvidence(
+        chrome_started=True, cpu_percent=83.5
+    )
+
+
+def test_observe_never_raises(monkeypatch):
+    def refuse(interval=None):
+        raise OSError("no counters")
+
+    monkeypatch.setattr(psutil, "cpu_percent", refuse)
+    assert spawn_exhaustion.observe(True) == spawn_exhaustion.LaunchEvidence(
+        chrome_started=True, cpu_percent=None
+    )
+
+
+def test_observe_spends_no_cpu_window_when_no_chrome_started(monkeypatch):
+    """The 0.2 s window blocks the loop; a launch that never began cannot be
+    'starved', so it must not pay for one."""
+    sampled = []
+    monkeypatch.setattr(
+        psutil, "cpu_percent", lambda interval=None: sampled.append(interval) or 99.0
+    )
+    assert spawn_exhaustion.observe(False) == spawn_exhaustion.LaunchEvidence(
+        chrome_started=False, cpu_percent=None
+    )
+    assert sampled == []
+
+
+async def test_the_call_site_reads_the_evidence_before_the_teardown_ends_the_chrome(
+    monkeypatch, doomed_manager
+):
+    """After the teardown the failed Chrome is gone and the CPU has dropped, so a
+    sample taken then would read an idle machine for a launch that died of load."""
+    order = []
+
+    def fake_observe(chrome_started):
+        order.append("observe")
+        return STARVED
+
+    async def fake_teardown(self, *args, **kwargs):
+        order.append("teardown")
+
+    seen = []
+
+    def fake_hint(path, evidence=None):
+        seen.append(evidence)
+        return "\n\nSTARVED-PARAGRAPH"
+
+    monkeypatch.setattr(spawn_exhaustion, "observe", fake_observe)
+    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", fake_hint)
+    monkeypatch.setattr(BrowserManager, "_teardown_failed_spawn", fake_teardown)
+
+    with pytest.raises(Exception) as err:
+        await doomed_manager.spawn_browser(BrowserOptions())
+
+    assert order == ["observe", "teardown"]
+    assert seen == [STARVED]
+    assert str(err.value).endswith("STARVED-PARAGRAPH")
 
 
 # ---------------------------------------------------------------------------

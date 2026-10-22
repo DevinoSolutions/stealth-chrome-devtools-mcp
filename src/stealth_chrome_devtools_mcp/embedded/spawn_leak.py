@@ -168,6 +168,16 @@ def launched_pid(attempt: Attempt) -> int | None:
     )
 
 
+def started(attempt: Attempt | None) -> bool:
+    """Whether *attempt* launched a Chrome that is still running (F-1024): the one
+    fact that separates a launch that was LATE from one that never began. ``None``
+    (the launch was never reached) and a launch we cannot name are both False."""
+    try:
+        return attempt is not None and launched_pid(attempt) is not None
+    except Exception:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+        return False
+
+
 def _registered(attempt: Attempt) -> object | None:
     """The ``Browser`` nodriver registered for *attempt*'s config, or None."""
     if attempt.config is None:

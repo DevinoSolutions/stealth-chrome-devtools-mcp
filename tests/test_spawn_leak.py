@@ -84,7 +84,9 @@ def doomed_manager(monkeypatch, pid_file, on_launch, error=None):
     )
     monkeypatch.setattr(BrowserManager, "_launch_browser", failing_launch)
     monkeypatch.setattr(process_cleanup, "pid_file", pid_file)
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
     monkeypatch.setattr(spawn_contention, "contention_hint", lambda n: None)
     return BrowserManager()
 
@@ -146,7 +148,9 @@ async def test_the_sibling_that_won_the_race_survives(
     )
     monkeypatch.setattr(BrowserManager, "_launch_browser", launch)
     monkeypatch.setattr(process_cleanup, "pid_file", pid_file)
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
     monkeypatch.setattr(spawn_contention, "contention_hint", lambda n: None)
     manager = BrowserManager()
 

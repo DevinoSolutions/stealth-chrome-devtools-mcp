@@ -263,7 +263,9 @@ def failing_spawn_server(patched_server, monkeypatch, tmp_path):
     )
     monkeypatch.setattr(BrowserManager, "_launch_browser", failing_launch)
     # Keep the F-811 hint out of the assertion AND off the real process table.
-    monkeypatch.setattr(spawn_exhaustion, "exhaustion_hint", lambda path: None)
+    monkeypatch.setattr(
+        spawn_exhaustion, "exhaustion_hint", lambda path, evidence=None: None
+    )
 
     class _CloneStorage:
         def require_allowed_user_data_dir(self, user_data_dir, session=None):
