@@ -174,6 +174,103 @@ async def test_a_navigation_chrome_never_accepted_keeps_its_one_recovery_retry(
     assert len(replacements) == 1
 
 
+class _SlowAnsweringTab(FakeTab):
+    """A healthy replacement tab whose ``Page.navigate`` answers after *delay*."""
+
+    delay = 0.2
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
+            await asyncio.sleep(self.delay)
+        return await super().send(cdp_obj, *args, **kwargs)
+
+
+async def test_an_unanswered_navigate_leaves_the_recovery_retry_a_real_budget(
+    monkeypatch, manager
+):
+    """T-6363 (F-1026). The tool caps the WHOLE navigate at ``timeout + 5`` s, and
+    an unanswered first ``Page.navigate`` used to spend all of ``timeout`` before
+    the stale-tab recovery retry (F-824) started, so on CI the retry was cancelled
+    mid-send (``CDP operation timed out after 35s``). Scaled to the clock: a 0.9 s
+    navigate under a 1.0 s outer cap (the ``+ 5`` s), a stale first tab, and a
+    replacement that needs 0.2 s. Today: 0.9 s + 0.2 s > 1.0 s. With the
+    acceptance bound (timeout / 3 = 0.3 s): 0.3 s + 0.2 s fits.
+
+    Bounded by its own ``wait_for`` so the RED is a failure, not a hang."""
+    stale = _UnansweringTab()
+    fresh = _SlowAnsweringTab()
+    tabs = iter([stale, fresh])
+    replacements: list[str] = []
+
+    async def get_navigation_tab(self, instance_id):
+        return next(tabs)
+
+    async def replace_main_tab(self, instance_id, reason, close_existing=True):
+        replacements.append(reason)
+        return next(tabs)
+
+    monkeypatch.setattr(BrowserManager, "get_navigation_tab", get_navigation_tab)
+    monkeypatch.setattr(BrowserManager, "_replace_main_tab", replace_main_tab)
+    outer_cap = 1.0  # the tool's `timeout + 5` s, scaled
+
+    result = await asyncio.wait_for(
+        manager.navigate(instance_id="iid-1", url=URL, timeout=900), timeout=outer_cap
+    )
+
+    assert result["url"] == URL
+    assert len(replacements) == 1
+    assert _navigate_frames(stale) == [URL]
+    assert _navigate_frames(fresh) == [URL]
+
+
+class _SlowServerTab(FakeTab):
+    """A live tab on a slow server: Chrome starts the navigation at once
+    (``Page.frameStartedLoading``, +9 ms measured) and answers ``Page.navigate``
+    only when the response headers arrive (+12.04 s measured)."""
+
+    delay = 0.3
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        if getattr(getattr(cdp_obj, "gi_code", None), "co_name", None) == "navigate":
+            event = cdp.page.FrameStartedLoading(frame_id=cdp.page.FrameId("F-main"))
+            for event_type, handler in list(self.handlers):
+                if event_type is cdp.page.FrameStartedLoading:
+                    handler(event)
+            await asyncio.sleep(self.delay)
+        return await super().send(cdp_obj, *args, **kwargs)
+
+
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+async def test_a_slow_server_whose_navigation_started_keeps_the_whole_budget(
+    monkeypatch, manager, pinned
+):
+    """T-6363 (F-1026). The acceptance bound is on SILENCE, not on the reply:
+    Chrome answers ``Page.navigate`` only once the headers arrive, so a server
+    slower than ``ACCEPT_SECONDS`` is a live tab and must succeed on its own tab,
+    with no recovery retry, whether pinned or not. RED at 31f36ab (which bounded
+    the reply itself): attempt 1 timed out and the page was loaded twice.
+
+    The bound is shrunk to 50 ms and the reply takes 300 ms, so the margin is
+    the bound's own size rather than the machine's speed."""
+    monkeypatch.setattr(navigation_milestone, "ACCEPT_SECONDS", 0.05)
+    tab = _SlowServerTab()
+    replacements = _with_tab(monkeypatch, tab)
+
+    result = await asyncio.wait_for(
+        manager.navigate(
+            instance_id="iid-1",
+            url=URL,
+            timeout=3000,
+            pinned=tab if pinned else None,
+        ),
+        timeout=2.0,
+    )
+
+    assert result["url"] == URL
+    assert _navigate_frames(tab) == [URL]
+    assert replacements == []
+
+
 async def test_the_recovery_retry_still_carries_the_referrer(monkeypatch, manager):
     """F-965: the referrer is a parameter of ``Page.navigate``, so the stale-tab
     retry's second send carries it too — it is not state set once before the loop."""

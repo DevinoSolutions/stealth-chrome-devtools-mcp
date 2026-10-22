@@ -154,6 +154,23 @@ ABORTED = "net::ERR_ABORTED"
 #: deadline and lose the named answer to a bare cancellation.
 ABORTED_GRACE_SECONDS = 1.0
 
+#: T-6363 (F-1026): how long a tab may show NO sign that Chrome started this
+#: navigation before it is called stale, at most — and at most a third of the
+#: caller's budget, so a small ``timeout`` keeps its proportions. The tool caps
+#: the whole navigate at ``timeout + 5`` s, and a silent first ``Page.navigate``
+#: used to spend ALL of ``timeout`` before F-824's stale-tab recovery retry
+#: started, leaving it ~5 s: it was cancelled mid-send on CI (``CDP operation
+#: timed out after 35s``) and could never finish.
+#:
+#: The bound is on silence, NOT on the reply: Chrome answers ``Page.navigate``
+#: only once the response HEADERS arrive (measured on Chrome 152 against a
+#: server that sleeps 12 s: ``Page.frameStartedLoading`` at +9 ms, the reply and
+#: ``init`` at +12.04 s, no ``frameRequestedNavigation`` at all), so a slow
+#: server is a live tab and keeps the whole budget. The sign is
+#: ``Page.frameStartedLoading``, which Chrome emits in the same few ms.
+ACCEPT_SECONDS = 10.0
+ACCEPT_BUDGET_SHARE = 3
+
 
 @dataclass
 class Progress:
@@ -383,6 +400,55 @@ def _aborted_error(url: str) -> ToolError:
     )
 
 
+async def _send_navigate(
+    tab: Tab,
+    url: str,
+    referrer: str | None,
+    budget_seconds: float,
+    life: asyncio.Event,
+) -> tuple[object, object, str | None]:
+    """Send ``Page.navigate`` and return Chrome's answer, or raise
+    ``TimeoutError`` when the tab shows no sign of life (T-6363).
+
+    *life* is set by the caller's ``Page.frameStartedLoading`` listener. A tab
+    that stays silent for :data:`ACCEPT_SECONDS` (or a third of *budget_seconds*)
+    is a stale one, and the ``TimeoutError`` is the one `progress.accepted` False
+    already marks as such, early enough for the ONE recovery retry (F-824) to
+    have a real budget. Once Chrome has STARTED the navigation, the reply waits
+    for the server's headers under the caller's whole budget, as it always did.
+    The reply is shielded by cdp_transport, so abandoning it cannot kill the
+    listener (F-883 B1).
+    """
+
+    async def send() -> tuple[object, object, str | None]:
+        await tab.send(cdp.page.set_lifecycle_events_enabled(enabled=True))
+        return await tab.send(
+            cdp.page.navigate(
+                url,
+                referrer=referrer or None,
+                referrer_policy=(
+                    cdp.page.ReferrerPolicy.UNSAFE_URL if referrer else None
+                ),
+            )
+        )
+
+    sending = asyncio.ensure_future(send())
+    sign = asyncio.ensure_future(life.wait())
+    try:
+        await asyncio.wait(
+            {sending, sign},
+            timeout=min(ACCEPT_SECONDS, budget_seconds / ACCEPT_BUDGET_SHARE),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not (sending.done() or life.is_set()):
+            raise TimeoutError  # no sign of life: a stale tab
+        return await sending
+    finally:
+        sign.cancel()
+        if not sending.done():
+            sending.cancel()
+
+
 async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget and progress, plus F-965's referrer)
     tab: Tab,
     url: str,
@@ -407,6 +473,10 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
     started = loop.time()
     stream: list[tuple[str, str, str]] = []
     arrived = asyncio.Event()
+    life = asyncio.Event()
+
+    def on_started(_event: cdp.page.FrameStartedLoading, _c: object = None) -> None:
+        life.set()
 
     def on_lifecycle(
         event: cdp.page.LifecycleEvent, _connection: object = None
@@ -415,21 +485,15 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
         arrived.set()
 
     tab.add_handler(cdp.page.LifecycleEvent, on_lifecycle)
+    tab.add_handler(cdp.page.FrameStartedLoading, on_started)
     try:
         # nodriver re-sends Page.enable ahead of this on EVERY navigation: once
         # the listener below is removed, its next send forgets `cdp.page` from
         # `enabled_domains` (connection.py's _register_handlers), so the domain
         # reads as new each time. Both commands are idempotent, ~1 ms together,
         # and that beats tracking either flag per tab.
-        await tab.send(cdp.page.set_lifecycle_events_enabled(enabled=True))
-        frame_id, loader_id, error_text = await tab.send(
-            cdp.page.navigate(
-                url,
-                referrer=referrer or None,
-                referrer_policy=(
-                    cdp.page.ReferrerPolicy.UNSAFE_URL if referrer else None
-                ),
-            )
+        frame_id, loader_id, error_text = await _send_navigate(
+            tab, url, referrer, budget_seconds, life
         )
         progress.accepted = True
         aborted = error_text == ABORTED
@@ -473,6 +537,8 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
     finally:
         with contextlib.suppress(KeyError):
             tab.remove_handler(cdp.page.LifecycleEvent, on_lifecycle)
+        with contextlib.suppress(KeyError):
+            tab.remove_handler(cdp.page.FrameStartedLoading, on_started)
 
     if wait_until == "networkidle":
         # Half of what is LEFT, never all of it (the abort grace's own rule
