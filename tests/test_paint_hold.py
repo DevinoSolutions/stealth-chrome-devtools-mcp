@@ -5,7 +5,8 @@ producing frames (T-5903), at the page's full painting cost, so the hold goes on
 tab a tool is acting on and ends ``LINGER_SECONDS`` after the last call. The real-Chrome
 side is ``test_e2e_background_tab_frames.py``; this file pins the bookkeeping: one start
 per tab however many calls, a moving deadline, release, no leaked task, a refusal that
-never reaches the tool.
+never reaches the tool, a cancelled or failed start never sticks or drops a newer hold,
+and a caller's own screencast is left alone.
 """
 
 from __future__ import annotations
@@ -16,6 +17,9 @@ import pytest
 
 from fakes import FakeTab
 from stealth_chrome_devtools_mcp.embedded import paint_hold, tab_binding
+from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
+    CDPFunctionExecutor,
+)
 
 START = "Page.startScreencast"
 STOP = "Page.stopScreencast"
@@ -143,6 +147,157 @@ async def test_a_wedged_tab_costs_the_tool_a_bounded_wait_not_a_hang(monkeypatch
     monkeypatch.setattr(paint_hold, "SEND_BUDGET_S", 0.05)
     tab = WedgedTab(target_id="t-1")
     await asyncio.wait_for(paint_hold.hold(tab), 1.0)
-    assert (
-        paint_hold._held == {}
-    )  # the failed hold is dropped, so the next call retries
+    # The start may still land when the renderer wakes, so the entry keeps its timer
+    # (which sends the stop); it is not dropped as a refusal is.
+    assert paint_hold._held["t-1"].task is not None
+
+
+async def test_a_wedged_tab_pays_the_budget_once_not_on_every_call(monkeypatch):
+    monkeypatch.setattr(paint_hold, "SEND_BUDGET_S", 0.3)
+    tab = WedgedTab(target_id="t-1")
+    await paint_hold.hold(tab)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await paint_hold.hold(tab)
+    assert loop.time() - began < 0.1
+
+
+class GatedTab(FakeTab):
+    """A tab whose start_screencast waits on ``gate`` and then fails if ``fail``."""
+
+    def __init__(self, *args, fail=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gate = asyncio.Event()
+        self.fail = fail
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        if cdp_obj.gi_code.co_name == "start_screencast":
+            await self.gate.wait()
+            if self.fail:
+                raise ConnectionError("refused")
+        return await super().send(cdp_obj, *args, **kwargs)
+
+
+async def test_a_cancelled_start_never_leaves_a_stuck_hold():
+    """CancelledError during the start used to leave an entry with no timer, so every
+    later call only moved its deadline and the tab painted until it closed."""
+    tab = GatedTab(target_id="t-1")
+    call = asyncio.create_task(paint_hold.hold(tab))
+    await asyncio.sleep(0.02)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    entry = paint_hold._held["t-1"]
+    assert entry.task is not None  # the cancel still arms the release
+    tab.gate.set()
+    await asyncio.sleep(0.4)  # linger 0.2 s
+    assert paint_hold._held == {}
+    assert len(tab.sent(STOP)) == 1
+
+
+async def test_a_cancelled_start_replaced_by_a_newer_hold_leaves_the_newer_alone():
+    old, new = GatedTab(target_id="t-1"), FakeTab(target_id="t-1")
+    call = asyncio.create_task(paint_hold.hold(old))
+    await asyncio.sleep(0.02)
+    await paint_hold.hold(new)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert paint_hold._held["t-1"].tab is new
+    assert paint_hold._held["t-1"].task is not None
+
+
+async def test_a_start_failure_racing_a_re_hold_does_not_drop_the_newer_hold():
+    """The failure path popped ``_held[key]`` by key, so it dropped the entry of a
+    re-hold that replaced it, orphaning that hold's timer and its screencast."""
+    old, new = GatedTab(target_id="t-1", fail=True), FakeTab(target_id="t-1")
+    first = asyncio.create_task(paint_hold.hold(old))
+    await asyncio.sleep(0.02)
+    await paint_hold.hold(new)  # replaces the in-flight entry
+    newer = paint_hold._held["t-1"]
+    old.gate.set()
+    await first  # the old start fails now, and is logged only
+    assert paint_hold._held.get("t-1") is newer
+    assert newer.task is not None
+    await asyncio.sleep(0.4)
+    assert len(new.sent(STOP)) == 1  # and it is released on time
+
+
+async def test_forgetting_a_tab_during_its_start_leaves_nothing_behind():
+    tab = GatedTab(target_id="t-1")
+    call = asyncio.create_task(paint_hold.hold(tab))
+    await asyncio.sleep(0.02)
+    paint_hold.forget("t-1")
+    tab.gate.set()
+    await call
+    assert paint_hold._held == {}
+    assert [t for t in asyncio.all_tasks() if "_expire" in repr(t)] == []  # no timer
+    await asyncio.sleep(0.3)
+    assert tab.sent(STOP) == []  # a closed tab: nothing to release
+
+
+async def test_a_rediscovered_target_stops_the_old_session_if_it_is_still_open():
+    old, new = FakeTab(target_id="t-1"), FakeTab(target_id="t-1")
+    await paint_hold.hold(old)
+    await paint_hold.hold(new)
+    assert len(old.sent(STOP)) == 1
+    assert len(new.sent(START)) == 1
+
+
+async def test_a_rediscovered_target_sends_nothing_to_a_closed_old_session():
+    old, new = FakeTab(target_id="t-1"), FakeTab(target_id="t-1")
+    await paint_hold.hold(old)
+    old.closed = True
+    await paint_hold.hold(new)
+    assert old.sent(STOP) == []
+
+
+async def test_a_refused_stop_of_the_old_session_still_holds_the_new_one():
+    old = FakeTab(target_id="t-1", cdp_responses={"stop_screencast": lambda n: 1 / 0})
+    new = FakeTab(target_id="t-1")
+    await paint_hold.hold(old)
+    await paint_hold.hold(new)
+    assert paint_hold._held["t-1"].tab is new
+
+
+async def test_a_callers_own_screencast_is_neither_overridden_nor_stopped():
+    tab = FakeTab(target_id="t-1")
+    executor = CDPFunctionExecutor()
+    await paint_hold.hold(tab)
+    result = await executor.execute_cdp_command(
+        tab, "Page.startScreencast", {"format": "png"}
+    )
+    assert result["success"]
+    assert paint_hold._held == {}
+    await paint_hold.hold(tab)  # the next tool call must not start over theirs
+    await asyncio.sleep(0.4)
+    assert len(tab.sent(START)) == 2  # the hold's, then the caller's: nothing else
+    assert tab.sent(STOP) == []
+
+
+async def test_a_callers_stop_hands_the_tab_back_to_the_hold():
+    tab = FakeTab(target_id="t-1")
+    executor = CDPFunctionExecutor()
+    await executor.execute_cdp_command(tab, "Page.startScreencast", {})
+    await executor.execute_cdp_command(tab, "Page.stopScreencast", {})
+    await paint_hold.hold(tab)
+    assert "t-1" in paint_hold._held
+    assert len(tab.sent(START)) == 2  # theirs, then the hold's
+
+
+async def test_a_failed_caller_screencast_command_does_not_take_the_tab():
+    tab = FakeTab(target_id="t-1", cdp_responses={"start_screencast": lambda n: 1 / 0})
+    executor = CDPFunctionExecutor()
+    result = await executor.execute_cdp_command(tab, "Page.startScreencast", {})
+    assert not result["success"]
+    await paint_hold.hold(tab)
+    assert paint_hold._held == {} and "t-1" not in paint_hold._caller_owned
+
+
+async def test_a_stale_timer_never_releases_a_newer_hold():
+    old, new = FakeTab(target_id="t-1"), FakeTab(target_id="t-1")
+    stale = paint_hold._Hold(old, deadline=0.0)
+    paint_hold._held["t-1"] = newer = paint_hold._Hold(new, deadline=1e12)
+    await paint_hold._expire("t-1", stale)
+    assert paint_hold._held["t-1"] is newer
+    assert old.sent(STOP) == [] and new.sent(STOP) == []
