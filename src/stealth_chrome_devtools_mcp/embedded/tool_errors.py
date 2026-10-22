@@ -60,26 +60,38 @@ _departed: dict[str, str] = {}
 _DEPARTED_KEPT = 64
 
 
-#: ids of browsers that died ON THEIR OWN and were discarded by the manager, that no
-#: ``close_instance`` has answered for yet (F-1022); oldest first out.
-_exited: dict[str, None] = {}
+#: id -> the spawn's recorded ``profile_selection``, for browsers that died ON THEIR
+#: OWN and were discarded by the manager, that no ``close_instance`` has answered
+#: for yet (F-1022); oldest first out. The selection is kept because the discard
+#: pops the spawn diagnostics the tool layer reads, and without it a close that
+#: arrives second cannot tell a disposable clone from the shared ``fleet`` or
+#: ``default`` browser, so it would skip the seed refresh and the shared-session
+#: refusal that the same close does when it is the first to notice the crash.
+_exited: dict[str, dict[str, object]] = {}
 
 
 def claim_exited(instance_id: str) -> bool:
     """Whether *instance_id* is a browser that died on its own and nobody has closed
     since: one close claims it, so a second reports a miss like any double close."""
-    claimed = instance_id in _exited
-    _exited.pop(instance_id, None)
-    return claimed
+    return _exited.pop(instance_id, None) is not None
+
+
+def exited_selection(instance_id: str) -> dict[str, object]:
+    """The ``profile_selection`` of an unclaimed browser that died on its own, else
+    ``{}``; reading it does not claim it."""
+    return _exited.get(instance_id, {})
 
 
 def remember_departed(
-    instance_id: str, data: dict[str, object], exited: bool = False
+    instance_id: str,
+    data: dict[str, object],
+    exited: dict[str, object] | None = None,
 ) -> None:
-    """Note, as an instance leaves the manager (closed, or *exited* on its own),
-    which directory its browser was on, so a later miss can say how to relaunch."""
-    if exited:
-        _exited[instance_id] = None
+    """Note, as an instance leaves the manager (closed, or on its own: *exited* is
+    then its ``profile_selection``, ``{}`` when it recorded none), which directory
+    its browser was on, so a later miss can say how to relaunch."""
+    if exited is not None:
+        _exited[instance_id] = exited
         while len(_exited) > _DEPARTED_KEPT:
             del _exited[next(iter(_exited))]
     directory = getattr(data.get("options"), "user_data_dir", None)

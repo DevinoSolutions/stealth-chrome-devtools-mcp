@@ -17,6 +17,7 @@ from nodriver import Browser, Tab
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
     chrome_log,
+    clone_protection,
     desktop_launch,
     google_rotation_guard,
     login_persistence,
@@ -203,8 +204,11 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
         self._instances.pop(instance_id, None)
         self._exited.append((instance_id, data))
-        tool_errors.remember_departed(instance_id, data, exited=True)
-        self._spawn_diagnostics.pop(instance_id, None)
+        selection = (self._spawn_diagnostics.pop(instance_id, None) or {}).get(
+            "profile_selection"
+        ) or {}
+        tool_errors.remember_departed(instance_id, data, exited=selection)
+        clone_protection.release_selection(selection)  # F-1022: the browser is gone
         proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
         if proxy_forwarder is not None:
             self._run_in_background(
@@ -468,9 +472,8 @@ class BrowserManager:
                 + "; ".join(stealth_warnings),
             )
 
-        # When sandbox is explicitly disabled, ensure --no-sandbox is present
-        # in launch args (added after stealth filter since this is a deliberate
-        # platform/user choice, not an accidental automation leak).
+        # Sandbox explicitly disabled: add --no-sandbox after the stealth filter
+        # (a deliberate platform/user choice, not an accidental automation leak).
         if options.sandbox is False and "--no-sandbox" not in launch_args:
             launch_args.append("--no-sandbox")
         launch_args = login_persistence.protect_logins(launch_args)
@@ -900,12 +903,10 @@ class BrowserManager:
                 )
 
             # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
-            # The graceful close above is the START of Chrome's shutdown, and
-            # that shutdown is what COMMITS the cookie store — terminating
-            # mid-flush loses the login the caller just made. The grace, its
-            # measurement and what a cancelled close does about it are all
-            # `process_exit.settle`'s. Phase 3 keeps its whole budget: this is
-            # its own await.
+            # The graceful close above STARTS Chrome's shutdown, which COMMITS the
+            # cookie store; terminating mid-flush loses the login just made. The
+            # grace, its measurement and a cancelled close are `process_exit.settle`'s;
+            # Phase 3 keeps its whole budget (this is its own await).
             await process_exit.settle(
                 instance_id,
                 getattr(browser, "_process", None),
@@ -1221,9 +1222,8 @@ class BrowserManager:
 
         # No per-tab `await` (F-771): update_targets() just refreshed every field
         # below; a rediscovered target is a raw Connection with no __await__ (its
-        # __getattr__ still answers .url); and Tab.wait() costs 0.5s per tab.
-        # The record itself is `tab_identity`'s, shared with get_active_tab and
-        # list_instances so the three cannot disagree (F-874).
+        # __getattr__ still answers .url); and Tab.wait() costs 0.5s per tab. The
+        # record is `tab_identity`'s, shared with get_active_tab/list_instances (F-874).
         await browser.update_targets()
 
         return [tab_identity.record(tab) for tab in browser.tabs]
