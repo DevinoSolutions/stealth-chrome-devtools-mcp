@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
 
