@@ -111,7 +111,7 @@ imports nodriver already, and the stdio proxy imports neither.
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import psutil
@@ -122,6 +122,14 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
     from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
+
+
+def _cpu_times() -> object | None:
+    """The machine CPU times now, or ``None`` when unreadable (never raises)."""
+    try:
+        return psutil.cpu_times()
+    except Exception:  # noqa: BLE001  PERMANENT(a baseline taken inside the spawn path must not fail the spawn)
+        return None
 
 
 @dataclass
@@ -140,9 +148,15 @@ class Attempt:
     Chrome on failure", which is not what that code does. F-919 §6 enumerates
     the three, and F-924 is the successor that would let this fence reach two
     of them.
+
+    ``cpu_baseline`` is the machine's CPU times when the attempt began (F-1024): the
+    failure handler subtracts it from a second reading, so "how busy was the machine
+    during THIS launch" is answered without a sleeping sample on the event loop, and
+    per attempt, so a concurrent spawn cannot shorten another's window.
     """
 
     config: object | None = None
+    cpu_baseline: object | None = field(default_factory=_cpu_times, repr=False)
 
 
 def launched_pid(attempt: Attempt) -> int | None:

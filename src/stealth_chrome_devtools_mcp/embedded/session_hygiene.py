@@ -80,6 +80,8 @@ SWEEP_INTERVAL_SECONDS = 30.0
 # above, for the same reason: it is "gone", not "thinking" (a proxy waits at most
 # BACKEND_READY_TIMEOUT, 120 s, from its own start, and connects the moment we answer).
 UNADOPTED_AFTER_SECONDS = ABANDONED_AFTER_SECONDS
+# How often a pending decision looks again while a browser re-attach pass is running.
+REATTACH_POLL_SECONDS = 5.0
 
 _SESSION_HEADER = b"mcp-session-id"
 _logger = logging.getLogger("stealth.backend")
@@ -94,7 +96,11 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self.last_seen: dict[str, float] = {}
         self.reaped_total = 0
-        self.ever_served = False  # F-1023: any client has reached /mcp, even once
+        # F-1023: any request has reached /mcp, even once. Set on ENTRY to
+        # handle_request, so a request still in flight counts, and an ``initialize``
+        # probe counts as much as a proxy (a probe means someone is looking for this
+        # backend, and the failure it can cause is the safe one: it stays up).
+        self.ever_served = False
         _managers.append(weakref.ref(self))
 
     def note_activity(self, session_id: str, *, now: float | None = None) -> None:
@@ -187,8 +193,14 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
         return reaped
 
 
+def _never_reattaching() -> bool:
+    return False
+
+
 async def exit_if_unadopted(
-    has_browsers: Callable[[], Awaitable[bool]], stop: Callable[[], None]
+    has_browsers: Callable[[], Awaitable[bool]],
+    stop: Callable[[], None],
+    reattaching: Callable[[], bool] = _never_reattaching,
 ) -> bool:
     """Stop this backend if no client ever came for it (F-1023); True iff it did.
 
@@ -202,8 +214,19 @@ async def exit_if_unadopted(
     BOTH hold: no request ever reached ``/mcp`` (so no one adopted it, and an adopted
     backend is never touched however quiet it later goes), and it hosts no browser (a
     persistent-profile browser a previous backend left, adopted by F-888, is a reason to
-    stay). Anything unclear leaves it running. Never raises into the lifespan."""
+    stay). "A request" is ANY request, an ``initialize`` probe included: a probe means
+    someone is looking for this backend, and counting it fails safe (the backend stays).
+    The ``/_stealth/health`` heartbeat is not a request to ``/mcp`` and does not count.
+
+    A re-attach pass still running (*reattaching*) is waited out first: its browsers are
+    not listed until it adopts them, so ``has_browsers`` would answer no for a backend
+    that is about to host them. Both answers are read AGAIN after the awaits, directly
+    before *stop*, because a request or a pass that began while ``has_browsers`` was
+    suspended must abort the exit. Anything unclear leaves it running. Never raises into
+    the lifespan."""
     await anyio.sleep(UNADOPTED_AFTER_SECONDS)
+    while reattaching():  # noqa: ASYNC110  PERMANENT(the pass publishes a lock, not an event, and it ends within minutes)
+        await anyio.sleep(REATTACH_POLL_SECONDS)
     manager = active_manager()
     if manager is None or manager.ever_served:
         return False
@@ -212,6 +235,8 @@ async def exit_if_unadopted(
             return False
     except Exception as error:  # noqa: BLE001  PERMANENT(an unanswerable question keeps the backend)
         _logger.warning("unadopted-backend check could not list browsers: %r", error)
+        return False
+    if manager.ever_served or reattaching():
         return False
     _logger.warning(
         "no client reached this backend in %.0fs and it hosts no browser; exiting "

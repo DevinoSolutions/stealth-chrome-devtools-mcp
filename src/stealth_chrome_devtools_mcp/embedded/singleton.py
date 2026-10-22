@@ -409,7 +409,7 @@ def _server_process_cmd(port: int) -> list[str]:
         str(port),
         "--host",
         "127.0.0.1",
-        "--exit-if-unadopted",  # F-1023: ends itself if no proxy ever arrives
+        "--exit-if-unadopted",  # F-1023: every spawn here has it (start, heal, restart)
     ]
 
 

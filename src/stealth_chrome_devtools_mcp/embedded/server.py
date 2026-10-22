@@ -182,7 +182,9 @@ async def app_lifespan(server):
             # browsers are cleaned exactly as for any other stop.
             _UNADOPTED_WATCH = asyncio.create_task(
                 rt.session_hygiene.exit_if_unadopted(
-                    _hosts_browsers, lambda: signal.raise_signal(signal.SIGTERM)
+                    _hosts_browsers,
+                    lambda: signal.raise_signal(signal.SIGTERM),
+                    reattaching=rt.browser_reattach.in_progress,
                 )
             )
         # F-963: the probe-and-heal loop for persistent-profile browsers, started

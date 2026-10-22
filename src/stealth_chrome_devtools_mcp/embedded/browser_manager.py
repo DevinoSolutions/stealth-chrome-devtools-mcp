@@ -744,7 +744,7 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
             raise
         except Exception as e:
-            ev = spawn_exhaustion.observe(spawn_leak.started(launch_attempt))
+            ev = spawn_exhaustion.observe(launch_attempt, e)
             await self._teardown_failed_spawn(
                 "error",
                 instance_id,

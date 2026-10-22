@@ -22,20 +22,30 @@ test but T15, which is the deliberate real-contract check — without it a psuti
 API change would leave every mocked pin green over a helper that counts nothing.
 """
 
+import asyncio
+import inspect
 import json
+import time
+from collections import namedtuple
 from pathlib import Path
 
+import nodriver.core.browser
 import psutil
 import pytest
 
 from fakes import assert_no_default_paths
-from stealth_chrome_devtools_mcp.embedded import spawn_exhaustion
+from stealth_chrome_devtools_mcp.embedded import (
+    spawn_budget,
+    spawn_exhaustion,
+    spawn_leak,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.spawn_exhaustion import (
     _EXHAUSTION_PROCESS_THRESHOLD as THRESHOLD,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 # ---------------------------------------------------------------------------
 # Process-table doubles
@@ -305,10 +315,18 @@ def test_no_public_function_defaults_its_path_parameter():
 # to reap browsers that were not the problem.
 # ---------------------------------------------------------------------------
 
-STARVED = spawn_exhaustion.LaunchEvidence(chrome_started=True, cpu_percent=97.0)
-NOT_STARTED = spawn_exhaustion.LaunchEvidence(chrome_started=False, cpu_percent=97.0)
-IDLE_CPU = spawn_exhaustion.LaunchEvidence(chrome_started=True, cpu_percent=12.0)
-NO_CPU_READING = spawn_exhaustion.LaunchEvidence(chrome_started=True, cpu_percent=None)
+
+def _evidence(started=True, cpu=97.0, late=True):
+    return spawn_exhaustion.LaunchEvidence(
+        chrome_started=started, cpu_percent=cpu, missed_deadline=late
+    )
+
+
+STARVED = _evidence()
+NOT_STARTED = _evidence(started=False)
+NOT_LATE = _evidence(late=False)  # started, hot CPU, but a failure AFTER the launch
+IDLE_CPU = _evidence(cpu=12.0)
+NO_CPU_READING = _evidence(cpu=None)
 
 
 @pytest.mark.parametrize(
@@ -340,15 +358,32 @@ def test_a_starved_launch_names_the_cpu_not_the_process_cap(monkeypatch, pid_fil
     assert "kill-orphans" not in hint
 
 
-def test_a_starved_launch_stays_starved_when_the_count_is_also_high(
-    monkeypatch, pid_file
-):
-    """The count at the limit does not outvote a Chrome that started late."""
+def test_a_count_at_the_limit_is_never_relabelled_as_starvation(monkeypatch, pid_file):
+    """A machine really at the cap is usually pegged too; the count is the decisive
+    fact, so the capacity answer wins and the CPU reading is ADDED, not substituted."""
     install_process_table(monkeypatch, chrome_procs(THRESHOLD + 40))
     hint = spawn_exhaustion.exhaustion_hint(pid_file, STARVED)
-    assert "CPU" in hint
-    assert "out of process capacity" not in hint
-    assert f"{THRESHOLD + 40}" in hint  # still reported, as a number
+    assert "out of process capacity" in hint
+    assert "kill-orphans --force" in hint
+    assert "CPU-starved" not in hint
+    assert "CPU also read 97%" in hint  # both facts reported
+
+
+@pytest.mark.parametrize("evidence", [None, IDLE_CPU, NOT_LATE, NOT_STARTED])
+def test_the_cpu_note_needs_a_starved_launch(monkeypatch, pid_file, evidence):
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD))
+    hint = spawn_exhaustion.exhaustion_hint(pid_file, evidence)
+    assert "out of process capacity" in hint
+    assert "CPU also read" not in hint
+
+
+def test_a_failure_after_the_launch_is_not_starvation_whatever_the_cpu_reads(
+    monkeypatch, pid_file
+):
+    """Hot CPU and a live Chrome, but the launch did not miss its deadline."""
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD - 1))
+    assert not NOT_LATE.starved()
+    assert spawn_exhaustion.exhaustion_hint(pid_file, NOT_LATE) is None
 
 
 def test_a_chrome_that_never_started_is_not_called_starved(monkeypatch, pid_file):
@@ -376,34 +411,148 @@ def test_the_cap_is_named_only_when_the_count_is_at_the_limit(
     )
 
 
-def test_observe_samples_the_machine_cpu(monkeypatch):
-    monkeypatch.setattr(psutil, "cpu_percent", lambda interval=None: 83.5)
-    assert spawn_exhaustion.observe(True) == spawn_exhaustion.LaunchEvidence(
-        chrome_started=True, cpu_percent=83.5
+Times = namedtuple("Times", "user system idle")
+LinuxTimes = namedtuple("LinuxTimes", "user system idle iowait guest")
+
+
+class _Attempt:
+    def __init__(self, baseline):
+        self.cpu_baseline = baseline
+
+
+@pytest.fixture
+def chrome_running(monkeypatch):
+    monkeypatch.setattr(spawn_exhaustion.spawn_leak, "started", lambda attempt: True)
+
+
+def _cpu_now(monkeypatch, reading):
+    monkeypatch.setattr(psutil, "cpu_times", lambda *a, **k: reading)
+
+
+LATE = Exception("Failed to connect to browser")
+
+
+def test_observe_reads_the_cpu_since_the_launch_began(monkeypatch, chrome_running):
+    _cpu_now(monkeypatch, Times(user=80, system=10, idle=10))
+    got = spawn_exhaustion.observe(_Attempt(Times(0, 0, 0)), LATE)
+    assert got == spawn_exhaustion.LaunchEvidence(
+        chrome_started=True, cpu_percent=90.0, missed_deadline=True
     )
+    assert got.starved()
 
 
-def test_observe_never_raises(monkeypatch):
-    def refuse(interval=None):
+def test_cpu_counts_iowait_as_idle_and_leaves_guest_time_out():
+    # 50 s user (10 of it guest), 30 s idle, 20 s iowait: busy = 50 of 100.
+    after = LinuxTimes(user=50, system=0, idle=30, iowait=20, guest=10)
+    assert spawn_exhaustion._idle_and_total(after) == (50, 100)
+
+
+def test_cpu_with_no_time_elapsed_or_no_baseline_is_unknown(monkeypatch):
+    _cpu_now(monkeypatch, Times(5, 5, 5))
+    assert spawn_exhaustion._cpu_since(Times(5, 5, 5)) is None
+    assert spawn_exhaustion._cpu_since(None) is None
+
+
+def test_observe_takes_no_blocking_sample(monkeypatch, chrome_running):
+    """The old cpu_percent(interval=0.2) slept ON the event loop inside the failure
+    handler, under the very load it measured. Nothing may sleep now."""
+
+    def blocks(*args, **kwargs):
+        raise AssertionError("observe must not take a blocking sample")
+
+    monkeypatch.setattr(psutil, "cpu_percent", blocks)
+    monkeypatch.setattr(time, "sleep", blocks)
+    _cpu_now(monkeypatch, Times(95, 0, 5))
+    assert spawn_exhaustion.observe(_Attempt(Times(0, 0, 0)), LATE).starved()
+
+
+def test_observe_never_raises(monkeypatch, chrome_running):
+    def refuse(*args, **kwargs):
         raise OSError("no counters")
 
-    monkeypatch.setattr(psutil, "cpu_percent", refuse)
-    assert spawn_exhaustion.observe(True) == spawn_exhaustion.LaunchEvidence(
-        chrome_started=True, cpu_percent=None
+    monkeypatch.setattr(psutil, "cpu_times", refuse)
+    assert spawn_exhaustion.observe(_Attempt(Times(0, 0, 0)), LATE) == (
+        spawn_exhaustion.LaunchEvidence(
+            chrome_started=True, cpu_percent=None, missed_deadline=True
+        )
     )
 
 
-def test_observe_spends_no_cpu_window_when_no_chrome_started(monkeypatch):
-    """The 0.2 s window blocks the loop; a launch that never began cannot be
-    'starved', so it must not pay for one."""
-    sampled = []
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("first page never opened"),
+        ToolError("Browser spawn stalled in the first-page wait stage: no answer"),
+        ToolError("the DevTools endpoint belongs to another process"),
+    ],
+)
+def test_observe_does_not_read_the_cpu_for_a_post_launch_failure(
+    monkeypatch, chrome_running, error
+):
+    """Finding 1: hot CPU and a live Chrome say nothing about a failure that is not a
+    missed DevTools deadline, so it is never called starved."""
+
+    def reads(*args, **kwargs):
+        raise AssertionError("no CPU read for a failure that cannot be starved")
+
+    monkeypatch.setattr(psutil, "cpu_times", reads)
+    got = spawn_exhaustion.observe(_Attempt(Times(0, 0, 0)), error)
+    assert got == spawn_exhaustion.LaunchEvidence(
+        chrome_started=True, cpu_percent=None, missed_deadline=False
+    )
+    assert not got.starved()
+
+
+def test_observe_spends_nothing_when_no_chrome_started(monkeypatch):
+    monkeypatch.setattr(spawn_exhaustion.spawn_leak, "started", lambda attempt: False)
     monkeypatch.setattr(
-        psutil, "cpu_percent", lambda interval=None: sampled.append(interval) or 99.0
+        psutil, "cpu_times", lambda: pytest.fail("a launch that never began is free")
     )
-    assert spawn_exhaustion.observe(False) == spawn_exhaustion.LaunchEvidence(
-        chrome_started=False, cpu_percent=None
-    )
-    assert sampled == []
+    got = spawn_exhaustion.observe(_Attempt(Times(0, 0, 0)), LATE)
+    assert got.cpu_percent is None
+    assert not got.starved()
+
+
+def test_an_attempt_records_the_cpu_when_it_begins(monkeypatch):
+    monkeypatch.setattr(psutil, "cpu_times", lambda: Times(1, 2, 3))
+    assert spawn_leak.Attempt().cpu_baseline == Times(1, 2, 3)
+
+    def unreadable():
+        raise OSError("no counters")
+
+    monkeypatch.setattr(psutil, "cpu_times", unreadable)
+    assert spawn_leak.Attempt().cpu_baseline is None  # never fails a spawn
+
+
+# ---- which failures are a missed DevTools deadline (finding 1) -----------------------
+
+
+def test_nodriver_still_raises_the_connect_failure_we_match():
+    """The text belongs to nodriver, not to us: if a release rewords it, the starved
+    verdict would silently never fire, so read it from the installed source."""
+    source = inspect.getsource(nodriver.core.browser.Browser.start)
+    assert spawn_exhaustion._CONNECT_FAILURE in source
+
+
+async def test_the_launch_stage_budget_is_a_missed_deadline_and_others_are_not(
+    monkeypatch,
+):
+    """Through the REAL spawn_budget.phase, not a hand-typed message."""
+    monkeypatch.setattr(spawn_budget, "TEST_BUDGET_SECONDS", 0.01, raising=False)
+
+    async def hangs():
+        await asyncio.sleep(5)
+
+    errors = {}
+    for stage in ("launch", "first-page wait", "post-launch setup"):
+        with pytest.raises(ToolError) as caught:
+            await spawn_budget.phase(stage, "TEST_BUDGET_SECONDS")(hangs)()
+        errors[stage] = caught.value
+    assert spawn_exhaustion.missed_devtools_deadline(errors["launch"])
+    assert not spawn_exhaustion.missed_devtools_deadline(errors["first-page wait"])
+    assert not spawn_exhaustion.missed_devtools_deadline(errors["post-launch setup"])
+    assert spawn_exhaustion.missed_devtools_deadline(LATE)
+    assert not spawn_exhaustion.missed_devtools_deadline(RuntimeError("boom"))
 
 
 async def test_the_call_site_reads_the_evidence_before_the_teardown_ends_the_chrome(
@@ -413,8 +562,10 @@ async def test_the_call_site_reads_the_evidence_before_the_teardown_ends_the_chr
     sample taken then would read an idle machine for a launch that died of load."""
     order = []
 
-    def fake_observe(chrome_started):
+    def fake_observe(attempt, error):
         order.append("observe")
+        assert isinstance(attempt, spawn_leak.Attempt)
+        assert INNER_FAILURE in str(error)
         return STARVED
 
     async def fake_teardown(self, *args, **kwargs):
@@ -436,6 +587,53 @@ async def test_the_call_site_reads_the_evidence_before_the_teardown_ends_the_chr
     assert order == ["observe", "teardown"]
     assert seen == [STARVED]
     assert str(err.value).endswith("STARVED-PARAGRAPH")
+
+
+def _fail_launch_with(monkeypatch, error):
+    """A launch whose Chrome "started" (the registry says so), on a pegged CPU."""
+
+    async def failing_launch(self, options, browser_executable, launch_args, attempt):
+        attempt.cpu_baseline = Times(0, 0, 0)
+        raise error
+
+    monkeypatch.setattr(BrowserManager, "_launch_browser", failing_launch)
+    monkeypatch.setattr(spawn_leak, "started", lambda attempt: True)
+    monkeypatch.setattr(psutil, "cpu_times", lambda: Times(97, 0, 3))
+
+
+async def test_a_deadline_miss_on_a_pegged_cpu_is_reported_starved_end_to_end(
+    monkeypatch, doomed_manager, pid_file
+):
+    _fail_launch_with(monkeypatch, LATE)
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD - 1))
+    with pytest.raises(Exception) as err:
+        await doomed_manager.spawn_browser(BrowserOptions())
+    assert "CPU-starved" in str(err.value)
+    assert "97%" in str(err.value)
+
+
+async def test_a_post_launch_failure_on_a_pegged_cpu_is_not_reported_starved(
+    monkeypatch, doomed_manager, pid_file
+):
+    """Finding 1 end to end: the same live Chrome and the same 97% CPU, but the failure
+    is not the DevTools deadline, so the error stays exactly what it was."""
+    _fail_launch_with(monkeypatch, RuntimeError("timezone override refused"))
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD - 1))
+    with pytest.raises(Exception) as err:
+        await doomed_manager.spawn_browser(BrowserOptions())
+    assert str(err.value) == "timezone override refused"
+
+
+async def test_a_real_cap_with_a_pegged_cpu_reports_both_end_to_end(
+    monkeypatch, doomed_manager, pid_file
+):
+    _fail_launch_with(monkeypatch, LATE)
+    install_process_table(monkeypatch, chrome_procs(THRESHOLD + 5))
+    with pytest.raises(Exception) as err:
+        await doomed_manager.spawn_browser(BrowserOptions())
+    assert "out of process capacity" in str(err.value)
+    assert "CPU also read 97%" in str(err.value)
+    assert "CPU-starved" not in str(err.value)
 
 
 # ---------------------------------------------------------------------------
