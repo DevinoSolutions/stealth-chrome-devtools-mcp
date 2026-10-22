@@ -1,6 +1,6 @@
 # F-789 — `close_instance` returns `False` for a browser that has already died
 
-**Status: OPEN.** Opened by RELEASE-10 (W10) from the crash-recovery fault
+**Status: FIXED by F-1022** (`audit/stage2/finding_F1022_close_instance_of_a_crashed_browser.md`; the pin below now asserts `True`). Opened by RELEASE-10 (W10) from the crash-recovery fault
 injection.
 **Severity: MEDIUM** — the cleanup itself is correct; the *report* is not. A
 caller following the product's own printed advice sees a failure signal for an

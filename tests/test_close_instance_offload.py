@@ -390,6 +390,51 @@ async def test_a_tab_close_that_times_out_names_its_type():
 
 
 @pytest.mark.asyncio
+async def test_closing_a_browser_that_crashed_answers_closed_either_way_round():
+    """F-1022 (T-5956, F-789): the recovery a failed tool call names is
+    ``close_instance``, and its answer for a browser that DIED must not depend on
+    which side of that call the crash was noticed. The fake browser's process has
+    exited, so ``get_instance`` discards it as the next tool call does.
+
+    * noticed AFTER (``close_instance`` first): it claims the instance — True, as
+      it always did;
+    * noticed BEFORE (a tool call or ``list_instances`` discarded it first): the
+      instance is gone from the manager, and this used to answer False — "no such
+      instance" — for the same browser, which flipped
+      ``test_crash_recovery_after_the_owned_chrome_is_killed`` on macOS.
+
+    One close claims a crashed browser; the next, and an id never held, still miss.
+    """
+    manager = BrowserManager()
+    _seed_manager(manager, "after-1")
+    assert await manager.close_instance("after-1") is True
+    assert await manager.close_instance("after-1") is False
+
+    _seed_manager(manager, "before-1")
+    assert await manager.get_instance("before-1") is None  # the crash is noticed
+    assert "before-1" not in manager._instances
+    assert await manager.close_instance("before-1") is True
+    assert await manager.close_instance("before-1") is False
+
+    _seed_manager(manager, "before-2")
+    assert await manager.list_instances() == []  # noticed by the other route
+    assert await manager.close_instance("before-2") is True
+
+    assert await manager.close_instance("never-held") is False
+
+
+@pytest.mark.asyncio
+async def test_a_close_never_claims_a_browser_that_was_closed_not_crashed():
+    """The claim exists only for a browser that exited ON ITS OWN: one that
+    ``close_instance`` closed is not claimable a second time."""
+    manager = BrowserManager()
+    _seed_manager(manager, "closed-1")
+    assert await manager.close_instance("closed-1") is True
+    assert await manager.get_instance("closed-1") is None
+    assert await manager.close_instance("closed-1") is False
+
+
+@pytest.mark.asyncio
 async def test_happy_path_fast_kill(monkeypatch):
     """Fast stubbed kill: returns True, instance removed, in_memory_storage called."""
     from stealth_chrome_devtools_mcp.embedded.in_memory_storage import (

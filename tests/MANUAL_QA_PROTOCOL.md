@@ -1244,9 +1244,10 @@ dead instance's profile directory is removable, and a freshly spawned instance
 navigates and closes cleanly.
 **Evidence**: planned — planned-pytest:
 `tests/test_resilience.py::test_crash_recovery_after_the_owned_chrome_is_killed_and_close_succeeds`.
-The step cannot be satisfied while F-789 stands: the product's own error message
-tells the caller to run `close_instance`, and that call returns `False` for a
-browser that is provably gone.
+F-789 (the product's own error message tells the caller to run `close_instance`,
+and that call returned `False` for a browser that is provably gone) is FIXED by
+F-1022, so nothing blocks promotion; it stays `planned` until the gate binds the
+step.
 **Current support (non-acceptance)**: pytest:
 `tests/test_resilience.py::test_crash_recovery_after_the_owned_chrome_is_killed`
 is a characterization pin. It kills the tree enumerated from
@@ -1254,8 +1255,7 @@ is a characterization pin. It kills the tree enumerated from
 call — so the fault is proved injected rather than raced — and it asserts that
 the four halves that DO hold (typed bounded failure with a message, no surviving
 process, removable profile, working fresh spawn) cannot silently regress behind
-the one that does not. It pins `close_instance is False`, so closing F-789 turns
-the pin red and forces this step to be promoted deliberately.
+the F-789 one, now fixed: it asserts `close_instance` answers `closed: True`.
 
 Scope note for whoever promotes it: no claim is made anywhere here about
 automatic reconnection or session restoration. The contract in view is *fail
