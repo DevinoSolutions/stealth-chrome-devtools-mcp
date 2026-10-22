@@ -43,14 +43,27 @@ CREDENTIAL_HEADERS = frozenset(
 )
 
 #: A header whose NAME contains one of these is a credential too (``x-session-
-#: token``, ``x-client-secret``, ``x-goog-api-key``): the named set cannot list
-#: every vendor's spelling.
-CREDENTIAL_HEADER_MARKERS = ("token", "secret", "api-key", "apikey")
+#: token``, ``x-client-secret``, ``x-goog-api-key``, ``cf-access-jwt-assertion``,
+#: ``x-session-id``): the named set cannot list every vendor's spelling. Compared
+#: after ``_`` is read as ``-``, so ``x_api_key`` and ``X-Api-Key`` are one name.
+CREDENTIAL_HEADER_MARKERS = (
+    "token",
+    "secret",
+    "api-key",
+    "apikey",
+    "authorization",
+    "password",
+    "passwd",
+    "jwt",
+    "session",
+    "credential",
+)
 
 
 def is_credential_header(name: str) -> bool:
-    """Whether the header called *name* carries a credential, case-blind."""
-    lowered = name.lower()
+    """Whether the header called *name* carries a credential, case-blind and
+    with ``-`` and ``_`` treated alike."""
+    lowered = name.lower().replace("_", "-")
     return lowered in CREDENTIAL_HEADERS or any(
         marker in lowered for marker in CREDENTIAL_HEADER_MARKERS
     )
