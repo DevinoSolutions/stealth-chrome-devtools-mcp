@@ -79,6 +79,12 @@ _CREDENTIAL_FILE_NAMES = frozenset(
 #: The label for a UNC / device path (never contains the path itself).
 _REMOTE_RULE = "a network share or device path (UNC or a device namespace)"
 
+#: A path the OS cannot resolve is refused by rule, never with its own error text.
+_UNRESOLVABLE = (
+    "path tools refuse a path the operating system cannot resolve (rule: "
+    "secret-location deny-list, F-1025). Choose a plain local path."
+)
+
 _BROWSER_PROFILE_DIRS = (
     ("Google", "Chrome"),
     ("Google", "Chrome Beta"),
@@ -114,7 +120,7 @@ _SEPARATORS = re.compile(r"([\\/])")
 #: ``/proc/<pid>/environ`` is the process's environment, i.e. every secret passed
 #: by variable. ``self`` and ``thread-self`` resolve to a pid under ``realpath``;
 #: the pattern keeps them so the rule holds for a path that was never resolved.
-_PROC_ENVIRON = re.compile(r"^/proc/(?:self|thread-self|\d+)(?:/task/\d+)?/environ$")
+_PROC_ENVIRON = re.compile(r"^/proc/(?:self|thread-self|\d+)(?:/task/\d+)?/environ\Z")
 
 
 def _win_canonical(path: str) -> str:
@@ -171,7 +177,15 @@ def _real(path: str | os.PathLike[str]) -> str:
     ``os.path.realpath`` keeps the prefix it was handed, and a prefixed path
     never starts with the unprefixed deny-list root it lies in.
     """
-    real = os.path.realpath(os.fspath(path))
+    text = os.fspath(path)
+    if "\0" in text:
+        raise ToolError(_UNRESOLVABLE)
+    try:
+        real = os.path.realpath(text)
+    except (OSError, ValueError):
+        # ``~/.pgpass::$INDEX_ALLOCATION`` makes realpath raise
+        # NotADirectoryError, whose text embeds the absolute path (F-877).
+        raise ToolError(_UNRESOLVABLE) from None
     if real.startswith("\\\\?\\") and _drive_path(real[4:]):
         return real[4:]
     return real
@@ -274,17 +288,28 @@ def _profile_rule(real: str) -> str | None:
     """The label when *real* lies in a Chrome profile directory wherever it is.
 
     A profile is a directory with our clone marker or a login store
-    (``profile_seed.MARKER_NAME`` / ``LOGIN_WITNESSES``), so a profile that
+    (``profile_seed.MARKER_NAME`` / ``PROFILE_STATE_FILE`` / ``LOGIN_WITNESSES``,
+    the last also under ``Profile N/``), so a profile that
     ``spawn_browser(user_data_dir=...)`` placed outside every named root is
     still refused. A directory that cannot be read is not a profile.
     """
-    witnesses = (profile_seed.MARKER_NAME, *profile_seed.LOGIN_WITNESSES)
+    witnesses = (
+        profile_seed.MARKER_NAME,
+        profile_seed.PROFILE_STATE_FILE,
+        *profile_seed.LOGIN_WITNESSES,
+    )
+    # Every ``Default/`` witness is equally ``Profile 1/``, ``Profile 2/`` and so on.
+    numbered = [
+        "Profile */" + witness.partition("/")[2]
+        for witness in profile_seed.LOGIN_WITNESSES
+    ]
     start = Path(real)
     for directory in (start, *start.parents):
-        for witness in witnesses:
-            with contextlib.suppress(OSError):
-                if (directory / witness).is_file():
-                    return "a Chrome profile directory (clone marker or login store)"
+        with contextlib.suppress(OSError):
+            if any((directory / witness).is_file() for witness in witnesses) or any(
+                next(directory.glob(pattern), None) is not None for pattern in numbered
+            ):
+                return "a Chrome profile directory (clone marker or login store)"
     return None
 
 
