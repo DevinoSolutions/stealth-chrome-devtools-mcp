@@ -2970,7 +2970,7 @@
     "tags": []
   },
   "new_tab": {
-    "description": "Open a new tab in the browser instance. It becomes THIS session's tab:\npage tools called without tab_id act on it from now on.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    url (str): URL to open in the new tab.\n\nReturns:\n    Dict[str, Any]: New tab information. A Chrome error page raises (F-833).",
+    "description": "Open a new tab in the browser instance. It becomes THIS session's tab:\npage tools called without tab_id act on it from now on. While a tool drives a\nbackground tab, Chrome repaints every painting background tab in that window\nfor up to 10 s.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    url (str): URL to open in the new tab.\n\nReturns:\n    Dict[str, Any]: New tab information. A Chrome error page raises (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3721,7 +3721,7 @@
     "tags": []
   },
   "switch_tab": {
-    "description": "Switch to a specific tab by bringing it to front. It becomes THIS session's\ntab: page tools called without tab_id act on it from now on (other sessions\nsharing the browser keep their own).\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (str): Target tab ID to switch to.\n\nReturns:\n    bool: True if switched successfully.",
+    "description": "Switch to a specific tab by bringing it to front. It becomes THIS session's\ntab: page tools called without tab_id act on it from now on (other sessions\nsharing the browser keep their own). While a tool drives a background tab,\nChrome repaints every painting background tab in that window for up to 10 s.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (str): Target tab ID to switch to.\n\nReturns:\n    bool: True if switched successfully.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,

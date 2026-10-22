@@ -72,7 +72,7 @@ async def test_the_cookie_lands_on_the_live_page_not_the_cached_one(patched_serv
 
     assert await call_tool(srv, "set_cookie", instance_id="i1", name="n", value="v")
 
-    assert tab.cdp_frames[0]["params"]["url"] == LIVE_URL
+    assert tab.sent("Network.setCookie")[0]["params"]["url"] == LIVE_URL
     assert browser.update_targets_calls == 1
 
 
@@ -92,7 +92,9 @@ async def test_a_caller_given_url_pays_for_no_round_trip(patched_server):
         url="https://elsewhere.test/",
     )
 
-    assert tab.cdp_frames[0]["params"]["url"] == "https://elsewhere.test/"
+    assert (
+        tab.sent("Network.setCookie")[0]["params"]["url"] == "https://elsewhere.test/"
+    )
     assert browser.update_targets_calls == 0
 
 
@@ -118,7 +120,9 @@ async def test_an_instance_with_no_browser_handle_still_answers_from_its_tab(
 
     await call_tool(srv, "set_cookie", instance_id="i1", name="n", value="v")
 
-    assert tab.cdp_frames[0]["params"]["url"] == "https://cached.test/page"
+    assert (
+        tab.sent("Network.setCookie")[0]["params"]["url"] == "https://cached.test/page"
+    )
 
 
 async def test_a_wedged_browser_costs_a_bounded_error_not_a_hang(
@@ -136,7 +140,8 @@ async def test_a_wedged_browser_costs_a_bounded_error_not_a_hang(
     with pytest.raises(ToolError, match="timed out"):
         await call_tool(srv, "set_cookie", instance_id="i1", name="n", value="v")
 
-    assert tab.cdp_frames == []
+    # No cookie was written. (The tab was still held first: that is not the cookie.)
+    assert tab.sent("Network.setCookie") == []
 
 
 async def test_a_tab_with_no_url_anywhere_still_raises_the_argument_error(

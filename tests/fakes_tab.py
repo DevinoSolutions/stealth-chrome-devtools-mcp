@@ -490,6 +490,16 @@ class FakeTab:
         if self.opened_by is not None and self in self.opened_by.tabs:
             self.opened_by.tabs.remove(self)
 
+    def sent(self, method: str) -> list[dict[str, Any]]:
+        """The recorded frames of one CDP *method* (``"Network.setCookie"``).
+
+        ``cdp_frames`` is EVERYTHING sent to the tab, as it is on a real one: every
+        page tool resolves its tab through ``tab_binding.tab_for_caller``, which
+        sends the F-1019 paint hold (``Page.startScreencast``) first. A test about
+        what a TOOL sent asks for that tool's method, not for frame 0.
+        """
+        return [f for f in self.cdp_frames if f.get("method") == method]
+
     async def disconnect(self) -> None:
         """nodriver's ``Connection.disconnect`` — every ``Tab`` IS a Connection.
 

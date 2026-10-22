@@ -760,7 +760,8 @@ class TestCookieSameSite:
             value="abc",
             same_site="Lax",
         )
-        assert tab.cdp_frames[0]["params"]["sameSite"] == "Lax"
+        (frame,) = tab.sent("Network.setCookie")
+        assert frame["params"]["sameSite"] == "Lax"
 
 
 class TestArmingANewTrackedTab:
