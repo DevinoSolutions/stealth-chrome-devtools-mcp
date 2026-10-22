@@ -322,6 +322,24 @@ async def test_export_debug_logs_refuses_to_overwrite_unless_asked(
     assert (tmp_path / final).read_bytes() != b"precious"
 
 
+async def test_export_debug_logs_with_no_filename_never_collides(
+    patched_server, home, tmp_path, monkeypatch
+):
+    """The default is a NEW file per call, so an agent calling it with no
+    arguments twice (even in one second) gets two files, not a refusal."""
+    monkeypatch.chdir(tmp_path)
+    srv = patched_server(debug_logger=_logger_with_entries())
+
+    first = await call_tool(srv, "export_debug_logs")
+    second = await call_tool(srv, "export_debug_logs")
+
+    assert first != second
+    assert Path(first).is_file()
+    assert Path(second).is_file()
+    assert Path(first).name.startswith("debug_log_")
+    assert Path(first).resolve().parent == tmp_path.resolve()
+
+
 @POSIX_ONLY
 @pytest.mark.parametrize("fmt", ["json", "pickle", "gzip-pickle"])
 async def test_export_debug_logs_writes_owner_only(patched_server, home, tmp_path, fmt):

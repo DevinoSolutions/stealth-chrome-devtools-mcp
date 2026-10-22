@@ -19,6 +19,8 @@ verbatim; ``tests/test_cdp_timeout.py`` scans the same derived set for them.
 """
 
 import asyncio
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
@@ -77,7 +79,7 @@ async def clear_debug_view() -> bool:
 
 
 async def export_debug_logs(
-    filename: str = "debug_log.json",
+    filename: str | None = None,
     max_errors: int = 100,
     max_warnings: int = 100,
     max_info: int = 100,
@@ -89,7 +91,9 @@ async def export_debug_logs(
     Export debug logs to a file using the fastest available method with timeout protection.
 
     Args:
-        filename (str): Name of the file to export to.
+        filename (Optional[str]): File to export to. When omitted, a NEW file
+            `debug_log_<UTC timestamp>_<random>.json` is created in the working
+            directory, so repeated calls never collide; the answer is its path.
         max_errors (int): Maximum number of errors to export (default: 100).
         max_warnings (int): Maximum number of warnings to export (default: 100).
         max_info (int): Maximum number of info logs to export (default: 100).
@@ -99,13 +103,19 @@ async def export_debug_logs(
                      - Small data (<100 items): JSON (human readable)
                      - Medium data (100-1000 items): Pickle (fast binary)
                      - Large data (>1000 items): Gzip-Pickle (fastest, compressed)
-        overwrite (bool): Replace `filename` if it already exists (default: False,
-            an existing file is refused). The file is created owner-only (0600) and
+        overwrite (bool): Replace an explicit `filename` that already exists
+            (default: False, an existing file is refused). The file is created owner-only (0600) and
             may not lie in a credential store, browser profile or this server's state.
 
     Returns:
         str: Path to the exported file.
     """
+    if filename is None:
+        # F-1025: no path given means no collision to refuse. A timestamp plus a
+        # random suffix, created with O_EXCL like any export, so two calls (even
+        # in the same second) write two files instead of the second one raising.
+        stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"debug_log_{stamp}_{uuid.uuid4().hex[:8]}.json"
     try:
         # F-164 non-CDP: guards a thread-offloaded file export (no CDP); a timeout
         # returns this tool's ``-> str`` guidance string, not a CDP-hang error, so

@@ -1148,14 +1148,21 @@
     "tags": []
   },
   "export_debug_logs": {
-    "description": "Export debug logs to a file using the fastest available method with timeout protection.\n\nArgs:\n    filename (str): Name of the file to export to.\n    max_errors (int): Maximum number of errors to export (default: 100).\n    max_warnings (int): Maximum number of warnings to export (default: 100).\n    max_info (int): Maximum number of info logs to export (default: 100).\n    include_all (bool): Include all logs regardless of limits (default: False).\n    format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n                 'auto' chooses fastest format based on data size:\n                 - Small data (<100 items): JSON (human readable)\n                 - Medium data (100-1000 items): Pickle (fast binary)\n                 - Large data (>1000 items): Gzip-Pickle (fastest, compressed)\n    overwrite (bool): Replace `filename` if it already exists (default: False,\n        an existing file is refused). The file is created owner-only (0600) and\n        may not lie in a credential store, browser profile or this server's state.\n\nReturns:\n    str: Path to the exported file.",
+    "description": "Export debug logs to a file using the fastest available method with timeout protection.\n\nArgs:\n    filename (Optional[str]): File to export to. When omitted, a NEW file\n        `debug_log_<UTC timestamp>_<random>.json` is created in the working\n        directory, so repeated calls never collide; the answer is its path.\n    max_errors (int): Maximum number of errors to export (default: 100).\n    max_warnings (int): Maximum number of warnings to export (default: 100).\n    max_info (int): Maximum number of info logs to export (default: 100).\n    include_all (bool): Include all logs regardless of limits (default: False).\n    format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n                 'auto' chooses fastest format based on data size:\n                 - Small data (<100 items): JSON (human readable)\n                 - Medium data (100-1000 items): Pickle (fast binary)\n                 - Large data (>1000 items): Gzip-Pickle (fastest, compressed)\n    overwrite (bool): Replace an explicit `filename` that already exists\n        (default: False, an existing file is refused). The file is created owner-only (0600) and\n        may not lie in a credential store, browser profile or this server's state.\n\nReturns:\n    str: Path to the exported file.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "filename": {
-          "default": "debug_log.json",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "format": {
           "default": "auto",
