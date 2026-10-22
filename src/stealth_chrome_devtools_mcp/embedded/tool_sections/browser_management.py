@@ -36,7 +36,12 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from stealth_chrome_devtools_mcp.embedded import profile_target, tab_identity
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_protection,
+    profile_target,
+    tab_identity,
+    tool_errors,
+)
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
@@ -779,6 +784,10 @@ async def close_instance(
     profile_selection = {}
     if isinstance(spawn_diagnostics, dict):
         profile_selection = spawn_diagnostics.get("profile_selection") or {}
+    # F-1022: a browser that crashed was discarded by an earlier tool call, which
+    # popped its diagnostics; the selection it spawned with is kept for exactly this
+    # close, so the answer below is the same whichever call noticed the crash first.
+    profile_selection = profile_selection or tool_errors.exited_selection(instance_id)
     rt.shared_session.require_shared_session_named(
         instance_id, profile_selection, session
     )
@@ -799,10 +808,12 @@ async def close_instance(
         rt.dynamic_hook_system.remove_instance(instance_id)
         # Instance is gone — lift sweep protection for its disposable clone so the
         # storage cap can reclaim it later if the on-close delete was deferred.
-        if profile_selection.get("profile_role") == "clone" and profile_selection.get(
-            "user_data_dir"
-        ):
-            rt.clone_storage._release_clone_dir(profile_selection["user_data_dir"])
+        clone_protection.release_selection(profile_selection)
+        # A `default` browser that CRASHED refreshes the seed too: the copy is the
+        # same `_refresh_master_snapshot_if_safe` (it refuses a held profile), and the
+        # next clone's `_refresh_snapshot_if_stale` would copy the same unclean
+        # profile anyway, so skipping would only defer it and make the two orderings
+        # answer differently (F-1022).
         if should_refresh_snapshot:
             refresh = await asyncio.to_thread(
                 rt.clone_storage._refresh_master_snapshot_if_safe,

@@ -28,10 +28,15 @@ import psutil
 import pytest
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp.embedded import process_exit
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_protection,
+    clone_storage,
+    process_exit,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserState
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 def _noop_coro():
@@ -596,6 +601,126 @@ async def test_a_refusal_with_no_words_is_still_reported(patched_server, call_to
     answer = await call_tool(server, "close_instance", instance_id="i3")
 
     assert answer["seed_error"] == "unreported", answer
+
+
+def _crashed_browser_server(patched_server, selection: dict, refreshes: list):
+    """The REAL tool body over a REAL manager holding a browser whose process has
+    exited, with the spawn's recorded *selection* — the thing a crash discard pops."""
+    manager = BrowserManager()
+    _seed_manager(manager, "crash-1")
+    manager._spawn_diagnostics["crash-1"] = {"profile_selection": selection}
+
+    def _refresh(reason):
+        refreshes.append(reason)
+        return {"seed_refreshed": True}
+
+    async def _clear(instance_id):
+        return None
+
+    server = patched_server(
+        browser_manager=manager,
+        network_interceptor=SimpleNamespace(clear_instance_data=_clear),
+        dynamic_hook_system=SimpleNamespace(remove_instance=MagicMock()),
+        clone_storage=SimpleNamespace(_refresh_master_snapshot_if_safe=_refresh),
+    )
+    return server, manager
+
+
+@pytest.mark.parametrize(
+    "noticed_first", [True, False], ids=["discard-first", "close-first"]
+)
+@pytest.mark.asyncio
+async def test_a_crashed_clone_is_released_to_the_sweep_whichever_call_noticed(
+    patched_server, call_tool, tmp_path, noticed_first
+):
+    """F-1022 review: the discard popped the spawn diagnostics, so the tool saw no
+    clone and left its dir in ``clone_protection.PROTECTED`` (sweep-exempt) until a
+    backend restart. The discard itself now releases it — the browser is gone
+    whether or not anyone ever calls ``close_instance`` — and the close that follows
+    answers the same as when it noticed the crash itself."""
+    clone = tmp_path / "clone-1"
+    clone.mkdir()
+    clone_protection.protect(clone)
+    try:
+        server, manager = _crashed_browser_server(
+            patched_server,
+            {"profile_role": "clone", "user_data_dir": str(clone)},
+            [],
+        )
+        assert clone_protection.is_protected(clone), "the premise: a live clone"
+        if noticed_first:
+            assert await manager.get_instance("crash-1") is None
+            assert not clone_protection.is_protected(clone), (
+                "a crash-discarded clone stays sweep-exempt until restart"
+            )
+
+        answer = await call_tool(server, "close_instance", instance_id="crash-1")
+
+        assert answer == {"closed": True, "seed_refreshed": None}, answer
+        assert not clone_protection.is_protected(clone), answer
+    finally:
+        clone_protection.release(clone)
+
+
+@pytest.mark.parametrize(
+    "noticed_first", [True, False], ids=["discard-first", "close-first"]
+)
+@pytest.mark.asyncio
+async def test_a_crashed_default_browser_refreshes_the_seed_either_way_round(
+    patched_server, call_tool, noticed_first
+):
+    """F-1022 review: the seed refresh is kept for a crashed ``default`` browser.
+    The copy is the guarded ``_refresh_master_snapshot_if_safe``, and the next
+    clone's stale-seed refresh would copy the same unclean profile, so skipping only
+    deferred it and made the two orderings answer differently (``None`` vs ``True``)."""
+    refreshes: list[str] = []
+    server, manager = _crashed_browser_server(
+        patched_server,
+        {
+            "profile_role": "default",
+            "user_data_dir": str(clone_storage.master_profile_dir()),
+        },
+        refreshes,
+    )
+    if noticed_first:
+        assert await manager.get_instance("crash-1") is None
+
+    answer = await call_tool(
+        server, "close_instance", instance_id="crash-1", session="default"
+    )
+
+    assert refreshes == ["after-default-close"], refreshes
+    assert answer == {"closed": True, "seed_refreshed": True}, answer
+
+
+@pytest.mark.parametrize(
+    "noticed_first", [True, False], ids=["discard-first", "close-first"]
+)
+@pytest.mark.asyncio
+async def test_an_unnamed_close_of_a_crashed_fleet_browser_is_refused_either_way_round(
+    patched_server, call_tool, noticed_first
+):
+    """F-1022 review: the refusal keeps its one rule — it names which profile the id
+    was, so the answer does not depend on which call noticed the crash. Refused,
+    the claim is NOT consumed: closing it with its session name still answers True."""
+    server, manager = _crashed_browser_server(
+        patched_server,
+        {
+            "profile_role": "fleet",
+            "user_data_dir": str(clone_storage.clone_root_dir() / "fleet"),
+        },
+        [],
+    )
+    if noticed_first:
+        assert await manager.get_instance("crash-1") is None
+
+    with pytest.raises(ToolError, match="'fleet' session's browser"):
+        await call_tool(server, "close_instance", instance_id="crash-1")
+
+    answer = await call_tool(
+        server, "close_instance", instance_id="crash-1", session="fleet"
+    )
+    assert answer == {"closed": True, "seed_refreshed": None}, answer
 
 
 # ---------------------------------------------------------------------------
