@@ -11,14 +11,17 @@ on:
 
 # A new commit on a PR supersedes the run still going for the previous one, so
 # cancel it (a full 3-OS gate per pushed commit was ~3250 wall minutes in 100
-# runs). The cancel is PR-ONLY: pushes to main/dev share the ref-keyed group but
-# are never cancelled, and tag/publish runs (publish.yml) and manual runs are
-# not in this group at all. It lives HERE, in the caller, and not in
-# release-gate.yml: a `concurrency` in a called workflow evaluates in the
-# caller's context, so it would also bind publish.yml/canary.yml's calls and
-# could cancel or deadlock the caller's own group.
+# runs). Only PR runs share a group (keyed on the PR number); every other run
+# (push to main/dev, manual) falls back to its own unique run_id, so it is never
+# cancelled AND never replaced while pending: GitHub drops a PENDING run of the
+# same group when a newer one queues, even with cancel-in-progress false, which
+# would lose the middle push's required gate. Tag runs (publish.yml) are not in
+# this group at all. It lives HERE, in the caller, and not in release-gate.yml:
+# a `concurrency` in a called workflow evaluates in the caller's context, so it
+# would also bind publish.yml/canary.yml's calls and could cancel or deadlock
+# the caller's own group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
