@@ -35,7 +35,7 @@ import json
 import pytest
 
 from fakes import FakeClickTarget, FakeTab, FakeTextField
-from stealth_chrome_devtools_mcp.embedded import text_entry
+from stealth_chrome_devtools_mcp.embedded import click_target, text_entry
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -593,3 +593,78 @@ async def test_a_disabled_control_under_the_point_exempts_press_verification():
 
     assert len(_presses(target)) == 1
     assert result["dispatch"] == "coordinate"
+
+
+# ---------------------------------------------------------------------------
+# click_element -- third review of F-1017: the cleanup survives a second cancel
+# ---------------------------------------------------------------------------
+
+
+def _release_that_waits(tab, target):
+    """Make the first ``mouseReleased`` after a press wait on a gate.
+
+    Answers ``(entered, gate)``: ``entered`` is set when the release is in flight,
+    ``gate`` lets it through. The page receives the release only once the gate
+    opens, so a cleanup that a second cancellation can skip leaves ``held`` True.
+    """
+    entered, gate = asyncio.Event(), asyncio.Event()
+    real_send = tab.send
+
+    async def send(cdp_obj, *args, **kwargs):
+        if (
+            getattr(cdp_obj, "__name__", "") == "dispatch_mouse_event"
+            and target.pressed
+        ):
+            entered.set()
+            await gate.wait()
+        return await real_send(cdp_obj, *args, **kwargs)
+
+    tab.send = send
+    return entered, gate
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [asyncio.CancelledError(), TimeoutError()],
+    ids=["cancelled-press", "timed-out-press"],
+)
+async def test_a_second_cancellation_during_the_cleanup_still_releases(failure):
+    """RED before the fix: the cleanup ``mouseReleased`` was awaited bare, so a
+    cancellation landing while it ran skipped the release AND the disarm."""
+    tab, target = _click_tab(fail_on={"mousePressed": (failure, True)})
+    entered, gate = _release_that_waits(tab, target)
+
+    task = asyncio.ensure_future(DOMHandler.click_element(tab, CLICK_SELECTOR))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    gate.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert target.held is False
+    assert target.armed is None
+
+
+async def test_the_cleanup_after_a_second_cancellation_is_bounded(monkeypatch):
+    """A release that never answers must not hold the cancellation for ever."""
+    monkeypatch.setattr(click_target, "INPUT_BUDGET_S", 0.05)
+    tab, target = _click_tab(fail_on={"mousePressed": (asyncio.CancelledError(), True)})
+    entered, _never = _release_that_waits(tab, target)
+
+    task = asyncio.ensure_future(DOMHandler.click_element(tab, CLICK_SELECTOR))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+
+
+async def test_press_verification_is_not_exempted_by_a_plain_ancestor_of_a_fieldset():
+    """The disabled question is asked of a form control, never of ``closest`` over
+    everything: ``<fieldset disabled>`` itself matches ``:disabled``, which would
+    call a ``<div>`` inside it disabled (real-Chrome pin:
+    ``test_e2e_click_under_emulation``). The hermetic tier cannot run the DOM, so
+    this pins the one fact its fakes would otherwise hide."""
+    assert "closest(':disabled')" not in click_target.AIM_JS
+    assert "fieldset" not in click_target.AIM_JS.split("const inert")[1].split("};")[0]

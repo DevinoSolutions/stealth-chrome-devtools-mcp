@@ -15,6 +15,14 @@
   <button id="edge" style="position:absolute;left:280px;top:640px;width:70px;height:40px">Edge</button>
   <!-- A child of a disabled button: Chrome sends it no mousedown. -->
   <button id="dbtn" disabled style="position:absolute;left:150px;top:100px;width:120px;height:40px"><span id="dchild">Disabled child</span></button>
+  <!-- A disabled fieldset disables its FORM CONTROLS only (and not the ones in its
+       first legend): a plain div inside it, and a button in the legend, still
+       receive a mousedown. -->
+  <fieldset id="fs" disabled style="position:absolute;left:150px;top:160px;width:180px;margin:0;padding:0;border:0">
+    <legend style="padding:0"><button id="lbtn" style="width:120px;height:28px">Legend</button></legend>
+    <div id="fdiv" style="width:120px;height:28px">Div in fieldset</div>
+    <button id="fbtn" style="width:120px;height:28px">Button in fieldset</button>
+  </fieldset>
   <script>
     window.__hits = [];
     // A frame (its events are frame-relative; the click point is top-level) and a

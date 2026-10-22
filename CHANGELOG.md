@@ -19,6 +19,30 @@ gate are gone. The required check (`release-gate / release-gate`) is unchanged;
 the evidence ledger's `unit-tests/*-py3.12` cells are now `coverage/*`. A test
 pins that no (OS, python) cell runs the suite twice.
 
+### `click_element` lands where it aimed under a device-metrics override, and a miss raises (F-1017)
+
+Under `Emulation.setDeviceMetricsOverride` with a `scale` (what DevTools' device mode sets to fit an emulated screen into the window), `click_element`'s
+mouse input reached the page at `x / scale`: aimed at CSS (100, 290) it arrived at (80, 232) at `scale: 1.25` and at (125, 362) at `0.8`, and hit
+`<body>`. The tool's own hit-test is `document.elementFromPoint` at the unscaled point, so it still named the button and the miss was silent
+(T-5907, seen on a 360 px walk of unotes.net). Nothing in CDP reads the scale back, so `click_target.click` (the one coordinate click, `dom_handler`'s
+only caller) now MEASURES it: a `mouseMoved` is observed by a capturing listener in the page, the point is rescaled by the ratio and the correction is
+confirmed by another observed move before anything is pressed (a probe beyond the emulated viewport is dropped, so it is retried at half and a quarter of
+the aimed point). The press is observed between `mousePressed` and `mouseReleased`, and a `mousedown` whose real target is outside an element the
+hit-test named, or a press the page never reported, raises `ToolError` instead of returning `reason: null`; a disabled control, which Chrome sends no
+`mousedown`, is exempt. The point dispatched is the first content quad's centre in the top-level viewport (as `Element.mouse_click` always used), so an
+element inside an iframe is still clicked where it is, and a closed shadow root's host counts as the element. Once `mousePressed` has gone out nothing
+falls back to the synthetic `el.click()`: a page that navigates on the press used to take a second, untrusted click. The probe adds no string-named
+global to `window` (a `Symbol.for` handle, visible only to `getOwnPropertySymbols`, disposed at once on a failed arm and by the next arm otherwise).
+The button is never left held: a press that times out, is cancelled or fails, a cancelled read and a release that fails each send a best-effort
+bounded `mouseReleased`, and a cancellation stays a cancellation; that release (and the probe's disposal after a failed press) is shielded, so a second cancellation arriving while it runs cannot skip it, is waited out for at most two input budgets and is then re-raised. A release whose reply was lost may have been delivered, and the retry then gives the page a second `mouseup` (accepted: the alternative is a button left held, and the two cannot be told apart). A page whose own capture-phase `window` listener calls `stopPropagation()` hides
+the `mousedown` from the probe, so a click that worked is reported "could not be verified" there. A disabled form control (itself `:disabled`, or inside a disabled `button`, `input`, `select`, `textarea`, `optgroup` or `option`, or disabled by an ancestor `<fieldset disabled>` outside its first `<legend>`) or one under
+the point exempts the click from press verification; a plain `<div>` or `<span>` inside a disabled fieldset is NOT disabled (Chrome delivers its `mousedown`), so its press is still verified and `reason` stays `null`. With no scale the cost is one extra move. `type_text`, `paste_text` and
+`select_option` send no pointer input and are unaffected. Mobile auto zoom-out (`visualViewport.scale` 0.8 from a 450 px layout), the page scale factor and
+a differing `screenWidth` were measured and do NOT misplace input: only the override's `scale` does. `document.elementFromPoint` answers the shadow host for an element inside any shadow root, so
+`hit_is_target` now treats the host as the element (an open-root element used to read `covered`). Not fixed: `execute_cdp_command` still sends whatever
+coordinates it is given, a touch override's `Input.dispatchTouchEvent` is not used by any tool, and inside an iframe under a scale a probe can fall outside
+the frame, in which case the click raises rather than missing (`audit/stage2/finding_F1017_click_under_device_metrics_scale.md`).
+
 ## 2.1.39
 
 ### A popup the page opens is armed when it is created, not when a tool first switches to it (F-1012)
