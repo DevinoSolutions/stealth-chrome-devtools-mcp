@@ -166,7 +166,8 @@ def binary_prewarmed() -> bool:
 
     Mirrors `resolve_chrome._read_version`'s own branching rather than naming
     Linux: Windows reads a sibling version directory and macOS reads
-    `Info.plist`, and everything ELSE falls through to `--version`. Today only
+    `Info.plist`, and everything ELSE runs `--version` (on Linux even when dpkg
+    supplies the version, precisely so this stays true, T-6555). Today only
     Linux reaches that fall-through on a gate cell, but writing it as "not
     Windows and not Darwin" keeps this true for any other POSIX rather than
     silently reporting `false` there.

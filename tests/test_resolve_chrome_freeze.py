@@ -337,16 +337,47 @@ def _done(stdout="", rc=0):
     return subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
 
 
-def test_linux_dpkg_version_wins_without_running_chrome(monkeypatch):
+def test_linux_dpkg_version_wins_and_chrome_is_still_execd(monkeypatch):
+    """The package version is THE answer, and the binary still runs once: the
+    cold-start probe counts on this step having paged Chrome in (F-870)."""
     calls = []
 
     def fake_run(argv, **kwargs):
         calls.append(argv[0])
-        return _done("131.0.6778.85-1")
+        if argv[0] == "dpkg-query":
+            return _done("131.0.6778.85-1")
+        return _done("Google Chrome 131.0.6778.99")
 
     _linux(monkeypatch, fake_run)
     assert resolve_chrome._read_version(CHROME) == "131.0.6778.85"
-    assert calls == ["dpkg-query"]
+    assert calls == ["dpkg-query", str(CHROME)]
+
+
+def test_linux_a_cold_exec_cannot_fail_a_version_dpkg_answered(monkeypatch):
+    def fake_run(argv, **kwargs):
+        if argv[0] == "dpkg-query":
+            return _done("131.0.6778.85-1")
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    _linux(monkeypatch, fake_run)
+    assert resolve_chrome._read_version(CHROME) == "131.0.6778.85"
+
+
+@pytest.mark.parametrize(
+    ("raw", "version"),
+    [
+        ("131.0.6778.85-1", "131.0.6778.85"),
+        ("1:131.0.6778.85-1", "131.0.6778.85"),
+        ("131.0.6778.85", "131.0.6778.85"),
+        ("131.0-beta.2-1", "131.0-beta.2"),
+    ],
+)
+def test_linux_the_deb_epoch_and_revision_are_dropped(monkeypatch, raw, version):
+    def fake_run(argv, **kwargs):
+        return _done(raw if argv[0] == "dpkg-query" else "")
+
+    _linux(monkeypatch, fake_run)
+    assert resolve_chrome._read_version(CHROME) == version
 
 
 def test_linux_a_chrome_outside_the_deb_dir_never_takes_the_package_version(
