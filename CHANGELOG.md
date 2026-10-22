@@ -83,6 +83,32 @@ an elevated process is owned by the Administrators group (the token's default ow
 canary that an `Authorization` header never reaches a Sentry event (`observability._scrub_event` removes no headers by name; safety rests on the
 SDK's defaults, and a real canary needs a live Sentry client).
 
+### A python binding answers only the page it was made for, and the tool descriptions say plainly that hooks and bindings are host Python (F-L, T-6206)
+
+`create_python_binding` runs the caller's Python in the backend process with real builtins and registers it with `Runtime.addBinding`, which
+Chrome exposes to every frame of the tab, cross-origin iframes included, and keeps across navigations. `on_binding_called` ignored the calling
+context, and the registry was one name-keyed dict shared by every instance (a second instance's binding of the same name replaced the first). So
+any script a tab ever loaded after a binding was made could call host Python with arguments of its choosing. Now each binding is bound to its tab
+(the registry key is `(target_id, name)`) and to the main frame's default execution context, learned from `Runtime.executionContextCreated`
+(replayed for every existing context when the tab's watch disables and re-enables `Runtime` once, handlers attached first) and kept as BOTH
+`id` and `uniqueId`, because ids are per-isolate counters that repeat across renderer processes. `bindingCalled`'s own `executionContextId`
+must equal it. A call from any other context is dropped without running the function and without a reply, and logged at WARNING with the
+binding, tab and both context ids but never the arguments (once per calling context, at most 16 per binding, so a page cannot flood the
+log). The binding is dropped (its registry entry goes and `Runtime.removeBinding` is sent) on any of: `executionContextDestroyed` naming
+its id or its `uniqueId`, `executionContextsCleared`, a context created with the same id but another `uniqueId` (or a new main-frame default
+context), or a main-frame `Page.frameNavigated`. The context is read and the binding registered with no await between, and the creation
+re-checks after `Runtime.addBinding` and after the wrapper is injected (in that context, by `uniqueContextId`), so a navigation in between
+makes it raise and leave nothing registered. If Chrome reports no default context for the main frame the tool raises and registers nothing.
+One handler set per tab, however many bindings: each tab has a single watch that dispatches by registry lookup, where each create used to
+add three more handlers for the life of the tab. Re-creating a name on a tab replaces its binding. `get_function_executor_info` still lists
+binding names. Not done: script in the creating context itself (the page's own scripts, same-origin frames included) can still call the
+binding, because that is what a binding is for, so one should be created only on a page that is trusted; the Python is still unsandboxed
+host code; and a closed tab's registry entry is not reaped. Part 2 of F-L: `create_dynamic_hook`'s `exec` of `function_code` and `eval` of
+`custom_condition` use a trimmed `__builtins__` that reads as a sandbox and is not one (the injected `fnmatch` reaches `os`). No sandbox is
+built. `dynamic_hook_system`'s docstring and comments, and the `create_dynamic_hook` and `create_python_binding` descriptions, now say it is host
+Python exec. The `create_dynamic_hook` and `create_python_binding` entries in the SOFT golden `tests/goldens/tool_surface.json` change for those
+descriptions (the latter adds "including same-origin frames") and nothing else.
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
