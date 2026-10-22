@@ -31,6 +31,7 @@ def _short_linger(monkeypatch):
     yield
     for key in list(paint_hold._held):
         paint_hold.forget(key)
+    paint_hold._caller_owned.clear()  # a caller's screencast must not leak into the next test
 
 
 async def test_a_driven_tab_is_held_with_a_frame_that_never_comes():
