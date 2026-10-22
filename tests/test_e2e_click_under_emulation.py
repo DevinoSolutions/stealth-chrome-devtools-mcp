@@ -348,3 +348,17 @@ async def test_the_reported_sequence_clicks_where_a_raw_dispatch_lands(
     for hit in (seen["raw"][0], seen["clicked"][0]):
         assert abs(hit["x"] - CENTRE[0]) <= 1.5 and abs(hit["y"] - CENTRE[1]) <= 1.5
     assert not [name for name in seen["sent"] if ".emulation." in name], seen
+
+
+async def test_a_child_of_a_disabled_button_is_reported_disabled_not_unverified(
+    fixture_app_server, tmp_empty_root
+):
+    """RED before the fix: ``disabled`` was ``matches(':disabled')`` on the target
+    only, so a click on the span inside a disabled button, which Chrome sends no
+    mousedown, raised "could not be verified"."""
+
+    async def body(iid):
+        record = await get_fn("click_element")(instance_id=iid, selector="#dchild")
+        assert record["reason"] == "disabled", record
+
+    await _in_a_page(fixture_app_server, body)

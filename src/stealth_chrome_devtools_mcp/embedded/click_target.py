@@ -138,7 +138,8 @@ DISABLED = "disabled"
 #: ``getBoundingClientRect()``, which answers an all-zero rect there and would
 #: invent a click point at the viewport origin.
 #:
-#: ``disabled`` is ``matches(':disabled')`` and NOT the ``elem.disabled`` IDL
+#: ``disabled`` is ``closest(':disabled')`` (the element or an ancestor; a child of a
+#: disabled ``<button>`` gets no mousedown either) and NOT the ``elem.disabled`` IDL
 #: attribute. Measured, Chrome 152: a ``<button>`` inside a ``<fieldset disabled>``
 #: reports ``elem.disabled === false`` while ``:disabled`` matches, it hit-tests to
 #: ITSELF, and the page receives nothing — so the IDL read produced exactly the
@@ -156,9 +157,10 @@ AIM_JS = """(elem) => {
     let point = null;
     let hit = null;
     let hitIsTarget = false;
+    let under = null;
     if (box) {
         point = {x: box.left + box.width / 2, y: box.top + box.height / 2};
-        const under = document.elementFromPoint(point.x, point.y);
+        under = document.elementFromPoint(point.x, point.y);
         hit = shape(under);
         // ``document.elementFromPoint`` answers the shadow HOST for a point over an
         // element inside any shadow root, so the host stands for the element.
@@ -180,7 +182,8 @@ AIM_JS = """(elem) => {
         target: shape(elem),
         hit: hit,
         hit_is_target: hitIsTarget,
-        disabled: elem.matches(':disabled'),
+        disabled: !!elem.closest(':disabled'),
+        under_disabled: !!(under && under.closest(':disabled')),
         pointer_events: String(style.pointerEvents),
         visibility: String(style.visibility)
     });
@@ -190,7 +193,11 @@ AIM_JS = """(elem) => {
 #: How far (CSS px) a page-observed event may be from the point it was aimed at
 #: and still count as "there". Chrome reports ``clientX/Y`` as integers (a move to
 #: 362.5 arrived at 362), so this absorbs that truncation and not a scale.
-LANDING_TOLERANCE = 2.0
+LANDING_TOLERANCE = 1.0
+
+#: Added per axis in proportion to the coordinate, so rounding is absorbed far from
+#: the origin while a real scale (1.25 turns x=10 into 8) is not accepted near it.
+LANDING_TOLERANCE_RELATIVE = 0.01
 
 #: How many observed moves :func:`aim_input` may spend converging on the scale.
 MAX_PROBES = 4
@@ -204,9 +211,10 @@ PROBE_FRACTIONS = (1.0, 0.5, 0.25)
 #: that calls ``alert()`` holds ``Input.dispatchMouseEvent`` open indefinitely.
 INPUT_BUDGET_S = 5.0
 
-#: The probe's one handle on the page: a ``Symbol.for`` key, so it is not in
-#: ``Object.getOwnPropertyNames(window)`` and a page that enumerates its globals
-#: does not see it. It holds the DISPOSER of the armed listener, which is what
+#: The probe's one handle on the page: a ``Symbol.for`` key, so it is not a
+#: string-named global (``Object.getOwnPropertyNames(window)`` and ``for…in`` do not
+#: list it; ``Object.getOwnPropertySymbols`` / ``Reflect.ownKeys`` do, so it is not
+#: invisible). It holds the DISPOSER of the armed listener, which is what
 #: lets the next arm remove a handler an earlier click left behind.
 PROBE_KEY = "stealth.click.probe"
 
@@ -424,10 +432,15 @@ async def _send_mouse(tab: Tab, kind: str, x: float, y: float) -> None:
 
 
 async def _arm(element: Element, kinds: list[str]) -> None:
-    await asyncio.wait_for(
-        element.apply(ARM_PROBE_JS.replace("__KINDS__", json.dumps(kinds))),
-        INPUT_BUDGET_S,
-    )
+    try:
+        await asyncio.wait_for(
+            element.apply(ARM_PROBE_JS.replace("__KINDS__", json.dumps(kinds))),
+            INPUT_BUDGET_S,
+        )
+    except BaseException:
+        # An arm that timed out may still have run; dispose now, not at the next arm.
+        await _disarm(element)
+        raise
 
 
 async def _read(element: Element) -> list[dict[str, object]]:
@@ -457,6 +470,19 @@ async def _disarm(element: Element) -> str | None:
     return None
 
 
+async def _let_go(tab: Tab, at: tuple[float, float]) -> str | None:
+    """Best-effort, bounded ``mouseReleased``: never leave the button held.
+
+    Errors are swallowed because the failure already in flight is the one worth
+    reporting; a cancellation arriving DURING this release still propagates.
+    """
+    try:
+        await _send_mouse(tab, "mouseReleased", *at)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(cleanup must not mask the failure being raised)
+        return type(exc).__name__
+    return None
+
+
 async def _moved(
     tab: Tab, element: Element, x: float, y: float
 ) -> dict[str, object] | None:
@@ -469,6 +495,15 @@ async def _moved(
         await _disarm(element)
         raise
     return seen[-1] if seen else None
+
+
+def _lands(landed: tuple[float, float], aimed: tuple[float, float]) -> bool:
+    """Whether a page-observed point is the aimed one, within rounding."""
+    return all(
+        abs(landed[i] - aimed[i])
+        <= LANDING_TOLERANCE + LANDING_TOLERANCE_RELATIVE * abs(aimed[i])
+        for i in (0, 1)
+    )
 
 
 def _landed(
@@ -508,7 +543,7 @@ async def aim_input(
         return None
     for _ in range(MAX_PROBES - 1):
         landed = _landed(seen, offset)
-        if all(abs(landed[i] - aimed[i]) <= LANDING_TOLERANCE for i in (0, 1)):
+        if _lands(landed, aimed):
             return sent[axis] / aimed[axis]
         if landed[axis] <= 0 or sent[axis] <= 0:
             raise ToolError(
@@ -525,13 +560,49 @@ async def aim_input(
                 f"({sent[0]:g}, {sent[1]:g}) did not reach the page"
             )
     landed = _landed(seen, offset)
-    if any(abs(landed[i] - aimed[i]) > LANDING_TOLERANCE for i in (0, 1)):
+    if not _lands(landed, aimed):
         raise ToolError(
             f"could not aim the click on '{selector}': input at CSS "
             f"({aimed[0]:g}, {aimed[1]:g}) still reaches the page at "
             f"({landed[0]:g}, {landed[1]:g}) after {MAX_PROBES} probes"
         )
     return sent[axis] / aimed[axis]
+
+
+def _verify(
+    selector: str,
+    aimed: tuple[float, float],
+    facts: dict[str, object],
+    seen: list[dict[str, object]],
+) -> None:
+    """Raise unless the page's own ``mousedown`` landed inside the element.
+
+    Nothing is claimed for an element the hit-test did not name, and a disabled
+    control is exempt: Chrome sends it no ``mousedown`` at all (measured, plain
+    and inside a ``<fieldset disabled>``), so silence from it is the answer
+    ``reason`` already gives. That holds for the target or anything inside a
+    disabled ancestor AND for a disabled control under the point when the target
+    is an enabled wrapper around it.
+    """
+    if not facts.get("hit_is_target") or facts.get("disabled"):
+        return
+    if facts.get("under_disabled"):
+        return
+    x, y = aimed
+    if not seen:
+        raise ToolError(
+            f"click on '{selector}' could not be verified: aimed at CSS "
+            f"({x:g}, {y:g}) where the hit-test names the element, but the page "
+            "reported no mousedown"
+        )
+    reached = seen[0]
+    if not reached.get("inside"):
+        raise ToolError(
+            f"click on '{selector}' missed: aimed at CSS ({x:g}, {y:g}) where the "
+            f"hit-test names the element, but the page's mousedown landed at "
+            f"({_number(reached.get('x')):g}, {_number(reached.get('y')):g}) on "
+            f"{_shape(reached)}"
+        )
 
 
 async def click(
@@ -578,7 +649,12 @@ async def click(
     try:
         await _send_mouse(tab, "mousePressed", *at)
     except BaseException as failure:
+        # A timeout or a cancellation does not prove the press was not delivered,
+        # so the button is let go whatever happened.
+        await _let_go(tab, at)
         await _disarm(element)
+        if not isinstance(failure, Exception):
+            raise
         raise ToolError(
             f"click on '{selector}' failed while pressing: {type(failure).__name__}"
         ) from failure
@@ -591,29 +667,18 @@ async def click(
         seen = await _read(element)
     except Exception as failure:  # noqa: BLE001  PERMANENT(the page may navigate on mousedown; the press already went out)
         gone = type(failure).__name__
+    except BaseException:
+        await _let_go(tab, at)
+        raise
     try:
         await _send_mouse(tab, "mouseReleased", *at)
-    except Exception as failure:
+    except BaseException as failure:
+        await _let_go(tab, at)
+        if not isinstance(failure, Exception):
+            raise
         raise ToolError(
             f"click on '{selector}' pressed but could not release: "
             f"{type(failure).__name__}"
         ) from failure
-    # A disabled control is sent no mousedown by Chrome at all (measured, plain and
-    # inside a ``<fieldset disabled>``), so silence from it is the answer ``reason``
-    # already gives, not a press nobody saw.
-    if not expected or gone is not None or facts.get("disabled"):
-        return
-    if not seen:
-        raise ToolError(
-            f"click on '{selector}' could not be verified: aimed at CSS "
-            f"({x:g}, {y:g}) where the hit-test names the element, but the page "
-            "reported no mousedown"
-        )
-    reached = seen[0]
-    if not reached.get("inside"):
-        raise ToolError(
-            f"click on '{selector}' missed: aimed at CSS ({x:g}, {y:g}) where the "
-            f"hit-test names the element, but the page's mousedown landed at "
-            f"({_number(reached.get('x')):g}, {_number(reached.get('y')):g}) on "
-            f"{_shape(reached)}"
-        )
+    if gone is None:
+        _verify(selector, (x, y), facts, seen)

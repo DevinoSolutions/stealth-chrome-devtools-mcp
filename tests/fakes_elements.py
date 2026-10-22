@@ -201,6 +201,9 @@ class FakeClickTarget:
         frame_offset: tuple[float, float] = (0.0, 0.0),
         navigates_on_press: bool = False,
         swallows_press: bool = False,
+        hit_disabled: bool = False,
+        fail_on: dict[str, tuple[BaseException, bool]] | None = None,
+        read_error: BaseException | None = None,
     ) -> None:
         self.viewport = viewport
         self.input_scale = input_scale
@@ -208,6 +211,15 @@ class FakeClickTarget:
         self.navigates_on_press = navigates_on_press
         self.swallows_press = swallows_press
         self.pressed = False
+        # ``held`` is the one fact a stuck button is: the page was pressed and
+        # never released. ``fail_on`` maps a dispatch kind to (error, delivered):
+        # the command raises ONCE, and ``delivered`` says whether the page got
+        # the event before the reply was lost (a 5 s timeout does not prove it
+        # did not).
+        self.held = False
+        self.hit_disabled = hit_disabled
+        self.fail_on = dict(fail_on or {})
+        self.read_error = read_error
         self.armed: list[str] | None = None
         self.observed: list[dict[str, Any]] = []
         self.landings: list[tuple[str, float, float, bool]] = []
@@ -269,6 +281,7 @@ class FakeClickTarget:
                 "hit": hit,
                 "hit_is_target": visible_point and self.hit is None,
                 "disabled": self.disabled,
+                "under_disabled": self.hit_disabled,
                 "pointer_events": self.pointer_events,
                 "visibility": self.visibility,
             }
@@ -304,6 +317,16 @@ class FakeClickTarget:
         return SimpleNamespace(center=self._quad_centre())
 
     def receive_mouse(self, params: dict[str, Any]) -> None:
+        """Route one dispatch, then raise the failure armed for its kind (once)."""
+        kind = params["type"]
+        failure = self.fail_on.pop(kind, None)
+        if failure is not None and not failure[1]:
+            raise failure[0]
+        self._deliver(params)
+        if failure is not None:
+            raise failure[0]
+
+    def _deliver(self, params: dict[str, Any]) -> None:
         """One ``Input.dispatchMouseEvent`` as the PAGE receives it.
 
         ``input_scale`` models an ``Emulation.setDeviceMetricsOverride`` carrying
@@ -325,6 +348,9 @@ class FakeClickTarget:
         if kind == "mousePressed":
             self.calls.append("mouse_click")
             self.pressed = True
+            self.held = True
+        if kind == "mouseReleased":
+            self.held = False
         wanted = {"mouseMoved": "mousemove", "mousePressed": "mousedown"}.get(kind)
         if wanted == "mousedown" and self.swallows_press:
             return
@@ -356,6 +382,8 @@ class FakeClickTarget:
             self.observed = []
             return True
         if PROBE_KEY in js_function:
+            if self.read_error is not None and self.pressed:
+                raise self.read_error
             if self.navigates_on_press and self.pressed:
                 # The page navigated on mousedown: the document the read would
                 # have asked is gone, which is how Chrome answers it.

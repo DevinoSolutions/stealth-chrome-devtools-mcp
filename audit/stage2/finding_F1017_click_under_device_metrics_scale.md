@@ -94,7 +94,7 @@ on the press made the read throw and the generic fallback sent a second, untrust
 `Element.mouse_click` (which draws nodriver's red `flash_point` dot as before; the dot is NOT drawn on the new path), which is also what produces the
 synthetic fallback for a boxless one.
 
-The probe's handle is `window[Symbol.for("stealth.click.probe")]`, a disposer: not an own string property of `window`, and the next arm calls it, so a
+The probe's handle is `window[Symbol.for("stealth.click.probe")]`, a disposer: not a string-named global (visible to `Object.getOwnPropertySymbols`/`Reflect.ownKeys`), and the next arm calls it, so a
 failure that skipped the read cannot leave a second listener logging `composedPath` for every later mouse event. Every dispatch and read is bounded by 5 s
 (a `mousedown` handler that calls `alert()` holds `Input.dispatchMouseEvent` open).
 
