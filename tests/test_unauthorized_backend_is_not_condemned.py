@@ -1,0 +1,248 @@
+"""F-1018 follow-up (T-6550): a 401 never condemns a healthy backend on the
+cold-start or the self-heal path.
+
+T-6367 made the heartbeat answer alive / unauthorized / dead, so a 401 is no
+strike. Two other readers of the same probe still read a 401 as "not ready":
+
+* ``singleton._same_identity_backend_ready`` (via ``backend_probe.ready``), so a
+  proxy that cannot read the token got ``None`` from ``_find_running_server``
+  and ``_clear_stale_backend`` TERMINATED an idle, healthy backend;
+* ``proxy_selfheal._confirm_bridge_verdict``, which asks the same gate and so
+  answered DEAD after a lost connection.
+
+A 401 is the backend ANSWERING: alive, and refusing only THIS client. Nothing
+here is mocked below the HTTP boundary: the backend is a real loopback server
+that answers what a token-enforcing backend answers, and the verdicts are the
+product's.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_probe,
+    proxy_selfheal,
+    singleton,
+)
+
+OUR_VERSION = "9.9.9"
+OUR_FINGERPRINT = "fp-same"
+
+
+class _Backend:
+    """A loopback server answering ``status`` (or per-path ``paths``) to anything."""
+
+    def __init__(self, status: int, paths: dict[str, int] | None = None) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                outer.requests.append((self.command, self.path))
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                code = (paths or {}).get(self.path, status)
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST = do_DELETE = _answer  # noqa: N815  PERMANENT(http.server dispatches on do_<METHOD>)
+
+            def log_message(self, *args: object) -> None:
+                return
+
+        self.requests: list[tuple[str, str]] = []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}{backend_probe.MCP_PATH}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def backend_401():
+    backend = _Backend(401)
+    yield backend
+    backend.close()
+
+
+@pytest.fixture
+def dead_port() -> int:
+    """A port with nothing listening: bound, read, closed - connection refused."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(autouse=True)
+def hermetic(tmp_path, monkeypatch):
+    """Our state in tmp_path, our identity pinned, no token read, no real kill."""
+    monkeypatch.setattr(singleton, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(singleton, "LOCK_FILE", tmp_path / "singleton.lock")
+    monkeypatch.setattr(singleton, "PORT_FILE", tmp_path / "server.port")
+    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
+    monkeypatch.setattr(singleton, "_server_version", lambda: OUR_VERSION)
+    monkeypatch.setattr(singleton, "_source_fingerprint", lambda: OUR_FINGERPRINT)
+    monkeypatch.setattr(backend_probe.backend_token, "auth_headers", dict)
+    # The once-per-run WARNING flag is process state: every test starts a new run.
+    monkeypatch.setattr(backend_probe, "_unauthorized_said", threading.Event())
+    # Owns no browsers: the F-886 rule is not what is under test here.
+    monkeypatch.setattr(singleton, "_protecting_browsers", lambda *a, **k: [])
+
+
+@pytest.fixture
+def terminated(monkeypatch) -> list[int]:
+    """The terminate seam: records the port, kills nothing."""
+    ports: list[int] = []
+    monkeypatch.setattr(
+        singleton, "_terminate_backend", lambda port: ports.append(port) or True
+    )
+    return ports
+
+
+def _record(tmp_path, port: int) -> None:
+    (tmp_path / "server.json").write_text(
+        json.dumps(
+            {
+                "port": port,
+                "version": OUR_VERSION,
+                "pid": 2**22 - 1,  # no such process: never "our backend" by pid
+                "source_fingerprint": OUR_FINGERPRINT,
+            }
+        )
+    )
+
+
+# -- the probe: one home, one verdict vocabulary ----------------------------
+
+
+def test_the_probe_names_a_401_unauthorized_and_ready_stays_false(backend_401):
+    assert (
+        backend_probe.probe(backend_401.url, 2.0) == backend_probe.VERDICT_UNAUTHORIZED
+    )
+    assert backend_probe.ready(backend_401.url, 2.0) is False
+
+
+def test_the_probe_still_names_a_dead_backend_dead_and_a_good_one_alive(dead_port):
+    assert (
+        backend_probe.probe(f"http://127.0.0.1:{dead_port}/mcp/", 1.0)
+        == backend_probe.VERDICT_DEAD
+    )
+    ok = _Backend(200)
+    try:
+        assert backend_probe.probe(ok.url, 2.0) == backend_probe.VERDICT_ALIVE
+        assert backend_probe.ready(ok.url, 2.0) is True
+    finally:
+        ok.close()
+
+
+def test_a_legacy_heartbeat_reads_a_401_initialize_as_unauthorized_not_dead():
+    """No health route (404) falls back to ``initialize``, which 401s."""
+    backend = _Backend(401, paths={backend_probe.HEALTH_PATH: 404})
+    beat = backend_probe.Heartbeat(backend.url)
+    try:
+        assert beat.verdict(2.0) == backend_probe.VERDICT_UNAUTHORIZED
+        assert beat.alive(2.0) is True
+    finally:
+        beat.close()
+        backend.close()
+
+
+async def test_the_cold_start_poll_logs_the_cause_at_warning_once(backend_401, caplog):
+    with caplog.at_level(logging.DEBUG, logger="stealth.proxy"):
+        assert await backend_probe.await_ready(backend_401.url, 0.6) is False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "bearer token" in warnings[0].getMessage()
+
+
+# -- the cold-start path: _clear_stale_backend ------------------------------
+
+
+def test_clear_stale_never_terminates_an_idle_backend_answering_401(
+    tmp_path, backend_401, terminated
+):
+    """THE cold-start pin. RED when a 401 reads as not-ready: ``reusable()`` is
+    False, no browser protects the idle backend, and it is terminated."""
+    _record(tmp_path, backend_401.port)
+    assert singleton._clear_stale_backend(backend_401.port) == []
+    assert terminated == []
+
+
+def test_the_reuse_gate_finds_a_backend_answering_401(tmp_path, backend_401):
+    """``_find_running_server`` is what hands the proxy a backend instead of a
+    spawn; with a 401 it used to hand back None."""
+    _record(tmp_path, backend_401.port)
+    assert singleton._same_identity_backend_ready(backend_401.port, patience=0.0)
+
+
+def test_the_cold_start_lock_does_not_spawn_over_a_backend_answering_401(
+    tmp_path, backend_401, terminated, monkeypatch
+):
+    _record(tmp_path, backend_401.port)
+    spawned: list[int] = []
+    monkeypatch.setattr(singleton, "_start_server_process", spawned.append)
+    singleton._start_backend_holding_lock(backend_401.port)
+    assert (terminated, spawned) == ([], [])
+
+
+def test_a_dead_backend_is_still_cleared(tmp_path, dead_port, terminated):
+    _record(tmp_path, dead_port)
+    assert singleton._clear_stale_backend(dead_port) == []
+    assert terminated == [dead_port]
+
+
+def test_a_stale_version_is_still_evicted_even_if_it_answers_401(
+    tmp_path, backend_401, terminated
+):
+    """The unauthorized exemption is for backends we would REUSE. A stale
+    version still has to go (issue #14), exactly as before."""
+    (tmp_path / "server.json").write_text(
+        json.dumps(
+            {
+                "port": backend_401.port,
+                "version": "0.0.1",
+                "pid": 2**22 - 1,
+                "source_fingerprint": OUR_FINGERPRINT,
+            }
+        )
+    )
+    singleton._clear_stale_backend(backend_401.port)
+    assert terminated == [backend_401.port]
+
+
+# -- the self-heal path: _confirm_bridge_verdict ----------------------------
+
+
+async def test_a_401_after_a_lost_connection_is_not_dead(tmp_path, backend_401):
+    """THE self-heal pin, through the gate the proxy wires (``confirm_alive``)."""
+    _record(tmp_path, backend_401.port)
+    verdict = await proxy_selfheal._confirm_bridge_verdict(
+        backend_401.port, confirm_alive=singleton._same_identity_backend_ready
+    )
+    assert verdict == proxy_selfheal.CONNECTION_RESET_CAUSE
+
+
+async def test_a_refused_connection_after_a_lost_connection_is_still_dead(
+    tmp_path, dead_port, monkeypatch
+):
+    monkeypatch.setattr(proxy_selfheal, "_report", lambda *a, **k: None)
+    _record(tmp_path, dead_port)
+    verdict = await proxy_selfheal._confirm_bridge_verdict(
+        dead_port, confirm_alive=singleton._same_identity_backend_ready
+    )
+    assert verdict == proxy_selfheal.CONNECTION_LOST_CAUSE

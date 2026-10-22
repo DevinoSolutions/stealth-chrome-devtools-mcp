@@ -53,6 +53,15 @@ watchdog never strikes a healthy backend for something only this client can fix 
 which, with the confirmation probe 401ing the same way, used to condemn a backend
 that owned browsers. The cause is logged at WARNING once per run of 401s, not per beat.
 
+**The same three verdicts for every other reader** (T-6550). :func:`probe` is the one
+attempt that tells them apart; :func:`ready` is ``probe == alive`` for the callers that
+need "can I talk to it" (the CLI's ``responsive``/``wedged`` ladder, the port-selection
+and release-gate probes). ``singleton._same_identity_backend_ready`` is the reuse gate
+and the cold-start and self-heal paths consult it, so it asks :func:`probe` and treats
+:data:`VERDICT_UNAUTHORIZED` as a backend of ours that is merely refusing this client:
+never evicted, never replaced, never answered DEAD. :func:`await_ready` logs the same
+cause once while it keeps polling.
+
 **Never raises.** Every failure — connection refused, timeout, a malformed
 answer — resolves to False. That is ``singleton._server_is_healthy``'s
 fail-closed contract: a probe error reads as "not ready" and never propagates,
@@ -152,20 +161,57 @@ def _request(client_name: str) -> dict[str, object]:
     }
 
 
-def ready(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> bool:
-    """One synchronous attempt: True iff ``url`` answers an ``initialize`` 200."""
+def probe(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> str:
+    """One synchronous attempt: :data:`VERDICT_ALIVE` iff ``url`` answers an
+    ``initialize`` 200, :data:`VERDICT_UNAUTHORIZED` iff it answers 401 (alive,
+    and refusing only us), else :data:`VERDICT_DEAD`. Never raises."""
     import httpx
 
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             resp = client.post(url, json=_request(client_name), headers=_headers())
+            if resp.status_code == _UNAUTHORIZED_STATUS:
+                _say_unauthorized("readiness probe")
+                return VERDICT_UNAUTHORIZED
+            _unauthorized_said.clear()
             if resp.status_code != _READY_STATUS:
-                return False
+                return VERDICT_DEAD
             _discard_session(client.delete, url, resp.headers.get("mcp-session-id"))
-            return True
+            return VERDICT_ALIVE
     except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not ready")
         _logger.debug("liveness probe attempt failed", exc_info=exc)
-        return False
+        _unauthorized_said.clear()
+        return VERDICT_DEAD
+
+
+def ready(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> bool:
+    """One synchronous attempt: True iff ``url`` answers an ``initialize`` 200.
+
+    "Can I talk to it", and a 401 is no: for "is it alive" ask :func:`probe`."""
+    return probe(url, timeout, client_name=client_name) == VERDICT_ALIVE
+
+
+def refused(url: str, timeout: float) -> bool:
+    """True iff ``url`` answers 401: a backend that is up and refusing only us."""
+    return probe(url, timeout) == VERDICT_UNAUTHORIZED
+
+
+#: Set while the current run of 401s has been said, cleared by any other answer, so
+#: the WARNING is once per run and not once per probe (a cold start polls for
+#: seconds). Heartbeat keeps its own per-instance flag: it is ONE watchdog's run.
+_unauthorized_said = threading.Event()
+
+
+def _say_unauthorized(what: str) -> None:
+    """The WARNING every 401 reader shares, once per run of 401s."""
+    if _unauthorized_said.is_set():
+        return
+    _unauthorized_said.set()
+    _logger.warning(
+        "%s: %s; the backend is answering, so it is not replaced",
+        what,
+        backend_token.UNAUTHORIZED,
+    )
 
 
 def health_url(mcp_url: str) -> str:
@@ -208,10 +254,10 @@ class Heartbeat:
         """One beat: :data:`VERDICT_ALIVE`, :data:`VERDICT_UNAUTHORIZED` or
         :data:`VERDICT_DEAD`. Never raises."""
         if self._legacy:
-            if ready(self._mcp_url, timeout):
-                return VERDICT_ALIVE
-            self._legacy = False  # a replaced backend may serve the route now
-            return VERDICT_DEAD
+            verdict = probe(self._mcp_url, timeout)
+            if verdict == VERDICT_DEAD:
+                self._legacy = False  # a replaced backend may serve the route now
+            return verdict
         try:
             resp = self._connection().get(
                 self._health_url, timeout=timeout, headers=backend_token.auth_headers()
@@ -282,7 +328,10 @@ async def await_ready(
                     await _discard_session_async(
                         client.delete, url, resp.headers.get("mcp-session-id")
                     )
+                    _unauthorized_said.clear()
                     return True
+                if resp.status_code == _UNAUTHORIZED_STATUS:
+                    _say_unauthorized("backend readiness")
             except Exception:  # noqa: BLE001  PERMANENT(expected during a cold start)
                 _logger.debug("backend readiness probe attempt failed", exc_info=True)
             await anyio.sleep(interval)

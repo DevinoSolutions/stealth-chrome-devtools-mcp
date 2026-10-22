@@ -104,6 +104,19 @@ whole budget before it is called stale. The `Page.frameStartedLoading` listener 
 
 - **The F-1000 gated load page is an ordinary route (T-3102).** `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
 
+### A 401 never condemns a healthy backend on the cold-start or self-heal path (F-1018, T-6550)
+
+The T-6367 follow-up left two readers of the same probe reading a 401 as "not ready". `singleton._same_identity_backend_ready`, the reuse gate, builds on
+`backend_probe.ready`, so a proxy that could not read the token file (deleted, locked by antivirus, another user's) got `None` from
+`_find_running_server`, `_clear_stale_backend` saw `reusable()` False and TERMINATED an idle, healthy backend (only F-886's browser protection spared
+one), and `proxy_selfheal._confirm_bridge_verdict`, which asks the same gate, answered DEAD after a lost connection. `backend_probe.probe` now answers
+the heartbeat's own verdicts (`alive` / `unauthorized` / `dead`, no second vocabulary) for one `initialize`, and `ready` is `probe == alive` for the
+callers that need "can I talk to it". The gate treats a 401 from a backend of OUR identity as alive: it is reused, never evicted, never replaced and never
+answered DEAD, and `await_ready` logs `backend_token.UNAUTHORIZED` at WARNING once per run of 401s while it keeps polling, so the cause is in the proxy
+log instead of an unexplained "did not become ready". A dead (refused) backend is cleared and answered DEAD exactly as before, and so is a stale-version
+one, which is still evicted whatever it answers. The legacy-heartbeat fallback (a backend with no health route) reads a 401 the same way. Not changed: the
+CLI's `responsive`/`wedged` ladder (`backend_liveness.probe_port`) and port selection still use `ready`, so a 401 shows as `wedged` there.
+
 ### A 401 is its own heartbeat verdict, not a strike; the token regex is exact; Windows refuses a foreign-owned token file (F-1018, T-6367)
 
 Follow-ups from the F-1018 bearer-token review. The watchdog's `Heartbeat` read a 401 as "dead", so a client that could not read the token file
