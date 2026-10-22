@@ -876,8 +876,15 @@ def _cookie_server(patched_server, tab: FakeTab, browser: FakeBrowser | None):
     )
 
 
+def _network_frames(tab: FakeTab) -> list[dict]:
+    """The cookie read's frames. ``cdp_frames`` also holds the F-1019 paint hold
+    every page tool sends first (see ``FakeTab.sent``); these tests are about
+    which ``Network.*`` read the tool chose, so they look at those alone."""
+    return [frame for frame in tab.cdp_frames if frame["method"].startswith("Network.")]
+
+
 def _cdp_methods(tab: FakeTab) -> list[str]:
-    return [frame["method"] for frame in tab.cdp_frames]
+    return [frame["method"] for frame in _network_frames(tab)]
 
 
 async def test_get_cookies_defaults_to_the_page_the_tab_shows_now(patched_server):
@@ -887,7 +894,7 @@ async def test_get_cookies_defaults_to_the_page_the_tab_shows_now(patched_server
     await call_tool(srv, "get_cookies", instance_id="i1")
 
     assert _cdp_methods(tab) == ["Network.getCookies"]
-    assert tab.cdp_frames[0]["params"]["urls"] == [LIVE_URL]
+    assert _network_frames(tab)[0]["params"]["urls"] == [LIVE_URL]
 
 
 async def test_get_cookies_returns_the_whole_jar_only_for_all_sites(patched_server):
@@ -908,7 +915,7 @@ async def test_get_cookies_given_urls_asks_for_exactly_those(patched_server):
         srv, "get_cookies", instance_id="i1", urls=["https://other.example.test/"]
     )
 
-    assert tab.cdp_frames[0]["params"]["urls"] == ["https://other.example.test/"]
+    assert _network_frames(tab)[0]["params"]["urls"] == ["https://other.example.test/"]
     assert browser.update_targets_calls == 0, "an explicit url costs no round trip"
 
 
@@ -919,7 +926,9 @@ async def test_a_page_with_no_http_url_has_no_cookies_and_does_not_widen(
     srv = _cookie_server(patched_server, tab, None)
 
     assert await call_tool(srv, "get_cookies", instance_id="i1") == []
-    assert tab.cdp_frames == [], "about:blank must not fall through to the whole jar"
+    assert _network_frames(tab) == [], (
+        "about:blank must not fall through to the whole jar"
+    )
 
 
 # ------------------------------------------------- the mode, on every OS ----
