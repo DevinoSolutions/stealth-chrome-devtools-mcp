@@ -113,7 +113,9 @@ def _version_via_dpkg(path: Path) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return ""
-    version = (completed.stdout or "").strip().split("-")[0]
+    # ``[epoch:]upstream[-revision]``: drop both, keep a hyphen inside upstream.
+    raw = (completed.stdout or "").strip().split(":", 1)[-1]
+    version = raw.rpartition("-")[0] or raw
     return version if completed.returncode == 0 and _looks_like_version(version) else ""
 
 
@@ -157,8 +159,8 @@ def _read_version(path: Path) -> str:
 
     ``chrome.exe --version`` prints nothing on Windows, so the versioned sibling
     ``Application\\<version>\\`` directory is authoritative there. macOS carries
-    the version in the app bundle's ``Info.plist``. Linux reads the dpkg version,
-    then ``--version`` (retried; fails loudly).
+    the version in the app bundle's ``Info.plist``. Linux reads the dpkg version
+    and still runs ``--version`` (retried), which must answer when dpkg does not.
     """
     system = platform.system().lower()
     if system == "windows":
@@ -179,11 +181,14 @@ def _read_version(path: Path) -> str:
         if isinstance(version, str) and version:
             return version
         return _version_via_cli(path)
-    # Linux: a cold runner can take >30 s to start Chrome once, so prefer the
-    # package database and bound the CLI fallback at 2 x 45 s (T-6555).
-    return _version_via_dpkg(path) or _version_via_cli(
-        path, attempts=2, timeout=45, strict=True
-    )
+    # Linux: a cold runner can take >30 s to start Chrome once, so the package
+    # database is the version source when it answers (T-6555). The binary is
+    # exec'd EITHER WAY: the cold-start probe records launch #1 as prewarmed by
+    # this step (chrome_cold_start_probe.binary_prewarmed, F-870). Its answer is
+    # required only when dpkg has none.
+    packaged = _version_via_dpkg(path)
+    executed = _version_via_cli(path, attempts=2, timeout=45, strict=not packaged)
+    return packaged or executed
 
 
 def resolve_chrome() -> dict[str, str]:
