@@ -36,9 +36,14 @@ and is merely late under CPU load fails exactly like one that never could. Namin
 problem, while the machine was starved of CPU. :class:`LaunchEvidence` carries the two
 facts that tell them apart, both read at the moment of failure and before the teardown
 ends the late Chrome: whether the attempt's Chrome was running, and the machine CPU.
+The verdict is made ONLY for a launch that failed on its DevTools deadline
+(:func:`missed_devtools_deadline`): a failure after the launch (first page, post-launch
+setup, hooks) says nothing about load, whatever the CPU reads. And a process count AT
+the limit is never relabelled: it keeps the capacity answer, with the CPU added.
 
-A leaf module: ``psutil``, ``debug_logger`` and ``browser_pid_registry`` only.
-Never ``process_cleanup``, never ``singleton``, never ``server``.
+A leaf module: ``psutil``, ``debug_logger``, ``browser_pid_registry``,
+``spawn_budget`` and ``spawn_leak`` only. Never ``process_cleanup``, never
+``singleton``, never ``server``.
 
 The module is NOT named ``spawn_diagnostics``: ``browser_manager.spawn_browser``
 and ``server.spawn_browser`` each bind a local of that name inside the very
@@ -52,7 +57,11 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_pid_registry,
+    spawn_budget,
+    spawn_leak,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -68,11 +77,15 @@ if TYPE_CHECKING:
 _EXHAUSTION_PROCESS_THRESHOLD = 120
 
 # Machine CPU at which a Chrome that started and was still late is put down to load
-# rather than to capacity. Sampled over a short window at the moment of failure, so
-# it is "busy NOW", not an average of a quiet minute. A module constant on purpose
+# rather than to capacity: the average over THIS launch (``spawn_leak.Attempt``'s
+# baseline to the failure), not of a quiet minute. A module constant on purpose
 # (see above): an unknown STEALTH_MCP_* key crashes get_settings().
 _STARVED_CPU_PERCENT = 90.0
-_CPU_SAMPLE_SECONDS = 0.2
+
+# nodriver's own raise on a missed DevTools deadline is a bare ``Exception`` with this
+# text (``browser_connect`` quotes the source); the other way to miss it is the launch
+# stage's budget, whose text ``spawn_budget.stalled_in`` owns.
+_CONNECT_FAILURE = "Failed to connect to browser"
 
 # The names a Chromium BROWSER tree runs under, measured on the maintainer's box
 # (tasklist, 2026-10-21: 243 chrome.exe beside 29 stealth-chrome-devtools-mcp.exe, our
@@ -129,38 +142,76 @@ def live_chromium_processes() -> int:
     return live
 
 
+def missed_devtools_deadline(error: BaseException) -> bool:
+    """Whether *error* is a launch that ran out of time for Chrome's DevTools endpoint.
+
+    The only failure a CPU reading can explain: nodriver's connect failure, or the
+    launch stage's own budget. A first-page, post-launch or identity failure is raised
+    AFTER the endpoint answered (or for another reason), so a busy machine does not
+    make it a late launch."""
+    text = str(error)
+    return _CONNECT_FAILURE in text or spawn_budget.stalled_in("launch") in text
+
+
 class LaunchEvidence(NamedTuple):
     """What a failed launch looked like when it failed (F-1024)."""
 
     chrome_started: bool
     """The attempt's own Chrome was running (it started and was late, or hung)."""
     cpu_percent: float | None
-    """Machine CPU over a short window at the failure, or ``None`` if unreadable."""
+    """Machine CPU over the launch, or ``None`` if unreadable or never asked for."""
+    missed_deadline: bool
+    """The launch failed on its DevTools deadline (:func:`missed_devtools_deadline`)."""
 
     def starved(self) -> bool:
-        """A Chrome that started on a machine whose CPU is at the ceiling."""
+        """A Chrome that started, missed its deadline, on a machine at the ceiling."""
         return (
             self.chrome_started
+            and self.missed_deadline
             and self.cpu_percent is not None
             and self.cpu_percent >= _STARVED_CPU_PERCENT
         )
 
 
-def observe(chrome_started: bool) -> LaunchEvidence:
-    """The evidence for a launch that just failed. Never raises: an unreadable CPU
-    is ``None``, which :meth:`LaunchEvidence.starved` reads as "not starved". The
-    0.2 s CPU window is spent only when a Chrome started: without one the verdict
-    cannot be "starved", so a launch that never began costs the loop nothing."""
-    try:
-        cpu = (
-            psutil.cpu_percent(interval=_CPU_SAMPLE_SECONDS) if chrome_started else None
-        )
-    except Exception as error:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
-        debug_logger.log_debug(
-            "spawn_exhaustion", "observe", f"CPU not readable: {error}"
-        )
-        cpu = None
-    return LaunchEvidence(chrome_started=chrome_started, cpu_percent=cpu)
+def _idle_and_total(times: object) -> tuple[float, float]:
+    """Idle and total CPU seconds, counted as ``psutil.cpu_percent`` counts them: iowait
+    is idle, and Linux guest columns are already inside user and nice."""
+    fields = tuple(times)  # type: ignore[call-overload]
+    idle = getattr(times, "idle", 0.0) + getattr(times, "iowait", 0.0)
+    guest = getattr(times, "guest", 0.0) + getattr(times, "guest_nice", 0.0)
+    return idle, sum(fields) - guest
+
+
+def _cpu_since(baseline: object | None) -> float | None:
+    """Machine CPU percent since *baseline* (``psutil.cpu_times()``), or ``None``.
+
+    A subtraction of two readings, so it neither sleeps nor blocks the event loop."""
+    if baseline is None:
+        return None
+    idle_before, total_before = _idle_and_total(baseline)
+    idle_now, total_now = _idle_and_total(psutil.cpu_times())
+    total = total_now - total_before
+    if total <= 0:
+        return None
+    return max(0.0, min(100.0, 100.0 * (1.0 - (idle_now - idle_before) / total)))
+
+
+def observe(attempt: spawn_leak.Attempt | None, error: BaseException) -> LaunchEvidence:
+    """The evidence for a launch that just failed with *error*. Never raises: an
+    unreadable CPU is ``None``, which :meth:`LaunchEvidence.starved` reads as "not
+    starved". The CPU is read only for a Chrome that started and failed on its DevTools
+    deadline: any other failure cannot be "starved", so it costs nothing."""
+    started = spawn_leak.started(attempt)
+    late = missed_devtools_deadline(error)
+    cpu = None
+    if started and late:
+        try:
+            cpu = _cpu_since(getattr(attempt, "cpu_baseline", None))
+        except Exception as exc:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+            debug_logger.log_debug(
+                "spawn_exhaustion", "observe", f"CPU not readable: {exc}"
+            )
+    return LaunchEvidence(chrome_started=started, cpu_percent=cpu, missed_deadline=late)
 
 
 def _starved_text(evidence: LaunchEvidence, live: int, tracked: int) -> str:
@@ -195,17 +246,27 @@ def _hint_text(live: int, tracked: int) -> str:
     )
 
 
+def _load_note(evidence: LaunchEvidence) -> str:
+    """The CPU reading, appended to the capacity paragraph when both facts hold."""
+    return (
+        f"\nThe machine CPU also read {evidence.cpu_percent:.0f}% when the launch "
+        "failed, so load may have made the browser late as well; the process count "
+        "above is still at the limit (F-1024)."
+    )
+
+
 def exhaustion_hint(
     pid_file: Path, evidence: LaunchEvidence | None = None
 ) -> str | None:
     """The paragraph to append to a failed spawn's error, or ``None``.
 
-    A launch whose Chrome started on a CPU-starved machine (*evidence*) gets the
-    starvation paragraph whatever the process count; otherwise the process-capacity
-    paragraph, only when the count is really at the limit. Returns ``None``
-    otherwise and on any internal failure, so the call site is one line plus an
-    ``or ""``. The returned string already starts
-    with ``"\\n\\n"``: the call site does no formatting.
+    A process count AT the limit gets the process-capacity paragraph, and a starved
+    launch (*evidence*) adds its CPU reading to it rather than replacing it: the count
+    is the decisive fact and a neighbour process can peg a CPU. Below the limit, a
+    launch whose Chrome started and missed its DevTools deadline on a CPU-starved
+    machine gets the starvation paragraph. ``None`` otherwise and on any internal
+    failure, so the call site is one line plus an ``or ""``. The returned string
+    already starts with ``"\\n\\n"``: the call site does no formatting.
 
     ``pid_file`` is required and never defaults. The caller's binding is what
     selects the record — a defaulted path would bind a module global at def-time
@@ -225,6 +286,7 @@ def exhaustion_hint(
             f"Exhaustion probe failed, spawn error left undecorated: {error}",
         )
         return None
-    if evidence is not None and starved:
-        return _starved_text(evidence, live, tracked)
-    return _hint_text(live, tracked)
+    if live >= _EXHAUSTION_PROCESS_THRESHOLD:
+        note = _load_note(evidence) if evidence is not None and starved else ""
+        return _hint_text(live, tracked) + note
+    return _starved_text(evidence, live, tracked)  # type: ignore[arg-type]

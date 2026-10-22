@@ -184,9 +184,11 @@ class _SpyHygiene:
 
     def __init__(self) -> None:
         self.calls: list[tuple[Any, Any]] = []
+        self.reattaching: list[Any] = []
 
-    async def exit_if_unadopted(self, has_browsers, stop) -> bool:
+    async def exit_if_unadopted(self, has_browsers, stop, reattaching=None) -> bool:
         self.calls.append((has_browsers, stop))
+        self.reattaching.append(reattaching)
         return False
 
 
@@ -213,6 +215,8 @@ async def test_a_cold_started_backend_arms_the_unadopted_exit(
     assert await has_browsers() is False
     stop()
     assert raised == [server.signal.SIGTERM]
+    # A re-attach pass still running keeps the backend: the watch is told how to ask.
+    assert hygiene.reattaching == [server.rt.browser_reattach.in_progress]
 
 
 async def test_an_operator_started_backend_never_arms_it(

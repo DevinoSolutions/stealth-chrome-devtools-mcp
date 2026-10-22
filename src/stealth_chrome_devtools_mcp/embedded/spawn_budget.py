@@ -104,6 +104,12 @@ async def _end(child: "asyncio.Future[object]") -> bool:
     return False
 
 
+def stalled_in(stage: str) -> str:
+    """The opening words of the error a stalled *stage* raises; ``spawn_exhaustion``
+    matches on them to tell a launch that missed its deadline from a later stall."""
+    return f"Browser spawn stalled in the {stage} stage"
+
+
 def phase(
     stage: str, budget_name: str
 ) -> Callable[[Callable[_P, Awaitable[_T]]], Callable[_P, Awaitable[_T]]]:
@@ -135,7 +141,7 @@ def phase(
                     "and was abandoned",
                 )
             raise ToolError(
-                f"Browser spawn stalled in the {stage} stage: no answer within "
+                f"{stalled_in(stage)}: no answer within "
                 f"{budget:g} s. The Chrome it launched is stopped; spawn again."
             )
 

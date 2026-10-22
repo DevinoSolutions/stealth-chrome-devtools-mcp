@@ -159,3 +159,27 @@ class TestBootLogRedirect:
             # exits only if no request ever reached it and it hosts no browser.
             "--exit-if-unadopted",
         ]
+
+
+class TestExitIfUnadoptedLaunchPaths:
+    """F-1023 review: which launches carry ``--exit-if-unadopted``. Every spawn goes
+    through ``_start_server_process`` (the cold start, a self-heal, and the operator
+    ``restart`` verb); only a backend an operator runs by hand (``serve --http``) does
+    not. ``restart`` carrying it is a decision, pinned so changing it is deliberate."""
+
+    def test_the_restart_verb_spawns_with_the_flag(self, isolated_state, monkeypatch):
+        fake_proc = MagicMock()
+        fake_proc.pid = 4242
+        popen_mock = MagicMock(return_value=fake_proc)
+        monkeypatch.setattr(subprocess, "Popen", popen_mock)
+        monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+        monkeypatch.setattr(singleton, "_select_backend_port", lambda port: 4321)
+        monkeypatch.setattr(singleton, "_terminate_backend", lambda port: None)
+        monkeypatch.setattr(singleton, "_wait_for_server", lambda port: True)
+        monkeypatch.setattr(singleton, "_probe_port", lambda port: "responsive")
+
+        status, _pid = singleton.restart_backend()
+
+        assert status == "responsive"
+        cmd = popen_mock.call_args.args[0]
+        assert "--exit-if-unadopted" in cmd

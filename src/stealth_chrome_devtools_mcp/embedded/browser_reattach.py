@@ -590,6 +590,12 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
 _pass_lock = asyncio.Lock()
 
 
+def in_progress() -> bool:
+    """Whether a re-attach pass is running now: browsers it has not adopted yet are
+    not in ``list_instances``, so "this backend hosts none" is not yet true (F-1023)."""
+    return _pass_lock.locked()
+
+
 def start(manager: BrowserManager, cleanup: ProcessCleanup) -> asyncio.Task | None:
     """Schedule the adoption pass off the first-serve path.
 
