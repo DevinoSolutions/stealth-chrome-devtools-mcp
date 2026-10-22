@@ -107,6 +107,7 @@ _DACL_SECURITY_INFORMATION = 0x00000004
 _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 _TOKEN_QUERY = 0x0008  # TOKEN_QUERY
 _TOKEN_USER = 1  # TOKEN_INFORMATION_CLASS.TokenUser
+_TOKEN_OWNER = 4  # TOKEN_INFORMATION_CLASS.TokenOwner
 
 
 def token_path() -> Path:
@@ -164,22 +165,27 @@ def _refuse_a_foreign_file(path: Path) -> None:
     """A token file another user owns is not ours to trust or to tighten.
 
     POSIX compares the file's uid with ours; Windows compares the owner SID with
-    the current user's (:func:`_file_owner_sid`, :func:`_user_sid`). A file that
-    is not there is nothing to refuse, and on Windows an owner that cannot be read
-    is refused (fail closed) rather than assumed to be ours.
+    the SIDs this process makes files with (:func:`_file_owner_sid`,
+    :func:`_own_sids`). A file that is not there is nothing to refuse, and on
+    Windows an owner that cannot be read is refused (fail closed) rather than
+    assumed to be ours.
     """
     if sys.platform == "win32":
         try:
-            owner, me = _file_owner_sid(path), _user_sid()
+            owner = _file_owner_sid(path)
         except FileNotFoundError:
             return
         except OSError as exc:
             raise ToolError(
-                f"{path}: its owner could not be read ({exc}); refusing to serve "
-                "with a token that may be readable by another user. Remove it and "
-                "start the backend again."
+                _unverifiable(path, f"its owner could not be read ({exc})")
             ) from exc
-        if owner != me:
+        try:
+            mine = _own_sids()
+        except OSError as exc:
+            raise ToolError(
+                _unverifiable(path, f"this process's SID could not be read ({exc})")
+            ) from exc
+        if owner not in mine:
             raise ToolError(_foreign_owner(path, f"SID {owner}"))
         return
     try:
@@ -188,6 +194,13 @@ def _refuse_a_foreign_file(path: Path) -> None:
         return
     if owner_uid != os.geteuid():
         raise ToolError(_foreign_owner(path, f"uid {owner_uid}"))
+
+
+def _unverifiable(path: Path, why: str) -> str:
+    return (
+        f"{path}: {why}; refusing to serve with a token that may be readable by "
+        "another user. Remove it and start the backend again."
+    )
 
 
 def _foreign_owner(path: Path, who: str) -> str:
@@ -307,8 +320,22 @@ def _owner_only_windows(path: Path) -> None:
         kernel32.LocalFree(descriptor)
 
 
+def _own_sids() -> frozenset[str]:
+    """The SIDs a file this process creates can be owned by: the token's user and
+    its default owner. They differ in an elevated admin process, whose files are
+    owned by the Administrators group (``S-1-5-32-544``), so comparing with the user
+    alone would refuse the backend's own token on its next start."""
+    return frozenset({_user_sid(), _token_sid(_TOKEN_OWNER)})
+
+
 def _user_sid() -> str:
     """The current process token's user SID as a string (``S-1-5-21-...``)."""
+    return _token_sid(_TOKEN_USER)
+
+
+def _token_sid(info_class: int) -> str:
+    """The SID a ``TOKEN_USER`` or ``TOKEN_OWNER`` of this process's token names.
+    Both structures start with the SID pointer."""
     import ctypes
     from ctypes import wintypes
 
@@ -336,21 +363,21 @@ def _user_sid() -> str:
     try:
         needed = wintypes.DWORD()
         advapi32.GetTokenInformation(
-            process_token, _TOKEN_USER, None, 0, ctypes.byref(needed)
+            process_token, info_class, None, 0, ctypes.byref(needed)
         )
         buffer = ctypes.create_string_buffer(needed.value)
         if not advapi32.GetTokenInformation(
-            process_token, _TOKEN_USER, buffer, needed, ctypes.byref(needed)
+            process_token, info_class, buffer, needed, ctypes.byref(needed)
         ):
             raise OSError("GetTokenInformation failed")
-        # TOKEN_USER starts with a SID_AND_ATTRIBUTES: first field is the SID pointer.
         return _sid_string(ctypes.c_void_p.from_buffer(buffer).value)
     finally:
         kernel32.CloseHandle(process_token)
 
 
 def _sid_string(sid_pointer: int | None) -> str:
-    """A SID, by pointer, as its string form (``S-1-5-21-...``)."""
+    """A SID, by pointer, as its string form (``S-1-5-21-...``). ``OSError`` when
+    the conversion fails, including for a NULL pointer."""
     import ctypes
     from ctypes import wintypes
 
