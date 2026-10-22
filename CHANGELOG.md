@@ -98,6 +98,8 @@ the frame, in which case the click raises rather than missing (`audit/stage2/fin
 the call. httpcore retries only connection establishment (`ConnectError`, `ConnectTimeout`), before a single request byte is written, so a tool can
 never run twice because of it; `proxy_selfheal`'s replay is untouched. Pins drive the real client against a real loopback listener whose first dial is
 refused (it fails with `retries=0`), and a request that WAS sent and whose connection was then dropped is seen by the server exactly once.
+The cost is on a backend that is really down: it now takes about 1.5 s (backoffs of 0, 0.5 and 1 s) to report the refusal, on
+every verb, and a dial that hangs rather than being refused can take up to four connect timeouts. Both are loopback-only.
 
 Three follow-ups to the navigate bound above. Only the MAIN frame's `Page.frameStartedLoading` (the frame whose id is the tab's target id) lifts the
 bound now; a stale page's iframe loading no longer counts as the navigation having started. The 10 s ceiling also applies when the budget is larger
