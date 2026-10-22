@@ -48,13 +48,15 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 
-def default_session_root() -> Path:
-    root = get_settings().browser_session_root
-    if root:
-        return Path(root).expanduser()
+def platform_default_session_root() -> Path:
     if os.name == "nt":
         return Path(r"C:\stealth-mcp-browser-sessions")
     return Path.home() / ".stealth-mcp-browser-sessions"
+
+
+def default_session_root() -> Path:
+    root = get_settings().browser_session_root
+    return Path(root).expanduser() if root else platform_default_session_root()
 
 
 def master_profile_dir() -> Path:
