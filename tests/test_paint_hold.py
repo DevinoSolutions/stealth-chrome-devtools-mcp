@@ -130,3 +130,19 @@ async def test_no_tab_is_no_hold(monkeypatch):
     monkeypatch.setattr(tab_binding, "_resolve", resolve)
     assert await tab_binding.tab_for_caller(object(), "iid") is None
     assert paint_hold._held == {}
+
+
+class WedgedTab(FakeTab):
+    """A tab whose renderer never answers."""
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        await asyncio.Event().wait()
+
+
+async def test_a_wedged_tab_costs_the_tool_a_bounded_wait_not_a_hang(monkeypatch):
+    monkeypatch.setattr(paint_hold, "SEND_BUDGET_S", 0.05)
+    tab = WedgedTab(target_id="t-1")
+    await asyncio.wait_for(paint_hold.hold(tab), 1.0)
+    assert (
+        paint_hold._held == {}
+    )  # the failed hold is dropped, so the next call retries
