@@ -461,7 +461,10 @@ def _main_frame_listener(
     A page target's main frame id IS its target id (CDP). Only the main frame
     starting to load is a sign of life: an iframe of the stale page loading would
     lift the bound while the navigation we sent is still unseen. With no target
-    id to compare, any frame counts (the older, looser behaviour).
+    id to compare, any frame counts (the older, looser behaviour). The id equality
+    is the CDP convention, not measured here: a case that broke it (prerender
+    activation, BFCache restore) would make the attempt read stale at the bound,
+    so the tab is replaced and the navigation retried, never a hang.
     """
     main_frame = getattr(getattr(tab, "target", None), "target_id", None)
 

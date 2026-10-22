@@ -8,6 +8,10 @@ raises ``ConnectionRefusedError`` once and then behaves, which is what a backend
 that is mid-restart looks like to a client. With ``retries=0`` that first
 refusal is the end (``httpx.ConnectError``); with the transport's connection
 retries the second dial reaches the listener.
+
+Patching ``anyio.connect_tcp`` relies on httpcore dialling through its AnyIO
+backend under asyncio, which httpcore 1.x does; the ``retries=0`` contrast test
+is what would expose a backend change (its first dial would stop failing).
 """
 
 from __future__ import annotations
