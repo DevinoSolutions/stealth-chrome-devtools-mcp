@@ -83,6 +83,7 @@ async def export_debug_logs(
     max_info: int = 100,
     include_all: bool = False,
     format: str = "auto",
+    overwrite: bool = False,
 ) -> str:
     """
     Export debug logs to a file using the fastest available method with timeout protection.
@@ -98,6 +99,9 @@ async def export_debug_logs(
                      - Small data (<100 items): JSON (human readable)
                      - Medium data (100-1000 items): Pickle (fast binary)
                      - Large data (>1000 items): Gzip-Pickle (fastest, compressed)
+        overwrite (bool): Replace `filename` if it already exists (default: False,
+            an existing file is refused). The file is created owner-only (0600) and
+            may not lie in a credential store, browser profile or this server's state.
 
     Returns:
         str: Path to the exported file.
@@ -114,6 +118,7 @@ async def export_debug_logs(
                 max_warnings if not include_all else None,
                 max_info if not include_all else None,
                 format,
+                overwrite,
             ),
             timeout=30.0,
         )

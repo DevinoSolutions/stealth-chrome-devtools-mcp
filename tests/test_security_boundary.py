@@ -492,20 +492,31 @@ class TestFilesystemDestinationMatrix:
         assert asyncio.run(interceptor.export_to_json("inst", mixed))
         assert (sub / "mixed.json").is_file()
 
-    def test_an_existing_target_is_overwritten_without_warning(self, tmp_path: Path):
-        """The overwrite policy, stated: there isn't one. There is no refusal,
-        no backup, and no signal in the return value."""
+    def test_an_existing_target_is_refused_unless_overwrite_is_asked(
+        self, tmp_path: Path
+    ):
+        """The overwrite policy (F-1025): an existing file is REFUSED, with a
+        ToolError naming ``overwrite=True``; asking for it replaces the file."""
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
         target = tmp_path / "existing.json"
         target.write_text("PRIOR CONTENT", encoding="utf-8")
         interceptor = _interceptor()
-        assert asyncio.run(interceptor.export_to_json("inst", str(target)))
+        with pytest.raises(ToolError, match=r"overwrite=True"):
+            asyncio.run(interceptor.export_to_json("inst", str(target)))
+        assert target.read_text(encoding="utf-8") == "PRIOR CONTENT"
+        assert asyncio.run(
+            interceptor.export_to_json("inst", str(target), overwrite=True)
+        )
         assert "PRIOR CONTENT" not in target.read_text(encoding="utf-8")
 
     def test_two_exports_to_the_same_name_leave_one_file(self, tmp_path: Path):
         target = tmp_path / "dup.json"
         interceptor = _interceptor()
-        for _ in range(2):
-            assert asyncio.run(interceptor.export_to_json("inst", str(target)))
+        assert asyncio.run(interceptor.export_to_json("inst", str(target)))
+        assert asyncio.run(
+            interceptor.export_to_json("inst", str(target), overwrite=True)
+        )
         assert sorted(p.name for p in tmp_path.iterdir()) == ["dup.json"]
 
     def test_a_symlinked_directory_is_followed_to_its_real_target(self, tmp_path: Path):
