@@ -121,7 +121,9 @@ class _FakeConnection:
         """Hand *event* to every handler registered for its type, the way
         nodriver's listener does (a plain call), and let what they scheduled
         finish."""
-        for handler in list(self.handlers[type(event)]):
+        # The LIVE list, as nodriver's listener walks it: a handler that removes
+        # itself during dispatch makes the next one be skipped.
+        for handler in self.handlers[type(event)]:
             outcome = handler(event)
             if asyncio.iscoroutine(outcome) or isinstance(outcome, asyncio.Task):
                 await outcome
@@ -642,6 +644,51 @@ async def test_a_destroyed_target_is_reaped_with_its_watch():
     assert tab.handler_count() == 0
     assert other.handler_count() == 5  # the other tab is untouched
     assert len(tab.browser.connection.handlers[cdp.target.TargetDestroyed]) == 1
+
+
+async def test_reaping_a_watch_does_not_skip_the_handler_after_it():
+    """The reap runs inside the browser connection's dispatch, which walks the
+    live handler list. Two tabs on one browser, the first destroyed: a listener
+    registered after the first watch's must still see the event, and so must the
+    second watch (it ignores a foreign id, but it must be called)."""
+    bindings = python_binding.Bindings()
+    first = _FakeTab("T-a", context=7)
+    await _install(first, "x", lambda: 1, bindings)
+    seen = []
+    first.browser.connection.add_handler(
+        cdp.target.TargetDestroyed, lambda e: seen.append("sibling")
+    )
+    second = _FakeTab("T-b", context=21, browser=first.browser)
+    await _install(second, "x", lambda: 2, bindings)
+
+    await first.browser.destroy("T-a")
+
+    assert seen == ["sibling"]
+    assert set(bindings.watches) == {"T-b"}
+    assert first.handler_count() == 0
+    await first.browser.destroy("T-b")  # the second watch was still attached
+    assert bindings.watches == {}
+
+
+async def test_a_target_destroyed_during_install_leaves_no_watch_behind():
+    """The tab closes while a replaced connection's stale bindings are being
+    dropped: the new watch is already listening, reaps itself, and the install
+    fails closed rather than leaving a watch for a dead tab."""
+    bindings = python_binding.Bindings()
+    old = _FakeTab()
+    await _install(old, "x", lambda: 1, bindings)
+    new = _FakeTab()
+
+    async def tab_closes():
+        await new.browser.destroy("T-a")
+
+    new.on_send["Runtime.removeBinding"] = tab_closes
+    with pytest.raises(ToolError, match="closed"):
+        await _install(new, "y", lambda: 1, bindings)
+
+    assert bindings.watches == {}
+    assert bindings == {}
+    assert new.handler_count() == 0
 
 
 async def test_a_tab_destroyed_then_reopened_under_its_id_is_watched_afresh():

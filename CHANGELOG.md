@@ -93,8 +93,9 @@ rules backstop only for Sentry, not for the local log file.
   `Tab`, after the tab was closed, and a new connection to the same target replaced the watch while the old one's CDP handlers stayed attached to the old tab.
   The watch now also listens for `Target.targetDestroyed` on the browser's connection: when its target ends it forgets the tab's bindings (there is no page left
   to `removeBinding` on), takes its handlers off and leaves `watches`. A replaced watch detaches the same way. Handlers come off one by one, never through
-  nodriver's `remove_handler`, which deletes an event type's whole list (on the browser connection that is nodriver's own target bookkeeping). Hermetic pins
-  added to `test_python_binding.py`; `tests/test_e2e_python_binding_frames.py` (real Chrome, integration) pins who is answered: a same-origin `about:blank`
+  nodriver's `remove_handler`, which deletes an event type's whole list (on the browser connection that is nodriver's own target bookkeeping). The detach runs after the event's dispatch (nodriver walks the live handler list) and the new watch is attached before the install's first await, so a tab closed
+  mid-install fails the install instead of leaking a watch. Hermetic pins
+  added to `test_python_binding.py`; `tests/test_e2e_python_binding_frames.py` (real Chrome, integration) also pins the reap on a real tab close, and who is answered: a same-origin `about:blank`
   frame calling `window.parent`'s binding is, a `srcdoc` frame and a cross-origin frame calling the binding from their own context are refused.
 
 ### The path tools refuse secret locations, never overwrite unasked, write owner-only and redact credentials; `get_cookies` stops returning the whole jar (F-1025)

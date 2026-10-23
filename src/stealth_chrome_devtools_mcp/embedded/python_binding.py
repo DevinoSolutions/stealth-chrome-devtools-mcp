@@ -387,14 +387,19 @@ class TabWatch:
 
     def _on_target_destroyed(self, event: Any) -> None:
         """The tab is gone: forget its bindings (there is no page left to
-        ``removeBinding`` on), leave its connections and leave the registry."""
+        ``removeBinding`` on), leave the registry and, once this dispatch is over,
+        leave the connections.
+
+        The detach is deferred because nodriver's listener walks the LIVE handler
+        list: removing this handler from it now would skip the one after it.
+        """
         if str(event.target_id) != self.target_id:
             return
         for bound in self._tab_bindings():
             _forget(self.bindings, bound)
-        self.detach()
         if self.bindings.watches.get(self.target_id) is self:
             del self.bindings.watches[self.target_id]
+        asyncio.get_running_loop().call_soon(self.detach)
 
 
 async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
@@ -407,10 +412,14 @@ async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
         # listening on a tab nobody drives any more.
         if watch is not None:
             watch.detach()
-        for stale in [b for b in bindings.values() if b.target_id == target_id]:
-            await drop_binding(tab, bindings, stale)
+        # Attached BEFORE the first await, so a target destroyed meanwhile
+        # reaches it and cannot leave a watch for a dead tab behind.
         watch = bindings.watches[target_id] = TabWatch(tab, bindings, target_id)
         watch.attach()
+        for stale in [b for b in bindings.values() if b.target_id == target_id]:
+            await drop_binding(tab, bindings, stale)
+        if bindings.watches.get(target_id) is not watch:
+            raise ToolError("The tab was closed while the binding was being created")
     if not watch.replayed:
         await watch.replay_contexts()
     return watch
