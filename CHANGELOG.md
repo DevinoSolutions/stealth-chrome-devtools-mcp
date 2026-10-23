@@ -275,6 +275,10 @@ never empties the version. The step exits non-zero naming the cause (timeout,
 launch failure or no version in the output) only when dpkg gave nothing and
 `--version` also failed. Windows and macOS are unchanged.
 
+### Test harness: `release_gate_harness` split by concern (T-6148)
+
+- `tests/release_gate_harness.py` (2313 lines) is now the entry point (`run_release_gate_journey`, `gate_workspace`, `RawStdioWire`) plus a re-export of five siblings: `_consts`, `_fixture`, `_env`, `_journey`, `_soak`. Code moved verbatim (all 97 top-level definitions AST-identical); every importer is unchanged except `test_release_gate_harness_ports.py`, which now patches `_os_assigned_port` on `release_gate_harness_env`, where `_pick_free_port` looks it up. `fixture_routes.py` (908 lines, already split) is left alone. Test-only, no product change.
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
