@@ -136,6 +136,8 @@ def test_the_gate_takes_a_bounded_share_of_the_runner_pool(gate_jobs):
         assert {"unit-tests", "coverage"} <= set(needs), (
             f"{name} must wait for unit-tests and coverage, needs {needs}"
         )
+    smoke_needs = gate_jobs["install-smoke"]["needs"]
+    assert "build-dist" in smoke_needs, "install-smoke downloads build-dist's artifact"
     for name in ("unit-tests", "coverage"):
         assert "needs" not in gate_jobs[name], f"{name} is first-wave: no needs"
 

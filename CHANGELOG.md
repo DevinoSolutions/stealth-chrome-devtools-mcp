@@ -7,6 +7,9 @@
 The org runner pool is shared (28 runners) and one run once held 15 of them.
 Each `release-gate.yml` matrix now sets `max-parallel: 2` (unit-tests 3), and integration, transport,
 offline-stealth and install-smoke wait for unit-tests and coverage. Cells are unchanged.
+A run takes about 60 min instead of about 30. A unit-tests or coverage failure now skips the
+wave-2 jobs (integration, transport, offline-stealth, install-smoke), so a red run shows only
+the wave-1 failures.
 
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
