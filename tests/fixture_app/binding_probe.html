@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-binding-probe</title>
+  </head>
+  <body>
+    <!-- Loaded in a frame of a page that holds a create_python_binding named
+         pyProbe. It calls the RAW binding (a single string, the only shape a CDP
+         binding takes) from this frame's own execution context and reports to
+         the parent what it found: whether the binding is exposed here at all
+         and whether the call threw. The parent names the frame via window.name.
+         Self-contained and deterministic, like iframe_child.html. -->
+    <script>
+      (function () {
+        "use strict";
+        var exposed = typeof window.pyProbe;
+        var threw = null;
+        try {
+          window.pyProbe(JSON.stringify({ callId: "probe", args: [1, 2] }));
+        } catch (e) {
+          threw = String(e);
+        }
+        parent.postMessage(
+          { frame: window.name, exposed: exposed, threw: threw },
+          "*"
+        );
+      })();
+    </script>
+  </body>
+</html>

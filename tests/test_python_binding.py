@@ -23,6 +23,7 @@ The live-Chrome end-to-end proof (JS-visible return value == Python's return) is
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import types
 from typing import Any
@@ -103,7 +104,32 @@ def _navigated(frame: str = "T-a", parent: str | None = None) -> Any:
     return page.FrameNavigated.from_json({"frame": frame_json, "type": "Navigation"})
 
 
-class _FakeTab:
+class _FakeConnection:
+    """What nodriver's ``Connection`` keeps: ``handlers`` is a dict of event
+    type -> list of callbacks, and ``add_handler`` appends to the type's list."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[type, list[Any]] = collections.defaultdict(list)
+
+    def add_handler(self, event_type, handler):
+        self.handlers[event_type].append(handler)
+
+    def handler_count(self) -> int:
+        return sum(len(callbacks) for callbacks in self.handlers.values())
+
+    async def deliver(self, event: Any) -> None:
+        """Hand *event* to every handler registered for its type, the way
+        nodriver's listener does (a plain call), and let what they scheduled
+        finish."""
+        for handler in list(self.handlers[type(event)]):
+            outcome = handler(event)
+            if asyncio.iscoroutine(outcome) or isinstance(outcome, asyncio.Task):
+                await outcome
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+
+class _FakeTab(_FakeConnection):
     """Answers the CDP commands a binding install and a call issue.
 
     nodriver CDP commands are generators that yield a ``{"method", "params"}``
@@ -118,13 +144,19 @@ class _FakeTab:
     answered — where a page navigates under a call.
     """
 
-    def __init__(self, target_id: str = "T-a", context: int | None = CREATING_CONTEXT):
+    def __init__(
+        self,
+        target_id: str = "T-a",
+        context: int | None = CREATING_CONTEXT,
+        browser: Any = None,
+    ):
+        super().__init__()
+        self.browser = browser if browser is not None else _FakeBrowserOf()
         self.target = types.SimpleNamespace(target_id=target_id)
         self.main: tuple[int, str] | None = (
             None if context is None else (context, f"unique-{context}")
         )
         self.frames: list[dict[str, Any]] = []
-        self.handlers: list[tuple[type, Any]] = []
         self.wrapper_value: Any = {"success": True}
         self.runtime_enabled = True
         self.on_send: dict[str, Any] = {}
@@ -158,9 +190,6 @@ class _FakeTab:
             )
         return (runtime.RemoteObject(type_="undefined"), None)
 
-    def add_handler(self, event_type, handler):
-        self.handlers.append((event_type, handler))
-
     def methods(self) -> list[str]:
         return [f["method"] for f in self.frames]
 
@@ -173,19 +202,6 @@ class _FakeTab:
             and f["params"]["expression"].startswith("window.dispatchEvent")
         ]
 
-    async def deliver(self, event: Any) -> None:
-        """Hand *event* to every handler registered for its type, the way
-        nodriver's listener does (a plain call), and let what they scheduled
-        finish."""
-        for event_type, handler in list(self.handlers):
-            if event_type is not type(event):
-                continue
-            outcome = handler(event)
-            if asyncio.iscoroutine(outcome) or isinstance(outcome, asyncio.Task):
-                await outcome
-        for _ in range(3):
-            await asyncio.sleep(0)
-
     async def navigate(self, context: int, unique: str | None = None) -> None:
         """The page loads another document: its context ends and a new one starts."""
         old = self.main
@@ -194,6 +210,19 @@ class _FakeTab:
             await self.deliver(_destroyed(*old))
         await self.deliver(_navigated(self.target.target_id))
         await self.deliver(_created(*self.main, frame=self.target.target_id))
+
+
+class _FakeBrowserOf:
+    """The browser a tab reports: its own ``connection`` is where Chrome's
+    ``Target.targetDestroyed`` arrives."""
+
+    def __init__(self) -> None:
+        self.connection = _FakeConnection()
+
+    async def destroy(self, target_id: str) -> None:
+        await self.connection.deliver(
+            cdp.target.TargetDestroyed(target_id=cdp.target.TargetID(target_id))
+        )
 
 
 def _detail_of(expression: str) -> dict[str, Any]:
@@ -543,13 +572,13 @@ async def test_one_handler_set_per_tab_however_many_bindings():
     bindings = python_binding.Bindings()
     tab = _FakeTab()
     await _install(tab, "first", lambda: ran.append("first"), bindings)
-    baseline = len(tab.handlers)
+    baseline = tab.handler_count()
 
     for i in range(10):
         await _install(tab, f"b{i}", lambda i=i: ran.append(i), bindings)
         await _install(tab, "first", lambda: ran.append("first"), bindings)
 
-    assert len(tab.handlers) == baseline == 5
+    assert tab.handler_count() == baseline == 5
     await tab.deliver(_event("b3", "1", [], CREATING_CONTEXT))
     await tab.deliver(_event("first", "2", [], CREATING_CONTEXT))
     assert ran == [3, "first"]
@@ -567,8 +596,68 @@ async def test_a_new_connection_to_the_same_target_gets_its_own_handlers():
     await _install(new, "y", lambda: 1, bindings)
 
     assert set(bindings) == {("T-a", "y")}
-    assert len(new.handlers) == 5
+    assert new.handler_count() == 5
     assert "Runtime.removeBinding" in new.methods()  # x, off the new connection
+
+
+async def test_a_replaced_watch_stops_listening_on_the_old_tab():
+    """The watch of a connection that was replaced is not left attached to the
+    old tab (nor to its browser): the old tab no longer feeds it events, and a
+    listener somebody else put on the same event type survives."""
+    bindings = python_binding.Bindings()
+    old = _FakeTab()
+    foreign = []
+    old.add_handler(runtime.BindingCalled, foreign.append)
+    await _install(old, "x", lambda: 1, bindings)
+    old_watch = bindings.watches["T-a"]
+    assert old.handler_count() == 6
+    assert old.browser.connection.handler_count() == 1
+    new = _FakeTab()
+
+    await _install(new, "y", lambda: 1, bindings)
+
+    assert bindings.watches["T-a"] is not old_watch
+    assert old.handlers[runtime.BindingCalled] == [foreign.append]
+    assert old.handler_count() == 1  # the foreign listener only
+    assert old.browser.connection.handler_count() == 0
+    assert new.handler_count() == 5
+    assert new.browser.connection.handler_count() == 1
+
+
+async def test_a_destroyed_target_is_reaped_with_its_watch():
+    """``Target.targetDestroyed`` ends the tab's watch: its bindings leave the
+    registry, it leaves ``watches`` (and with it the reference to the Tab) and it
+    takes its handlers off the tab and the browser's connection."""
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "x", lambda: 1, bindings)
+    other = _FakeTab("T-b", context=21, browser=tab.browser)
+    await _install(other, "x", lambda: 2, bindings)
+    assert set(bindings.watches) == {"T-a", "T-b"}
+
+    await tab.browser.destroy("T-a")
+
+    assert set(bindings.watches) == {"T-b"}
+    assert set(bindings) == {("T-b", "x")}
+    assert tab.handler_count() == 0
+    assert other.handler_count() == 5  # the other tab is untouched
+    assert len(tab.browser.connection.handlers[cdp.target.TargetDestroyed]) == 1
+
+
+async def test_a_tab_destroyed_then_reopened_under_its_id_is_watched_afresh():
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+    await _install(tab, "x", lambda: 1, bindings)
+    await tab.browser.destroy("T-a")
+    assert bindings.watches == {}
+
+    again = _FakeTab()
+    ran = []
+    await _install(again, "x", lambda: ran.append(1), bindings)
+    await again.deliver(_event("x", "c", [], CREATING_CONTEXT))
+
+    assert ran == [1]
+    assert bindings.watches["T-a"].tab is again
 
 
 async def test_failed_install_leaves_nothing_registered():

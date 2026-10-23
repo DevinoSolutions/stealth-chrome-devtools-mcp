@@ -35,6 +35,12 @@ fails closed. Page script in the creating context itself, same-origin frames
 included, can still call it — that is what a binding is for; the tool
 description says so.
 
+A watch also ends with its target: ``Target.targetDestroyed`` (reported on the
+browser's connection, never the page's) forgets the tab's bindings, detaches the
+watch and removes it from ``Bindings.watches``, which would otherwise keep every
+closed tab. A watch replaced by a new connection to the same target is detached
+the same way.
+
 How the round-trip actually works (the old code never wired it): ``addBinding``
 exposes ``window[name]`` as a function that, when called with a **single
 string**, emits ``Runtime.bindingCalled``. The wrapper preserves that raw
@@ -50,6 +56,7 @@ must never import ``server`` (the ``tab`` is passed in as an argument).
 """
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -275,14 +282,42 @@ class TabWatch:
     main: tuple[int, str] | None = None
     replayed: bool = False
     _removals: set[asyncio.Task[None]] = field(default_factory=set)
+    _listening: list[tuple[Any, type, Callable[[Any], Any]]] = field(
+        default_factory=list
+    )
+
+    def _listen(self, connection: Any, event_type: type, handler: Callable) -> None:
+        connection.add_handler(event_type, handler)
+        self._listening.append((connection, event_type, handler))
 
     def attach(self) -> None:
         rt = uc.cdp.runtime
-        self.tab.add_handler(rt.BindingCalled, self._on_binding_called)
-        self.tab.add_handler(rt.ExecutionContextCreated, self._on_created)
-        self.tab.add_handler(rt.ExecutionContextDestroyed, self._on_destroyed)
-        self.tab.add_handler(rt.ExecutionContextsCleared, self._on_cleared)
-        self.tab.add_handler(uc.cdp.page.FrameNavigated, self._on_navigated)
+        self._listen(self.tab, rt.BindingCalled, self._on_binding_called)
+        self._listen(self.tab, rt.ExecutionContextCreated, self._on_created)
+        self._listen(self.tab, rt.ExecutionContextDestroyed, self._on_destroyed)
+        self._listen(self.tab, rt.ExecutionContextsCleared, self._on_cleared)
+        self._listen(self.tab, uc.cdp.page.FrameNavigated, self._on_navigated)
+        # The page's own connection never reports its target's end; the browser's
+        # does, and it is what lets the watch (and the Tab it holds) go.
+        browser = getattr(self.tab, "browser", None)
+        if browser is not None:
+            self._listen(
+                browser.connection,
+                uc.cdp.target.TargetDestroyed,
+                self._on_target_destroyed,
+            )
+
+    def detach(self) -> None:
+        """Take this watch's handlers off the connections it was attached to.
+
+        By hand, not ``Connection.remove_handler``: that deletes the event type's
+        whole handler list, which on the browser connection is nodriver's own
+        target bookkeeping and on the tab is every other listener.
+        """
+        for connection, event_type, handler in self._listening:
+            with contextlib.suppress(KeyError, ValueError):
+                connection.handlers[event_type].remove(handler)
+        self._listening.clear()
 
     async def replay_contexts(self) -> None:
         """Make Chrome report every existing context again.
@@ -350,6 +385,17 @@ class TabWatch:
             for bound in self._tab_bindings():
                 self.drop(bound)
 
+    def _on_target_destroyed(self, event: Any) -> None:
+        """The tab is gone: forget its bindings (there is no page left to
+        ``removeBinding`` on), leave its connections and leave the registry."""
+        if str(event.target_id) != self.target_id:
+            return
+        for bound in self._tab_bindings():
+            _forget(self.bindings, bound)
+        self.detach()
+        if self.bindings.watches.get(self.target_id) is self:
+            del self.bindings.watches[self.target_id]
+
 
 async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
     """The watch of ``tab``, attached and replayed (made on first use)."""
@@ -357,7 +403,10 @@ async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
     watch = bindings.watches.get(target_id)
     if watch is None or watch.tab is not tab:
         # First use, or a new connection to the same target: bindings made on the
-        # old connection do not exist on this one.
+        # old connection do not exist on this one, and its watch must stop
+        # listening on a tab nobody drives any more.
+        if watch is not None:
+            watch.detach()
         for stale in [b for b in bindings.values() if b.target_id == target_id]:
             await drop_binding(tab, bindings, stale)
         watch = bindings.watches[target_id] = TabWatch(tab, bindings, target_id)
