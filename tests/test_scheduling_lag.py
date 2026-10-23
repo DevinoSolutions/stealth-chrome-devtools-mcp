@@ -404,7 +404,12 @@ class TestIdleCanary:
             proc = c._proc
         assert factor is not None and 1.0 <= factor <= scheduling_lag.MAX_STRETCH
         assert c._wakes > 0
-        assert proc is not None and proc.returncode is not None
+        assert proc is not None
+        # stop() only waits CANARY_REAP_SECONDS for the reap; an IDLE child on a
+        # starved host can take longer, so this pin waits for the exit itself.
+        if proc.returncode is None:
+            await asyncio.wait_for(proc.wait(), 30)
+        assert proc.returncode is not None
 
     def test_the_canary_is_as_low_as_chromium_makes_a_background_renderer(self):
         # kBackgroundPriority = 5 (desktop Linux, base/process/process_linux.cc);

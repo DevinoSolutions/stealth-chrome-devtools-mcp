@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### The idle-canary pin waits for the child's exit, not the product's 2 s reap budget (T-7028)
+
+`test_the_real_child_wakes_and_is_gone_after_stop` asserted the IDLE-priority child had
+exited the instant `stop()` returned, but `stop()` waits only `CANARY_REAP_SECONDS` (2 s)
+and logs `not reaped yet` past it, which is correct. On a starved pre-push lane the child
+took longer and the pin failed. It now waits up to 30 s for the exit itself. Test only.
+
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
