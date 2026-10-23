@@ -258,6 +258,11 @@ exited the instant `stop()` returned, but `stop()` waits only `CANARY_REAP_SECON
 and logs `not reaped yet` past it, which is correct. On a starved pre-push lane the child
 took longer and the pin failed. It now waits up to 30 s for the exit itself. Test only.
 
+### Dependabot config and a PR-time dependency audit (T-6750)
+
+- **Dependabot now watches `uv` (pyproject.toml + uv.lock), `npm` (the husky root) and `github-actions`**, weekly, minor and patch grouped, security updates in their own group. `uv` alone covers the Python lock; there is no second `pip` entry.
+- **`.github/workflows/security-audit.yml` runs on every PR and weekly**: an inline `npm audit --omit=dev` for the npm lock (the org workflow lives in a private repo, which a public repo cannot call), plus `pip-audit` over `uv export` of the locked requirements, since the org workflow does not read `uv.lock`.
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
