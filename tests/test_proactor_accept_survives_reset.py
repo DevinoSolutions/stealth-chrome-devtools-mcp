@@ -23,7 +23,9 @@ import pytest
 
 from stealth_chrome_devtools_mcp.embedded import proactor_accept
 
-pytestmark = pytest.mark.skipif(
+# Only the tests that drive the real Proactor (or patch it) are Windows-only; the
+# wrapper's logic runs on any loop and is pinned on every platform.
+windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="the Proactor loop only exists on Windows"
 )
 
@@ -84,6 +86,7 @@ async def _fresh_connection_is_served(port: int) -> bytes:
     return answer
 
 
+@windows_only
 def test_the_listener_survives_a_storm_of_resets(installed):
     async def scenario():
         server, port = await _serve_and_storm()
@@ -94,11 +97,12 @@ def test_the_listener_survives_a_storm_of_resets(installed):
             assert await _fresh_connection_is_served(port) == b"ok"
         finally:
             server.close()
-            await server.wait_closed()
+            await asyncio.wait_for(server.wait_closed(), 3)
 
     asyncio.run(scenario(), loop_factory=asyncio.ProactorEventLoop)
 
 
+@windows_only
 def test_close_still_ends_the_accept_loop_without_spinning(installed):
     async def scenario():
         server, port = await _serve_and_storm()
@@ -246,6 +250,7 @@ def test_cancelling_the_loops_future_cancels_the_pending_accept():
     assert fake.issued == 1
 
 
+@windows_only
 def test_install_is_idempotent(installed):
     first = installed.accept
     assert getattr(first, proactor_accept._MARK, False), (
@@ -253,6 +258,11 @@ def test_install_is_idempotent(installed):
     )
     assert proactor_accept.install() is False
     assert installed.accept is first
+
+
+def test_install_is_a_no_op_off_windows(monkeypatch):
+    monkeypatch.setattr(proactor_accept.sys, "platform", "linux")
+    assert proactor_accept.install() is False
 
 
 def test_the_backend_installs_it_and_the_proxy_does_not():
