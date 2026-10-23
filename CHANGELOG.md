@@ -279,6 +279,18 @@ launch failure or no version in the output) only when dpkg gave nothing and
 
 - `tests/release_gate_harness.py` (2313 lines) is now the entry point (`run_release_gate_journey`, `gate_workspace`, `RawStdioWire`) plus a re-export of five siblings: `_consts`, `_fixture`, `_env`, `_journey`, `_soak`. Code moved verbatim (all 97 top-level definitions AST-identical); every importer is unchanged except `test_release_gate_harness_ports.py`, which now patches `_os_assigned_port` on `release_gate_harness_env`, where `_pick_free_port` looks it up. `fixture_routes.py` (908 lines, already split) is left alone. Test-only, no product change.
 
+### A client reset during accept no longer closes the backend's listener on Windows (T-6363 part 3)
+
+- On Windows uvicorn serves on asyncio's Proactor loop, whose accept loop closes the LISTENING socket on any accept `OSError`. A client that reset while its
+  connection was pending in `AcceptEx` (`WinError 64`) therefore left a backend that was up, held its established sessions, and refused every new connection;
+  the 12-session startup herd died of it (CI run 39833151221, "connection ... broke while 'tools/list' was in flight", `Accept failed on a socket`).
+  `proactor_accept.install()` (called by the backend only, before `mcp.run`) wraps `IocpProactor.accept` so a reset-class error re-arms the accept and logs a
+  WARNING; close, cancellation and every other error behave as before. Pinned against the real `ProactorEventLoop` with a 200-connection RST storm.
+  The reset WARNING is throttled (the 1st, then every power of ten from the 100th) and a connection accepted for a loop that has gone is closed at once.
+  A run of more than 10,000 consecutive resets with no real connection (the 10,001st) still surfaces the error and closes the listener (only a local RST flood can do that, and it is no worse than before).
+  The throttle covers this WARNING only: asyncio's own "Task exception was never retrieved" line for each reset is unchanged, and the failed connection socket is still left to garbage collection, as before.
+  Not fixed here: the proxy does not replay an idempotent in-flight `tools/list` after a break (`PendingCalls` fails all, by design).
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
