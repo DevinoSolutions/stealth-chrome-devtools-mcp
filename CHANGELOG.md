@@ -87,6 +87,16 @@ rules backstop only for Sentry, not for the local log file.
   EITHER the live or the discarded selection is `fleet`/`default`, a stale record is dropped when a live browser's close succeeds, and the suite clears `tool_errors`' departed
   stores before each test.
 
+### A closed tab's python-binding watch is reaped (T-6561)
+
+- **`Bindings.watches` no longer keeps every tab it ever watched (T-6561, #278 review).** A tab's `TabWatch` stayed in the registry, and kept a reference to its
+  `Tab`, after the tab was closed, and a new connection to the same target replaced the watch while the old one's CDP handlers stayed attached to the old tab.
+  The watch now also listens for `Target.targetDestroyed` on the browser's connection: when its target ends it forgets the tab's bindings (there is no page left
+  to `removeBinding` on), takes its handlers off and leaves `watches`. A replaced watch detaches the same way. Handlers come off one by one, never through
+  nodriver's `remove_handler`, which deletes an event type's whole list (on the browser connection that is nodriver's own target bookkeeping). Hermetic pins
+  added to `test_python_binding.py`; `tests/test_e2e_python_binding_frames.py` (real Chrome, integration) pins who is answered: a same-origin `about:blank`
+  frame calling `window.parent`'s binding is, a `srcdoc` frame and a cross-origin frame calling the binding from their own context are refused.
+
 ### The path tools refuse secret locations, never overwrite unasked, write owner-only and redact credentials; `get_cookies` stops returning the whole jar (F-1025)
 
 T-6207 (security sweep 2026-10-22, F-E / F-F / F-H): four tools take a path a hostile page can steer an agent into choosing, and `get_cookies` documented "current page" while returning every cookie of every site.
