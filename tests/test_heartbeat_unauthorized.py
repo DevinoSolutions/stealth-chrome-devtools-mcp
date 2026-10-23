@@ -18,14 +18,29 @@ import logging
 import httpx
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import backend_probe, backend_watchdog
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_probe,
+    backend_token,
+    backend_watchdog,
+)
 
 URL = "http://127.0.0.1:1/mcp/"
 
 
+def _answer(status: int) -> httpx.Response:
+    """What a token-enforcing backend answers: its own 401, byte for byte."""
+    if status != 401:
+        return httpx.Response(status)
+    return httpx.Response(
+        401,
+        content=backend_token.UNAUTHORIZED_BODY,
+        headers={"www-authenticate": backend_token.SCHEME},
+    )
+
+
 def _beat_answering(monkeypatch, status: int) -> backend_probe.Heartbeat:
     beat = backend_probe.Heartbeat(URL)
-    transport = httpx.MockTransport(lambda request: httpx.Response(status))
+    transport = httpx.MockTransport(lambda request: _answer(status))
     monkeypatch.setattr(beat, "_connection", lambda: httpx.Client(transport=transport))
     return beat
 
@@ -42,6 +57,25 @@ def test_a_401_is_its_own_verdict_and_the_backend_counts_as_alive(monkeypatch):
 )
 def test_the_other_answers_keep_their_verdicts(monkeypatch, status, verdict):
     assert _beat_answering(monkeypatch, status).verdict(1.0) == verdict
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(401),
+        httpx.Response(
+            401, json={"error": "nope"}, headers={"www-authenticate": "Basic"}
+        ),
+        httpx.Response(401, content=backend_token.UNAUTHORIZED_BODY),
+    ],
+    ids=["bare", "foreign-body-and-scheme", "our-body-no-scheme"],
+)
+def test_a_401_that_is_not_our_backends_is_a_stranger_and_dead(monkeypatch, response):
+    """Another auth-protected server on the port is not our backend refusing us."""
+    beat = backend_probe.Heartbeat(URL)
+    transport = httpx.MockTransport(lambda request: response)
+    monkeypatch.setattr(beat, "_connection", lambda: httpx.Client(transport=transport))
+    assert beat.verdict(1.0) == backend_probe.VERDICT_DEAD
 
 
 def test_a_refused_connection_is_still_dead(monkeypatch):
@@ -78,7 +112,7 @@ def _beat_answering_in_turn(monkeypatch, answers) -> backend_probe.Heartbeat:
         status = queue.pop(0)
         if status is None:
             raise httpx.ConnectError("refused")
-        return httpx.Response(status)
+        return _answer(status)
 
     transport = httpx.MockTransport(answer)
     monkeypatch.setattr(beat, "_connection", lambda: httpx.Client(transport=transport))

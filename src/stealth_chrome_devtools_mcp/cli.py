@@ -190,9 +190,8 @@ def _format_backend_status(status: str, port: int | None) -> str:
     """
     # "down" (a stale record but nothing actually listening) and "none" (no
     # record at all) both read as "not running" to an operator - there is no
-    # live process to reconnect to either way; plan_M1 SS2.1-D's three
-    # display strings map 1:1 to what matters operationally: not running /
-    # responsive / wedged.
+    # live process to reconnect to either way. The rest map 1:1 to what matters
+    # operationally: responsive / wedged / refusing (T-6550).
     if status in ("none", "down"):
         return "not running"
     if status == "wedged":
@@ -200,6 +199,8 @@ def _format_backend_status(status: str, port: int | None) -> str:
             f"running but UNRESPONSIVE on port {port} — wedged; "
             "a new session will evict and respawn it"
         )
+    if status == "refusing":
+        return f"running on port {port}, REFUSING our token; run `stealthy restart`"
     return f"running (responsive) on port {port}"
 
 
@@ -742,7 +743,7 @@ def _cmd_kill_orphans(args) -> int:
     from stealth_chrome_devtools_mcp.embedded import process_cleanup, singleton
 
     status, port = singleton._probe_backend_status()
-    if status in ("responsive", "wedged") and not args.force:
+    if status in ("responsive", "wedged", "refusing") and not args.force:
         pid = _recorded_backend_pid(port)
         print(
             f"a backend is running (pid {pid if pid is not None else '-'}); "

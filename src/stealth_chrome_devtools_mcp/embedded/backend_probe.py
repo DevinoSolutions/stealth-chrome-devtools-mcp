@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.embedded import backend_token
@@ -161,27 +162,40 @@ def _request(client_name: str) -> dict[str, object]:
     }
 
 
+def _is_ours_401(resp: httpx.Response) -> bool:
+    """True iff ``resp`` is a 401 the bearer-token middleware wrote: its own body
+    and ``www-authenticate`` (``backend_token.is_our_refusal``), which any other
+    auth-protected server on the port does not send. THE one place that judges it."""
+    return resp.status_code == _UNAUTHORIZED_STATUS and backend_token.is_our_refusal(
+        resp.headers, resp.content
+    )
+
+
+def _verdict_of(resp: httpx.Response) -> str:
+    if _is_ours_401(resp):
+        return VERDICT_UNAUTHORIZED
+    return VERDICT_ALIVE if resp.status_code == _READY_STATUS else VERDICT_DEAD
+
+
 def probe(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> str:
     """One synchronous attempt: :data:`VERDICT_ALIVE` iff ``url`` answers an
-    ``initialize`` 200, :data:`VERDICT_UNAUTHORIZED` iff it answers 401 (alive,
-    and refusing only us), else :data:`VERDICT_DEAD`. Never raises."""
+    ``initialize`` 200, :data:`VERDICT_UNAUTHORIZED` iff it answers with OUR
+    backend's own 401 (alive, and refusing only us), else :data:`VERDICT_DEAD` -
+    a 401 in anyone else's words is a stranger on the port. Never raises."""
     import httpx
 
+    verdict = VERDICT_DEAD
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             resp = client.post(url, json=_request(client_name), headers=_headers())
-            if resp.status_code == _UNAUTHORIZED_STATUS:
-                _say_unauthorized("readiness probe")
-                return VERDICT_UNAUTHORIZED
-            _unauthorized_said.clear()
-            if resp.status_code != _READY_STATUS:
-                return VERDICT_DEAD
-            _discard_session(client.delete, url, resp.headers.get("mcp-session-id"))
-            return VERDICT_ALIVE
+            verdict = _verdict_of(resp)
+            if verdict == VERDICT_ALIVE:
+                _discard_session(client.delete, url, resp.headers.get("mcp-session-id"))
     except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not ready")
         _logger.debug("liveness probe attempt failed", exc_info=exc)
-        _unauthorized_said.clear()
-        return VERDICT_DEAD
+    _note(url, verdict)
+    _last.seen = (url, verdict)
+    return verdict
 
 
 def ready(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> bool:
@@ -191,27 +205,59 @@ def ready(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> bo
     return probe(url, timeout, client_name=client_name) == VERDICT_ALIVE
 
 
-def refused(url: str, timeout: float) -> bool:
-    """True iff ``url`` answers 401: a backend that is up and refusing only us."""
+def refused(url: str, timeout: float = 2.0) -> bool:
+    """True iff ``url`` answers OUR backend's 401: up, and refusing only us.
+    Answered in a 401's own time, so the budget is short (a display path)."""
     return probe(url, timeout) == VERDICT_UNAUTHORIZED
 
+
+#: How long one run of 401s from the same backend is waited out before only a
+#: restart cures it: a token file regenerated under a backend that keeps the old
+#: one in memory 401s every client for ever. Past this, ``refusal`` says EVICT -
+#: and ``backend_eviction.clear_stale`` still spares a backend that owns browsers.
+PERSISTENT_UNAUTHORIZED_SECONDS = 120.0
 
 #: Set while the current run of 401s has been said, cleared by any other answer, so
 #: the WARNING is once per run and not once per probe (a cold start polls for
 #: seconds). Heartbeat keeps its own per-instance flag: it is ONE watchdog's run.
 _unauthorized_said = threading.Event()
+#: url -> when its current run of 401s began; any other answer ends the run.
+_unauthorized_since: dict[str, float] = {}
+#: The clock the run is measured on (a seam: the suite sets it).
+_clock = time.monotonic
+#: The last ``(url, verdict)`` this thread's :func:`probe` reached, for :func:`refusal`.
+_last = threading.local()
 
 
-def _say_unauthorized(what: str) -> None:
-    """The WARNING every 401 reader shares, once per run of 401s."""
-    if _unauthorized_said.is_set():
+def _note(url: str, verdict: str) -> None:
+    """Record one answer: the WARNING once per run of 401s, and when the run began."""
+    if verdict != VERDICT_UNAUTHORIZED:
+        _unauthorized_said.clear()
+        _unauthorized_since.pop(url, None)
         return
-    _unauthorized_said.set()
-    _logger.warning(
-        "%s: %s; the backend is answering, so it is not replaced",
-        what,
-        backend_token.UNAUTHORIZED,
-    )
+    _unauthorized_since.setdefault(url, _clock())
+    if not _unauthorized_said.is_set():
+        _unauthorized_said.set()
+        _logger.warning(
+            "%s; the backend is answering, so it is not treated as dead",
+            backend_token.UNAUTHORIZED,
+        )
+
+
+def refusal(url: str, *, ours: Callable[[], bool]) -> bool | None:
+    """What the reuse gate does with the answer THIS thread's last :func:`probe`
+    of ``url`` got, consuming it: ``None`` when it was no 401 of ours or ``ours()``
+    cannot vouch that the process answering is our own backend (a stranger on the
+    port is a stranger, and gets no more trust for answering 401); ``True`` to
+    reuse a backend that is merely refusing us; ``False`` once that has gone on
+    past :data:`PERSISTENT_UNAUTHORIZED_SECONDS`, so only a restart cures it.
+
+    Reads the probe the gate just made, so a gate pass costs ONE ``initialize``."""
+    seen, _last.seen = getattr(_last, "seen", None), None
+    if seen != (url, VERDICT_UNAUTHORIZED) or not ours():
+        return None
+    since = _unauthorized_since.get(url, _clock())
+    return _clock() - since < PERSISTENT_UNAUTHORIZED_SECONDS
 
 
 def health_url(mcp_url: str) -> str:
@@ -273,7 +319,7 @@ class Heartbeat:
             )
             self._legacy = True
             return self.verdict(timeout)
-        if resp.status_code == _UNAUTHORIZED_STATUS:
+        if _is_ours_401(resp):
             if not self._said_unauthorized:
                 self._said_unauthorized = True
                 _logger.warning(
@@ -283,7 +329,7 @@ class Heartbeat:
                 )
             return VERDICT_UNAUTHORIZED
         self._said_unauthorized = False
-        return VERDICT_ALIVE if resp.status_code == _READY_STATUS else VERDICT_DEAD
+        return _verdict_of(resp)
 
     def close(self) -> None:
         """Drop the connection. Best-effort; a later :meth:`alive` reopens it."""
@@ -309,8 +355,6 @@ async def await_ready(
     url: str, deadline_seconds: float, *, client_name: str = READINESS_CLIENT
 ) -> bool:
     """Poll ``url`` until it answers an ``initialize`` 200, or the deadline."""
-    import time
-
     import anyio
     import httpx
 
@@ -324,16 +368,16 @@ async def await_ready(
                 resp = await client.post(
                     url, json=_request(client_name), headers=_headers()
                 )
-                if resp.status_code == _READY_STATUS:
+                verdict = _verdict_of(resp)
+                _note(url, verdict)
+                if verdict == VERDICT_ALIVE:
                     await _discard_session_async(
                         client.delete, url, resp.headers.get("mcp-session-id")
                     )
-                    _unauthorized_said.clear()
                     return True
-                if resp.status_code == _UNAUTHORIZED_STATUS:
-                    _say_unauthorized("backend readiness")
             except Exception:  # noqa: BLE001  PERMANENT(expected during a cold start)
                 _logger.debug("backend readiness probe attempt failed", exc_info=True)
+                _note(url, VERDICT_DEAD)
             await anyio.sleep(interval)
             interval = min(interval * 1.5, _POLL_MAX_SECONDS)
     return False

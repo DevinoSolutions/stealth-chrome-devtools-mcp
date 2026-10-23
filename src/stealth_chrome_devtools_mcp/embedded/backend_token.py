@@ -66,6 +66,7 @@ from stealth_chrome_devtools_mcp.embedded import backend_registry
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from starlette.middleware import Middleware
@@ -84,8 +85,14 @@ SCHEME = "Bearer"
 UNAUTHORIZED = (
     "the backend refused the request: missing or wrong bearer token "
     f"(read from <state dir>/{TOKEN_FILE_NAME}; a backend started by another "
-    "OS user or under another home has a different one)"
+    "OS user or under another home has a different one); if it keeps refusing, "
+    "run `stealthy restart`"
 )
+
+#: The body of the 401 :class:`BearerTokenMiddleware` writes, and with the
+#: ``www-authenticate`` scheme below the only thing that tells it from some other
+#: auth-protected server's 401 on a port our dead backend used to hold.
+UNAUTHORIZED_BODY = b'{"error":"unauthorized"}'
 
 #: ``secrets.token_urlsafe(32)`` is 43 characters of this alphabet. A file that
 #: is shorter or longer or holds anything else (empty, hand-edited, appended to,
@@ -140,6 +147,13 @@ def ensure(path: Path | None = None) -> str:
 def read(path: Path | None = None) -> str | None:
     """The token a client should send, or ``None``. Never raises."""
     return _read_file(path or token_path())
+
+
+def is_our_refusal(headers: Mapping[str, str], body: bytes) -> bool:
+    """True iff a 401's ``headers`` and ``body`` are the ones
+    :class:`BearerTokenMiddleware` writes (see :data:`UNAUTHORIZED_BODY`): the
+    backend client's test that the 401 it got is OUR backend's, not a stranger's."""
+    return body == UNAUTHORIZED_BODY and headers.get("www-authenticate") == SCHEME
 
 
 def auth_headers(path: Path | None = None) -> dict[str, str]:
@@ -489,7 +503,7 @@ class BearerTokenMiddleware:
 
 
 async def _unauthorized(send: Send) -> None:
-    body = b'{"error":"unauthorized"}'
+    body = UNAUTHORIZED_BODY
     await send(
         {
             "type": "http.response.start",

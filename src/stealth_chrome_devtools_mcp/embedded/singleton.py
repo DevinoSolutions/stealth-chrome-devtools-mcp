@@ -171,7 +171,10 @@ def _probe_port(port: int) -> str:
     directly would bind them at import time and never see the patch.
     """
     return backend_liveness.probe_port(
-        port, is_healthy=_server_is_healthy, http_ready=_backend_http_ready
+        port,
+        is_healthy=_server_is_healthy,
+        http_ready=_backend_http_ready,
+        refused=lambda p: backend_probe.refused(_backend_http_url(p)),
     )
 
 
@@ -244,8 +247,9 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     reuse a stale, legacy or edited-source backend; F-829: an unreadable digest
     is unknown, not a contradiction — see ``fingerprint_mismatch``) — and it
     answers a real ``initialize`` in the patience window (F-301/F-501: a wedged
-    backend holds its socket open, so only the app-level probe counts). A 401 is
-    alive and refusing only THIS client's token (T-6550): True, never replaced.
+    backend holds its socket open, so only the app-level probe counts). OUR backend,
+    on its port, answering its own 401 is alive and refusing only THIS client
+    (T-6550): True, until that has lasted past the bound (``backend_probe.refusal``).
 
     THE one consumer of :func:`_adoptable_identity`, so "same identity" here has
     always meant "one we would reuse" — since F-889 (d) that includes a build
@@ -260,11 +264,9 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     ``patience=0.0`` (discovery) probes once and never sleeps; ``None`` means
     ``REUSE_PATIENCE_SECONDS``, read at call time so tests can shrink it.
 
-    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds —
-    a probe timeout is evidence about the backend only while this process is
-    itself being scheduled. The measurement, its bound and the 2026-09-02
-    incident behind it are ``scheduling_lag.FairWindow``'s, THE one home for
-    that question; on an idle machine it is the wall-clock deadline it replaced.
+    F-856: the window is spent in FAIRLY SCHEDULED seconds, not wall seconds (a
+    probe timeout is evidence only while this process is scheduled); the
+    measurement is ``scheduling_lag.FairWindow``'s, THE one home for it.
     """
     # The entry recorded ON THIS PORT, not merely the first: under F-808's
     # per-context record another desktop's backend says nothing about `port`.
@@ -276,11 +278,16 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     # per-attempt budget; the single-shot hot path keeps the pinned 2s.
     per_attempt = REUSE_PROBE_TIMEOUT if patience else LIVENESS_PROBE_TIMEOUT
     window = scheduling_lag.FairWindow(patience)
+    url = _backend_http_url(port)
     while not _backend_http_ready(port, timeout=per_attempt):
         if not _server_is_healthy(port) and not _is_our_backend(entry.get("pid")):
             return False  # no socket and no live process: dead, not busy
-        if backend_probe.refused(_backend_http_url(port), LIVENESS_PROBE_TIMEOUT):
-            return True
+        # The answer that probe just got, if it was OUR backend's own 401 (T-6550).
+        refusal = backend_probe.refusal(
+            url, ours=lambda: _backend_pid_on_port(port) == entry.get("pid")
+        )
+        if refusal is not None:
+            return refusal
         if window.expired():
             return False
         window.nap(0.25)
@@ -539,28 +546,21 @@ def _start_backend_holding_lock(port: int) -> None:
             # M2-3: read WHY this port's backend is about to be taken away when
             # the cause is a source change (version matches, digests differ) —
             # otherwise silent, in the log and (F-827) on the wire. Read HERE,
-            # once per spawn, not in the thrice-called _find_running_server; a
-            # cheap unconditional diagnostic probe, deliberately NOT a second
-            # reuse gate. What it is USED for is decided below, once the kill
-            # site has answered.
+            # once per spawn; a diagnostic, deliberately NOT a second reuse gate.
+            # What it is USED for is decided below, once the kill site answered.
             entry = backend_registry.backend_on_port(_read_server_state(), port) or {}
             edited = backend_registry.fingerprint_mismatch(entry, _source_fingerprint())
-            # A stale/legacy backend (different or unknown version) may still be
-            # holding the port; evict it under the lock so our fresh, correctly
-            # versioned backend can bind — otherwise the proxy would fall back to
-            # the old backend and the upgrade would silently not take effect.
+            # A stale/legacy backend (different or unknown version) may still hold
+            # the port; evict it under the lock so our fresh, correctly versioned
+            # backend can bind — else the upgrade would silently not take effect.
             # F-886: unless it is a stranger's backend still serving live
-            # browsers, which is never evicted. Selection normally hands us a
-            # free port in that case; if the record changed under us since, the
-            # honest answer is to spawn nothing rather than kill it, and the
-            # next proxy start re-selects.
+            # browsers, never evicted: if the record changed under us since
+            # selection, spawn nothing rather than kill it; the next start re-selects.
             spared = _clear_stale_backend(port)
-            # AFTER the decision, never before it (F-886 review, F4): this used
-            # to sit above the call, so the refusal path — the one the comment
-            # above exists for — shipped "backend evicted" to the durable log
-            # and to Sentry about a backend still running. Source-only, as it
-            # always was: not a version change (#14), not an unreadable digest
-            # (F-829).
+            # AFTER the decision, never before it (F-886 review, F4): the refusal
+            # path used to ship "backend evicted" about a backend still running.
+            # Source-only, as it always was: not a version change (#14), not an
+            # unreadable digest (F-829).
             if edited and entry.get("version") == _server_version():
                 _report_eviction_decision(port, spared)
             if spared:
