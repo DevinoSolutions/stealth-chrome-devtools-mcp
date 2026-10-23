@@ -244,6 +244,13 @@ def _note(url: str, verdict: str) -> None:
         )
 
 
+def cure_for(url: str) -> str | None:
+    """The sentence to attach to a "no backend" report when ``url``'s last answer
+    was OUR backend's 401 (a run is open), else ``None``: the one place the cure
+    (``backend_token.UNAUTHORIZED``, which names ``stealthy restart``) is chosen."""
+    return backend_token.UNAUTHORIZED if url in _unauthorized_since else None
+
+
 def refusal(url: str, *, ours: Callable[[], bool]) -> bool | None:
     """What the reuse gate does with the answer THIS thread's last :func:`probe`
     of ``url`` got, consuming it: ``None`` when it was no 401 of ours or ``ours()``
