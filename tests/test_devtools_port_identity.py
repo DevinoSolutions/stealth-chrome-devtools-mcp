@@ -117,6 +117,11 @@ class FakeConnection:
         self.handlers: dict = {}
         self.sent: list[str] = []
         self.disconnected = False
+        #: nodriver's ``Connection.closed`` and ``_listener_task``: ``disconnect()`` is what
+        #: makes the next ``send()`` reconnect.
+        self.closed = False
+        self.lost = False
+        self._listener_task = None
         self.target = kwargs.get("target")
         type(self).world.connections.append(self)
 
@@ -130,6 +135,11 @@ class FakeConnection:
         reply: dict = {}
         if method == "SystemInfo.getProcessInfo":
             if world.identity == "silent":
+                await asyncio.Event().wait()
+            if world.identity == "lost_once" and not self.lost:
+                # The request leaves, the transport dies under it, nothing is raised.
+                self.lost = True
+                self.closed = True
                 await asyncio.Event().wait()
             if world.identity == "unsupported":
                 raise ProtocolException({"code": -32601, "message": "not found"})
@@ -147,6 +157,7 @@ class FakeConnection:
 
     async def disconnect(self):
         self.disconnected = True
+        self.closed = False
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +284,61 @@ async def test_a_browser_that_never_says_who_it_is_times_out_by_name(world, prof
     (foreign,) = world.connections
     assert foreign.disconnected
     assert "Browser.close" not in foreign.sent
+
+
+@pytest.fixture
+def running_launcher(monkeypatch):
+    """Our launcher stays alive, so the patience applies: 0.4 s in all, a 0.05 s floor
+    (the ``world`` fixture), asked again once per floor."""
+    monkeypatch.setattr(devtools_port, "_running", lambda pid: True)
+    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.4)
+    monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.01)
+
+
+def _asks(connection: FakeConnection) -> int:
+    return connection.sent.count("SystemInfo.getProcessInfo")
+
+
+async def test_a_lost_identity_query_is_asked_again_not_waited_out(
+    world, profile, running_launcher
+):
+    """T-7014: nodriver's ``send`` can lose a request without raising (the listener
+    dies, the socket drops under the transaction). One request waited on for the whole
+    patience then fails a HEALTHY spawn as a stranger after 60 s. The read-only query is
+    asked again once per floor, on a fresh transport, and the first answer counts."""
+    world.identity = "lost_once"
+
+    browser = await _launch(profile)
+
+    assert browser.connection is world.connections[0]
+    assert _asks(browser.connection) >= 2
+    assert browser.connection.disconnected
+
+
+async def test_a_sibling_that_answers_the_second_ask_is_still_refused(
+    world, profile, running_launcher
+):
+    """The pid in the reply is the whole proof, whichever ask it answers."""
+    world.identity = "lost_once"
+    world.holder_pid = SIBLING_PID
+
+    with pytest.raises(ToolError, match="not the Chrome this spawn launched"):
+        await _launch(profile)
+
+    assert _asks(world.connections[0]) >= 2
+
+
+async def test_a_silent_browser_is_asked_a_bounded_number_of_times(
+    world, profile, running_launcher
+):
+    world.identity = "silent"
+
+    with pytest.raises(ToolError, match="did not say which process it is"):
+        await _launch(profile)
+
+    (foreign,) = world.connections
+    assert foreign.disconnected
+    assert 2 <= _asks(foreign) <= 0.4 / 0.05 + 1
 
 
 async def test_the_identity_wait_fits_inside_the_launch_phase():
