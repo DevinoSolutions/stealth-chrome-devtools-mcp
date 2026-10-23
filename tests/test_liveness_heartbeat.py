@@ -4,8 +4,8 @@ connection per beat.
 Every stdio proxy's watchdog asks the backend "are you alive" every ~2 s. It used
 to ask with a real ``initialize`` over a NEW ``httpx.Client`` each time: one new
 TCP connection (left in TIME_WAIT) and one new MCP session, ServerSession and
-task group on the backend per beat. The SDK's DELETE only marks the transport
-terminated, so the entry stayed listed until the 300 s sweep. Measured on the
+task group on the backend per beat. Before mcp 1.30 the SDK's DELETE only
+marked the transport terminated, so the entry stayed listed until the 300 s sweep. Measured on the
 owner's machine with ~38 proxies attached: ~5,600 sessions listed, ~560 reaped
 per sweep, ~2,200 sockets in TIME_WAIT.
 
@@ -331,7 +331,7 @@ async def test_a_legacy_backend_that_dies_reads_dead_and_retries_the_route(monke
     assert gone._legacy is False, "re-test the route next beat: it may be a new backend"
 
 
-# --- defence in depth: an old proxy's DELETE ----------------------------------
+# --- an old proxy's DELETE, unlisted by the SDK's own discard (mcp 1.30) -------
 
 
 async def test_a_delete_unlists_the_session_at_once_and_the_id_still_answers_404(
@@ -355,7 +355,7 @@ async def test_a_delete_unlists_the_session_at_once_and_the_id_still_answers_404
                 deleted = await raw.delete(backend.url, headers=headers)
                 assert deleted.status_code == 200
                 assert backend.sessions == before, (
-                    "listed until the sweep, before F-960"
+                    "listed until the sweep, before mcp 1.30"
                 )
 
                 again = await raw.post(
@@ -370,7 +370,7 @@ async def test_a_delete_unlists_the_session_at_once_and_the_id_still_answers_404
 
 
 async def test_a_delete_the_transport_refuses_does_not_unlist(monkeypatch):
-    """Only a session that WAS terminated is forgotten: a DELETE the transport
+    """The SDK discards only a session that ended: a DELETE the transport
     rejects (an unsupported protocol version) leaves the live session alone."""
     async with _serving(monkeypatch) as backend:
         resp = await _initialize(backend.url)

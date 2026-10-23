@@ -1,5 +1,7 @@
 # F-960 — the proxy liveness heartbeat mints a TCP connection and an MCP session per beat
 
+> Superseded (T-6904): mcp 1.30's own `_discard_session` now drops ended sessions; `_forget_if_deleted` was removed.
+
 **Severity:** Medium-high (resource leak on the shared backend; no data loss). Measured on the owner's
 machine 2026-10-10 against backend 2.1.27: ~5,600 MCP sessions listed, ~560 reaped per 30 s sweep,
 ~2,200 TCP connections in TIME_WAIT, ~38 stdio proxies attached.
