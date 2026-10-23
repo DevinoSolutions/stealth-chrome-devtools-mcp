@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-### CI runs at most 4 cells of each matrix at once (T-6909)
+### CI takes at most about 8 runners at once: 2 cells per matrix, in two waves (T-6909)
 
 The org runner pool is shared (28 runners) and one run once held 15 of them.
-Each `release-gate.yml` matrix now sets `max-parallel: 4`; the cells are unchanged.
+Each `release-gate.yml` matrix now sets `max-parallel: 2`, and integration, transport,
+offline-stealth and install-smoke wait for unit-tests and coverage. Cells are unchanged.
 
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
