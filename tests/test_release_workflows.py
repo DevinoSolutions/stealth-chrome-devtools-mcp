@@ -15,10 +15,14 @@ later that the required check was green while a lane never ran.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import release_evidence  # noqa: E402  PERMANENT(tools/ is not an importable package; the sys.path line above must run first)
 
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 RELEASE_GATE = WORKFLOWS / "release-gate.yml"
@@ -139,7 +143,30 @@ def test_the_gate_takes_a_bounded_share_of_the_runner_pool(gate_jobs):
     smoke_needs = gate_jobs["install-smoke"]["needs"]
     assert "build-dist" in smoke_needs, "install-smoke downloads build-dist's artifact"
     for name in ("unit-tests", "coverage"):
-        assert "needs" not in gate_jobs[name], f"{name} is first-wave: no needs"
+        assert gate_jobs[name]["needs"] == "plan", f"{name} is first-wave: only plan"
+
+
+def test_a_pull_request_runs_a_strict_subset_and_every_other_event_the_full_ledger():
+    """T-6910: the PR tier is a named subset of REQUIRED_CELLS; tag and main owe all.
+
+    The plan job and the aggregate both call `tier_for_event`, so the cells a run
+    executes and the cells the ledger demands cannot drift apart. An event the
+    tier table does not name (a tag push, workflow_dispatch, an unknown future
+    event) must fail closed to FULL.
+    """
+    full = set(release_evidence.REQUIRED_KEYS)
+    pr = set(release_evidence.keys_for_tier(release_evidence.PR_TIER))
+    assert pr < full, "the PR tier must be a strict subset of REQUIRED_CELLS"
+    assert {k for k in pr if "Windows" in k or "macOS" in k} == set()
+    assert "install-smoke/sdist-Linux-X64" not in pr
+    for event in ("push", "workflow_dispatch", "release", "merge_group", "", "x"):
+        tier = release_evidence.tier_for_event(event)
+        assert set(release_evidence.keys_for_tier(tier)) == full, event
+    assert release_evidence.tier_for_event("pull_request") == release_evidence.PR_TIER
+    # What the plan runs is exactly what the tier owes (no cross-product extras).
+    for tier, owed in (("pr", pr), ("full", full)):
+        ran = _expand_plan(release_evidence.plan_matrices(tier))
+        assert ran == {k for k in owed if "/default" not in k}, tier
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +211,7 @@ def test_w3_edges_are_present(gate_jobs):
 # The declared macOS gap stays declared.
 # ---------------------------------------------------------------------------
 def test_install_smoke_covers_both_artifacts_on_all_three_cells(gate_jobs):
-    matrix = gate_jobs["install-smoke"]["strategy"]["matrix"]
+    matrix = release_evidence.plan_matrices("full")["install-smoke"]
     assert set(matrix["kind"]) == {"wheel", "sdist"}
     labels = {f"{c['runner_os']}/{c['runner_arch']}" for c in matrix["cell"]}
     assert labels == {"Linux/X64", "Windows/X64", "macOS/ARM64"}
@@ -199,7 +226,7 @@ def test_macos_smoke_is_partial_and_the_others_are_full(gate_jobs):
     """
     stages = {
         f"{c['runner_os']}/{c['runner_arch']}": c["stages"]
-        for c in gate_jobs["install-smoke"]["strategy"]["matrix"]["cell"]
+        for c in release_evidence.plan_matrices("full")["install-smoke"]["cell"]
     }
     assert stages == {
         "Linux/X64": "full",
@@ -352,7 +379,7 @@ def test_the_ledger_job_needs_every_evidence_producing_job(gate_jobs):
     producers = {
         name
         for name, job in gate_jobs.items()
-        if name not in {AGGREGATE, "release-evidence"}
+        if name not in {AGGREGATE, "release-evidence", "plan"}
     }
     assert set(gate_jobs["release-evidence"]["needs"]) == producers
 
@@ -367,6 +394,33 @@ def test_the_ledger_does_not_replace_a_single_direct_edge(gate_jobs):
         )
 
 
+PLAN_OUTPUTS = {
+    "unit-tests": "unit_tests",
+    "coverage": "coverage",
+    "integration": "integration",
+    "transport": "transport",
+    "offline-stealth": "offline_stealth",
+    "install-smoke": "install_smoke",
+}
+
+
+def _expand_plan(plan: dict) -> set[str]:
+    """The ledger keys a plan's matrices produce, named as the emit steps name them."""
+    keys = set()
+    for job, matrix in plan.items():
+        if job == "install-smoke":
+            keys |= {
+                f"install-smoke/{kind}-{c['runner_os']}-{c['runner_arch']}"
+                for kind in matrix["kind"]
+                for c in matrix["cell"]
+            }
+            continue
+        for c in matrix["include"]:
+            suffix = f"-py{c['python-version']}" if "python-version" in c else ""
+            keys.add(f"{job}/{c['runner_os']}-{c['runner_arch']}{suffix}")
+    return keys
+
+
 def test_every_declared_required_cell_emits_its_record(gate_jobs):
     """The ledger's required cells and the workflow's matrix cells are ONE set.
 
@@ -374,11 +428,6 @@ def test_every_declared_required_cell_emits_its_record(gate_jobs):
     child); a declared cell the workflow no longer has would too. This pins the
     two together so the failure surfaces here, in a unit test, instead of in CI.
     """
-    import sys as _sys
-
-    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-    import release_evidence
-
     emitting_jobs = {
         name
         for name, job in gate_jobs.items()
@@ -391,22 +440,14 @@ def test_every_declared_required_cell_emits_its_record(gate_jobs):
         f"declared but never emit: {sorted(declared_jobs - emitting_jobs)}"
     )
 
-    yaml_cells = {
-        f"unit-tests/{c['runner_os']}-{c['runner_arch']}-py{c['python-version']}"
-        for c in gate_jobs["unit-tests"]["strategy"]["matrix"]["include"]
-    }
-    for job in ("coverage", "integration", "transport", "offline-stealth"):
-        yaml_cells |= {
-            f"{job}/{c['runner_os']}-{c['runner_arch']}"
-            for c in gate_jobs[job]["strategy"]["matrix"]["include"]
-        }
-    smoke = gate_jobs["install-smoke"]["strategy"]["matrix"]
-    yaml_cells |= {
-        f"install-smoke/{kind}-{c['runner_os']}-{c['runner_arch']}"
-        for kind in smoke["kind"]
-        for c in smoke["cell"]
-    }
-    yaml_cells |= {
+    # The workflow holds no cell list: every matrix job reads the plan job's output,
+    # which asks the ledger (T-6910). So the cells are the plan's, expanded the way
+    # the emit steps name them, and the plan must reproduce the ledger exactly.
+    for job, key in PLAN_OUTPUTS.items():
+        assert gate_jobs[job]["strategy"]["matrix"] == (
+            f"${{{{ fromJSON(needs.plan.outputs.{key}) }}}}"
+        ), f"{job} must read its matrix from the plan job"
+    yaml_cells = _expand_plan(release_evidence.plan_matrices("full")) | {
         f"{job}/default"
         for job in ("quality", "known-gaps", "build-dist", "package-verify")
     }
@@ -430,7 +471,7 @@ def test_the_not_integration_suite_runs_once_per_os_and_python_cell(gate_jobs):
         script = "\n".join(_all_run_steps(job))
         if 'pytest -m "not integration"' not in script:
             continue
-        py_pinned = job["strategy"]["matrix"]["include"]
+        py_pinned = release_evidence.plan_matrices("full")[name]["include"]
         for c in py_pinned:
             py = c.get("python-version") or "3.12"
             cells.setdefault((c["runner_os"], py), []).append(name)

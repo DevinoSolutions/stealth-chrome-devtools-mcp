@@ -254,6 +254,75 @@ REQUIRED_CELLS: tuple[CellSpec, ...] = _build_required_cells()
 CELLS_BY_KEY: dict[str, CellSpec] = {spec.key: spec for spec in REQUIRED_CELLS}
 REQUIRED_KEYS: tuple[str, ...] = tuple(sorted(CELLS_BY_KEY))
 
+# ── tiers (T-6910) ──────────────────────────────────────────────────────────
+# The PR tier is a NAMED SUBSET of REQUIRED_CELLS, never a second list: Linux
+# only, and the wheel (not the sdist) for install-smoke. Pushes to main, tags
+# and manual runs qualify the FULL ledger; an event this table does not name
+# fails closed to FULL, so a tag can never be qualified by the smaller tier.
+FULL_TIER = "full"
+PR_TIER = "pr"
+PR_EVENTS = frozenset({"pull_request"})
+RUNS_ON = {
+    "Linux": "ubuntu-latest",
+    "Windows": "windows-latest",
+    "macOS": "macos-latest",
+}
+_JOBS_WITHOUT_MATRIX = ("quality", "known-gaps", "build-dist", "package-verify")
+
+
+def tier_for_event(event: str) -> str:
+    return PR_TIER if event in PR_EVENTS else FULL_TIER
+
+
+def _in_pr_tier(spec: CellSpec) -> bool:
+    return spec.runner_os == LINUX[1] and not spec.cell.startswith("sdist-")
+
+
+def cells_for_tier(tier: str) -> tuple[CellSpec, ...]:
+    if tier == PR_TIER:
+        return tuple(spec for spec in REQUIRED_CELLS if _in_pr_tier(spec))
+    return REQUIRED_CELLS
+
+
+def keys_for_tier(tier: str) -> tuple[str, ...]:
+    return tuple(sorted(spec.key for spec in cells_for_tier(tier)))
+
+
+def _runner(spec: CellSpec) -> dict[str, str]:
+    return {
+        "os": RUNS_ON[spec.runner_os],
+        "runner_os": spec.runner_os,
+        "runner_arch": spec.runner_arch,
+    }
+
+
+def plan_matrices(tier: str) -> dict[str, dict[str, list]]:
+    """job -> the ``strategy.matrix`` the workflow runs for ``tier``.
+
+    release-gate.yml carries no cell list of its own: its matrix jobs read these
+    through ``fromJSON(needs.plan.outputs...)``, so the cells have ONE home.
+    """
+    plan: dict[str, dict[str, list]] = {}
+    for spec in cells_for_tier(tier):
+        if spec.job in _JOBS_WITHOUT_MATRIX:
+            continue
+        matrix = plan.setdefault(spec.job, {})
+        if spec.job == "install-smoke":
+            kind = spec.cell.split("-", 1)[0]
+            stages = "handshake" if spec.runner_os == MACOS[1] else "full"
+            cell = {**_runner(spec), "stages": stages}
+            if kind not in matrix.setdefault("kind", []):
+                matrix["kind"].append(kind)
+            if cell not in matrix.setdefault("cell", []):
+                matrix["cell"].append(cell)
+            continue
+        entry = _runner(spec)
+        if spec.job == "unit-tests":
+            entry["python-version"] = spec.python_version
+        matrix.setdefault("include", []).append(entry)
+    return plan
+
+
 # A stdio claim is only believable from a job whose selector runs the real-stdio
 # lane. Transport-ness is proved by WHICH JOB executed the node, never by a
 # hand-written label on the claim.

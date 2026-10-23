@@ -27,7 +27,7 @@ SHA = "a" * 40
 OTHER_SHA = "b" * 40
 RUN_ID = "12345"
 RUN_ATTEMPT = "1"
-EVENT = "pull_request"
+EVENT = "push"
 
 JUNIT_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2">
@@ -229,7 +229,7 @@ def _aggregate(root: Path, **overrides: str) -> tuple[dict[str, object], list[st
         workflow_name="release-gate",
         run_id=overrides.get("run_id", RUN_ID),
         run_attempt=overrides.get("run_attempt", RUN_ATTEMPT),
-        event=EVENT,
+        event=overrides.get("event", EVENT),
         claims_path=Path(overrides.get("claims", _no_claims(root))),
     )
     return re_mod.build_aggregate(spec)
@@ -259,6 +259,45 @@ def test_a_complete_current_ledger_aggregates_clean(ledger: Path):
     children = aggregate["children"]
     assert [child["key"] for child in children] == list(re_mod.REQUIRED_KEYS)
     assert all(len(str(child["sha256"])) == 64 for child in children)
+
+
+# ── tiers (T-6910) ──────────────────────────────────────────────────────────
+@pytest.fixture
+def pr_ledger(tmp_path: Path) -> Path:
+    """Records for ONLY the cells a pull request runs."""
+    root = tmp_path / "release-evidence"
+    work = tmp_path / "work"
+    work.mkdir()
+    for spec in re_mod.cells_for_tier(re_mod.PR_TIER):
+        _emit_cell(root, work, spec, claim_nodes=True)
+    return root
+
+
+def test_a_pull_request_ledger_is_complete_at_the_pr_tier(pr_ledger: Path):
+    shipped = {"claims": str(re_mod.CLAIMS_PATH), "event": "pull_request"}
+    aggregate, problems = _aggregate(pr_ledger, **shipped)
+    assert problems == []
+    assert aggregate["tier"] == "pr"
+    assert aggregate["required_cells"] == list(re_mod.keys_for_tier("pr"))
+    assert len(aggregate["required_cells"]) < len(re_mod.REQUIRED_KEYS)
+
+
+@pytest.mark.parametrize("event", ["push", "workflow_dispatch", "release", "x"])
+def test_the_pr_tier_ledger_never_qualifies_a_main_push_or_a_tag(
+    pr_ledger: Path, event: str
+):
+    """A tag (or any non-PR event) owes EVERY cell: the smaller ledger is red."""
+    aggregate, problems = _aggregate(pr_ledger, event=event)
+    assert aggregate["tier"] == "full"
+    missing = [p for p in problems if "missing child record" in p]
+    owed = set(re_mod.REQUIRED_KEYS) - set(re_mod.keys_for_tier("pr"))
+    assert len(missing) == len(owed) > 0
+
+
+def test_a_missing_pr_tier_cell_is_still_rejected_on_a_pull_request(pr_ledger: Path):
+    _record_path(pr_ledger, "transport/Linux-X64").unlink()
+    _, problems = _aggregate(pr_ledger, event="pull_request")
+    assert any("missing child record" in p for p in problems)
 
 
 def test_the_required_cell_set_covers_all_three_qualified_runners(ledger: Path):
