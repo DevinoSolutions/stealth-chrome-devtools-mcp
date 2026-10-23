@@ -1,5 +1,6 @@
 import contextlib
 import gzip
+import hashlib
 import json
 import logging
 import pickle
@@ -81,6 +82,19 @@ class DebugLogger:
         # needs move_to_end()/popitem(last=False), which plain dict/set don't
         # expose even though both are already insertion-ordered.
         self._seen_errors: OrderedDict[str, None] = OrderedDict()
+
+    @staticmethod
+    def fingerprint(body: str) -> str:
+        """What a log line may say about a script body: its size and a short digest.
+
+        INFO and above reach the durable ``stealth.backend`` log and become a
+        Sentry breadcrumb on the next error event, and a script body is where
+        ``document.cookie=...`` and pasted tokens live (F-I). The digest still
+        lets one log line be matched to another, or to the caller's own copy,
+        without the text ever leaving the process.
+        """
+        digest = hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:8]
+        return f"{len(body)} chars, sha256:{digest}"
 
     def _emit_stderr(self, message: str, force: bool = False):
         """
