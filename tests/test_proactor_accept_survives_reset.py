@@ -181,6 +181,65 @@ def test_a_listener_that_resets_every_accept_is_surfaced_not_spun_on(monkeypatch
     assert fake.issued == 4  # the first accept plus three retries
 
 
+class _ClosedListener:
+    def fileno(self) -> int:
+        return -1
+
+
+def test_a_995_on_a_closed_listener_surfaces_without_a_retry():
+    """995 is what server.close() produces; a closed listener must end the loop."""
+
+    async def scenario():
+        fake = _FakeProactor(
+            asyncio.get_running_loop(), [OSError(None, "aborted", None, 995)]
+        )
+        accept = proactor_accept._wrap(
+            lambda self, listener: self.original_accept(listener)
+        )
+        outer = accept(fake, _ClosedListener())
+        await asyncio.wait({outer}, timeout=2)
+        return fake, outer
+
+    fake, outer = asyncio.run(scenario())
+    assert fake.issued == 1
+    assert outer.exception().winerror == 995
+
+
+def test_a_connection_accepted_for_a_gone_loop_is_closed_now():
+    """The inner accept wins a race with the loop's cancellation."""
+
+    class _Conn:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Stubborn(asyncio.Future):
+        def cancel(self, msg=None):  # an accept already completed in the kernel
+            return False
+
+    conn = _Conn()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        inner = _Stubborn(loop=loop)
+        fake = _FakeProactor(loop, [])
+        accept = proactor_accept._wrap(lambda self, listener: inner)
+        outer = accept(fake, _Listener())
+        outer.cancel()
+        await asyncio.sleep(0)
+        inner.set_result((conn, ("127.0.0.1", 1)))
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert conn.closed
+
+
+def test_the_reset_warning_is_throttled():
+    shown = [n for n in range(1, 10_001) if proactor_accept._worth_logging(n)]
+    assert shown == [1, 100, 1000, 10000]
+
+
 def test_cancelling_the_loops_future_cancels_the_pending_accept():
     fake, outer = _run([None], cancel=True)
     assert outer.cancelled()
@@ -189,6 +248,9 @@ def test_cancelling_the_loops_future_cancels_the_pending_accept():
 
 def test_install_is_idempotent(installed):
     first = installed.accept
+    assert getattr(first, proactor_accept._MARK, False), (
+        "install() did not patch accept"
+    )
     assert proactor_accept.install() is False
     assert installed.accept is first
 

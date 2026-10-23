@@ -76,49 +76,80 @@ def _is_reset(exc: BaseException | None) -> bool:
     )
 
 
+#: The first reset of an accept call is logged, then every power of ten from here.
+_LOG_FROM = 100
+
+
+def _worth_logging(count: int) -> bool:
+    """The 1st reset, then the 100th, 1000th, ... : a local RST scanner must not
+    be able to flood the backend log."""
+    return count == 1 or (
+        count >= _LOG_FROM and str(count) == "1" + "0" * (len(str(count)) - 1)
+    )
+
+
+def _close_unclaimed(accepted: tuple) -> None:
+    """A connection accepted for a loop that has since gone (its future was
+    cancelled by ``server.close()``): close it now rather than at GC."""
+    try:
+        accepted[0].close()
+    except Exception:  # noqa: BLE001  PERMANENT(best-effort cleanup of a socket nobody owns)
+        _logger.debug("could not close an unclaimed accepted socket", exc_info=True)
+
+
+def _serving(proactor, listener) -> bool:  # noqa: ANN001  PERMANENT(a private stdlib proactor)
+    """Whether the listener is still open and not stopped by ``server.close()``."""
+    stopped = getattr(proactor, "_stopped_serving", ())
+    return listener.fileno() != -1 and listener not in stopped
+
+
+def _settle_unclaimed(inner) -> None:  # noqa: ANN001  PERMANENT(a future)
+    """The inner accept finished after the loop's future was already done: close
+    what it accepted, or read the error nobody else will."""
+    if inner.cancelled():
+        return
+    if inner.exception() is None:
+        _close_unclaimed(inner.result())
+
+
 def _wrap(original):  # noqa: ANN001, ANN202  PERMANENT(wraps a private stdlib method; a signature would pretend to know it)
     def accept(self, listener):  # noqa: ANN001, ANN202  PERMANENT(same)
         outer = self._loop.create_future()
         current = [original(self, listener)]  # a synchronous failure is stock behaviour
         resets = 0
 
-        def listener_is_serving() -> bool:
-            stopped = getattr(self, "_stopped_serving", ())
-            return listener.fileno() != -1 and listener not in stopped
-
-        def on_done(inner) -> None:  # noqa: ANN001  PERMANENT(a future)
+        def rearm(exc: BaseException) -> None:
             nonlocal resets
-            if outer.done():
-                if not inner.cancelled():
-                    inner.exception()  # retrieved: nobody else will read it
-                return
-            if inner.cancelled():
-                outer.cancel()
-                return
-            exc = inner.exception()
-            if exc is None:
-                outer.set_result(inner.result())
-                return
-            if (
-                _is_reset(exc)
-                and resets < MAX_CONSECUTIVE_RESETS
-                and listener_is_serving()
-            ):
-                resets += 1
+            resets += 1
+            if _worth_logging(resets):
                 _logger.warning(
-                    "a client reset during accept (%s); the listener stays open "
-                    "(%d in a row)",
+                    "a client reset during accept (%s); the listener stays "
+                    "open (%d in a row on this accept)",
                     exc,
                     resets,
                 )
-                try:
-                    current[0] = original(self, listener)
-                except Exception as error:  # noqa: BLE001  PERMANENT(any failure to re-arm is the accept's failure)
-                    outer.set_exception(error)
-                    return
-                current[0].add_done_callback(on_done)
+            try:
+                current[0] = original(self, listener)
+            except Exception as error:  # noqa: BLE001  PERMANENT(any failure to re-arm is the accept's failure)
+                outer.set_exception(error)
                 return
-            outer.set_exception(exc)
+            current[0].add_done_callback(on_done)
+
+        def on_done(inner) -> None:  # noqa: ANN001  PERMANENT(a future)
+            if outer.done():
+                _settle_unclaimed(inner)
+            elif inner.cancelled():
+                outer.cancel()
+            elif (exc := inner.exception()) is None:
+                outer.set_result(inner.result())
+            elif (
+                _is_reset(exc)
+                and resets < MAX_CONSECUTIVE_RESETS
+                and _serving(self, listener)
+            ):
+                rearm(exc)
+            else:
+                outer.set_exception(exc)
 
         def on_outer_done(done) -> None:  # noqa: ANN001  PERMANENT(a future)
             if done.cancelled():
