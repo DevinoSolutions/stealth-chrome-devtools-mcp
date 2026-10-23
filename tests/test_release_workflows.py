@@ -110,6 +110,39 @@ def test_publish_requires_the_green_gate_and_downloads_that_runs_artifact():
 
 
 # ---------------------------------------------------------------------------
+# A bounded share of the shared runner pool (T-6909).
+# ---------------------------------------------------------------------------
+MAX_PARALLEL = {"unit-tests": 3}
+DEFAULT_MAX_PARALLEL = 2
+SECOND_WAVE = ("integration", "transport", "offline-stealth", "install-smoke")
+
+
+def test_the_gate_takes_a_bounded_share_of_the_runner_pool(gate_jobs):
+    """Every matrix is capped and staged, so one run cannot hold the org's pool.
+
+    One run once held 15 of the 28 shared runners. Each matrix therefore declares
+    `max-parallel` (3 for unit-tests, 2 elsewhere) and the second wave waits for
+    the first, so the peak stays near 9. The cells themselves are pinned by the
+    evidence ledger; this pins only the cap and the staging.
+    """
+    matrices = {n: j for n, j in gate_jobs.items() if "matrix" in j.get("strategy", {})}
+    assert matrices, "release-gate.yml declares no matrix jobs"
+    caps = {n: j["strategy"].get("max-parallel") for n, j in matrices.items()}
+    expected = {n: MAX_PARALLEL.get(n, DEFAULT_MAX_PARALLEL) for n in matrices}
+    assert caps == expected, f"max-parallel per matrix is {caps}, want {expected}"
+    for name in SECOND_WAVE:
+        needs = gate_jobs[name].get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        assert {"unit-tests", "coverage"} <= set(needs), (
+            f"{name} must wait for unit-tests and coverage, needs {needs}"
+        )
+    smoke_needs = gate_jobs["install-smoke"]["needs"]
+    assert "build-dist" in smoke_needs, "install-smoke downloads build-dist's artifact"
+    for name in ("unit-tests", "coverage"):
+        assert "needs" not in gate_jobs[name], f"{name} is first-wave: no needs"
+
+
+# ---------------------------------------------------------------------------
 # The aggregate never forgets an edge.
 # ---------------------------------------------------------------------------
 def test_aggregate_directly_needs_every_other_job(gate_jobs):
