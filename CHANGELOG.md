@@ -121,6 +121,10 @@ callers that need "can I talk to it". The gate treats a 401 as alive, with three
   client for ever. Past `PERSISTENT_UNAUTHORIZED_SECONDS` (120 s of one unbroken run, any other answer ends it) the gate stops vouching for it, so
   `clear_stale` evicts and respawns it (the new backend loads a fresh token), and F-886 still spares one that owns browsers. The WARNING, the CLI's
   unauthorized message (`backend_token.UNAUTHORIZED`) and `status` now name the cure, `stealthy restart`.
+- **A record without an integer pid vouches for nothing**, so a lookalike 401 is never adopted when both the record and a failed listener lookup say "no pid".
+  A persistent 401 on a backend that owns browsers is spared for good, and the proxy's "unreachable" log line and event (`hint`) then carry the same
+  `backend_token.UNAUTHORIZED` sentence naming `stealthy restart`. On macOS `psutil.net_connections` may need root; the listener lookup is then `None`, so our
+  own 401 is not reused and the path falls back to the eviction attempts (fail-safe).
 - **One `initialize` per gate pass.** `refusal` reads the answer the pass's ready probe just got instead of asking again.
 
 `await_ready` logs the cause once per run of 401s while it keeps polling, and the legacy-heartbeat fallback reads a 401 the same way. `status`/`doctor` show a

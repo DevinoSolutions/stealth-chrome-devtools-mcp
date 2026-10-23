@@ -422,3 +422,147 @@ def test_a_refusing_backend_is_reported_as_running_and_names_the_cure():
     assert "REFUSING" in line
     assert "stealthy restart" in line
     assert "not running" not in line
+
+
+# -- review 2: a record without a pid vouches for nothing -------------------
+
+
+@pytest.mark.parametrize(
+    "recorded_pid", [None, "4242", 4242.0], ids=["absent", "str", "float"]
+)
+def test_a_record_without_an_int_pid_never_adopts_a_401(
+    tmp_path, backend_401, monkeypatch, recorded_pid
+):
+    """Both sides None (a pid-less record, and a listener lookup that failed on
+    AccessDenied) used to compare equal, and a lookalike 401 was adopted."""
+    record = {
+        "port": backend_401.port,
+        "version": OUR_VERSION,
+        "source_fingerprint": OUR_FINGERPRINT,
+    }
+    if recorded_pid is not None:
+        record["pid"] = recorded_pid
+    (tmp_path / "server.json").write_text(json.dumps(record))
+    # The lookup agrees with whatever the record says, None included.
+    monkeypatch.setattr(singleton, "_backend_pid_on_port", lambda p: record.get("pid"))
+    assert not singleton._same_identity_backend_ready(backend_401.port, patience=0.0)
+
+
+# -- review 2: the unreachable report names the cure ------------------------
+
+_REAL_PROTECTING_BROWSERS = singleton._protecting_browsers
+
+
+async def test_a_401_backend_that_owns_browsers_is_spared_and_the_report_names_the_cure(
+    tmp_path, backend_401, terminated, monkeypatch, caplog
+):
+    """Through the REAL protected()/stamp path: the record, the backend's own
+    liveness stamp and ``browser_pids.json`` are on disk, a browser of its is
+    running (this process), and nothing about the protection is stubbed."""
+    import os
+    import time
+
+    import anyio
+
+    from stealth_chrome_devtools_mcp import observability
+    from stealth_chrome_devtools_mcp.embedded import (
+        backend_registry,
+        browser_pid_registry,
+    )
+
+    monkeypatch.setattr(singleton, "_protecting_browsers", _REAL_PROTECTING_BROWSERS)
+    monkeypatch.setattr(singleton, "_is_our_backend", lambda pid: pid == OUR_PID)
+    _record(tmp_path, backend_401.port)
+    assert backend_registry.stamp_heartbeat(
+        tmp_path / "server.json", port=backend_401.port, pid=OUR_PID, at=time.time()
+    )
+    entry = browser_pid_registry.with_owner(
+        browser_pid_registry.new_entry(
+            os.getpid(),
+            create_time=1.0,
+            user_data_dir=None,
+            uses_custom_data_dir=None,
+            auto_clone=False,
+        ),
+        OUR_PID,
+        1.0,
+    )
+    (tmp_path / browser_pid_registry.RECORD_NAME).write_text(
+        json.dumps({"browser_processes": {"inst-1": entry}}), encoding="utf-8"
+    )
+
+    singleton._clear_stale_backend(backend_401.port)  # opens the run of 401s
+    backend_probe._clock.now += backend_probe.PERSISTENT_UNAUTHORIZED_SECONDS + 1
+    assert singleton._clear_stale_backend(backend_401.port) == [os.getpid()]
+    assert terminated == []  # owns browsers: spared, however long it refuses
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        observability,
+        "capture_lifecycle",
+        lambda message, *, level="warning", **fields: events.append((message, fields)),
+    )
+    monkeypatch.setattr(proxy_selfheal, "RETRY_BASE_SECONDS", 0.001)
+    monkeypatch.setattr(proxy_selfheal, "RETRY_MAX_SECONDS", 0.01)
+
+    async def connect(_url, _replay, armed):
+        armed.set()
+        await anyio.sleep_forever()
+
+    async def dead_watch(_port):
+        return
+
+    heals: list[int] = []
+
+    async def never_healed(*_a, **_kw):
+        heals.append(1)
+        if len(heals) > 1:
+            raise _EnoughError  # the first heal fails, the report is made, then stop
+
+    monkeypatch.setattr(proxy_selfheal, "heal_backend", never_healed)
+    with (
+        caplog.at_level(logging.ERROR, logger="stealth.proxy"),
+        anyio.fail_after(5),
+        pytest.raises(_EnoughError),
+    ):
+        await proxy_selfheal.drive(
+            port=backend_401.port,
+            url_for=lambda p: f"http://127.0.0.1:{p}{backend_probe.MCP_PATH}",
+            connect=connect,
+            watch=dead_watch,
+            confirm_alive=lambda _port: False,
+            replay=lambda: None,
+            pending=proxy_selfheal.PendingCalls(),
+            client_write=_Sink(),
+            ensure_running=lambda p: p,
+            await_ready=None,
+        )
+    unreachable = [e for m, e in events if m == proxy_selfheal.UNREACHABLE_EVENT]
+    assert [e.get("hint") for e in unreachable] == [backend_token.UNAUTHORIZED]
+    assert "stealthy restart" in caplog.text
+
+
+async def test_the_report_carries_no_hint_when_the_last_verdict_was_not_a_401(
+    monkeypatch,
+):
+    from stealth_chrome_devtools_mcp import observability
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        observability,
+        "capture_lifecycle",
+        lambda message, *, level="warning", **fields: events.append((message, fields)),
+    )
+    proxy_selfheal._unreachable(
+        port=1, generation=1, reason="unhealable", streak=1, delay=1.0, hint=None
+    )
+    assert "hint" not in events[0][1]
+
+
+class _EnoughError(Exception):
+    pass
+
+
+class _Sink:
+    async def send(self, msg):
+        return None

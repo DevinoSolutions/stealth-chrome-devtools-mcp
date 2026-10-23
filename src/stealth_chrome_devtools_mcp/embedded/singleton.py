@@ -278,13 +278,13 @@ def _same_identity_backend_ready(port: int, patience: float | None = None) -> bo
     # per-attempt budget; the single-shot hot path keeps the pinned 2s.
     per_attempt = REUSE_PROBE_TIMEOUT if patience else LIVENESS_PROBE_TIMEOUT
     window = scheduling_lag.FairWindow(patience)
-    url = _backend_http_url(port)
+    url, pid = _backend_http_url(port), backend_registry.recorded_int(entry, "pid")
     while not _backend_http_ready(port, timeout=per_attempt):
         if not _server_is_healthy(port) and not _is_our_backend(entry.get("pid")):
             return False  # no socket and no live process: dead, not busy
         # The answer that probe just got, if it was OUR backend's own 401 (T-6550).
         refusal = backend_probe.refusal(
-            url, ours=lambda: _backend_pid_on_port(port) == entry.get("pid")
+            url, ours=lambda: pid is not None and _backend_pid_on_port(port) == pid
         )
         if refusal is not None:
             return refusal
@@ -482,9 +482,8 @@ def _backend_http_url(port: int) -> str:
 
 
 def _backend_http_ready(port: int, *, timeout: float = LIVENESS_PROBE_TIMEOUT) -> bool:
-    """Single-shot, synchronous app-level liveness probe: True iff the backend
-    on ``port`` answers a real ``initialize`` with HTTP 200 ("can I talk to it":
-    a 401 is False here; the reuse gate reads 401 as alive).
+    """Single-shot app-level probe: True iff the backend on ``port`` answers a
+    real ``initialize`` with HTTP 200 ("can I talk to it": a 401 is False here).
 
     A binding, for the reason every binding in this file is one (see
     `_probe_port`): the suite patches THIS name, and it alone knows which URL a

@@ -80,6 +80,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Protocol
 
+from stealth_chrome_devtools_mcp.embedded import backend_probe
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -215,8 +217,14 @@ def _retry_delay(attempt: int) -> float:
     return base * (1.0 + random.uniform(-RETRY_JITTER, RETRY_JITTER))  # noqa: S311  PERMANENT(de-synchronising a fleet is not cryptography)
 
 
-def _unreachable(
-    *, port: int, generation: int, reason: str, streak: int, delay: float
+def _unreachable(  # noqa: PLR0913  PERMANENT(function interface)
+    *,
+    port: int,
+    generation: int,
+    reason: str,
+    streak: int,
+    delay: float,
+    hint: str | None = None,
 ) -> None:
     """The one report for "this proxy has no backend and is going to wait".
 
@@ -237,7 +245,12 @@ def _unreachable(
     anything new. ``delay`` is the FIRST wait, which is how a reader can tell an
     episode that opened from one that has been parked at the cap — and how long
     it actually ran is :data:`REACHABLE_EVENT`'s to say.
+
+    ``hint`` is the cure when the backend is up and refusing OUR token
+    (``backend_probe.cure_for``): the report says so, because nothing the retry
+    loop does can change that answer.
     """
+    extra = {} if hint is None else {"hint": hint}
     _report(
         UNREACHABLE_EVENT,
         level="error",
@@ -246,6 +259,7 @@ def _unreachable(
         reason=reason,
         consecutive_heals=streak,
         delay=round(delay, 1),
+        **extra,
     )
 
 
@@ -667,6 +681,9 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                 delay,
                 attempt,
             )
+            hint = backend_probe.cure_for(url_for(current))
+            if hint is not None and attempt == 1:
+                _logger.error("the backend on port %d is up: %s", current, hint)
             if attempt == 1:
                 _unreachable(
                     port=current,
@@ -676,6 +693,7 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                     ),
                     streak=streak,
                     delay=delay,
+                    hint=hint,
                 )
             await anyio.sleep(delay)
             # The wait IS the flap remedy, so the streak has been served.
