@@ -110,6 +110,7 @@ class _FakeConnection:
 
     def __init__(self) -> None:
         self.handlers: dict[type, list[Any]] = collections.defaultdict(list)
+        self.closed = False  # nodriver's ``Connection.closed``: the socket is shut
 
     def add_handler(self, event_type, handler):
         self.handlers[event_type].append(handler)
@@ -689,6 +690,39 @@ async def test_a_target_destroyed_during_install_leaves_no_watch_behind():
     assert bindings.watches == {}
     assert bindings == {}
     assert new.handler_count() == 0
+
+
+async def test_a_closed_browsers_watches_are_reaped_on_the_next_install():
+    """``close_instance`` kills the browser: no ``targetDestroyed`` arrives for
+    its tabs. The next install, on any tab, reaps the watches whose browser
+    connection is closed, with their bindings and handlers."""
+    bindings = python_binding.Bindings()
+    dead = _FakeTab("T-a", context=7)
+    await _install(dead, "x", lambda: 1, bindings)
+    dead.browser.connection.closed = True  # the process was killed
+
+    live = _FakeTab("T-b", context=21)
+    await _install(live, "x", lambda: 2, bindings)
+
+    assert set(bindings.watches) == {"T-b"}
+    assert set(bindings) == {("T-b", "x")}
+    assert dead.handler_count() == 0
+    assert live.handler_count() == 5
+
+
+async def test_a_target_destroyed_during_the_replay_fails_the_install_cleanly():
+    bindings = python_binding.Bindings()
+    tab = _FakeTab()
+
+    async def tab_closes():
+        await tab.browser.destroy("T-a")
+
+    tab.on_send["Runtime.enable"] = tab_closes
+    with pytest.raises(ToolError, match="closed"):
+        await _install(tab, "x", lambda: 1, bindings)
+
+    assert bindings.watches == {}
+    assert bindings == {}
 
 
 async def test_a_tab_destroyed_then_reopened_under_its_id_is_watched_afresh():

@@ -36,11 +36,12 @@ import fixture_routes
 # alias block, and slice 12 deleted it. ``tool_runtime`` is a normal module,
 # imported once, so this is the same object every body and every ``server.py``
 # execution drive — exactly what an E2E assertion about live browsers wants.
-# Re-exported (like ``get_fn`` and ``server_mod``) for the three E2E files that
-# need it: test_browser_integration, test_e2e_interaction, test_stealth. ruff sees
+# Re-exported (like ``get_fn`` and ``server_mod``) for the E2E files that need
+# it: test_browser_integration, test_e2e_interaction, test_stealth,
+# test_e2e_python_binding_frames. ruff sees
 # no use HERE, and per plan_SERVERSPLIT slices 10-11 that is not the prune
 # authority — the last consumer, prod or test, is.
-from stealth_chrome_devtools_mcp.embedded import (  # noqa: F401  PERMANENT(re-export consumed by the three E2E files named above)
+from stealth_chrome_devtools_mcp.embedded import (  # noqa: F401  PERMANENT(re-export consumed by the E2E files named above)
     tool_runtime as runtime,
 )
 
