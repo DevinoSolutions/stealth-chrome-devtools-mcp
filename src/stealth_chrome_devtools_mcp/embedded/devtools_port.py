@@ -48,7 +48,10 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from nodriver import Browser
+    from nodriver.core.connection import Connection
 
 __all__ = [
     "DROP_TIMEOUT_SECONDS",
@@ -130,16 +133,20 @@ def _unidentifiable() -> ToolError:
     )
 
 
-async def _drop(browser: Browser) -> None:
-    """Close OUR end of the websocket. Never ``Browser.close``: that is a command.
+async def _disconnect(connection: Connection) -> None:
+    """Close OUR end of one websocket. Never ``Browser.close``: that is a command.
 
     Shielded and bounded because it also runs while the spawn is being cancelled,
-    when a second cancellation must not abandon the half-open foreign socket.
+    when a second cancellation must not abandon a half-open socket.
     """
     with contextlib.suppress(Exception):
         await asyncio.wait_for(
-            asyncio.shield(browser.connection.disconnect()), DROP_TIMEOUT_SECONDS
+            asyncio.shield(connection.disconnect()), DROP_TIMEOUT_SECONDS
         )
+
+
+async def _drop(browser: Browser) -> None:
+    await _disconnect(browser.connection)
 
 
 def _running(pid: int) -> bool:
@@ -151,53 +158,107 @@ def _running(pid: int) -> bool:
         return False
 
 
-async def _reconnect_if_dead(browser: Browser) -> None:
-    """Make the next ``send`` open a fresh transport when this one cannot carry it.
+async def _ask_afresh(websocket_url: str) -> list:
+    """The same query over a THROWAWAY connection to the same browser endpoint.
 
-    nodriver reconnects in ``send`` only for a closed websocket; a listener task that
-    died on an open one leaves every later request unanswered. ``disconnect`` closes
-    both, so the ``send`` after it connects again with a new listener.
+    Never ``browser.connection``: nodriver sends ``Target.setDiscoverTargets`` once, in
+    ``Browser.start``, and Chrome scopes it to that websocket, so dropping and
+    reopening the launch's own connection would silence every later target event
+    (``tab_open`` documents the failure). This connection enables nothing and is
+    closed whatever ends the request, cancellation included.
     """
-    connection = browser.connection
-    listener = getattr(connection, "_listener_task", None)
-    if connection.closed or (listener is not None and listener.done()):
-        await _drop(browser)
+    from nodriver import cdp
+    from nodriver.core.connection import Connection
+
+    probe = Connection(websocket_url)
+    try:
+        return await probe.send(cdp.system_info.get_process_info())
+    finally:
+        await _disconnect(probe)
 
 
-async def _answer(browser: Browser, launched_pid: int) -> list:
-    """The browser's own process list, waiting while OUR launch is still running.
+class _Asks:
+    """The identity requests of one wait, in the order they were sent."""
 
-    The read-only query is asked again once per ``IDENTITY_TIMEOUT_SECONDS`` (T-7014):
-    nodriver's ``send`` can lose a request without raising (the fire-and-forget
-    websocket send fails, the listener dies, a close ends the listener without failing
-    the pending futures), and one request waited on for the whole patience then refuses
-    a healthy browser. A transport that is closed or has no live listener is replaced
-    before each ask. The FIRST answer counts; the requests are waited on
-    (``asyncio.wait`` never cancels them) and cancelled only when the wait is over,
-    because an abandoned CDP transaction can take the listener with it. The floor is
-    always given; past it the wait goes on, up to ``IDENTITY_PATIENCE_SECONDS``, only
-    while the launched pid is alive. A launcher that is gone, or one that cannot be
-    read, gets no more.
+    def __init__(self) -> None:
+        self.requests: list[asyncio.Future] = []
+        self._reported: set[asyncio.Future] = set()
+
+    def add(self, query: Awaitable[list]) -> None:
+        self.requests.append(asyncio.ensure_future(query))
+
+    def pending(self) -> list[asyncio.Future]:
+        return [r for r in self.requests if not r.done()]
+
+    def answers(self) -> list[list]:
+        """What the browser said so far. A request that FAILED is logged once and
+        never preferred over one that answered; a ``ProtocolException`` (the browser
+        says it cannot) is raised only while nothing has answered."""
+        from nodriver.core.connection import ProtocolException
+
+        failed: list[tuple[asyncio.Future, BaseException]] = []
+        answers: list[list] = []
+        for request in self.requests:
+            if not request.done() or request.cancelled():
+                continue
+            error = request.exception()
+            if error is None:
+                answers.append(request.result())
+            else:
+                failed.append((request, error))
+        if answers:
+            return answers
+        for request, error in failed:
+            if isinstance(error, ProtocolException):
+                raise error
+            if request not in self._reported:
+                self._reported.add(request)
+                debug_logger.log_warning(
+                    "devtools_port",
+                    "confirm_ours",
+                    f"an identity query failed ({type(error).__name__}); "
+                    "it is asked again at the next interval",
+                )
+        return []
+
+    async def end(self) -> None:
+        """Cancel what is still running and wait for it (a throwaway connection closes
+        in its own ``finally``); retrieve every failure, so none is left unretrieved."""
+        pending = self.pending()
+        for request in pending:
+            request.cancel()
+        if pending:
+            await asyncio.wait(pending)
+        for request in self.requests:
+            if request.done() and not request.cancelled():
+                request.exception()
+
+
+async def _answer(browser: Browser, launched_pid: int) -> list[list]:
+    """Every answer the browser gave to its own process-list query, waiting while
+    OUR launch is still running.
+
+    The read-only query is asked again once per ``IDENTITY_TIMEOUT_SECONDS``, each
+    time over a throwaway connection (T-7014): nodriver's ``send`` can lose a request
+    without raising (the fire-and-forget websocket send fails, the listener dies, a
+    close ends the listener without failing the pending futures), and one request
+    waited on for the whole patience then refuses a healthy browser. The requests are
+    waited on (``asyncio.wait`` never cancels them) and cancelled only when the wait
+    is over, because an abandoned CDP transaction can take the listener with it. The
+    floor is always given; past it the wait goes on, up to
+    ``IDENTITY_PATIENCE_SECONDS``, only while the launched pid is alive. A launcher
+    that is gone, or one that cannot be read, gets no more.
     """
     from nodriver import cdp
 
-    connection = browser.connection
+    url = getattr(browser.connection, "websocket_url", None)
     clock = asyncio.get_running_loop().time
     started = clock()
-    requests: set[asyncio.Future] = set()
-
-    def ask() -> None:
-        requests.add(
-            asyncio.ensure_future(connection.send(cdp.system_info.get_process_info()))
-        )
-
-    ask()
+    asks = _Asks()
+    asks.add(browser.connection.send(cdp.system_info.get_process_info()))
     next_ask = started + IDENTITY_TIMEOUT_SECONDS
     try:
-        while True:
-            answered = next((r for r in requests if r.done()), None)
-            if answered is not None:
-                break
+        while not (answers := asks.answers()):
             waited = clock() - started
             if waited >= IDENTITY_TIMEOUT_SECONDS and not (
                 waited < IDENTITY_PATIENCE_SECONDS and _running(launched_pid)
@@ -205,13 +266,15 @@ async def _answer(browser: Browser, launched_pid: int) -> list:
                 raise _unverified(waited)
             if clock() >= next_ask:
                 next_ask += IDENTITY_TIMEOUT_SECONDS
-                await _reconnect_if_dead(browser)
-                ask()
-            await asyncio.wait(
-                requests,
-                timeout=max(0.0, min(IDENTITY_POLL_SECONDS, next_ask - clock())),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+                if url:
+                    asks.add(_ask_afresh(url))
+            pause = max(0.0, min(IDENTITY_POLL_SECONDS, next_ask - clock()))
+            if asks.pending():
+                await asyncio.wait(
+                    asks.pending(), timeout=pause, return_when=asyncio.FIRST_COMPLETED
+                )
+            else:
+                await asyncio.sleep(pause)
         waited = clock() - started
         if waited > IDENTITY_TIMEOUT_SECONDS:
             debug_logger.log_warning(
@@ -221,32 +284,32 @@ async def _answer(browser: Browser, launched_pid: int) -> list:
                 f"(floor {IDENTITY_TIMEOUT_SECONDS:g} s); "
                 f"pid {launched_pid} was running",
             )
-        return answered.result()
+        return answers
     finally:
-        pending = {r for r in requests if not r.done()}
-        for request in pending:
-            request.cancel()
-        if pending:
-            await asyncio.wait(pending)
+        await asks.end()
 
 
 async def _ask(browser: Browser, launched_pid: int) -> None:
     from nodriver.core.connection import ProtocolException
 
     try:
-        processes = await _answer(browser, launched_pid)
+        answers = await _answer(browser, launched_pid)
     except ProtocolException:
         raise _unidentifiable() from None
-    browser_pids = [p.id_ for p in processes or () if p.type_ == _BROWSER_PROCESS]
-    if not browser_pids:
+    named = False
+    for processes in answers:
+        browser_pids = [p.id_ for p in processes or () if p.type_ == _BROWSER_PROCESS]
+        if not browser_pids:
+            continue
+        named = True
+        if not set(browser_pids) & owned_pids(launched_pid):
+            raise _refusal(browser_pids[0], launched_pid)
+    if not named:
         debug_logger.log_warning(
             "devtools_port",
             "confirm_ours",
             "the browser's process list has no `browser` process; identity unchecked",
         )
-        return
-    if not set(browser_pids) & owned_pids(launched_pid):
-        raise _refusal(browser_pids[0], launched_pid)
 
 
 async def confirm_ours(browser: Browser, launched_pid: int | None) -> None:

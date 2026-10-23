@@ -7,9 +7,10 @@
 - **A healthy spawn is no longer refused after 60 s of silence on one lost request (T-7014).** `devtools_port.confirm_ours` sent `SystemInfo.getProcessInfo`
   once and waited on it; nodriver's `send` can lose a request without raising (the websocket send task fails, the listener dies, a close ends the
   listener without failing the pending futures), so a macOS CI spawn waited the whole patience and failed with "did not say which process it is". The
-  read-only query is now asked again once per `IDENTITY_TIMEOUT_SECONDS`, on a fresh transport when the connection is closed or its listener is gone, and the
-  first answer counts. The proof is unchanged (the answer's `browser` pid must be ours or a descendant's), a stranger is still refused, and silence past
-  `IDENTITY_PATIENCE_SECONDS` is still a refusal.
+  read-only query is now asked again once per `IDENTITY_TIMEOUT_SECONDS`, each time over a throwaway connection to the same browser endpoint that is closed
+  however the request ends; the launch's own connection is never dropped, because Chrome scopes `Target.setDiscoverTargets` to the websocket and the
+  launch's popup handling would lose its target events. The first answer counts, a request that failed is logged and skipped, and an answer naming a pid
+  that is not ours still refuses. Silence past `IDENTITY_PATIENCE_SECONDS` is still a refusal.
 
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
