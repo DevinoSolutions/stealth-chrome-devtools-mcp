@@ -145,6 +145,21 @@ built. `dynamic_hook_system`'s docstring and comments, and the `create_dynamic_h
 Python exec. The `create_dynamic_hook` and `create_python_binding` entries in the SOFT golden `tests/goldens/tool_surface.json` change for those
 descriptions (the latter adds "including same-origin frames") and nothing else.
 
+### F-1025 follow-ups N1-N3: Windows trailing dot/space, wider header redaction, more secret locations (T-6403)
+
+- **A trailing dot or space no longer hides a denied directory on Windows (N1).** Win32 drops them from every path segment, so a not-yet-existing
+  `~/.kube.\config` or `~/.gnupg.` passed the deny-list and `precreate_private` created it under the denied name. `path_confinement._win_canonical`
+  strips them per segment, applied in the one place the deny-list compares (and to the `.env` / `.netrc` name rules), on Windows only.
+- **The export redacts more credential headers (N2).** `x_api_key`, `api_key`, `x-authorization`, `cf-access-jwt-assertion`, `x-session-id` and
+  `password` (and their kin: `-` and `_` are read alike, markers `authorization`, `password`, `passwd`, `jwt`, `session`, `credential` added).
+  `content-type`, `accept` and `user-agent` stay visible, pinned.
+- **More secret locations are refused (N3).** `~/.pgpass` (and the Windows `postgresql\pgpass.conf`), `~/.vault-token`, `/proc/self/environ` and
+  `/proc/<pid>/environ`, and a Chrome profile `spawn_browser(user_data_dir=<any path>)` put outside the session root: a directory carrying the clone
+  marker or a `LOGIN_WITNESSES` file (`profile_seed`, the repo's own two definitions) refuses everything under it. N4 (a mapped network drive stays
+  refused) is unchanged. Review round: a path the OS cannot resolve (`~/.pgpass::$INDEX_ALLOCATION`, a NUL byte) is a `ToolError` naming no path;
+  `Access-Control-Allow-Credentials` stays visible; `x-auth-key`, `x-access-key`, `ocp-apim-subscription-key`, `x-functions-key`, `x-amzn-oidc-*` and
+  `x-hub-signature[-256]` are redacted by name; a profile holding only `Local State` or `Profile N/` login files is recognised. Audit: `audit/stage2/finding_F1025_path_tools_secret_locations.md`, section "Follow-ups N1-N3".
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
