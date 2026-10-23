@@ -2,16 +2,6 @@
 
 ## Unreleased
 
-### A lost F-1009 identity query is asked again (T-7014)
-
-- **A healthy spawn is no longer refused after 60 s of silence on one lost request (T-7014).** `devtools_port.confirm_ours` sent `SystemInfo.getProcessInfo`
-  once and waited on it; nodriver's `send` can lose a request without raising (the websocket send task fails, the listener dies, a close ends the
-  listener without failing the pending futures), so a macOS CI spawn waited the whole patience and failed with "did not say which process it is". The
-  read-only query is now asked again once per `IDENTITY_TIMEOUT_SECONDS`, each time over a throwaway connection to the same browser endpoint that is closed
-  however the request ends; the launch's own connection is never dropped, because Chrome scopes `Target.setDiscoverTargets` to the websocket and the
-  launch's popup handling would lose its target events. The first answer counts, a request that failed is logged and skipped, and an answer naming a pid
-  that is not ours still refuses. Silence past `IDENTITY_PATIENCE_SECONDS` is still a refusal.
-
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
@@ -250,6 +240,16 @@ green and still break only on Windows, macOS or in the sdist; that is caught on 
 push to main, after the merge. The required check name (`release-gate / release-gate`)
 is unchanged. A PR's own code computes its tier, so the tier is only as trustworthy as the
 merged code: pushes to main and tags run the merged tier table, not the PR's.
+
+### A lost F-1009 identity query is asked again (T-7014)
+
+- **A healthy spawn is no longer refused after 60 s of silence on one lost request (T-7014).** `devtools_port.confirm_ours` sent `SystemInfo.getProcessInfo`
+  once and waited on it; nodriver's `send` can lose a request without raising (the websocket send task fails, the listener dies, a close ends the
+  listener without failing the pending futures), so a macOS CI spawn waited the whole patience and failed with "did not say which process it is". The
+  read-only query is now asked again once per `IDENTITY_TIMEOUT_SECONDS`, each time over a throwaway connection to the same browser endpoint that is closed
+  however the request ends; the launch's own connection is never dropped, because Chrome scopes `Target.setDiscoverTargets` to the websocket and the
+  launch's popup handling would lose its target events. The first answer counts, a request that failed is logged and skipped, and an answer naming a pid
+  that is not ours still refuses. Silence past `IDENTITY_PATIENCE_SECONDS` is still a refusal.
 
 ## 2.1.40
 
