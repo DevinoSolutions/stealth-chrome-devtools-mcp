@@ -25,8 +25,10 @@ above any a machine hands out, so ``psutil`` finds no descendants of them.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 import urllib.error
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -72,6 +74,8 @@ class World:
         self.holder_pid = OUR_PID
         #: What the holder does with the identity question.
         self.identity = "answers"
+        #: The first identity question has been lost / failed (``lost_once``, ``fails_once``).
+        self.lost = False
         self.argv: list[str] = []
         self.connections: list[FakeConnection] = []
         self.process = type("P", (), {"pid": OUR_PID, "returncode": None})()
@@ -117,11 +121,10 @@ class FakeConnection:
         self.handlers: dict = {}
         self.sent: list[str] = []
         self.disconnected = False
-        #: nodriver's ``Connection.closed`` and ``_listener_task``: ``disconnect()`` is what
-        #: makes the next ``send()`` reconnect.
-        self.closed = False
-        self.lost = False
-        self._listener_task = None
+        self.websocket_url = url
+        #: Chrome scopes ``Target.setDiscoverTargets`` to the websocket it was sent on:
+        #: closing this connection ends the target events it delivered.
+        self.discovering = False
         self.target = kwargs.get("target")
         type(self).world.connections.append(self)
 
@@ -133,14 +136,18 @@ class FakeConnection:
         self.sent.append(method)
         world = type(self).world
         reply: dict = {}
+        if method == "Target.setDiscoverTargets":
+            self.discovering = True
         if method == "SystemInfo.getProcessInfo":
             if world.identity == "silent":
                 await asyncio.Event().wait()
-            if world.identity == "lost_once" and not self.lost:
+            if world.identity == "lost_once" and not world.lost:
                 # The request leaves, the transport dies under it, nothing is raised.
-                self.lost = True
-                self.closed = True
+                world.lost = True
                 await asyncio.Event().wait()
+            if world.identity == "fails_once" and not world.lost:
+                world.lost = True
+                raise OSError("the transport died under the request")
             if world.identity == "unsupported":
                 raise ProtocolException({"code": -32601, "message": "not found"})
             reply = {
@@ -155,9 +162,13 @@ class FakeConnection:
             return done.value
         return None
 
+    def deliver_target_created(self) -> bool:
+        """Would a ``TargetCreated`` reach a handler on this connection now?"""
+        return self.discovering and not self.disconnected
+
     async def disconnect(self):
         self.disconnected = True
-        self.closed = False
+        self.discovering = False
 
 
 @pytest.fixture(autouse=True)
@@ -183,6 +194,7 @@ def world(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", this.spawn)
     monkeypatch.setattr("nodriver.core.util.free_port", lambda: OUR_PORT)
     monkeypatch.setattr("nodriver.core.browser.Connection", FakeConnection)
+    monkeypatch.setattr("nodriver.core.connection.Connection", FakeConnection)
 
     async def _request(api, endpoint_name, method="get", data=None):
         return await this.request(api, endpoint_name, method, data)
@@ -299,20 +311,31 @@ def _asks(connection: FakeConnection) -> int:
     return connection.sent.count("SystemInfo.getProcessInfo")
 
 
-async def test_a_lost_identity_query_is_asked_again_not_waited_out(
+async def test_a_lost_identity_query_is_asked_again_on_a_throwaway_connection(
     world, profile, running_launcher
 ):
     """T-7014: nodriver's ``send`` can lose a request without raising (the listener
     dies, the socket drops under the transaction). One request waited on for the whole
     patience then fails a HEALTHY spawn as a stranger after 60 s. The read-only query is
-    asked again once per floor, on a fresh transport, and the first answer counts."""
+    asked again once per floor, and the first answer counts. The re-ask goes over its
+    OWN connection: ``Target.setDiscoverTargets`` is per websocket, so the launch's
+    connection must not be dropped or its target events (popups) would stop."""
     world.identity = "lost_once"
 
     browser = await _launch(profile)
 
-    assert browser.connection is world.connections[0]
-    assert _asks(browser.connection) >= 2
-    assert browser.connection.disconnected
+    own, *throwaways = world.connections
+    assert browser.connection is own
+    assert not own.disconnected
+    assert own.deliver_target_created()
+    assert own.sent.count("Target.setDiscoverTargets") == 1
+    assert _asks(own) == 1
+    assert throwaways
+    assert sum(_asks(c) for c in world.connections) >= 2
+    assert all(c.disconnected for c in throwaways)
+    assert not [
+        m for c in throwaways for m in c.sent if m != "SystemInfo.getProcessInfo"
+    ]
 
 
 async def test_a_sibling_that_answers_the_second_ask_is_still_refused(
@@ -325,7 +348,8 @@ async def test_a_sibling_that_answers_the_second_ask_is_still_refused(
     with pytest.raises(ToolError, match="not the Chrome this spawn launched"):
         await _launch(profile)
 
-    assert _asks(world.connections[0]) >= 2
+    assert len(world.connections) >= 2
+    assert all(c.disconnected for c in world.connections)
 
 
 async def test_a_silent_browser_is_asked_a_bounded_number_of_times(
@@ -336,9 +360,32 @@ async def test_a_silent_browser_is_asked_a_bounded_number_of_times(
     with pytest.raises(ToolError, match="did not say which process it is"):
         await _launch(profile)
 
-    (foreign,) = world.connections
-    assert foreign.disconnected
-    assert 2 <= _asks(foreign) <= 0.4 / 0.05 + 1
+    assert all(c.disconnected for c in world.connections)
+    assert 2 <= sum(_asks(c) for c in world.connections) <= 0.4 / 0.05 + 1
+
+
+async def test_a_request_that_failed_neither_wins_nor_goes_unretrieved(
+    world, profile, running_launcher, monkeypatch
+):
+    """The first query fails outright; the re-ask answers ours. The failure is
+    logged, the spawn succeeds, and no future is left with an unretrieved exception."""
+    world.identity = "fails_once"
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict] = []
+    monkeypatch.setattr(loop, "call_exception_handler", unretrieved.append)
+    logged: list[str] = []
+    monkeypatch.setattr(
+        devtools_port,
+        "debug_logger",
+        SimpleNamespace(log_warning=lambda _c, _f, msg: logged.append(msg)),
+    )
+
+    browser = await _launch(profile)
+    gc.collect()
+
+    assert not browser.connection.disconnected
+    assert any("OSError" in line for line in logged)
+    assert unretrieved == []
 
 
 async def test_the_identity_wait_fits_inside_the_launch_phase():
