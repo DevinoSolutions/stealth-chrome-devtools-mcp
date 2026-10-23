@@ -495,6 +495,14 @@ class TestTheStoredCommandLengthCap:
         assert len(plan.command) <= desktop_launch.TR_MAX_CHARS
 
 
+def test_the_stale_spec_age_stays_twice_the_pid_deadline():
+    """The sweep reaps a spec only once no live spawn can still be waiting on its
+    pid, so the age must outlast the deadline with room for a late start. The
+    F-867 job pin widens the deadline in its helper process, which no longer
+    exercises this coupling, so the shipped constants are read here."""
+    assert backend_launch.STALE_SPEC_SECONDS >= 2 * backend_launch.PID_READY_TIMEOUT
+
+
 class TestOrphanTaskSweep:
     """A spawner killed mid-launch leaves BOTH its task and its spec behind (the
     teardown deletes the task first), so age is the predicate, not absence."""
