@@ -1,0 +1,30 @@
+name: Publish npm placeholder
+
+# Manual only, by design. This repo's own release flow publishes to PyPI, so
+# this workflow deliberately does NOT trigger on `release` — it must never
+# fire as a side effect of that flow.
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: npm
+    permissions:
+      contents: read
+      # Required for npm trusted publishing (OIDC). No NPM_TOKEN secret is used.
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing requires npm >= 11.5.1; setup-node ships an older npm.
+      - run: npm install -g npm@latest
+
+      - run: npm publish --access public
