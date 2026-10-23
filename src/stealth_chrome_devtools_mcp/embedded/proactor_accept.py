@@ -33,13 +33,14 @@ operation aborted), and only while the listener is still open and not stopped.
 An orderly ``server.close()`` cancels the loop's (outer) future, which cancels
 the inner one, and closes the listener, so neither a cancellation nor a closed
 or stopped listener is ever retried: close ends the loop at once and nothing
-spins. Any other error propagates exactly as before. A run of
-:data:`MAX_CONSECUTIVE_RESETS` resets with no accept between them stops being
-retried, so a listener that errors on every accept still surfaces instead of
-spinning. The connection socket of a failed accept is still released by the
-stock path (``accept_coro``), which also still logs its "Task exception was
-never retrieved" line at garbage collection; that noise is not worth a second
-patch.
+spins. Any other error propagates exactly as before. Once
+:data:`MAX_CONSECUTIVE_RESETS` resets in a row (no accept between them) have
+been retried, the next one is surfaced, so a listener that errors on every
+accept still surfaces instead of spinning. The connection socket of a failed
+accept is left to garbage collection, exactly as in the stock path
+(``accept_coro`` closes it only on cancellation), and asyncio still logs its
+"Task exception was never retrieved" line for it at collection; that noise is
+not worth a second patch.
 
 **Installed once, for the backend only.** ``server.py`` runs up to three times
 under ``runpy`` and the module may be imported by tests, so :func:`install` is
@@ -82,7 +83,8 @@ _LOG_FROM = 100
 
 def _worth_logging(count: int) -> bool:
     """The 1st reset, then the 100th, 1000th, ... : a local RST scanner must not
-    be able to flood the backend log."""
+    be able to flood the backend log with THIS warning (asyncio's own per-reset
+    line at garbage collection is not ours to throttle; see the module doc)."""
     return count == 1 or (
         count >= _LOG_FROM and str(count) == "1" + "0" * (len(str(count)) - 1)
     )
