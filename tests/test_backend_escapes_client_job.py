@@ -69,6 +69,7 @@ _HELPER = '''\
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="LOG %(message)s")
@@ -124,11 +125,13 @@ backend_launch.PID_READY_TIMEOUT = {pid_timeout}
 # Wait to be assigned to the job before spawning anything.
 sys.stdin.readline()
 
+started = time.monotonic()
 singleton._start_server_process(4321)
+handback = time.monotonic() - started
 
+print("HANDBACK", f"{{handback:.1f}}", flush=True)
 print("RUNG", rungs[-1] if rungs else "unlogged", flush=True)
 print("PID", recorded["pid"], flush=True)
-import time
 
 time.sleep({sleep})
 '''
@@ -318,9 +321,12 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         )
         # pytest prints the warnings summary for PASSING tests too, so this is
         # how a CI cell's own log says which rung protected the backend there.
+        handback = next(
+            (line.split()[1] for line in lines if line.startswith("HANDBACK ")), "?"
+        )
         warnings.warn(
             f"F-867 pin: backend escaped the client job via rung {rung!r} "
-            f"({session_end})",
+            f"({session_end}), pid hand-back took {handback}s",
             stacklevel=1,
         )
     finally:
