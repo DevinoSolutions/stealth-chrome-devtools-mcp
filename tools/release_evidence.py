@@ -454,8 +454,6 @@ def verify_claims(
             if key not in CELLS_BY_KEY:
                 problems.append(f"claim for {tool!r} names undeclared cell {key!r}")
                 continue
-            if key not in owed:
-                continue  # a cell this tier does not run (T-6910)
             if str(claim.get("transport", "")) == "stdio" and (
                 CELLS_BY_KEY[key].job not in TRANSPORT_JOBS
             ):
@@ -463,6 +461,8 @@ def verify_claims(
                     f"claim for {tool!r} asserts stdio but cites {key!r}, which "
                     f"does not run the real-stdio lane"
                 )
+            if key not in owed:
+                continue  # executed-and-passed is owed only on cells this tier runs
             if node not in index.get(key, set()):
                 problems.append(
                     f"claim for {tool!r} cites {node!r} on {key!r}, where it did "
