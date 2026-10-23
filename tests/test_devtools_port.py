@@ -6,6 +6,7 @@ door)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 from nodriver import cdp
-from nodriver.core.connection import ProtocolException
+from nodriver.core.connection import Connection, ProtocolException
 
 from fakes import forbid_real_process_kills
 from stealth_chrome_devtools_mcp.embedded import devtools_port
@@ -447,3 +448,83 @@ class TestAskedAgain:
                 devtools_port.confirm_ours(browser, os.getpid()), 10.0
             )
         assert throwaways.made == []
+
+
+class _Websocket:
+    """The websocket under a REAL nodriver ``Connection``: records what is sent, and
+    delivers whatever the test puts on ``inbox`` to the connection's own listener."""
+
+    close_code = None
+
+    def __init__(self) -> None:
+        self.inbox: asyncio.Queue[str] = asyncio.Queue()
+        self.sent: list[dict] = []
+
+    async def send(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+
+    async def recv(self) -> str:
+        return await self.inbox.get()
+
+    async def close(self) -> None:
+        self.close_code = 1000
+
+
+def _process_reply(message_id: int, pid: int) -> str:
+    return json.dumps(
+        {
+            "id": message_id,
+            "result": {"processInfo": [{"type": "browser", "id": pid, "cpuTime": 0.0}]},
+        }
+    )
+
+
+@pytest.mark.asyncio
+class TestTheCancelledFirstAsk:
+    async def test_a_late_reply_to_the_cancelled_first_ask_leaves_the_listener_alive(
+        self, monkeypatch, throwaways
+    ):
+        """When a throwaway answers first, the first ask on the launch's own
+        connection is CANCELLED while Chrome still has the command. The late reply must
+        reach a listener that survives it, or the launch's CDP session dies right
+        after the spawn is accepted. That holds only because ``cdp_transport`` shields
+        ``Transaction.__await__`` (and guards its delivery): the production import path
+        installs it, so this test does not, and the real nodriver ``send`` and
+        ``_listener`` run over a fake websocket."""
+        from stealth_chrome_devtools_mcp.embedded import (
+            cdp_transport,
+            tool_runtime,  # noqa: F401  PERMANENT(importing it is what installs the transport patch in production)
+        )
+
+        _short_waits(monkeypatch)
+        socket = _Websocket()
+        connection = Connection("ws://127.0.0.1:1/devtools/browser/x")
+        connection._websocket = socket  # noqa: SLF001  PERMANENT(a fake websocket under the real Connection)
+        connection._listener_task = asyncio.ensure_future(connection._listener())  # noqa: SLF001  PERMANENT(the real listener over the fake websocket)
+        try:
+            await devtools_port.confirm_ours(
+                SimpleNamespace(connection=connection), os.getpid()
+            )
+            assert throwaways.made, "the throwaway never asked"
+            (first,) = socket.sent
+            assert first["method"] == "SystemInfo.getProcessInfo"
+            pending = connection.mapper[first["id"]]
+            assert not pending.cancelled(), "the cancelled ask took its Transaction"
+
+            socket.inbox.put_nowait(_process_reply(first["id"], os.getpid()))
+            await asyncio.sleep(0.2)
+            assert not connection._listener_task.done(), (  # noqa: SLF001  PERMANENT(is the listener alive)
+                "the late reply killed the launch's listener"
+            )
+            assert pending.done()
+
+            following = asyncio.ensure_future(
+                connection.send(cdp.system_info.get_process_info())
+            )
+            await _until(lambda: len(socket.sent) == 2)
+            socket.inbox.put_nowait(_process_reply(socket.sent[1]["id"], os.getpid()))
+            reply = await asyncio.wait_for(following, 5.0)
+            assert reply[0].id_ == os.getpid()
+            assert cdp_transport.installed()
+        finally:
+            connection._listener_task.cancel()  # noqa: SLF001  PERMANENT(end the real listener)
