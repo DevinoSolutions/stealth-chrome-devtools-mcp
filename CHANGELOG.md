@@ -115,6 +115,10 @@ Review pass (PR #274): **Windows spellings.** `os.path.realpath` keeps a `\\?\C:
 **An unwritable destination** (missing folder, permission, a directory in the file's place, a folder that cannot be created) is a `ToolError` that names the file's basename and the OS reason, never the folder: `str(OSError)` embeds the absolute path (F-877), and the OSError is no longer chained.
 Still deferred (follow-up task, not covered by F-1025): the `browser://{id}/cookies` resource, `execute_cdp_command` (`DOM.setFileInputFiles` and the cookie methods), `post_data`, query strings and bodies in a network export, truncation before the capture with `overwrite=True` (`take_screenshot`), hardlinks to a secret, autostart / shell-rc / `.git/hooks` write targets, and the check-then-use gap between `upload_file` and the form submit. `%APPDATA%` / `%LOCALAPPDATA%` redirected away from `<home>\AppData` are not read (env access has one home, `settings`).
 
+### Input reaches a tab Chrome would call hidden (T-5332)
+
+- **A real-Chrome pin that F-1011's focus emulation delivers INPUT, not just frames (T-5332).** New `tests/test_e2e_hidden_tab_input.py` with `tests/fixture_app/hidden_input_probe.html`, whose key and click listeners drop everything while `document.visibilityState` is `hidden`. `type_text` and `click_element` on a `new_tab` tab covered by a later tab must leave the field holding the typed text and the click counter at 1, with the page `visible` and `hasFocus()` true; a covered tab no tool armed reads `hidden` and the page drops the same keys and click. Headless and headed. With `window_sizing.enable_focus_emulation` rebound to a no-op the driven case fails in both modes (`type_text` raises: the field never moved). Test-only.
+
 ### A refused loopback dial is retried, and the navigate bound counts only the main frame (F-1026, T-6363 part 2)
 
 `backend_client.http_client`, the one transport every CLI verb and the stdio proxy's bridge ride, now builds its `httpx.AsyncClient` over

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fixture-hidden-input-probe</title>
+  </head>
+  <body>
+    <input type="text" id="email" autocomplete="off" />
+    <button id="go">Go</button>
+    <span id="clicks">0</span>
+    <script>
+      // T-5332: input a HIDDEN page never sees. Every key and click is counted as
+      // received, and DROPPED (default prevented, nothing recorded) while the page
+      // reads hidden, so the input's value and the click counter move only for a
+      // page Chrome treats as visible.
+      window.__probe = { received: 0, dropped: 0, clicks: 0 };
+      var email = document.getElementById("email");
+      var go = document.getElementById("go");
+      var clicks = document.getElementById("clicks");
+      function admit(event) {
+        window.__probe.received++;
+        if (document.visibilityState === "hidden") {
+          window.__probe.dropped++;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return false;
+        }
+        return true;
+      }
+      email.addEventListener("keydown", admit, true);
+      email.addEventListener("keypress", admit, true);
+      go.addEventListener(
+        "click",
+        function (event) {
+          if (admit(event)) {
+            window.__probe.clicks++;
+            clicks.textContent = String(window.__probe.clicks);
+          }
+        },
+        true
+      );
+    </script>
+  </body>
+</html>
