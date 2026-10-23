@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### CI runs at most 4 cells of each matrix at once (T-6909)
+
+The org runner pool is shared (28 runners) and one run once held 15 of them.
+Each `release-gate.yml` matrix now sets `max-parallel: 4`; the cells are unchanged.
+
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
