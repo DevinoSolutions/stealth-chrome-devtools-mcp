@@ -428,3 +428,14 @@ def test_linux_total_failure_raises_naming_the_timeout(monkeypatch, capsys):
     monkeypatch.setattr(resolve_chrome, "_resolve_path", lambda: CHROME)
     assert resolve_chrome.main([]) == 1
     assert "timed out" in capsys.readouterr().err
+
+
+def test_linux_no_version_in_the_output_raises_naming_it(monkeypatch):
+    def fake_run(argv, **kwargs):
+        if argv[0] == "dpkg-query":
+            return _done("", rc=1)
+        return _done("Google Chrome")
+
+    _linux(monkeypatch, fake_run)
+    with pytest.raises(resolve_chrome.ChromeVersionError, match="no version in output"):
+        resolve_chrome._read_version(CHROME)
