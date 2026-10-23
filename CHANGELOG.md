@@ -20,7 +20,8 @@ Benefit: a PR uses 12 of the 28 cells and none of the slow Windows/macOS runners
 it finishes sooner and takes far less of the shared runner pool. Cost: a PR can be
 green and still break only on Windows, macOS or in the sdist; that is caught on the
 push to main, after the merge. The required check name (`release-gate / release-gate`)
-is unchanged.
+is unchanged. A PR's own code computes its tier, so the tier is only as trustworthy as the
+merged code: pushes to main and tags run the merged tier table, not the PR's.
 
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 

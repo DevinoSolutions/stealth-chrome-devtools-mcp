@@ -936,3 +936,46 @@ def test_the_tool_count_is_derived_from_the_registry():
 
     registry_total = sum(len(v) for v in server_mod.SECTION_TOOLS.values())
     assert len(re_mod.registry_tool_names()) == registry_total
+
+
+# ── claim verification per tier (T-6910) ────────────────────────────────────
+def _claims_doc(*rows: dict[str, object]) -> dict[str, object]:
+    return {"qualified": list(rows)}
+
+
+def test_a_main_push_still_verifies_a_claim_on_a_windows_cell(tmp_path: Path):
+    """The full tier owes Windows/macOS/sdist claims; only a PR skips them."""
+    root = tmp_path / "release-evidence"
+    work = tmp_path / "work"
+    work.mkdir()
+    for spec in re_mod.REQUIRED_CELLS:
+        bad = spec.key == "transport/Windows-X64"
+        _emit_cell(
+            root, work, spec, junit_body=SKIPPED_JUNIT if bad else JUNIT_TEMPLATE
+        )
+    claims = _claims(tmp_path, [_claim()])
+    for event in ("push", "workflow_dispatch"):
+        _, problems = _aggregate(root, claims=str(claims), event=event)
+        assert any(
+            "did not execute and pass" in p and "transport/Windows-X64" in p
+            for p in problems
+        ), event
+    _, pr_problems = _aggregate(root, claims=str(claims), event="pull_request")
+    assert not any("did not execute and pass" in p for p in pr_problems)
+
+
+def test_verify_claims_at_the_full_tier_checks_cells_the_pr_tier_skips():
+    claims = _claims_doc(_claim())
+    passed = {"transport/Linux-X64": {"tests/test_demo.py::test_alpha"}}
+    full = re_mod.verify_claims(claims, passed, tier="full")
+    assert any("transport/Windows-X64" in p and "did not execute" in p for p in full)
+    assert re_mod.verify_claims(claims, passed, tier="pr") == []
+
+
+def test_a_pull_request_still_rejects_a_mislabelled_stdio_claim_off_tier():
+    """The stdio label is a static fact about the cited cell's job, so it is
+    checked even on a cell the PR tier does not run."""
+    claims = _claims_doc(_claim(required_cells=["integration/Windows-X64"]))
+    problems = re_mod.verify_claims(claims, {}, tier="pr")
+    assert any("asserts stdio" in p for p in problems)
+    assert not any("did not execute" in p for p in problems)
