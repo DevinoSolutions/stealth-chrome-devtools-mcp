@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### A closed tab's python-binding watch is reaped (T-6561)
+
+- **`Bindings.watches` no longer keeps every tab it ever watched (T-6561, #278 review).** A tab's `TabWatch` stayed in the registry, and kept a reference to its
+  `Tab`, after the tab was closed, and a new connection to the same target replaced the watch while the old one's CDP handlers stayed attached to the old tab.
+  The watch now also listens for `Target.targetDestroyed` on the browser's connection: when its target ends it forgets the tab's bindings (there is no page left
+  to `removeBinding` on), takes its handlers off and leaves `watches`. A replaced watch detaches the same way. Handlers come off one by one, never through
+  nodriver's `remove_handler`, which deletes an event type's whole list (on the browser connection that is nodriver's own target bookkeeping). The detach runs after the event's dispatch (nodriver walks the live handler list) and the new watch is attached before `_watch_for`'s first await, so a tab closed
+  mid-install, or during the context replay, fails the install instead of leaking a watch. Closing an instance (`close_instance`) kills the browser process, so its tabs
+  report no `targetDestroyed`: their watches, and the bindings in them, are reaped by the same method on the NEXT install on any tab (every watch whose browser connection
+  is closed), not at close time; until then they stay in `watches`. Hermetic pins
+  added to `test_python_binding.py`; `tests/test_e2e_python_binding_frames.py` (real Chrome, integration) also pins the reap on a real tab close, and who is answered: a same-origin `about:blank`
+  frame calling `window.parent`'s binding is, a `srcdoc` frame and a cross-origin frame calling the binding from their own context are refused.
+
 ## 2.1.42
 
 ### Fixed: the Proactor reset pins run on Python 3.11 (T-7495)
@@ -86,17 +101,6 @@ rules backstop only for Sentry, not for the local log file.
   selection under it (three `fleet` close-guard pins failed in the full lane for exactly that, green alone). The live selection is now authoritative, an unnamed close is refused when
   EITHER the live or the discarded selection is `fleet`/`default`, a stale record is dropped when a live browser's close succeeds, and the suite clears `tool_errors`' departed
   stores before each test.
-
-### A closed tab's python-binding watch is reaped (T-6561)
-
-- **`Bindings.watches` no longer keeps every tab it ever watched (T-6561, #278 review).** A tab's `TabWatch` stayed in the registry, and kept a reference to its
-  `Tab`, after the tab was closed, and a new connection to the same target replaced the watch while the old one's CDP handlers stayed attached to the old tab.
-  The watch now also listens for `Target.targetDestroyed` on the browser's connection: when its target ends it forgets the tab's bindings (there is no page left
-  to `removeBinding` on), takes its handlers off and leaves `watches`. A replaced watch detaches the same way. Handlers come off one by one, never through
-  nodriver's `remove_handler`, which deletes an event type's whole list (on the browser connection that is nodriver's own target bookkeeping). The detach runs after the event's dispatch (nodriver walks the live handler list) and the new watch is attached before the install's first await, so a tab closed
-  mid-install fails the install instead of leaking a watch. Hermetic pins
-  added to `test_python_binding.py`; `tests/test_e2e_python_binding_frames.py` (real Chrome, integration) also pins the reap on a real tab close, and who is answered: a same-origin `about:blank`
-  frame calling `window.parent`'s binding is, a `srcdoc` frame and a cross-origin frame calling the binding from their own context are refused.
 
 ### The path tools refuse secret locations, never overwrite unasked, write owner-only and redact credentials; `get_cookies` stops returning the whole jar (F-1025)
 

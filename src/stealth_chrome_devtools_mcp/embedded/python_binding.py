@@ -38,8 +38,11 @@ description says so.
 A watch also ends with its target: ``Target.targetDestroyed`` (reported on the
 browser's connection, never the page's) forgets the tab's bindings, detaches the
 watch and removes it from ``Bindings.watches``, which would otherwise keep every
-closed tab. A watch replaced by a new connection to the same target is detached
-the same way.
+closed tab. A browser that is killed (``close_instance``) reports no
+``targetDestroyed`` for its tabs, so the next install reaps every watch whose
+browser connection is closed — the reap is the same method, run on the next
+install, not at close time. A watch replaced by a new connection to the same
+target is detached the same way.
 
 How the round-trip actually works (the old code never wired it): ``addBinding``
 exposes ``window[name]`` as a function that, when called with a **single
@@ -393,8 +396,20 @@ class TabWatch:
         The detach is deferred because nodriver's listener walks the LIVE handler
         list: removing this handler from it now would skip the one after it.
         """
-        if str(event.target_id) != self.target_id:
-            return
+        if str(event.target_id) == self.target_id:
+            self.reap()
+
+    @property
+    def dead(self) -> bool:
+        """True when the browser's connection is closed: the browser is gone and
+        no ``Target.targetDestroyed`` will ever come for this tab."""
+        browser = getattr(self.tab, "browser", None)
+        return browser is not None and bool(browser.connection.closed)
+
+    def reap(self) -> None:
+        """End this watch: forget its tab's bindings (there is no page left to
+        ``removeBinding`` on), leave the registry and, once this dispatch is
+        over, leave the connections. Idempotent."""
         for bound in self._tab_bindings():
             _forget(self.bindings, bound)
         if self.bindings.watches.get(self.target_id) is self:
@@ -403,7 +418,13 @@ class TabWatch:
 
 
 async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
-    """The watch of ``tab``, attached and replayed (made on first use)."""
+    """The watch of ``tab``, attached and replayed (made on first use).
+
+    First it reaps the watches of browsers that are gone: closing an instance
+    kills the process, so their ``Target.targetDestroyed`` never arrives.
+    """
+    for gone in [w for w in bindings.watches.values() if w.dead]:
+        gone.reap()
     target_id = str(tab.target.target_id)
     watch = bindings.watches.get(target_id)
     if watch is None or watch.tab is not tab:
@@ -422,6 +443,8 @@ async def _watch_for(tab: Tab, bindings: Bindings) -> TabWatch:
             raise ToolError("The tab was closed while the binding was being created")
     if not watch.replayed:
         await watch.replay_contexts()
+        if bindings.watches.get(target_id) is not watch:
+            raise ToolError("The tab was closed while the binding was being created")
     return watch
 
 
