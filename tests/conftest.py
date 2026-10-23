@@ -260,6 +260,38 @@ def _in_memory_storage_hygiene():
 
 
 @pytest.fixture(autouse=True)
+def _tool_errors_departed_stores_hygiene():
+    """No test may leave a departed-browser record behind for the next one (F-1022).
+
+    ``embedded/tool_errors.py`` keeps module-level stores (``_exited``,
+    ``_dead_on_close``, ``_departed``) that production fills as browsers leave a
+    backend and that live as long as the PROCESS; a test run shares one process,
+    and the instance ids the suites use are few and reused (``i-fleet`` in
+    ``test_browser_exit_relaunch`` / ``test_browser_health`` /
+    ``test_unnamed_spawn_never_opens_default``). A record one test left for
+    ``i-fleet`` was read by a later test's ``close_instance`` as that browser's
+    selection and unlocked the shared-session guard, so three fleet pins failed
+    in the full lane and passed alone. CLEARED, not asserted, on
+    ``_in_memory_storage_hygiene``'s precedent: the writers are production code
+    that is right to write. ``TestCloseGuard.test_a_stale_discard_never_unlocks_a_shared_close`` is the pin
+    that the product no longer depends on this isolation.
+
+    The import is function-local for the reason ``_in_memory_storage_hygiene``
+    gives: it reaches ``embedded/``.
+    """
+    from stealth_chrome_devtools_mcp.embedded import tool_errors
+
+    def clear() -> None:
+        tool_errors._exited.clear()
+        tool_errors._dead_on_close.clear()
+        tool_errors._departed.clear()
+
+    clear()
+    yield
+    clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_settings_cache():
     """Every test gets a fresh Settings read. ``get_settings()`` is process-cached
     (``@lru_cache``), so without this an env mutation via ``monkeypatch`` /

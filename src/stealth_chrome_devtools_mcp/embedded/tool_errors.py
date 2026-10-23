@@ -60,9 +60,58 @@ _departed: dict[str, str] = {}
 _DEPARTED_KEPT = 64
 
 
-def remember_departed(instance_id: str, data: dict[str, object]) -> None:
-    """Note, as an instance leaves the manager (closed, or exited on its own),
-    which directory its browser was on, so a later miss can say how to relaunch."""
+#: id -> the spawn's recorded ``profile_selection``, for browsers that died ON THEIR
+#: OWN and were discarded by the manager, that no ``close_instance`` has answered
+#: for yet (F-1022); oldest first out. The selection is kept because the discard
+#: pops the spawn diagnostics the tool layer reads, and without it a close that
+#: arrives second cannot tell a disposable clone from the shared ``fleet`` or
+#: ``default`` browser, so it would skip the seed refresh and the shared-session
+#: refusal that the same close does when it is the first to notice the crash.
+_exited: dict[str, dict[str, object]] = {}
+
+
+#: ids ``close_instance`` itself claimed while their process was already dead, until
+#: the tool layer has read it (F-1022): the close-first twin of ``_exited``, so the
+#: tool knows a crash without a lookup (a lookup discards, F-966).
+_dead_on_close: dict[str, None] = {}
+
+
+def note_dead_on_close(instance_id: str) -> None:
+    """Record that the close now claiming *instance_id* found its process dead."""
+    _dead_on_close[instance_id] = None
+    while len(_dead_on_close) > _DEPARTED_KEPT:
+        del _dead_on_close[next(iter(_dead_on_close))]
+
+
+def take_dead_on_close(instance_id: str) -> bool:
+    """Whether the close that just claimed *instance_id* found it dead; read once."""
+    return _dead_on_close.pop(instance_id, 0) is None
+
+
+def claim_exited(instance_id: str) -> bool:
+    """Whether *instance_id* is a browser that died on its own and nobody has closed
+    since: one close claims it, so a second reports a miss like any double close."""
+    return _exited.pop(instance_id, None) is not None
+
+
+def exited_selection(instance_id: str) -> dict[str, object] | None:
+    """The ``profile_selection`` of an unclaimed browser that died on its own, or
+    ``None`` when *instance_id* is not one; reading it does not claim it."""
+    return _exited.get(instance_id)
+
+
+def remember_departed(
+    instance_id: str,
+    data: dict[str, object],
+    exited: dict[str, object] | None = None,
+) -> None:
+    """Note, as an instance leaves the manager (closed, or on its own: *exited* is
+    then its ``profile_selection``, ``{}`` when it recorded none), which directory
+    its browser was on, so a later miss can say how to relaunch."""
+    if exited is not None:
+        _exited[instance_id] = exited
+        while len(_exited) > _DEPARTED_KEPT:
+            del _exited[next(iter(_exited))]
     directory = getattr(data.get("options"), "user_data_dir", None)
     if isinstance(directory, str) and directory:
         _departed[instance_id] = directory

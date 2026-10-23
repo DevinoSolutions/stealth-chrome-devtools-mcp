@@ -577,7 +577,7 @@ class TestEveryFirstPartyClientSendsTheToken:
         self, tmp_path, monkeypatch
     ):
         """The same callers once the token file is not theirs to read: the probes
-        say not-ready (fail-closed), the heartbeat says not-alive, and the CLI's
+        say not-ready (fail-closed), the heartbeat says unauthorized, and the CLI's
         session raises the 401 that ``cli_call`` turns into one sentence."""
         from stealth_chrome_devtools_mcp import cli_call
 
@@ -588,7 +588,12 @@ class TestEveryFirstPartyClientSendsTheToken:
             assert not await asyncio.to_thread(backend_probe.ready, url, 5.0)
             beat = backend_probe.Heartbeat(url)
             try:
-                assert not await asyncio.to_thread(beat.alive, 5.0)
+                # The heartbeat says "unauthorized", not "dead" (T-6367): the
+                # backend answered, so the watchdog must not strike it.
+                assert (
+                    await asyncio.to_thread(beat.verdict, 5.0)
+                    == backend_probe.VERDICT_UNAUTHORIZED
+                )
             finally:
                 beat.close()
             with pytest.raises(BaseException) as caught:  # noqa: PT011  PERMANENT(the SDK wraps the 401 in an ExceptionGroup; _verdict unwraps it, asserted next)

@@ -465,7 +465,7 @@
     "tags": []
   },
   "create_dynamic_hook": {
-    "description": "Create a new dynamic hook with AI-generated Python function.\n\nThis is the new powerful hook system that allows AI to write custom Python functions\nthat process network requests in real-time with no pending state.\n\nArgs:\n    name (str): Human-readable hook name\n    requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)\n    function_code (str): Python function code that processes requests (must define process_request(request))\n    instance_ids (Optional[List[str]]): Browser instances to apply hook to (all if None)\n    priority (int): Hook priority (lower = higher priority)\n\nReturns:\n    Dict[str, Any]: Hook creation result with hook_id\n\nExample function_code:\n    ```python\n    def process_request(request):\n        if \"example.com\" in request[\"url\"]:\n            return HookAction(action=\"redirect\", url=\"https://httpbin.org/get\")\n        return HookAction(action=\"continue\")\n    ```",
+    "description": "Create a new dynamic hook with AI-generated Python function.\n\nThis is the new powerful hook system that allows AI to write custom Python functions\nthat process network requests in real-time with no pending state.\n\nThe function_code and any requirements custom_condition run as Python in the\nbackend process on the host, through `exec` and `eval`. The trimmed builtins they\nare given are a convenience, not a sandbox: they are not a security boundary, and\nthe code can reach the host (for example through the `fnmatch` module it is given).\n\nArgs:\n    name (str): Human-readable hook name\n    requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)\n    function_code (str): Python function code that processes requests (must define process_request(request))\n    instance_ids (Optional[List[str]]): Browser instances to apply hook to (all if None)\n    priority (int): Hook priority (lower = higher priority)\n\nReturns:\n    Dict[str, Any]: Hook creation result with hook_id\n\nExample function_code:\n    ```python\n    def process_request(request):\n        if \"example.com\" in request[\"url\"]:\n            return HookAction(action=\"redirect\", url=\"https://httpbin.org/get\")\n        return HookAction(action=\"continue\")\n    ```",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -553,7 +553,7 @@
     "tags": []
   },
   "create_python_binding": {
-    "description": "Create a binding that allows JavaScript to call Python functions.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    binding_name (str): Name for the binding.\n    python_code (str): Python function code (as string).\n\nReturns:\n    Dict[str, Any]: Binding creation result.",
+    "description": "Create a binding that allows JavaScript to call Python functions.\n\nThe Python code runs with `exec` and full builtins inside the backend process\non the host. There is no sandbox: the function can read files and start\nprograms like any code this process runs. The binding answers only script in\nthe page context that was current on this tab when it was created, and is\ndropped when that page navigates or reloads. Script in that page can still\ncall it, including same-origin frames, so create one only on a page you trust.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    binding_name (str): Name for the binding.\n    python_code (str): Python function code (as string).\n\nReturns:\n    Dict[str, Any]: Binding creation result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1148,14 +1148,21 @@
     "tags": []
   },
   "export_debug_logs": {
-    "description": "Export debug logs to a file using the fastest available method with timeout protection.\n\nArgs:\n    filename (str): Name of the file to export to.\n    max_errors (int): Maximum number of errors to export (default: 100).\n    max_warnings (int): Maximum number of warnings to export (default: 100).\n    max_info (int): Maximum number of info logs to export (default: 100).\n    include_all (bool): Include all logs regardless of limits (default: False).\n    format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n                 'auto' chooses fastest format based on data size:\n                 - Small data (<100 items): JSON (human readable)\n                 - Medium data (100-1000 items): Pickle (fast binary)\n                 - Large data (>1000 items): Gzip-Pickle (fastest, compressed)\n\nReturns:\n    str: Path to the exported file.",
+    "description": "Export debug logs to a file using the fastest available method with timeout protection.\n\nArgs:\n    filename (Optional[str]): File to export to. When omitted, a NEW file\n        `debug_log_<UTC timestamp>_<random>.json` is created in the working\n        directory, so repeated calls never collide; the answer is its path.\n    max_errors (int): Maximum number of errors to export (default: 100).\n    max_warnings (int): Maximum number of warnings to export (default: 100).\n    max_info (int): Maximum number of info logs to export (default: 100).\n    include_all (bool): Include all logs regardless of limits (default: False).\n    format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').\n                 'auto' chooses fastest format based on data size:\n                 - Small data (<100 items): JSON (human readable)\n                 - Medium data (100-1000 items): Pickle (fast binary)\n                 - Large data (>1000 items): Gzip-Pickle (fastest, compressed)\n    overwrite (bool): Replace an explicit `filename` that already exists\n        (default: False, an existing file is refused). The file is created owner-only (0600) and\n        may not lie in a credential store, browser profile or this server's state.\n\nReturns:\n    str: Path to the exported file.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
         "filename": {
-          "default": "debug_log.json",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "format": {
           "default": "auto",
@@ -1176,6 +1183,10 @@
         "max_warnings": {
           "default": 100,
           "type": "integer"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1195,7 +1206,7 @@
     "tags": []
   },
   "export_network_data": {
-    "description": "Export network data to JSON file.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    filepath (str): Path to save JSON file.\n\nReturns:\n    Dict[str, Any]: ``{\"success\": bool}``, plus a ``capture_note`` when body\n    capture is off (exported responses have no bodies until it is enabled).",
+    "description": "Export network data to JSON file.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    filepath (str): Path to save JSON file. Created owner-only (0600); it may\n        not lie in a credential store, browser profile or this server's state.\n    overwrite (bool): Replace `filepath` if it already exists (default: False,\n        an existing file is refused).\n    include_credentials (bool): Keep the values of Cookie, Set-Cookie and\n        Authorization headers and the request cookies (default: False, each\n        value is exported as \"REDACTED\").\n\nReturns:\n    Dict[str, Any]: ``{\"success\": bool}``, plus a ``capture_note`` when body\n    capture is off (exported responses have no bodies until it is enabled).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -1203,8 +1214,16 @@
         "filepath": {
           "type": "string"
         },
+        "include_credentials": {
+          "default": false,
+          "type": "boolean"
+        },
         "instance_id": {
           "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "required": [
@@ -1936,11 +1955,15 @@
     "tags": []
   },
   "get_cookies": {
-    "description": "Get cookies for current page or specific URLs.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    urls (Optional[List[str]]): Optional list of URLs to get cookies for.\n\nReturns:\n    List[Dict[str, Any]]: List of cookies.",
+    "description": "Get cookies for the current page, or for specific URLs.\n\nWith no `urls` this returns the cookies that apply to the page the tab shows\nnow (its live URL; none for a page with no http/https URL). The whole browser jar — every site, HttpOnly included —\nis returned only when `all_sites=True` is passed.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    urls (Optional[List[str]]): Optional list of URLs to get cookies for.\n    all_sites (bool): Return every cookie in the browser, for every site\n        (default: False). Ignored when `urls` is given.\n\nReturns:\n    List[Dict[str, Any]]: List of cookies.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
       "properties": {
+        "all_sites": {
+          "default": false,
+          "type": "boolean"
+        },
         "instance_id": {
           "type": "string"
         },
@@ -3754,7 +3777,7 @@
     "tags": []
   },
   "take_screenshot": {
-    "description": "Take a screenshot of the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    full_page (bool): Capture full page (not just viewport).\n    format (str): Image format ('png' or 'jpeg').\n    file_path (Optional[str]): Optional file path to save screenshot to.\n\nReturns:\n    Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.",
+    "description": "Take a screenshot of the page.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    full_page (bool): Capture full page (not just viewport).\n    format (str): Image format ('png' or 'jpeg').\n    file_path (Optional[str]): Optional file path to save screenshot to. Created\n        owner-only (0600); it may not lie in a credential store, browser profile\n        or this server's state.\n    overwrite (bool): Replace `file_path` if it already exists (default: False,\n        an existing file is refused).\n\nReturns:\n    Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -3780,6 +3803,10 @@
         },
         "instance_id": {
           "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "type": "boolean"
         },
         "tab_id": {
           "anyOf": [

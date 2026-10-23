@@ -124,6 +124,8 @@ from nodriver.core.connection import ProtocolException
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module a leaf
+    from collections.abc import Callable
+
     from nodriver import Tab
 
 #: ``wait_until`` -> the ``Page.lifecycleEvent`` name that marks it for the
@@ -410,7 +412,8 @@ async def _send_navigate(
     """Send ``Page.navigate`` and return Chrome's answer, or raise
     ``TimeoutError`` when the tab shows no sign of life (T-6363).
 
-    *life* is set by the caller's ``Page.frameStartedLoading`` listener. A tab
+    *life* is set by the caller's listener for the main frame's
+    ``Page.frameStartedLoading``. A tab
     that stays silent for :data:`ACCEPT_SECONDS` (or a third of *budget_seconds*)
     is a stale one, and the ``TimeoutError`` is the one `progress.accepted` False
     already marks as such, early enough for the ONE recovery retry (F-824) to
@@ -449,6 +452,30 @@ async def _send_navigate(
             sending.cancel()
 
 
+def _main_frame_listener(
+    tab: Tab, life: asyncio.Event
+) -> Callable[[cdp.page.FrameStartedLoading, object], None]:
+    """The ``Page.frameStartedLoading`` handler that sets *life* for the tab's
+    MAIN frame only.
+
+    A page target's main frame id IS its target id (CDP). Only the main frame
+    starting to load is a sign of life: an iframe of the stale page loading would
+    lift the bound while the navigation we sent is still unseen. With no target
+    id to compare, any frame counts (the older, looser behaviour). The id equality
+    is the CDP convention, measured on real Chrome 155 (two tabs, Windows, the
+    2.1.40 prove): a case that broke it (prerender activation, BFCache restore)
+    would make the attempt read stale at the bound, so the tab is replaced and
+    the navigation retried, never a hang.
+    """
+    main_frame = getattr(getattr(tab, "target", None), "target_id", None)
+
+    def on_started(event: cdp.page.FrameStartedLoading, _c: object = None) -> None:
+        if main_frame is None or str(event.frame_id) == str(main_frame):
+            life.set()
+
+    return on_started
+
+
 async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget and progress, plus F-965's referrer)
     tab: Tab,
     url: str,
@@ -475,8 +502,7 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
     arrived = asyncio.Event()
     life = asyncio.Event()
 
-    def on_started(_event: cdp.page.FrameStartedLoading, _c: object = None) -> None:
-        life.set()
+    on_started = _main_frame_listener(tab, life)
 
     def on_lifecycle(
         event: cdp.page.LifecycleEvent, _connection: object = None

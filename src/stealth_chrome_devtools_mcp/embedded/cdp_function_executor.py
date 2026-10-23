@@ -162,7 +162,7 @@ class CDPFunctionExecutor:
         """
         Initializes the CDPFunctionExecutor instance.
         """
-        self._python_bindings: dict[str, Callable] = {}
+        self._python_bindings = python_binding.Bindings()
         self._persistent_functions: dict[str, dict[str, str]] = {}
 
     async def enable_runtime(self, tab: Tab) -> bool:
@@ -814,12 +814,12 @@ class CDPFunctionExecutor:
             Dict[str, Any]: Result of binding creation.
         """
         await self.enable_runtime(tab)
-        self._python_bindings[binding_name] = python_function
         # The genuine Runtime.bindingCalled round-trip lives in python_binding
-        # (extracted so this file stays within its LOC budget). Raises ToolError
-        # on failure — the executor no longer returns a lying success dict.
+        # (extracted so this file stays within its LOC budget), which also keeps
+        # the registry per tab and answers only the creating execution context.
+        # Raises ToolError on failure.
         return await python_binding.install_binding(
-            tab, binding_name, self._python_bindings
+            tab, binding_name, self._python_bindings, python_function
         )
 
     async def execute_python_in_browser(
@@ -989,7 +989,7 @@ class CDPFunctionExecutor:
             Dict[str, Any]: Information about the executor.
         """
         return {
-            "python_bindings": list(self._python_bindings.keys()),
+            "python_bindings": list(dict.fromkeys(n for _, n in self._python_bindings)),
             "persistent_functions": self._persistent_functions.get(instance_id, {})
             if instance_id
             else self._persistent_functions,

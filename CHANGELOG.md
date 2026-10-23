@@ -38,6 +38,115 @@ quote hook source), query strings in the URLs the hook and clone logs record,
 and a sweep of every other free-text log line for secrets, which the scrubber
 rules backstop only for Sentry, not for the local log file.
 
+### Four CI integration flakes (F-1014, F-1015, F-1016, F-1022)
+
+- **A slow Chrome is no longer refused as a stranger (F-1014, T-5899).** `devtools_port.confirm_ours` gave the browser 10 s to answer
+  `SystemInfo.getProcessInfo`, and on a starved macOS runner our own healthy Chrome did not, so the spawn failed with "did not say which process it
+  is". The 10 s stays as a floor; past it the SAME request keeps being waited on, up to `IDENTITY_PATIENCE_SECONDS` (60 s), for as long as the pid we
+  launched is running. The proof is unchanged (the answer's `browser` pid must be ours or a descendant's, a stranger is refused the moment it answers),
+  a launcher that is gone gets no extra wait, silence past the patience is still a refusal, and a late answer is logged with how long it took.
+- **The SIGTERM pin waits for a server that is serving (F-1015, T-5901).** `test_sigterm_on_a_real_backend_is_a_clean_shutdown` sent SIGTERM as soon as
+  `Application startup complete` was logged, which the lifespan writes BEFORE uvicorn binds the socket; a signal in that window makes uvicorn's
+  `_serve` return without `shutdown()` and the log has no `Application shutdown complete`. The pin now also waits for an HTTP answer. Test-only: no
+  product code changes (the same early return noises a stop sent in that few-millisecond window, which is left as is).
+- **A failed tab close names its type (F-1016, T-5900).** `asyncio.wait_for` raises `TimeoutError()` with no text, so the warning read
+  `Failed to close tab for <id>: ` and a CI failure said nothing. The line is now `...: TimeoutError` / `...: <Type>: <text>`. Diagnosis only: the
+  race behind that one occurrence is not proven (`audit/stage2/finding_F1016_tab_close_failure_names_no_type.md`).
+- **`close_instance` of a crashed browser answers `closed: True` whichever call noticed the crash (F-1022, T-5956, closes F-789).** A browser that died on its
+  own was discarded by the next tool call, after which `close_instance` found nothing and answered `False`; when the failure surfaced first, the same close
+  answered `True`, so `test_crash_recovery_after_the_owned_chrome_is_killed` flipped on macOS. The discard now records the id and the next `close_instance`
+  claims it once (True; a second close, or an id never held, is False). The resilience pin asserts `True`; both orderings are pinned hermetically.
+  The two orderings now also end in the same STATE, not only the same answer. The discard used to pop the spawn's `profile_selection` that `close_instance`
+  reads, so a close arriving second skipped what the same close does when it notices the crash itself: it left the crashed clone's directory in
+  `clone_protection.PROTECTED` (sweep-exempt until a backend restart, a disk leak), skipped the `default` seed refresh, and never refused an unnamed close
+  of a crashed `fleet` or `default` browser. A crash discard now releases the clone directory itself (`clone_protection.release_selection`, the one rule for
+  "is this a disposable clone", also used by `close_instance`), and keeps the selection until that browser is closed. The
+  `close_instance` tool still does no instance lookup (a lookup discards a dead browser, F-966): the manager notes, as it claims an instance, that its
+  process was already dead, so both orderings answer alike; because a discard already released the directory (which a respawn may since have reserved), a
+  close of a discarded id never releases it again. **Decisions:** the seed is NOT refreshed from a `default` browser known to have crashed (its profile may be torn and master-profile
+  loss is top severity): the answer is `seed_refreshed: false, seed_error: "default-crashed"` in both orderings; the shared-session refusal is kept (an unnamed close still names
+  the `fleet`/`default` profile it was, and a refused close does not consume the claim, so `session="fleet"` still answers `closed: True`).
+  **A discard record never unlocks the shared-session guard:** a re-attach reuses recorded instance ids (F-888), so a record for an id could outlive and outrank the LIVE
+  selection under it (three `fleet` close-guard pins failed in the full lane for exactly that, green alone). The live selection is now authoritative, an unnamed close is refused when
+  EITHER the live or the discarded selection is `fleet`/`default`, a stale record is dropped when a live browser's close succeeds, and the suite clears `tool_errors`' departed
+  stores before each test.
+
+### The path tools refuse secret locations, never overwrite unasked, write owner-only and redact credentials; `get_cookies` stops returning the whole jar (F-1025)
+
+T-6207 (security sweep 2026-10-22, F-E / F-F / F-H): four tools take a path a hostile page can steer an agent into choosing, and `get_cookies` documented "current page" while returning every cookie of every site.
+New `embedded/path_confinement.py` is the one home. **A deny-list, not an allow-root**, because `settings` has no allow-root to extend and inventing one would break every working upload/export until an operator configured it on a local single-user tool: `~/.ssh`, `~/.aws`, `~/.config/gcloud` (and `AppData/Roaming/gcloud`), `~/.gnupg`, the Chrome/Chromium/Edge/Brave/Firefox profile roots on all three platforms, `.env` / `.env.*` files (not `.example`/`.sample`/`.template`/`.dist`), this server's state directory and the browser-session root. It is checked on the REAL path (symlinks and Windows junctions followed) and the tool uses the path it checked; the refusal is a `ToolError` that names the rule, never the path (F-877).
+`upload_file` refuses a denied path before the page ever sees it. `export_debug_logs`, `export_network_data` and `take_screenshot(file_path=)` refuse a denied destination, refuse to replace an existing file unless the new `overwrite=True` is passed (one atomic `O_EXCL`, on the FINAL path: the pickle formats rewrite `.json` to `.pkl`), and create the file `0600` on POSIX (a no-op on Windows). A failed screenshot removes only the empty file it made. **Behaviour change:** a repeat call to the same EXPLICIT path now needs `overwrite=True`. `export_debug_logs` with no `filename` is unaffected: it writes a new `debug_log_<UTC timestamp>_<random>.json` (O_EXCL) in the working directory each call and answers with that path (`filename` now defaults to `None`, not `debug_log.json`). It is the only tool of the four with a default output name.
+`export_network_data` replaces the values of `Cookie`, `Set-Cookie`, `Authorization` and `Proxy-Authorization` (case-blind) and the request cookie map with `REDACTED`, the names kept; `include_credentials=True` keeps them. `get_cookies` with no `urls` now returns the cookies of the page the tab shows NOW (the live URL, the same `tab_identity.refreshed` that `set_cookie` uses; a tab with no http/https URL answers `[]`, never the jar); the whole jar, HttpOnly included, is the explicit `all_sites=True`. The doc already said "current page", so the behaviour moved, not the sentence.
+The served surface changes on purpose: `upload_file`'s refusal is in its error only; `export_debug_logs`, `export_network_data` and `take_screenshot` gain `overwrite`, `export_network_data` gains `include_credentials`, `get_cookies` gains `all_sites`, so `tests/goldens/tool_surface.json` is regenerated with `tools/dump_tool_surface.py --write` in this same change. Not covered here: `import_network_data` (F-G, a read that echoes nothing), the `browser://{id}/cookies` resource (`server.py`), and `execute_cdp_command`, which can still read the jar by design.
+Review pass (PR #274): **Windows spellings.** `os.path.realpath` keeps a `\\?\C:\...` prefix, so `\\?\<home>\.ssh\id_x` used to read and `\\?\<home>\.aws\credentials` used to be truncated past the deny-list; the prefix is now stripped before comparing, and UNC (`\\server\share`, `\\localhost\C$\...`, `\\?\UNC\...`) and device (`\\.\`, `\??\`, `\\?\GLOBALROOT`, a volume GUID) paths are refused outright by every path tool, as typed and as resolved, with the rule named and never the path. (A file on a mapped network drive is therefore refused too.)
+**Deny-list widened:** `.netrc` / `_netrc` / `.git-credentials` / `.npmrc` / `.pypirc` by NAME wherever they sit (like `.env`), `~/.config/gh`, `~/.config/git/credentials`, `~/.docker`, `~/.kube`, `~/.azure`, `~/.claude`, `~/.stealth-mcp`, macOS `~/Library/Keychains`, Windows `AppData/{Roaming,Local}/Microsoft/{Credentials,Protect,Vault}`, the Chrome Dev/SxS/Canary/`google-chrome-beta`/`-unstable`, Edge Beta/Dev/SxS, Vivaldi and Opera profile roots, and the platform-default browser-session root in addition to the configured one (so redirecting `STEALTH_MCP_BROWSER_SESSION_ROOT` does not un-protect profiles left in the default place).
+**Redaction widened:** with `include_credentials=False` the export also hides `x-api-key`, `x-auth-token`, `x-csrf-token`, `x-xsrf-token`, `x-amz-security-token` and any header whose name contains `token`, `secret`, `api-key` or `apikey` (case-blind; one home, `network_export.is_credential_header`).
+**An unwritable destination** (missing folder, permission, a directory in the file's place, a folder that cannot be created) is a `ToolError` that names the file's basename and the OS reason, never the folder: `str(OSError)` embeds the absolute path (F-877), and the OSError is no longer chained.
+Still deferred (follow-up task, not covered by F-1025): the `browser://{id}/cookies` resource, `execute_cdp_command` (`DOM.setFileInputFiles` and the cookie methods), `post_data`, query strings and bodies in a network export, truncation before the capture with `overwrite=True` (`take_screenshot`), hardlinks to a secret, autostart / shell-rc / `.git/hooks` write targets, and the check-then-use gap between `upload_file` and the form submit. `%APPDATA%` / `%LOCALAPPDATA%` redirected away from `<home>\AppData` are not read (env access has one home, `settings`).
+
+### A refused loopback dial is retried, and the navigate bound counts only the main frame (F-1026, T-6363 part 2)
+
+`backend_client.http_client`, the one transport every CLI verb and the stdio proxy's bridge ride, now builds its `httpx.AsyncClient` over
+`httpx.AsyncHTTPTransport(retries=3)`, so a backend that is mid-restart and refuses (or times out) the first dial is dialled again instead of failing
+the call. httpcore retries only connection establishment (`ConnectError`, `ConnectTimeout`), before a single request byte is written, so a tool can
+never run twice because of it; `proxy_selfheal`'s replay is untouched. Pins drive the real client against a real loopback listener whose first dial is
+refused (it fails with `retries=0`), and a request that WAS sent and whose connection was then dropped is seen by the server exactly once.
+The cost is on a backend that is really down: it now takes about 1.5 s (backoffs of 0, 0.5 and 1 s) to report the refusal, on
+every verb, and a dial that hangs rather than being refused can take up to four connect timeouts. Both are loopback-only.
+
+Three follow-ups to the navigate bound above. Only the MAIN frame's `Page.frameStartedLoading` (the frame whose id is the tab's target id) lifts the
+bound now; a stale page's iframe loading no longer counts as the navigation having started. The 10 s ceiling also applies when the budget is larger
+(it is `min(10 s, timeout / 3)`), so a CPU-starved first navigation that is silent for more than 10 s is treated as stale: the tab is replaced and the
+navigation retried once; a PINNED caller gets a `ToolError` after 10 s of silence and no retry. Once the main frame has started, the attempt keeps the
+whole budget before it is called stale. The `Page.frameStartedLoading` listener is pinned to be removed however the attempt ends.
+
+### The gated load page is a registered fixture route (F-1000, T-3102)
+
+- **The F-1000 gated load page is an ordinary route (T-3102).** `/cov/gated_load.html` moved out of `test_e2e_load_milestone.py` (a second page builder registered by `monkeypatch.setitem`) into `fixture_routes_cov`, registered in `ROUTES` and `DYNAMIC_PAGES` like its `/cov/*` siblings. Test-only, behaviour unchanged.
+
+### A 401 is its own heartbeat verdict, not a strike; the token regex is exact; Windows refuses a foreign-owned token file (F-1018, T-6367)
+
+Follow-ups from the F-1018 bearer-token review. The watchdog's `Heartbeat` read a 401 as "dead", so a client that could not read the token file
+(deleted, locked by antivirus, another user's) struck a HEALTHY backend three times, the confirmation probe 401ed the same way, and the backend was
+condemned and replaced (one that owned browsers was spared by F-886, an idle one was killed), with only a debug line to show for it. `Heartbeat.verdict`
+now answers `alive`, `unauthorized` or `dead`; `alive()` is False only for `dead`, so a 401 is never a strike, and the 401 sentence
+(`backend_token.UNAUTHORIZED`) is logged at WARNING once per run of 401s instead of per beat. The readiness and identity probes (`ready`, `await_ready`)
+are unchanged and still read a 401 as not ready. `backend_token`'s token pattern is `{43}`, not `{43,}`, so a file that was appended to is replaced
+instead of trusted. On Windows `_refuse_a_foreign_file` now compares the file's owner SID (`GetNamedSecurityInfoW`) with the current user's and
+refuses a token file owned by anyone else, or whose owner cannot be read, with the same sentence POSIX gives; before it returned at once on Windows, so
+a pre-existing token file owned by another principal was accepted (it was only re-ACLed, and its owner keeps implicit WRITE_DAC). A token file made by
+an elevated process is owned by the Administrators group (the token's default owner) rather than the user, so the token's user and its default owner are both accepted and any other owner is refused. A 401 to the heartbeat after an outage or a 200 logs the warning again. Not done: the cold-start and self-heal paths still read a 401 as not ready, so a client that cannot read the token can still have an idle healthy backend replaced (T-6550); and a
+canary that an `Authorization` header never reaches a Sentry event (`observability._scrub_event` removes no headers by name; safety rests on the
+SDK's defaults, and a real canary needs a live Sentry client).
+
+### A python binding answers only the page it was made for, and the tool descriptions say plainly that hooks and bindings are host Python (F-L, T-6206)
+
+`create_python_binding` runs the caller's Python in the backend process with real builtins and registers it with `Runtime.addBinding`, which
+Chrome exposes to every frame of the tab, cross-origin iframes included, and keeps across navigations. `on_binding_called` ignored the calling
+context, and the registry was one name-keyed dict shared by every instance (a second instance's binding of the same name replaced the first). So
+any script a tab ever loaded after a binding was made could call host Python with arguments of its choosing. Now each binding is bound to its tab
+(the registry key is `(target_id, name)`) and to the main frame's default execution context, learned from `Runtime.executionContextCreated`
+(replayed for every existing context when the tab's watch disables and re-enables `Runtime` once, handlers attached first) and kept as BOTH
+`id` and `uniqueId`, because ids are per-isolate counters that repeat across renderer processes. `bindingCalled`'s own `executionContextId`
+must equal it. A call from any other context is dropped without running the function and without a reply, and logged at WARNING with the
+binding, tab and both context ids but never the arguments (once per calling context, at most 16 per binding, so a page cannot flood the
+log). The binding is dropped (its registry entry goes and `Runtime.removeBinding` is sent) on any of: `executionContextDestroyed` naming
+its id or its `uniqueId`, `executionContextsCleared`, a context created with the same id but another `uniqueId` (or a new main-frame default
+context), or a main-frame `Page.frameNavigated`. The context is read and the binding registered with no await between, and the creation
+re-checks after `Runtime.addBinding` and after the wrapper is injected (in that context, by `uniqueContextId`), so a navigation in between
+makes it raise and leave nothing registered. If Chrome reports no default context for the main frame the tool raises and registers nothing.
+One handler set per tab, however many bindings: each tab has a single watch that dispatches by registry lookup, where each create used to
+add three more handlers for the life of the tab. Re-creating a name on a tab replaces its binding. `get_function_executor_info` still lists
+binding names. Not done: script in the creating context itself (the page's own scripts, same-origin frames included) can still call the
+binding, because that is what a binding is for, so one should be created only on a page that is trusted; the Python is still unsandboxed
+host code; and a closed tab's registry entry is not reaped. Part 2 of F-L: `create_dynamic_hook`'s `exec` of `function_code` and `eval` of
+`custom_condition` use a trimmed `__builtins__` that reads as a sandbox and is not one (the injected `fnmatch` reaches `os`). No sandbox is
+built. `dynamic_hook_system`'s docstring and comments, and the `create_dynamic_hook` and `create_python_binding` descriptions, now say it is host
+Python exec. The `create_dynamic_hook` and `create_python_binding` entries in the SOFT golden `tests/goldens/tool_surface.json` change for those
+descriptions (the latter adds "including same-origin frames") and nothing else.
+
+## 2.1.40
+
 ### CI cancels a pull request's superseded runs (T-5430)
 
 `test.yml` now has a `concurrency` group keyed on the PR number (or the ref)

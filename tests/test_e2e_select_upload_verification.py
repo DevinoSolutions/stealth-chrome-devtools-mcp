@@ -363,8 +363,11 @@ async def test_a_multiple_select_that_drops_options_fires_the_events(
 
 
 @pytest.fixture
-def two_files(tmp_path):
-    first, second = tmp_path / "a.txt", tmp_path / "bb.txt"
+def two_files(tmp_path_factory):
+    # NOT ``tmp_path``: ``tmp_empty_root`` makes that the browser-session root,
+    # which upload_file refuses to read from (F-1025's secret-location deny-list).
+    uploads = tmp_path_factory.mktemp("uploads")
+    first, second = uploads / "a.txt", uploads / "bb.txt"
     first.write_text("a", encoding="utf-8")
     second.write_text("bb", encoding="utf-8")
     return str(first), str(second)

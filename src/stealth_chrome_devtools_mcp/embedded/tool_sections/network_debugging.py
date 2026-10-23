@@ -191,19 +191,32 @@ async def search_network_requests(
     return result
 
 
-async def export_network_data(instance_id: str, filepath: str) -> dict[str, Any]:
+async def export_network_data(
+    instance_id: str,
+    filepath: str,
+    overwrite: bool = False,
+    include_credentials: bool = False,
+) -> dict[str, Any]:
     """
     Export network data to JSON file.
 
     Args:
         instance_id (str): Browser instance ID.
-        filepath (str): Path to save JSON file.
+        filepath (str): Path to save JSON file. Created owner-only (0600); it may
+            not lie in a credential store, browser profile or this server's state.
+        overwrite (bool): Replace `filepath` if it already exists (default: False,
+            an existing file is refused).
+        include_credentials (bool): Keep the values of Cookie, Set-Cookie and
+            Authorization headers and the request cookies (default: False, each
+            value is exported as "REDACTED").
 
     Returns:
         Dict[str, Any]: ``{"success": bool}``, plus a ``capture_note`` when body
         capture is off (exported responses have no bodies until it is enabled).
     """
-    success = await rt.network_interceptor.export_to_json(instance_id, filepath)
+    success = await rt.network_interceptor.export_to_json(
+        instance_id, filepath, overwrite, include_credentials
+    )
     result: dict[str, Any] = {"success": success}
     filters = await rt.network_interceptor.get_capture_filters(instance_id)
     if not filters.get("capture_bodies"):

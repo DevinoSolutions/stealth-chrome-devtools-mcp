@@ -48,7 +48,9 @@ now an assertion of recovery, so three of the four recover today:
   hold the full contract, including recovery, and are `satisfied`.
 * **MQ-126** (the browser is killed) fails on one point: the very call the
   product's own error message tells you to make, ``close_instance``, returns
-  ``False`` for a browser that is provably gone (F-789). Everything else — no
+  ``False`` for a browser that is provably gone (F-789, closed by F-1022: it
+  now answers ``closed: True`` whichever side of the call the crash is noticed
+  on, and this pin asserts that). Everything else — no
   orphan, removable profile, working fresh spawn — does hold.
 * **MQ-128** (navigation deadlines) times out exactly as specified, on the
   product's own deadline, with the M6-pinned message. Its recovery half —
@@ -341,18 +343,21 @@ async def _reap(iid: str) -> None:
 async def test_crash_recovery_after_the_owned_chrome_is_killed(
     instance, fixture_app_server
 ):
-    """PINS CURRENT BEHAVIOR incl. known quirk F-789; update deliberately when
-    it lands. Killing the owned Chrome tree mid-session, then calling the next
-    tool, gives a bounded typed failure with an actionable message — and that
-    message tells the caller to "close the instance with close_instance and
-    spawn a new one". ``close_instance`` then returns **False**.
+    """PINS CURRENT BEHAVIOR; F-789 (``close_instance`` answering False for a
+    browser that is gone) is closed by F-1022, so this now asserts the fix. Killing
+    the owned Chrome tree mid-session, then calling the next tool, gives a bounded
+    typed failure with an actionable message — and that message tells the caller
+    to "close the instance with close_instance and spawn a new one".
+    ``close_instance`` then returns **True** (T-5956: it was False when the
+    failed tool call had already discarded the dead instance and True when it had
+    not, so the pin flipped on macOS; the two orderings are pinned hermetically in
+    ``test_close_instance_offload``).
 
-    Everything else the MQ-126 recovery contract asks for does hold, and is
-    asserted here so a regression in any of it is caught: no process from the
-    killed tree survives, the crashed instance's profile is removable, and a
-    freshly spawned instance navigates and closes cleanly. Only the documented
-    recovery call's own return value is wrong, which is why this is a pin and
-    why MQ-126 is not satisfied at HEAD.
+    The rest of the MQ-126 recovery contract is asserted here too, so a regression
+    in any of it is caught: no process from the killed tree survives, the crashed
+    instance's profile is removable, and a freshly spawned instance navigates and
+    closes cleanly. MQ-126 stays ``planned`` until the gate binds it (its
+    promotion is no longer blocked by F-789).
 
     The killed tree is enumerated from ``process_cleanup``'s OWN tracking table
     before the kill, so "the process we killed is the one the product thinks it
@@ -392,19 +397,20 @@ async def test_crash_recovery_after_the_owned_chrome_is_killed(
     assert isinstance(value, Exception)
     assert str(value), "the failure carried no message for the caller to act on"
 
-    # F-789: the documented recovery call reports failure for a browser that is
-    # provably gone. Pinned, not fixed — src edits are a plan_RELEASE non-goal.
+    # F-789 / F-1022: the documented recovery call reports success for a browser
+    # that is provably gone, whether or not the failed call above had already
+    # discarded it.
     closed_outcome, closed, _ = await _terminal(
         close(instance_id=instance), f"close({instance}) after the crash"
     )
     assert closed_outcome == "returned", closed
     # F-910 made the answer a record; `closed` is the boolean it used to be,
     # and reading the key is what keeps this pin able to see a False at all —
-    # a record is truthy, so `closed is False` would have gone quiet here.
+    # a record is truthy, so `closed is True` would have gone quiet here.
     assert isinstance(closed, dict), f"close_instance answered {closed!r}"
-    assert closed["closed"] is False, (
-        "close_instance now reports success for a crashed browser — F-789 is "
-        "fixed and MQ-126 can be promoted from planned to satisfied"
+    assert closed["closed"] is True, (
+        "close_instance reported failure for a browser that crashed (F-789, "
+        "F-1022): the recovery call the error message names must succeed"
     )
 
     # The rest of the recovery contract DOES hold, and is pinned so it cannot

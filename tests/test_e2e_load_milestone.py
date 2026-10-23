@@ -51,7 +51,6 @@ import uuid
 import pytest
 import requests
 
-import fixture_routes
 from e2e_helpers import (
     eval_js,
     get_fn,
@@ -59,7 +58,11 @@ from e2e_helpers import (
     sandbox_kwargs,
     warmup_once,
 )
-from fixture_routes import COV_TITLE_AFTER_LOAD, COV_TITLE_BEFORE_LOAD
+from fixture_routes import (
+    COV_GATED_LOAD_PATH,
+    COV_TITLE_AFTER_LOAD,
+    COV_TITLE_BEFORE_LOAD,
+)
 
 pytestmark = integration_pytestmark()
 
@@ -74,11 +77,6 @@ HELD_MS = 1_800
 #: hold. A slow runner can only make the elapsed time LONGER, so a floor cannot
 #: flake the way the old ceiling on the ``domcontentloaded`` node did.
 MIN_WAIT_SECONDS = 1.5
-
-#: The page whose ``load`` the TEST holds (F-1000): the document commits and
-#: reaches ``DOMContentLoaded`` at once, and ``load`` waits on one ``<img>``
-#: that ``/fault/slow`` withholds until ``/fault/release``.
-GATED_PATH = "/cov/gated_load.html"
 
 #: A hang guard and nothing else. A correct ``domcontentloaded`` returns in
 #: well under a second; a regression that waits for ``load`` never returns while
@@ -137,34 +135,6 @@ async def test_navigate_waits_for_the_load_its_own_subresource_delayed(
         await close(instance_id=iid)
 
 
-def _gated_load_page(handler, query: str) -> None:
-    """The host page: ``/fault/slow``'s response IS the image ``load`` waits on.
-
-    The controller answers with HTML, which Blink cannot decode, so the image
-    ends in ``error`` once released. That is still the end of its fetch, and an
-    ``<img>`` that has finished loading for any reason stops blocking ``load``.
-    """
-    token = fixture_routes._query_value(query, "token")
-    script = """
-window.__covLoaded = false;
-window.addEventListener('load', function () {
-  document.title = '__AFTER__';
-  window.__covLoaded = true;
-});
-"""
-    body = (
-        "<h1 id='heading'>COV GATED LOAD</h1>"
-        f"<img id='gated-asset' alt='' src='/fault/slow?token={token}'>"
-        f"<script>{fixture_routes._fill(script, after=COV_TITLE_AFTER_LOAD)}</script>"
-    )
-    fixture_routes._send_html(
-        handler,
-        fixture_routes._page(
-            COV_TITLE_BEFORE_LOAD, fixture_routes.COV_SLOW_LOAD_SENTINEL, body
-        ),
-    )
-
-
 async def _get(url: str) -> dict:
     """Plain HTTP from this process, off-thread so the loop driving Chrome never
     blocks on it."""
@@ -196,7 +166,7 @@ async def _page_loaded(iid: str) -> bool:
 
 
 async def test_domcontentloaded_comes_back_before_that_same_load(
-    fixture_app_server, monkeypatch
+    fixture_app_server,
 ):
     """The control: the three milestones are still told apart.
 
@@ -213,9 +183,6 @@ async def test_domcontentloaded_comes_back_before_that_same_load(
     navigate = get_fn("navigate")
     close = get_fn("close_instance")
 
-    # Registered for this node only: the shared fixture server dispatches
-    # through ``ROUTES`` on every request, and ``monkeypatch`` puts it back.
-    monkeypatch.setitem(fixture_routes.ROUTES, ("GET", GATED_PATH), _gated_load_page)
     token = f"f1000-{uuid.uuid4().hex[:8]}"
     armed = await _get(f"{fixture_app_server}/fault/arm?token={token}")
     assert armed["token"] == token and armed["entered"] is False, armed
@@ -226,7 +193,7 @@ async def test_domcontentloaded_comes_back_before_that_same_load(
             result = await asyncio.wait_for(
                 navigate(
                     instance_id=iid,
-                    url=f"{fixture_app_server}{GATED_PATH}?token={token}",
+                    url=f"{fixture_app_server}{COV_GATED_LOAD_PATH}?token={token}",
                     wait_until="domcontentloaded",
                 ),
                 HANG_GUARD_SECONDS,

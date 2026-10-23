@@ -14,6 +14,11 @@ from nodriver import Tab
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.models import NetworkRequest, NetworkResponse
+from stealth_chrome_devtools_mcp.embedded.network_export import (
+    request_record,
+    response_record,
+)
+from stealth_chrome_devtools_mcp.embedded.path_confinement import open_text
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -756,14 +761,24 @@ class NetworkInterceptor:
         except Exception as e:
             raise Exception(f"Failed to set user agent: {e!s}")
 
-    async def export_to_json(self, instance_id: str, filepath: str) -> bool:
+    async def export_to_json(
+        self,
+        instance_id: str,
+        filepath: str,
+        overwrite: bool = False,
+        include_credentials: bool = False,
+    ) -> bool:
         """
         Export network data to JSON file.
 
         instance_id: str - The browser instance identifier.
         filepath: str - Path to save JSON file.
+        overwrite: bool - Replace an existing file (refused otherwise, F-1025).
+        include_credentials: bool - Keep Cookie / Set-Cookie / Authorization
+            values; by default each is replaced by ``REDACTED`` (F-1025).
         Returns: bool - True if successful.
         """
+        hide = not include_credentials
         async with self._lock:
             request_ids = self._instance_requests.get(instance_id, [])
             data = {"requests": [], "responses": []}
@@ -771,35 +786,18 @@ class NetworkInterceptor:
             for req_id in request_ids:
                 if req_id in self._requests:
                     req = self._requests[req_id]
-                    data["requests"].append(
-                        {
-                            "request_id": req.request_id,
-                            "url": req.url,
-                            "method": req.method,
-                            "headers": req.headers,
-                            "cookies": req.cookies,
-                            "post_data": req.post_data,
-                            "resource_type": req.resource_type,
-                            "timestamp": req.timestamp.isoformat(),
-                        }
-                    )
+                    data["requests"].append(request_record(req, hide))
 
                 if req_id in self._responses:
-                    resp = self._responses[req_id]
                     data["responses"].append(
-                        {
-                            "request_id": resp.request_id,
-                            "status": resp.status,
-                            "headers": resp.headers,
-                            "content_type": resp.content_type,
-                            "body": base64.b64encode(resp.body).decode("utf-8")
-                            if resp.body
-                            else None,
-                            "timestamp": resp.timestamp.isoformat(),
-                        }
+                        response_record(self._responses[req_id], hide)
                     )
 
-            Path(filepath).write_text(json.dumps(data, indent=2))  # noqa: ASYNC240  plan_M7
+            payload = json.dumps(data, indent=2)
+            with open_text(
+                filepath, tool="export_network_data", overwrite=overwrite
+            ) as handle:
+                handle.write(payload)
             return True
 
     async def import_from_json(self, instance_id: str, filepath: str) -> bool:

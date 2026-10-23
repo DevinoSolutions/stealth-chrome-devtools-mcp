@@ -36,7 +36,12 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from stealth_chrome_devtools_mcp.embedded import profile_target, tab_identity
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_protection,
+    profile_target,
+    tab_identity,
+    tool_errors,
+)
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.models import (
     BrowserOptions,
@@ -775,13 +780,17 @@ async def close_instance(
         used to go into a dict this tool discarded, which is how F-910 hid a
         seed that had silently stopped moving.
     """
+    # No instance lookup here: it discards a dead browser (F-966). A browser an
+    # earlier call already discarded has its selection kept for this close (F-1022).
     spawn_diagnostics = await rt.browser_manager.get_spawn_diagnostics(instance_id)
-    profile_selection = {}
-    if isinstance(spawn_diagnostics, dict):
-        profile_selection = spawn_diagnostics.get("profile_selection") or {}
-    rt.shared_session.require_shared_session_named(
-        instance_id, profile_selection, session
-    )
+    diagnostics = spawn_diagnostics if isinstance(spawn_diagnostics, dict) else {}
+    live = diagnostics.get("profile_selection") or {}
+    # F-888 reuses ids, so a discard record can be stale: live wins, either guards.
+    stale = tool_errors.exited_selection(instance_id)
+    for selection in (live, stale or {}):
+        rt.shared_session.require_shared_session_named(instance_id, selection, session)
+    discarded = None if live else stale
+    profile_selection = live or discarded or {}
     should_refresh_snapshot = (
         profile_selection.get("profile_role") == rt.profile_seed.DEFAULT_SESSION
     )
@@ -799,11 +808,19 @@ async def close_instance(
         rt.dynamic_hook_system.remove_instance(instance_id)
         # Instance is gone — lift sweep protection for its disposable clone so the
         # storage cap can reclaim it later if the on-close delete was deferred.
-        if profile_selection.get("profile_role") == "clone" and profile_selection.get(
-            "user_data_dir"
-        ):
-            rt.clone_storage._release_clone_dir(profile_selection["user_data_dir"])
-        if should_refresh_snapshot:
+        # A discard released it already, and the directory may since belong to a NEW
+        # spawn, so releasing again would unprotect that one.
+        if discarded is None:
+            clone_protection.release_selection(profile_selection)
+            tool_errors.claim_exited(instance_id)  # drop a stale record of this id
+        # Never refresh the seed from a `default` browser KNOWN to have crashed
+        # (discarded earlier, or dead when this close claimed it): its profile may
+        # be torn and the good seed must stay. Same answer either way.
+        crashed = tool_errors.take_dead_on_close(instance_id) or discarded is not None
+        if should_refresh_snapshot and crashed:
+            answer["seed_refreshed"] = False
+            answer["seed_error"] = "default-crashed"
+        elif should_refresh_snapshot:
             refresh = await asyncio.to_thread(
                 rt.clone_storage._refresh_master_snapshot_if_safe,
                 "after-default-close",

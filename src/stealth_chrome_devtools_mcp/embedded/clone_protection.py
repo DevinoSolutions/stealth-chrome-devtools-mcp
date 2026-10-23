@@ -22,7 +22,7 @@ and the suite have always called; nothing here imports it. A leaf: ``profile_cop
 
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from stealth_chrome_devtools_mcp.embedded import profile_copy
@@ -54,6 +54,18 @@ def release(path: object) -> None:
     """Drop sweep protection for a clone dir once its instance has closed."""
     with _LOCK:
         PROTECTED.discard(normalize(path))
+
+
+def release_selection(profile_selection: Mapping[str, object]) -> None:
+    """Drop protection for the clone a spawn recorded, once its browser is gone.
+
+    THE one rule for "is this selection a disposable clone": any other role (a
+    named session, ``default``, ``fleet``) owns its directory and has nothing here.
+    Idempotent, so the discard of a crashed browser and the ``close_instance`` that
+    follows it may both call it (F-1022)."""
+    directory = profile_selection.get("user_data_dir")
+    if profile_selection.get("profile_role") == "clone" and directory:
+        release(directory)
 
 
 def is_protected(path: object) -> bool:

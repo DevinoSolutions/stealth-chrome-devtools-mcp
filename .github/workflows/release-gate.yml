@@ -429,13 +429,13 @@ jobs:
         # full recovery invariant, so the step's second half is real evidence
         # rather than a pin bound to a step it does not satisfy.
         #
-        # MQ-126 is still deliberately NOT emitted: close_instance returns False
-        # for a browser that is already gone (F-789), so its recovery half stays
-        # false at HEAD, it remains characterization-pinned and routed, and the
-        # step is `planned` in tests/MANUAL_QA_PROTOCOL.md. Emitting it here
+        # MQ-126 is still deliberately NOT emitted yet: F-789 (close_instance
+        # returned False for a browser that is already gone) is fixed by F-1022,
+        # but the step has not been promoted; it remains characterization-pinned
+        # and `planned` in tests/MANUAL_QA_PROTOCOL.md. Emitting it here
         # would bind a passing pin to a step it does not satisfy, which is
         # exactly the "count declarations as behavior" cheat plan_RELEASE §8.1
-        # refuses. Add it in the SAME commit that closes F-789 and promotes the
+        # refuses. Add it in the SAME commit that promotes the
         # step.
         #
         # W16 (tests/test_stateful_i18n.py). Eight shapes, eleven nodes; seven

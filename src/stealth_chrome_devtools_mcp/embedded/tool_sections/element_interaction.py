@@ -38,6 +38,11 @@ from pathlib import Path
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
+from stealth_chrome_devtools_mcp.embedded.path_confinement import (
+    discard_precreated,
+    precreate_private,
+    refuse_secret_path,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError, _require_tab
 
 SECTION = "element-interaction"
@@ -165,6 +170,18 @@ async def upload_file(
     """
     timeout = rt._clamp_timeout(timeout, default=10_000)
     paths = [file_paths] if isinstance(file_paths, str) else list(file_paths)
+    # F-1025: the deny-list runs on the REAL path (symlinks and junctions
+    # followed) and its answer replaces the caller's spelling, so what is
+    # attached is exactly what was checked. Before the tab lookup and before the
+    # existence check, so a refusal never doubles as a probe for a secret file.
+    paths = [
+        str(
+            refuse_secret_path(
+                Path(str(raw)).expanduser(), tool="upload_file", action="attach"
+            )
+        )
+        for raw in paths
+    ]
     tab = await _require_tab(rt.browser_manager, instance_id)
     return await rt._with_cdp_timeout(
         rt.dom_handler.upload_file(tab, selector, paths, timeout),
@@ -472,6 +489,7 @@ async def take_screenshot(
     full_page: bool = False,
     format: str = "png",
     file_path: str | None = None,
+    overwrite: bool = False,
 ) -> str | dict[str, Any]:
     """
     Take a screenshot of the page.
@@ -480,7 +498,11 @@ async def take_screenshot(
         instance_id (str): Browser instance ID.
         full_page (bool): Capture full page (not just viewport).
         format (str): Image format ('png' or 'jpeg').
-        file_path (Optional[str]): Optional file path to save screenshot to.
+        file_path (Optional[str]): Optional file path to save screenshot to. Created
+            owner-only (0600); it may not lie in a credential store, browser profile
+            or this server's state.
+        overwrite (bool): Replace `file_path` if it already exists (default: False,
+            an existing file is refused).
 
     Returns:
         Union[str, Dict]: File path if file_path provided, otherwise optimized base64 data or file info dict.
@@ -492,12 +514,17 @@ async def take_screenshot(
     tab = await _require_tab(rt.browser_manager, instance_id)
 
     if file_path:
-        save_path = Path(file_path)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        await rt._with_cdp_timeout(
-            tab.save_screenshot(save_path), instance_id=instance_id
+        save_path, created = precreate_private(
+            file_path, tool="take_screenshot", overwrite=overwrite
         )
-        return f"Screenshot saved. AI agents should use the Read tool to view this image: {save_path.absolute()!s}"
+        try:
+            await rt._with_cdp_timeout(
+                tab.save_screenshot(save_path), instance_id=instance_id
+            )
+        except BaseException:
+            discard_precreated(save_path, created)
+            raise
+        return f"Screenshot saved. AI agents should use the Read tool to view this image: {save_path!s}"
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
