@@ -111,6 +111,14 @@ def throwaways(monkeypatch):
     return SimpleNamespace(made=made, plan=plan)
 
 
+def _launcher_exits_after_two(monkeypatch, throwaways) -> None:
+    """End the wait once two throwaways exist, not after a wall-clock patience: on a
+    loaded host one late wake of the loop spends a 0.3 s patience after a single ask
+    (T-7014 pre-push: 1 throwaway made), so a count pinned to the clock flakes."""
+    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 60.0)
+    monkeypatch.setattr(devtools_port, "_running", lambda pid: len(throwaways.made) < 2)
+
+
 def _lost_browser(*processes: tuple[str, int]) -> SimpleNamespace:
     """A browser whose own connection loses the first query (never answers)."""
     browser = _browser(*processes)
@@ -394,7 +402,7 @@ class TestAskedAgain:
         """A raw OSError from the websocket must not escape: it is skipped and the
         wait ends as the F-1009 ``ToolError``."""
         _short_waits(monkeypatch)
-        monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.3)
+        _launcher_exits_after_two(monkeypatch, throwaways)
         browser = _lost_browser(("browser", os.getpid()))
         throwaways.plan.extend([ConnectionRefusedError("no endpoint")] * 20)
         with pytest.raises(ToolError, match="did not say which process it is"):
@@ -409,7 +417,7 @@ class TestAskedAgain:
         self, monkeypatch, throwaways
     ):
         _short_waits(monkeypatch)
-        monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.3)
+        _launcher_exits_after_two(monkeypatch, throwaways)
         browser = _lost_browser()
         throwaways.plan.extend(["hang"] * 20)
         with pytest.raises(ToolError, match="did not say which process it is"):
