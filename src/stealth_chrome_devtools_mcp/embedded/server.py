@@ -11,7 +11,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from stealth_chrome_devtools_mcp.embedded import backend_token
+from stealth_chrome_devtools_mcp.embedded import backend_token, proactor_accept
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.backend_probe import MCP_PATH
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
@@ -669,6 +669,7 @@ if __name__ == "__main__":
         # manager by module attribute inside create_streamable_http_app. F-960:
         # the same call gives the app the session-free health route.
         rt.session_hygiene.install(mcp)
+        proactor_accept.install()  # T-6363: a reset client must not close the listener
         mcp.run(
             transport="http",
             host=args.host,
