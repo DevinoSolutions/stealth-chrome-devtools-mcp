@@ -22,8 +22,8 @@ reaching this code. A caller that imported these names directly would bind them
 at import time and silently stop seeing such a patch.
 
 The vocabulary is one closed set and it is ENTIRELY here: ``down`` | ``wedged``
-| ``responsive``, plus ``none`` for "no adoptable entry names a port at all"
-and :data:`NO_PORT` for an entry naming nothing usable as a port. That last word
+| ``refusing`` | ``responsive``, plus ``none`` for "no adoptable entry names a port
+at all" and :data:`NO_PORT` for an entry naming nothing usable as a port. That last word
 used to live in ``cli._probe_recorded_backend``, an adapter whose whole content
 was "the ladder, plus one word"; F-880 moved the word here and deleted the
 adapter, because :func:`survey` answers per entry and a second function that
@@ -72,20 +72,25 @@ def probe_port(
     *,
     is_healthy: Callable[[int], bool],
     http_ready: Callable[[int], bool],
+    refused: Callable[[int], bool] | None = None,
 ) -> str:
     """THE liveness ladder for ONE port — socket, then a real MCP `initialize`:
-    "down" | "wedged" | "responsive" (F-301's third state, which a bare socket
-    check cannot see). Read-only. THE one home for those four lines (F-868),
-    with three readers: the candidate walk below, :func:`_survey_one` (so
-    doctor's per-entry line and the deadness rule read the same ladder), and
-    `restart_backend`'s report of the port it spawned on. Doctor used to reach
-    it through `cli._probe_recorded_backend`, an adapter that added only the one
-    word this cannot reach — :data:`NO_PORT` now, here, and the adapter deleted
-    (F-880). It was a verbatim copy of this ladder before F-868.
+    "down" | "wedged" | "refusing" | "responsive" (F-301's third state, which a
+    bare socket check cannot see; T-6550's fourth: the backend answers, with its
+    own 401 to OUR token, which is neither wedged nor ours to evict). Read-only.
+    THE one home for those lines (F-868), with three readers: the candidate walk
+    below, :func:`_survey_one` (so doctor's per-entry line and the deadness rule
+    read the same ladder), and `restart_backend`'s report of the port it spawned
+    on. Doctor used to reach it through `cli._probe_recorded_backend`, an adapter
+    that added only the one word this cannot reach — :data:`NO_PORT` now, here,
+    and the adapter deleted (F-880). It was a verbatim copy of this ladder
+    before F-868.
     """
     if not is_healthy(port):
         return "down"
-    return "responsive" if http_ready(port) else "wedged"
+    if http_ready(port):
+        return "responsive"
+    return "refusing" if refused is not None and refused(port) else "wedged"
 
 
 def probe_recorded(
@@ -117,7 +122,9 @@ def probe_recorded(
         verdict = probe(port)
         if verdict == "responsive":
             return verdict, port
-        if best[0] == "none" or (best[0] == "down" and verdict == "wedged"):
+        if best[0] == "none" or (
+            best[0] == "down" and verdict in ("wedged", "refusing")
+        ):
             best = (verdict, port)
     return best
 

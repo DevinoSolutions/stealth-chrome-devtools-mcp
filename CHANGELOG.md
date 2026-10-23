@@ -111,11 +111,22 @@ The T-6367 follow-up left two readers of the same probe reading a 401 as "not re
 `_find_running_server`, `_clear_stale_backend` saw `reusable()` False and TERMINATED an idle, healthy backend (only F-886's browser protection spared
 one), and `proxy_selfheal._confirm_bridge_verdict`, which asks the same gate, answered DEAD after a lost connection. `backend_probe.probe` now answers
 the heartbeat's own verdicts (`alive` / `unauthorized` / `dead`, no second vocabulary) for one `initialize`, and `ready` is `probe == alive` for the
-callers that need "can I talk to it". The gate treats a 401 from a backend of OUR identity as alive: it is reused, never evicted, never replaced and never
-answered DEAD, and `await_ready` logs `backend_token.UNAUTHORIZED` at WARNING once per run of 401s while it keeps polling, so the cause is in the proxy
-log instead of an unexplained "did not become ready". A dead (refused) backend is cleared and answered DEAD exactly as before, and so is a stale-version
-one, which is still evicted whatever it answers. The legacy-heartbeat fallback (a backend with no health route) reads a 401 the same way. Not changed: the
-CLI's `responsive`/`wedged` ladder (`backend_liveness.probe_port`) and port selection still use `ready`, so a 401 shows as `wedged` there.
+callers that need "can I talk to it". The gate treats a 401 as alive, with three conditions that keep that from being a hole:
+
+- **The 401 must be OUR backend's.** `backend_token.is_our_refusal` (the middleware's own body and `www-authenticate: Bearer`, from the same constants
+  that write them) is judged in one place, `backend_probe`; a 401 in anyone else's words is a stranger and reads `dead`. The process listening on the
+  port must also be our recorded backend (`_backend_pid_on_port(port) == the recorded pid`). Without both, a dead backend's port taken by another
+  auth-protected server would have been adopted, and our bearer token bridged to it.
+- **A 401 that never ends is cured by a restart, and only safely.** A token file regenerated under a backend that kept the old token in memory 401s every
+  client for ever. Past `PERSISTENT_UNAUTHORIZED_SECONDS` (120 s of one unbroken run, any other answer ends it) the gate stops vouching for it, so
+  `clear_stale` evicts and respawns it (the new backend loads a fresh token), and F-886 still spares one that owns browsers. The WARNING, the CLI's
+  unauthorized message (`backend_token.UNAUTHORIZED`) and `status` now name the cure, `stealthy restart`.
+- **One `initialize` per gate pass.** `refusal` reads the answer the pass's ready probe just got instead of asking again.
+
+`await_ready` logs the cause once per run of 401s while it keeps polling, and the legacy-heartbeat fallback reads a 401 the same way. `status`/`doctor` show a
+backend that answers with its own 401 as `refusing` ("running on port N, REFUSING our token; run `stealthy restart`") instead of `wedged`; `kill-orphans`
+treats it as a running backend. A dead (refused) backend is cleared and answered DEAD as before, and so is a stale-version one, which is still evicted
+whatever it answers. Not changed: port selection and the release-gate probes still use `ready`.
 
 ### A 401 is its own heartbeat verdict, not a strike; the token regex is exact; Windows refuses a foreign-owned token file (F-1018, T-6367)
 

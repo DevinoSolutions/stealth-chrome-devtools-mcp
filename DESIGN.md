@@ -433,8 +433,10 @@ machine, or another OS user: anything that could reach the port could `initializ
   when the client or request is built; a client with no readable file sends none and gets the 401.
 * **What a 401 does.** The middleware runs after FastMCP's guard, so a foreign Host is still `421` and a foreign Origin `403` before the
   token is looked at. A missing token, another scheme and a wrong value are the same 401 (constant-time compare, no hint, one throttled
-  WARNING). The health route is behind it too. Probes read 401 as "not ready" / "not alive", the existing fail-closed verdict; the CLI
-  turns it into `backend_token.UNAUTHORIZED` and `EXIT_NO_BACKEND`. A token file deleted under a RUNNING backend locks its clients out (they find no file and send no
+  WARNING). The health route is behind it too. `backend_probe.ready` reads a 401 as "not ready", but the reuse gate and the heartbeat read OUR backend's own 401 (its
+  body and `www-authenticate`, from a process that is our recorded backend on the port) as alive and refusing only this client (T-6550): never a strike, never
+  evicted or answered DEAD, until it has lasted `PERSISTENT_UNAUTHORIZED_SECONDS`, when an idle one is restarted (F-886 spares one with browsers); a 401 in any
+  other words is a stranger. The CLI turns it into `backend_token.UNAUTHORIZED` and `EXIT_NO_BACKEND`. A token file deleted under a RUNNING backend locks its clients out (they find no file and send no
   header) until that backend is restarted (`stealthy restart`), which writes a new one: the backend's own loop is still alive, so the
   watchdog's second witness (F-889, `backend_liveness.self_report`) does not condemn it.
 * **Upgrade path.** *New client, old backend:* an old backend ignores the extra header, so a new `stealthy` or proxy talks to one it
