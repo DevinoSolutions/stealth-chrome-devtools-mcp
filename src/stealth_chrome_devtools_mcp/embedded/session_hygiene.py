@@ -1,9 +1,14 @@
 """THE one home for "this MCP session was abandoned by its client — reap it" (F-862).
 
 The backend's MCP layer (``mcp.server.streamable_http_manager``) lists one
-transport per ``mcp-session-id`` it ever handed out and prunes that list in
-exactly two places: an idle timeout FastMCP never configures, and a crashed
-session — which explicitly SKIPS terminated ones. A client's DELETE only marks
+transport per ``mcp-session-id`` it ever handed out. Up to mcp 1.28 it pruned
+that list in exactly two places: an idle timeout FastMCP never configures, and a
+crashed session — which explicitly SKIPS terminated ones. (mcp 1.30 DOES default
+a 30-minute idle timeout: a session with no request in flight for that long is
+reaped, and an open GET stream counts as in flight, so a live proxy holding its
+stream is never reaped. A client with no stream, the CLI or a probe, gets a 404
+after it and re-initializes, which ``proxy_selfheal`` handles. The sweep below
+stays for its shorter window and for terminated entries.) A client's DELETE only marks
 the transport terminated (so the id answers 404); the entry stays forever. A
 client that simply goes away — TCP closed, process dead — leaves everything:
 transport, ``ServerSession``, task group, the per-session lifespan. Every stdio
