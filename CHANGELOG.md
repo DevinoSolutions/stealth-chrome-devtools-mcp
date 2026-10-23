@@ -188,6 +188,16 @@ backend that answers with its own 401 as `refusing` ("running on port N, REFUSIN
 treats it as a running backend. A dead (refused) backend is cleared and answered DEAD as before, and so is a stale-version one, which is still evicted
 whatever it answers. Not changed: port selection and the release-gate probes still use `ready`.
 
+### Security: certifi, Pillow 13 and mcp 1.30 (T-6750)
+
+- **certifi 2026.4.22 -> 2026.10.19 (CRITICAL, GHSA-6q48-6c7w-9gw2).** The old bundle trusted emSign root CAs whose intermediate CA keys are compromised. certifi is
+  transitive (httpx/requests), so only `uv.lock` moves.
+- **Pillow 12.3.0 -> 13.0.0 (34 advisories, 5 high: GHSA-p4wg-p73j-c528, GHSA-65qm-jvmh-6pqg, GHSA-58r4-6rv3-gfh8, GHSA-g7cr-3p24-7wf7, GHSA-78g4-xqwv-q3g8).**
+  The one use (`take_screenshot`'s `Image.open` / `new` / `convert` / `paste` / `split` / `save`) calls only APIs 13.0 keeps; no code change.
+- **mcp 1.28.1 -> 1.30.0 (GHSA-84m7-p3x7-pcfv, unbounded session accumulation in the StreamableHTTP transport).** `fastmcp-slim` 3.4.8 declares `mcp>=1.24,<2`, so 1.30.0 is in range.
+- **mcp 1.30 changes three server defaults,** none configured by FastMCP: a 30-minute idle-session timeout (an open GET stream counts as in flight, so a live proxy is exempt), a 4 MiB request-body cap (413 beyond it) and a 10,000-session cap (503). A census of the tool signatures found no tool that carries a single inline argument near 4 MiB (file tools take paths).
+- `uv.lock` changes only those three packages. `uvx pip-audit` on the exported lock reports no known vulnerabilities (it reported 37 before).
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
