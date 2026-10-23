@@ -91,6 +91,13 @@ aggregate unless every cell below is present, current, and successful.
 | `install-smoke` | `sdist-Windows-X64` | Windows/X64 | 3.12 | launched + identity asserted | clean install of the exact sdist + journey |
 | `install-smoke` | `sdist-macOS-ARM64` | macOS/ARM64 | 3.12 | resolved only (no launch) | clean install of the exact sdist + handshake only (NO navigation, F-773) |
 
+**Tiers.** A `pull_request` run executes the PR tier, a named subset of
+these cells (12 of 28: Linux only, the wheel
+smoke only) and its aggregate demands only those. Pushes to main, tags
+and manual runs execute and demand **every** cell above, and an event
+the tier table does not name fails closed to all of them, so a smaller
+ledger never qualifies a release.
+
 The exact Chrome Stable executable path and version are **not** written
 into this document: they are image-provided and change under us. They
 are recorded per run in

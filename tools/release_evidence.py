@@ -134,6 +134,7 @@ from release_schema import (
     CLAIMS_KEYS,
     CLAIMS_PATH,
     CLAIMS_SCHEMA,
+    FULL_TIER,
     HASH_RE,
     IMAGE_OS_RE,
     LINUX,
@@ -142,6 +143,7 @@ from release_schema import (
     NODE_RE,
     NON_PER_TOOL_NODES,
     NUMERIC_RE,
+    PR_TIER,
     PYTHON_RE,
     RECORD_KEYS,
     REPO_ROOT,
@@ -161,6 +163,10 @@ from release_schema import (
     CellSpec,
     _build_required_cells,
     _spec,
+    cells_for_tier,
+    keys_for_tier,
+    plan_matrices,
+    tier_for_event,
 )
 
 #: Every name that moved to a sibling module stays importable from here (T-5431).
@@ -180,6 +186,7 @@ __all__ = [
     "DROP_KEY_FRAGMENTS",
     "FILESYSTEM_READ_TOOLS",
     "FILESYSTEM_WRITE_TOOLS",
+    "FULL_TIER",
     "HASH_RE",
     "HOST_EXEC_SITES",
     "HOST_EXEC_TOOLS",
@@ -192,6 +199,7 @@ __all__ = [
     "NON_PER_TOOL_NODES",
     "NUMERIC_RE",
     "PRESERVED_DIAGNOSTIC_FIELDS",
+    "PR_TIER",
     "PYTHON_RE",
     "RECORD_KEYS",
     "REDACTION_ACTIONS",
@@ -243,15 +251,19 @@ __all__ = [
     "_validate_threat_contract",
     "_validate_workflow",
     "build_record",
+    "cells_for_tier",
     "dumps",
     "host_secret_values",
+    "keys_for_tier",
     "parse_junit",
     "placeholder",
+    "plan_matrices",
     "redact",
     "redact_text",
     "redaction_rows",
     "sha256_file",
     "threat_rows",
+    "tier_for_event",
     "validate_policy",
     "validate_record",
 ]
@@ -275,8 +287,14 @@ class AggregateSpec:
     claims_path: Path
 
 
-def _discover_children(sha_dir: Path) -> tuple[dict[str, Path], list[str]]:
-    """Map ``job/cell`` → record path; report extras and duplicates."""
+def _discover_children(
+    sha_dir: Path, tier: str = FULL_TIER
+) -> tuple[dict[str, Path], list[str]]:
+    """Map ``job/cell`` → record path; report extras and duplicates.
+
+    A record for a declared cell the ``tier`` does not owe is tolerated; a missing
+    record is only reported for a cell the tier owes (T-6910).
+    """
     found: dict[str, Path] = {}
     problems: list[str] = []
     # Keys are path-derived, so an exact duplicate cannot exist on disk — but a
@@ -304,7 +322,7 @@ def _discover_children(sha_dir: Path) -> tuple[dict[str, Path], list[str]]:
         found[key] = path
     problems.extend(
         f"missing child record for required cell {key!r}"
-        for key in REQUIRED_KEYS
+        for key in keys_for_tier(tier)
         if key not in found
     )
     return found, problems
@@ -405,7 +423,11 @@ def _check_mq_ids(children: dict[str, dict[str, object]]) -> list[str]:
     ]
 
 
-def verify_claims(claims: dict[str, object], index: dict[str, set[str]]) -> list[str]:
+def verify_claims(
+    claims: dict[str, object],
+    index: dict[str, set[str]],
+    tier: str = FULL_TIER,
+) -> list[str]:
     """Check every ``release-qualified-success`` claim against the real ledger.
 
     This is what stops the contract from claiming a tool the run did not prove:
@@ -414,6 +436,7 @@ def verify_claims(claims: dict[str, object], index: dict[str, set[str]]) -> list
     a job that actually drives the real-stdio lane.
     """
     problems: list[str] = []
+    owed = set(keys_for_tier(tier))
     for claim in claim_rows(claims):
         node = str(claim.get("node_id", ""))
         tool = str(claim.get("tool", ""))
@@ -431,6 +454,8 @@ def verify_claims(claims: dict[str, object], index: dict[str, set[str]]) -> list
             if key not in CELLS_BY_KEY:
                 problems.append(f"claim for {tool!r} names undeclared cell {key!r}")
                 continue
+            if key not in owed:
+                continue  # a cell this tier does not run (T-6910)
             if str(claim.get("transport", "")) == "stdio" and (
                 CELLS_BY_KEY[key].job not in TRANSPORT_JOBS
             ):
@@ -452,7 +477,8 @@ def build_aggregate(spec: AggregateSpec) -> tuple[dict[str, object], list[str]]:
     problems: list[str] = []
     if not sha_dir.is_dir():
         return {}, [f"no evidence directory for release SHA {spec.release_sha!r}"]
-    paths, problems_found = _discover_children(sha_dir)
+    tier = tier_for_event(spec.event)
+    paths, problems_found = _discover_children(sha_dir, tier)
     problems.extend(problems_found)
     records: dict[str, dict[str, object]] = {}
     children: list[dict[str, object]] = []
@@ -479,7 +505,7 @@ def build_aggregate(spec: AggregateSpec) -> tuple[dict[str, object], list[str]]:
         )
     problems.extend(_check_mq_ids(records))
     claims = load_claims(spec.claims_path)
-    problems.extend(verify_claims(claims, _executed_index(records)))
+    problems.extend(verify_claims(claims, _executed_index(records), tier))
     surface = tool_surface(claims)
     aggregate: dict[str, object] = {
         "schema": SCHEMA,
@@ -495,7 +521,8 @@ def build_aggregate(spec: AggregateSpec) -> tuple[dict[str, object], list[str]]:
             "matrix_cell": AGGREGATE_CELL,
             "terminal_outcome": "success" if not problems else "failure",
         },
-        "required_cells": list(REQUIRED_KEYS),
+        "tier": tier,
+        "required_cells": list(keys_for_tier(tier)),
         "children": sorted(children, key=lambda item: str(item["key"])),
         "tool_surface": surface,
         "problems": problems,
@@ -699,7 +726,17 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
     if problems:
         print(f"::error::release_evidence: {len(problems)} ledger problem(s)")
         return 1
-    print(f"aggregate: all {len(REQUIRED_KEYS)} required cells validated")
+    cells = len(keys_for_tier(tier_for_event(args.event)))
+    print(f"aggregate: all {cells} {tier_for_event(args.event)}-tier cells validated")
+    return 0
+
+
+def _cmd_plan(args: argparse.Namespace) -> int:
+    """Print ``<job>=<matrix json>`` lines for ``$GITHUB_OUTPUT`` (T-6910)."""
+    tier = tier_for_event(args.event)
+    for job, matrix in sorted(plan_matrices(tier).items()):
+        print(f"{job.replace('-', '_')}={json.dumps(matrix, separators=(',', ':'))}")
+    print(f"tier={tier}")
     return 0
 
 
@@ -767,6 +804,10 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--event", required=True)
     aggregate.add_argument("--claims", type=Path, default=CLAIMS_PATH)
     aggregate.set_defaults(func=_cmd_aggregate)
+
+    plan = sub.add_parser("plan", help="print the matrices this event runs")
+    plan.add_argument("--event", required=True)
+    plan.set_defaults(func=_cmd_plan)
 
     claims = sub.add_parser("claims", help="validate the tool claim ledger")
     claims.add_argument("--claims", type=Path, default=CLAIMS_PATH)

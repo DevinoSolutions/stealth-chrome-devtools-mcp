@@ -6,7 +6,7 @@ name: release-gate
 # three GitHub-hosted cells (Ubuntu x64, Windows x64, macOS ARM64) and exposes one
 # stable aggregate check, `release-gate`, that a repository ruleset can require.
 #
-# Edge inventory (W2): quality, unit-tests, coverage, integration, transport,
+# Edge inventory (W2): plan (T-6910), quality, unit-tests, coverage, integration, transport,
 # offline-stealth. W3 adds build-dist, package-verify, install-smoke; W5 adds
 # release-evidence. Each new edge slots into the aggregate's `needs:` list — the
 # aggregate is never replaced and never forgets a direct edge.
@@ -49,6 +49,33 @@ permissions:
 
 jobs:
   # ── Lint / type / static gates (OS-independent → one cell) ──────────────────
+  # T-6910: the cells have ONE home, tools/release_evidence.py. `plan` asks it which
+  # matrices this event runs (a pull_request runs the PR tier: Linux only, wheel
+  # only; pushes to main, tags and manual runs run every REQUIRED_CELLS cell) and
+  # each matrix job reads its slice through fromJSON. The release-evidence
+  # aggregate derives the SAME tier from the same event, so a tag still owes every
+  # cell and a PR is never credited with a cell it did not run.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tier: ${{ steps.plan.outputs.tier }}
+      unit_tests: ${{ steps.plan.outputs.unit_tests }}
+      coverage: ${{ steps.plan.outputs.coverage }}
+      integration: ${{ steps.plan.outputs.integration }}
+      transport: ${{ steps.plan.outputs.transport }}
+      offline_stealth: ${{ steps.plan.outputs.offline_stealth }}
+      install_smoke: ${{ steps.plan.outputs.install_smoke }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Plan the matrices for this event
+        id: plan
+        shell: bash
+        run: python3 tools/release_evidence.py plan --event "${{ github.event_name }}" | tee -a "$GITHUB_OUTPUT"
+
   quality:
     name: quality
     runs-on: ubuntu-latest
@@ -119,6 +146,7 @@ jobs:
   # second py3.12 run here would execute the whole suite twice on the same cell
   # (T-6149). The ledger still owes a py3.12 pytest record per OS — `coverage/<os>`.
   unit-tests:
+    needs: plan
     name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -129,16 +157,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix:
-        include:
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.11" }
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.13" }
-          # 3.14 is Linux-only and unit-tests-only (T-4804): F-1005 gates an `__annotate__` fix on 3.14, and no other cell would run it.
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.14" }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.11" }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64, python-version: "3.13" }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.11" }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, python-version: "3.13" }
+      matrix: ${{ fromJSON(needs.plan.outputs.unit_tests) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -196,17 +215,14 @@ jobs:
           if-no-files-found: error
 
   coverage:
+    needs: plan
     name: coverage (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix:
-        include:
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+      matrix: ${{ fromJSON(needs.plan.outputs.coverage) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -273,18 +289,14 @@ jobs:
 
   # ── Real-Chrome evidence on all three OSes ─────────────────────────────────
   integration:
-    needs: [unit-tests, coverage]
+    needs: [plan, unit-tests, coverage]
     name: integration (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix:
-        include:
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+      matrix: ${{ fromJSON(needs.plan.outputs.integration) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -523,17 +535,14 @@ jobs:
   # visible without reading this file. Re-add the cell the moment F-773 closes —
   # `finding_F773_macos_detached_navigation.md` §7 is the experiment that does it.
   transport:
-    needs: [unit-tests, coverage]
+    needs: [plan, unit-tests, coverage]
     name: transport (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix:
-        include:
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
+      matrix: ${{ fromJSON(needs.plan.outputs.transport) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -717,18 +726,14 @@ jobs:
 
   # ── Offline stealth lane (W2 wires the edge; W4 lands the tests) ───────────
   offline-stealth:
-    needs: [unit-tests, coverage]
+    needs: [plan, unit-tests, coverage]
     name: offline-stealth (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix:
-        include:
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64 }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64 }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64 }
+      matrix: ${{ fromJSON(needs.plan.outputs.offline_stealth) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -1024,18 +1029,13 @@ jobs:
   # function. Flip these cells back to `full` the moment F-773 closes.
   install-smoke:
     name: install-smoke (${{ matrix.kind }} ${{ matrix.cell.runner_os }}/${{ matrix.cell.runner_arch }}${{ matrix.cell.stages == 'handshake' && ' NO-NAVIGATION partial' || '' }})
-    needs: [build-dist, unit-tests, coverage]
+    needs: [plan, build-dist, unit-tests, coverage]
     runs-on: ${{ matrix.cell.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix:
-        kind: [wheel, sdist]
-        cell:
-          - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, stages: full }
-          - { os: windows-latest, runner_os: Windows, runner_arch: X64, stages: full }
-          - { os: macos-latest, runner_os: macOS, runner_arch: ARM64, stages: handshake }
+      matrix: ${{ fromJSON(needs.plan.outputs.install_smoke) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -1221,6 +1221,7 @@ jobs:
     name: release-gate
     if: always()
     needs:
+      - plan
       - quality
       - unit-tests
       - coverage
@@ -1247,6 +1248,7 @@ jobs:
             echo "edge $1 = $2"
             if [ "$2" != "success" ]; then overall=1; fi
           }
+          check plan           "${{ needs.plan.result }}"
           check quality        "${{ needs.quality.result }}"
           check unit-tests     "${{ needs.unit-tests.result }}"
           check coverage       "${{ needs.coverage.result }}"

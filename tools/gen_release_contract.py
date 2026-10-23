@@ -628,6 +628,18 @@ def _matrix_section() -> str:
             f"| `{spec.job}` | `{spec.cell}` | {spec.label} | {python} "
             f"| {chrome} | {_md_escape(spec.proves)} |"
         )
+    pr_cells = len(release_evidence.cells_for_tier(release_evidence.PR_TIER))
+    lines.extend(
+        [
+            "",
+            "**Tiers.** A `pull_request` run executes the PR tier, a named subset of",
+            f"these cells ({pr_cells} of {len(matrix_rows())}: Linux only, the wheel",
+            "smoke only) and its aggregate demands only those. Pushes to main, tags",
+            "and manual runs execute and demand **every** cell above, and an event",
+            "the tier table does not name fails closed to all of them, so a smaller",
+            "ledger never qualifies a release.",
+        ]
+    )
     lines.extend(
         [
             "",

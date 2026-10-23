@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Pull requests run a smaller CI tier; main, tags and manual runs still run every cell (T-6910)
+
+A pull request now runs the PR tier of the release gate: Linux only (unit-tests on
+3 Pythons, coverage, integration, transport, offline-stealth, the wheel install-smoke)
+plus quality, known-gaps, build-dist and package-verify, 12 of the 28 ledger cells
+(Windows, macOS and the sdist smoke wait for the merge). Pushes to main, tags and
+`workflow_dispatch` run all 28, and any event the tier table does not name falls
+back to all 28. The tier is a named subset of `REQUIRED_CELLS` in
+`tools/release_schema.py`, re-exported by `tools/release_evidence.py`: a new `plan`
+job asks it which matrices to run, and the `release-evidence` aggregate derives the
+same tier from the same event, so a PR is never credited with a cell it did not run
+and a tag can never be qualified by the smaller ledger. `release-gate.yml` no longer
+carries its own cell lists.
+
+Benefit: a PR uses 12 of the 28 cells and none of the slow Windows/macOS runners, so
+it finishes sooner and takes far less of the shared runner pool. Cost: a PR can be
+green and still break only on Windows, macOS or in the sdist; that is caught on the
+push to main, after the merge. The required check name (`release-gate / release-gate`)
+is unchanged.
+
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
