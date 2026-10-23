@@ -22,16 +22,20 @@ refusals were handled and not merely still in flight.
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import json
+import time
 
 import pytest
+from nodriver import cdp
 
 from e2e_helpers import (
     eval_js,
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
+    runtime,
     sandbox_kwargs,
     wait_for_js,
     warmup_once,
@@ -138,5 +142,45 @@ async def test_binding_answers_same_origin_blank_frame_and_refuses_the_rest(
         # refused ones were decided and never ran the function.
         await _call_from_parent(iid, "window.pyProbe(40, 2)")
         assert call_log == [(40, 2), (40, 2)]
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_closing_a_tab_reaps_its_watch_and_leaves_nodrivers_handler(
+    fixture_origin_pair,
+):
+    """The reap of #278: a closed tab's ``TabWatch`` leaves ``Bindings.watches``
+    (with its reference to the Tab) when Chrome reports ``Target.targetDestroyed``,
+    and removing the watch's handler does not take nodriver's own handler for the
+    same event off the browser's connection with it."""
+    origin_a, _ = fixture_origin_pair
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        tab_id = (
+            await get_fn("new_tab")(instance_id=iid, url=f"{origin_a}/hooks.html")
+        )["tab_id"]
+        assert await get_fn("switch_tab")(instance_id=iid, tab_id=tab_id) is True
+        created = await get_fn("create_python_binding")(
+            instance_id=iid, binding_name="pyProbe", python_code=_BINDING_CODE
+        )
+        assert created.get("success") is True, created
+        bindings = runtime.cdp_function_executor._python_bindings
+        assert tab_id in bindings.watches
+        assert (tab_id, "pyProbe") in bindings
+
+        assert await get_fn("close_tab")(instance_id=iid, tab_id=tab_id) is True
+
+        deadline = time.monotonic() + 10.0
+        while tab_id in bindings.watches and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        assert tab_id not in bindings.watches
+        assert (tab_id, "pyProbe") not in bindings
+        browser = await runtime.browser_manager.get_browser(iid)
+        # Settled: the deferred detach has run by the time the loop has waited.
+        await asyncio.sleep(0.2)
+        callbacks = browser.connection.handlers[cdp.target.TargetDestroyed]
+        assert callbacks == [browser._handle_target_update], callbacks
     finally:
         await close(instance_id=iid)
