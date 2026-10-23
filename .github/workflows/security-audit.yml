@@ -3,6 +3,14 @@ name: Security audit
 on:
   pull_request:
     branches: ['**']
+    # Only a PR that changes the locked set (or this workflow) can introduce a
+    # vulnerable dependency; the weekly run catches advisories published later.
+    paths:
+      - uv.lock
+      - pyproject.toml
+      - package.json
+      - package-lock.json
+      - .github/workflows/security-audit.yml
   schedule:
     - cron: '17 5 * * 1'
 
@@ -14,15 +22,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # JS side: the root package.json holds husky only. DevinoSolutions/.github is
-  # private, so this public repo cannot call its reusable workflow; audit inline.
+  # JS side: the root package.json holds husky only, as a devDependency, so the
+  # audit must include dev dependencies or it audits nothing. DevinoSolutions/.github
+  # is private, so this public repo cannot call its reusable workflow; audit inline.
   js-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: npm audit (production dependencies)
-        run: npm audit --package-lock-only --omit=dev --audit-level=high
+      - name: npm audit (locked dependencies)
+        run: npm audit --package-lock-only --audit-level=high
 
   # Python side: the org workflow does not read uv.lock, so audit the locked set.
   python-audit:
