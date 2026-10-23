@@ -185,11 +185,25 @@ async def test_the_measurement_sees_listed_sessions_when_the_delete_is_not_honou
     monkeypatch,
 ):
     """The control for the session count, on the pre-F-960 behaviour (a DELETE
-    that leaves the entry listed): the old probe leaks one session per ask."""
+    that leaves the entry listed): the old probe leaks one session per ask.
+
+    Since mcp 1.30 the SDK's own ``_discard_session`` also drops an ended
+    session from the table (T-6750), so the control turns off both: ours, and
+    the SDK's down to the terminate it still owes the transport."""
+
+    async def _terminate_but_keep_listed(self, session_id, transport):
+        if not transport.is_terminated:
+            await transport.terminate()
+
     monkeypatch.setattr(
         session_hygiene.HygienicSessionManager,
         "_forget_if_deleted",
         lambda self, session_id: None,
+    )
+    monkeypatch.setattr(
+        session_hygiene.HygienicSessionManager,
+        "_discard_session",
+        _terminate_but_keep_listed,
     )
     async with _serving(monkeypatch) as backend:
         await _beats(lambda t: backend_probe.ready(backend.url, t))
