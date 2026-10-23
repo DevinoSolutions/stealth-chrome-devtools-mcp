@@ -123,12 +123,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     # The org runner pool is shared (28 runners) and one run once held 15 of them.
-    # max-parallel 2 plus two waves (integration, transport, offline-stealth and
-    # install-smoke wait for unit-tests and coverage) peaks at about 8 runners;
-    # this trades wall-clock for pool share (T-6909).
+    # unit-tests 3 at a time, every other matrix 2, in two waves (integration,
+    # transport, offline-stealth and install-smoke wait for unit-tests and coverage):
+    # peak about 9 runners, about 60 min per run (T-6909).
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
         include:
           - { os: ubuntu-latest, runner_os: Linux, runner_arch: X64, python-version: "3.11" }
