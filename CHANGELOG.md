@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Security: fastmcp 3.4.11 (GHSA-7xgj-8392-5q4r, T-7399)
+
+- **fastmcp and fastmcp-slim 3.4.8 -> 3.4.11 (GHSA-7xgj-8392-5q4r, medium: "Post-transform component authorization is skipped on direct calls").** The advisory covers `>=3.0.0,<3.4.10`; it failed the `python-audit` job. `pyproject.toml` pins both packages, so both pins move together.
+- A grep of `src/` finds no `add_transform`, `require_scopes`, `AuthCheck` or `auth=` use, so the project does not configure the authorization path the advisory describes. The bump clears the audit; it is not a response to a reachable exploit.
+- `uv.lock` changes only `fastmcp` and `fastmcp-slim` (versions, sdist and wheel hashes) plus a new `certifi` dependency edge on both, which 3.4.11 declares; `certifi` was already locked. No other package moves.
+- Verified: `uvx pip-audit==2.10.1` on the exported lock reports no known vulnerabilities; the release-gate handshake journey against the installed launcher reports 97 tools; 480 targeted tests pass (tool registry, protocol surface, wire semantics, host/origin guard, error and logging pins).
+
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
