@@ -119,8 +119,20 @@ def test_close_still_ends_the_accept_loop_without_spinning(installed):
     asyncio.run(scenario(), loop_factory=asyncio.ProactorEventLoop)
 
 
+def _win_error(message: str, winerror: int) -> OSError:
+    """An ``OSError`` carrying ``winerror`` on every platform.
+
+    The four-argument constructor sets ``winerror`` only on Windows, and the
+    wrapper's logic is pinned on Linux too, so elsewhere it is set by hand.
+    """
+    exc = OSError(None, message, None, winerror)
+    if not hasattr(exc, "winerror"):
+        exc.winerror = winerror
+    return exc
+
+
 def _reset_error() -> OSError:
-    return OSError(None, "The specified network name is no longer available", None, 64)
+    return _win_error("The specified network name is no longer available", 64)
 
 
 class _FakeProactor:
@@ -172,7 +184,7 @@ def test_a_reset_is_retried_and_the_next_connection_is_returned():
 
 
 def test_any_other_error_surfaces_unchanged():
-    boom = OSError(None, "not a reset", None, 10038)
+    boom = _win_error("not a reset", 10038)
     fake, outer = _run([boom])
     assert outer.exception() is boom
     assert fake.issued == 1
@@ -194,9 +206,7 @@ def test_a_995_on_a_closed_listener_surfaces_without_a_retry():
     """995 is what server.close() produces; a closed listener must end the loop."""
 
     async def scenario():
-        fake = _FakeProactor(
-            asyncio.get_running_loop(), [OSError(None, "aborted", None, 995)]
-        )
+        fake = _FakeProactor(asyncio.get_running_loop(), [_win_error("aborted", 995)])
         accept = proactor_accept._wrap(
             lambda self, listener: self.original_accept(listener)
         )
