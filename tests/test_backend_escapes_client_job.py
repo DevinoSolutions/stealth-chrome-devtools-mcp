@@ -57,6 +57,11 @@ _EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
+# Hard upper bounds for a loaded host. A real hang still fails inside them: the
+# helper's pid deadline, then the reader's join, then the helper's exit wait.
+_PID_READY_TIMEOUT = 60.0
+_ANNOUNCE_JOIN = 120.0
+_HELPER_EXIT_WAIT = 60.0
 _CREATE_NO_WINDOW = 0x08000000
 
 _HELPER = '''\
@@ -110,6 +115,11 @@ singleton._server_process_cmd = lambda port: [
     "-c",
     "import time; time.sleep({sleep})",
 ]
+
+# The shipped 20 s pid hand-back is sized for an idle host; the pre-push lane runs
+# this under load, where a slow scheduler dispatch would fall to the plain spawn
+# and read as "the scheduler rung is missing". Widen only the helper's deadline.
+backend_launch.PID_READY_TIMEOUT = {pid_timeout}
 
 # Wait to be assigned to the job before spawning anything.
 sys.stdin.readline()
@@ -221,7 +231,9 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
             "UNVERIFIED on this cell"
         )
     helper_py = tmp_path / "helper.py"
-    helper_py.write_text(_HELPER.format(sleep=120), encoding="utf-8")
+    helper_py.write_text(
+        _HELPER.format(sleep=120, pid_timeout=_PID_READY_TIMEOUT), encoding="utf-8"
+    )
     state = tmp_path / "state"
     state.mkdir()
 
@@ -251,7 +263,7 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         helper.stdin.flush()
         reader = threading.Thread(target=_read_until_pid, args=(helper, lines))
         reader.start()
-        reader.join(90)
+        reader.join(_ANNOUNCE_JOIN)
         transcript = "\n".join(lines)
         assert not reader.is_alive(), f"helper never announced a pid:\n{transcript}"
         pid_lines = [line for line in lines if line.startswith("PID ")]
@@ -291,7 +303,7 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         kernel.CloseHandle(wintypes.HANDLE(job))
         job = None
 
-        _wait_for_exit(helper, 15.0)
+        _wait_for_exit(helper, _HELPER_EXIT_WAIT)
         assert helper.poll() is not None, (
             f"the client's proxy outlived its own job ({session_end}); the pin "
             f"cannot say anything about the backend:\n{transcript}"

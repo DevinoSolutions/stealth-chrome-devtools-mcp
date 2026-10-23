@@ -114,7 +114,10 @@ class TestLockReentrancy:
 
         t = threading.Thread(target=_export, daemon=True)
         t.start()
-        t.join(timeout=5)
+        # A hard bound, not a latency budget: the export takes ~1 s alone, but a
+        # loaded pre-push lane can starve this thread past a tight join. A real
+        # deadlock never finishes, so any finite bound still catches it.
+        t.join(timeout=60)
 
         assert not t.is_alive(), (
             "export_to_file_paginated deadlocked: it acquires self._lock then "

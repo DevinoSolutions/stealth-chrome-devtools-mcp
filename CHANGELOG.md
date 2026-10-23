@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### The pre-push lane's deadlock and job-escape pins no longer race a loaded host (T-6907)
+
+Two tests failed in the local pre-push lane under host load and passed alone.
+`test_export_to_file_paginated_does_not_deadlock` joined its export thread for
+5 s, which a starved thread can miss; the join is now a 60 s hard bound (a real
+deadlock never finishes, so any finite bound still fails it). The F-867
+job-escape pin ran the shipped 20 s scheduler pid hand-back, so a slow task
+dispatch fell to the plain spawn and read as a missing scheduler rung; the
+helper process now widens `PID_READY_TIMEOUT` to 60 s (the product constant is
+unchanged), and the announce join (90 s to 120 s) and helper exit wait (15 s to
+60 s) were widened to sit outside it. Tests only; each pin was re-proved RED
+under mutation (a plain `Lock`; no scheduler rung).
+
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
