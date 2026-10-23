@@ -263,6 +263,18 @@ took longer and the pin failed. It now waits up to 30 s for the exit itself. Tes
 - **Dependabot now watches `uv` (pyproject.toml + uv.lock), `npm` (the husky root) and `github-actions`**, weekly, minor and patch grouped, security updates in their own group. `uv` alone covers the Python lock; there is no second `pip` entry.
 - **`.github/workflows/security-audit.yml` runs on PRs that change `uv.lock`, `pyproject.toml`, `package.json`, `package-lock.json` or the workflow itself, and weekly**: an inline `npm audit` of the npm lock, dev dependencies included because husky is the only one (the org workflow lives in a private repo, which a public repo cannot call), plus `pip-audit` over `uv export` of the locked requirements, since the org workflow does not read `uv.lock`. On 10-23 the locked set (104 pins) audited clean and `npm audit` found 0 vulnerabilities.
 
+### resolve_chrome no longer writes an empty Chrome version on a cold Linux runner (T-6555)
+
+`tools/resolve_chrome.py` ran `<chrome> --version` once with a 30 s bound and
+swallowed the timeout, so a cold runner wrote `"version": ""` and
+`release_records` rejected the evidence later. On Linux it now reads the dpkg
+package version and still runs `--version` (one retry, 2 x 45 s), because the
+cold-start probe counts on this step having started the binary once (F-870). The
+dpkg value wins when it answers, so a hung `--version` costs up to 90 s there but
+never empties the version. The step exits non-zero naming the cause (timeout,
+launch failure or no version in the output) only when dpkg gave nothing and
+`--version` also failed. Windows and macOS are unchanged.
+
 ## 2.1.40
 
 ### CI cancels a pull request's superseded runs (T-5430)
