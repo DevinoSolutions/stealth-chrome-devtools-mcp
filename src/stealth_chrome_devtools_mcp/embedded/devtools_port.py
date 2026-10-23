@@ -151,33 +151,68 @@ def _running(pid: int) -> bool:
         return False
 
 
+async def _reconnect_if_dead(browser: Browser) -> None:
+    """Make the next ``send`` open a fresh transport when this one cannot carry it.
+
+    nodriver reconnects in ``send`` only for a closed websocket; a listener task that
+    died on an open one leaves every later request unanswered. ``disconnect`` closes
+    both, so the ``send`` after it connects again with a new listener.
+    """
+    connection = browser.connection
+    listener = getattr(connection, "_listener_task", None)
+    if connection.closed or (listener is not None and listener.done()):
+        await _drop(browser)
+
+
 async def _answer(browser: Browser, launched_pid: int) -> list:
     """The browser's own process list, waiting while OUR launch is still running.
 
-    One request, not a retry: an abandoned CDP transaction can take the listener
-    with it, so the request is waited on (``asyncio.wait`` never cancels it) and
-    cancelled only when the wait is over. The floor is always given; past it the
-    wait goes on, up to ``IDENTITY_PATIENCE_SECONDS``, only while the launched pid
-    is alive. A launcher that is gone, or one that cannot be read, gets no more.
+    The read-only query is asked again once per ``IDENTITY_TIMEOUT_SECONDS`` (T-7014):
+    nodriver's ``send`` can lose a request without raising (the fire-and-forget
+    websocket send fails, the listener dies, a close ends the listener without failing
+    the pending futures), and one request waited on for the whole patience then refuses
+    a healthy browser. A transport that is closed or has no live listener is replaced
+    before each ask. The FIRST answer counts; the requests are waited on
+    (``asyncio.wait`` never cancels them) and cancelled only when the wait is over,
+    because an abandoned CDP transaction can take the listener with it. The floor is
+    always given; past it the wait goes on, up to ``IDENTITY_PATIENCE_SECONDS``, only
+    while the launched pid is alive. A launcher that is gone, or one that cannot be
+    read, gets no more.
     """
     from nodriver import cdp
 
+    connection = browser.connection
     clock = asyncio.get_running_loop().time
     started = clock()
-    request = asyncio.ensure_future(
-        browser.connection.send(cdp.system_info.get_process_info())
-    )
+    requests: set[asyncio.Future] = set()
+
+    def ask() -> None:
+        requests.add(
+            asyncio.ensure_future(connection.send(cdp.system_info.get_process_info()))
+        )
+
+    ask()
+    next_ask = started + IDENTITY_TIMEOUT_SECONDS
     try:
-        await asyncio.wait({request}, timeout=IDENTITY_TIMEOUT_SECONDS)
-        while (
-            not request.done()
-            and clock() - started < IDENTITY_PATIENCE_SECONDS
-            and _running(launched_pid)
-        ):
-            await asyncio.wait({request}, timeout=IDENTITY_POLL_SECONDS)
+        while True:
+            answered = next((r for r in requests if r.done()), None)
+            if answered is not None:
+                break
+            waited = clock() - started
+            if waited >= IDENTITY_TIMEOUT_SECONDS and not (
+                waited < IDENTITY_PATIENCE_SECONDS and _running(launched_pid)
+            ):
+                raise _unverified(waited)
+            if clock() >= next_ask:
+                next_ask += IDENTITY_TIMEOUT_SECONDS
+                await _reconnect_if_dead(browser)
+                ask()
+            await asyncio.wait(
+                requests,
+                timeout=max(0.0, min(IDENTITY_POLL_SECONDS, next_ask - clock())),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         waited = clock() - started
-        if not request.done():
-            raise _unverified(waited)
         if waited > IDENTITY_TIMEOUT_SECONDS:
             debug_logger.log_warning(
                 "devtools_port",
@@ -186,11 +221,13 @@ async def _answer(browser: Browser, launched_pid: int) -> list:
                 f"(floor {IDENTITY_TIMEOUT_SECONDS:g} s); "
                 f"pid {launched_pid} was running",
             )
-        return request.result()
+        return answered.result()
     finally:
-        if not request.done():
+        pending = {r for r in requests if not r.done()}
+        for request in pending:
             request.cancel()
-            await asyncio.wait({request})
+        if pending:
+            await asyncio.wait(pending)
 
 
 async def _ask(browser: Browser, launched_pid: int) -> None:

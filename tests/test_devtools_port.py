@@ -29,6 +29,9 @@ class _Connection:
     def __init__(self, processes) -> None:
         self.processes = processes
         self.disconnected = False
+        #: nodriver's ``Connection.closed`` and ``_listener_task``: a healthy transport.
+        self.closed = False
+        self._listener_task = None
         self.sent: list[dict] = []
         #: ``"hang"`` never answers; ``("slow", seconds)`` answers after that long;
         #: an exception instance is raised instead.
