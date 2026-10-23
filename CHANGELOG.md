@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.41
 
 ### Security: fastmcp 3.4.11 (GHSA-7xgj-8392-5q4r, T-7399)
 
