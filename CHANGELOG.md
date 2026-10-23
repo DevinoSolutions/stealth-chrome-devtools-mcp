@@ -2,15 +2,6 @@
 
 ## Unreleased
 
-### CI takes at most about 9 runners at once: 3 unit-test cells, 2 per other matrix, in two waves (T-6909)
-
-The org runner pool is shared (28 runners) and one run once held 15 of them.
-Each `release-gate.yml` matrix now sets `max-parallel: 2` (unit-tests 3), and integration, transport,
-offline-stealth and install-smoke wait for unit-tests and coverage. Cells are unchanged.
-A run takes about 60 min instead of about 30. A unit-tests or coverage failure now skips the
-wave-2 jobs (integration, transport, offline-stealth, install-smoke), so a red run shows only
-the wave-1 failures.
-
 ### Script bodies, credentials and spill files stay off shared surfaces (F-I, F-J, T-6205, T-6534)
 
 `execute_python_in_browser` logged the translated JavaScript, and its failure
@@ -206,6 +197,15 @@ whatever it answers. Not changed: port selection and the release-gate probes sti
 - **mcp 1.28.1 -> 1.30.0 (GHSA-84m7-p3x7-pcfv, unbounded session accumulation in the StreamableHTTP transport).** `fastmcp-slim` 3.4.8 declares `mcp>=1.24,<2`, so 1.30.0 is in range.
 - **mcp 1.30 changes three server defaults,** none configured by FastMCP: a 30-minute idle-session timeout (an open GET stream counts as in flight, so a live proxy is exempt), a 4 MiB request-body cap (413 beyond it) and a 10,000-session cap (503). A census of the tool signatures found no tool that carries a single inline argument near 4 MiB (file tools take paths).
 - `uv.lock` changes only those three packages. `uvx pip-audit` on the exported lock reports no known vulnerabilities (it reported 37 before).
+
+### CI takes at most about 9 runners at once: 3 unit-test cells, 2 per other matrix, in two waves (T-6909)
+
+The org runner pool is shared (28 runners) and one run once held 15 of them.
+Each `release-gate.yml` matrix now sets `max-parallel: 2` (unit-tests 3), and integration, transport,
+offline-stealth and install-smoke wait for unit-tests and coverage. Cells are unchanged.
+A run takes about 60 min instead of about 30. A unit-tests or coverage failure now skips the
+wave-2 jobs (integration, transport, offline-stealth, install-smoke), so a red run shows only
+the wave-1 failures.
 
 ## 2.1.40
 
