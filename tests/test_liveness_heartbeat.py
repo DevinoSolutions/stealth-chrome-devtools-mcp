@@ -17,7 +17,7 @@ free 127.0.0.1 port, a tiny FastMCP app, nothing of the live backend):
 * ``backend_probe.Heartbeat`` asks it over ONE keep-alive connection, and falls
   back to the ``initialize`` probe against a backend that predates the route;
 * a DELETE drops the session from the manager's table at once, for proxies that
-  are still running the old probe.
+  are still running the old probe (the SDK's own ``_discard_session``, mcp >= 1.30).
 
 The measurement is taken on the server side — ``len(_server_instances)`` for
 sessions listed, and a counter on uvicorn's ``connection_made`` for TCP
@@ -187,19 +187,14 @@ async def test_the_measurement_sees_listed_sessions_when_the_delete_is_not_honou
     """The control for the session count, on the pre-F-960 behaviour (a DELETE
     that leaves the entry listed): the old probe leaks one session per ask.
 
-    Since mcp 1.30 the SDK's own ``_discard_session`` also drops an ended
-    session from the table (T-6750), so the control turns off both: ours, and
-    the SDK's down to the terminate it still owes the transport."""
+    Since mcp 1.30 the SDK's own ``_discard_session`` drops an ended session from
+    the table (T-6750), so the control turns it down to the terminate it still
+    owes the transport."""
 
     async def _terminate_but_keep_listed(self, session_id, transport):
         if not transport.is_terminated:
             await transport.terminate()
 
-    monkeypatch.setattr(
-        session_hygiene.HygienicSessionManager,
-        "_forget_if_deleted",
-        lambda self, session_id: None,
-    )
     monkeypatch.setattr(
         session_hygiene.HygienicSessionManager,
         "_discard_session",
@@ -392,23 +387,6 @@ async def test_a_delete_the_transport_refuses_does_not_unlist(monkeypatch):
             )
         assert refused.status_code == 400
         assert backend.sessions == 1
-
-
-def test_forgetting_a_deleted_session_clears_every_table():
-    manager = session_hygiene.HygienicSessionManager(app=object())  # type: ignore[arg-type]
-
-    class Terminated:
-        is_terminated = True
-
-    manager._server_instances["s"] = Terminated()  # type: ignore[assignment]
-    manager._session_owners["s"] = object()  # type: ignore[assignment]
-    manager.last_seen["s"] = 1.0
-
-    manager._forget_if_deleted("s")
-
-    assert not manager._server_instances
-    assert not manager._session_owners
-    assert not manager.last_seen
 
 
 def test_health_url_swaps_only_the_path():

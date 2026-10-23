@@ -3,14 +3,16 @@
 The backend's MCP layer (``mcp.server.streamable_http_manager``) lists one
 transport per ``mcp-session-id`` it ever handed out. Up to mcp 1.28 it pruned
 that list in exactly two places: an idle timeout FastMCP never configures, and a
-crashed session — which explicitly SKIPS terminated ones. (mcp 1.30 DOES default
-a 30-minute idle timeout: a session with no request in flight for that long is
-reaped, and an open GET stream counts as in flight, so a live proxy holding its
-stream is never reaped. A client with no stream, the CLI or a probe, gets a 404
-after it and re-initializes, which ``proxy_selfheal`` handles. The sweep below
-stays for its shorter window and for terminated entries.) A client's DELETE only marks
-the transport terminated (so the id answers 404); the entry stays forever. A
-client that simply goes away — TCP closed, process dead — leaves everything:
+crashed session — which explicitly SKIPS terminated ones. A client's DELETE only
+marked the transport terminated (so the id answered 404); the entry stayed
+forever. mcp >= 1.30 closes that part itself: ``_discard_session`` drops an ended
+session from the table however it ended (client DELETE, idle timeout, crash), and
+it defaults a 30-minute idle timeout: a session with no request in flight for that
+long is reaped, and an open GET stream counts as in flight, so a live proxy
+holding its stream is never reaped. A client with no stream, the CLI or a probe,
+gets a 404 after it and re-initializes, which ``proxy_selfheal`` handles. The
+sweep below stays for its shorter window and for terminated entries. A client that
+simply goes away — TCP closed, process dead — leaves everything:
 transport, ``ServerSession``, task group, the per-session lifespan. Every stdio
 proxy's watchdog opens such a session on the backend every 2 s
 (``singleton._backend_http_ready`` sends a real ``initialize``) and DELETEs it
@@ -21,10 +23,10 @@ lost. Two million probes a day is the 6.7 GB the 2026-09-11 backend showed after
 
 F-960 closes the same leak from both ends. The watchdog no longer opens a session
 per beat at all (``backend_probe.Heartbeat`` asks :func:`_health` below, a route
-that creates none). And for a proxy still running the old probe, a DELETE now
-drops the session from the table when it lands (``handle_request``) instead of
-leaving the terminated entry for the sweep: with 38 old proxies that was ~19
-sessions a second listed for ``ABANDONED_AFTER_SECONDS`` each, ~5,600 at once.
+that creates none). For a proxy still running the old probe, the SDK (mcp >= 1.30)
+now drops the session from the table when its DELETE lands, instead of leaving the
+terminated entry for the sweep: with 38 old proxies that was ~19 sessions a second
+listed for ``ABANDONED_AFTER_SECONDS`` each, ~5,600 at once.
 
 :class:`HygienicSessionManager` is that manager with a sweep. Every
 ``SWEEP_INTERVAL_SECONDS`` it walks the live sessions; one that has NO standing
@@ -123,24 +125,6 @@ class HygienicSessionManager(FastMCPStreamableHTTPSessionManager):
         if session_id:
             self.note_activity(session_id)
         await super().handle_request(scope, receive, send)
-        if session_id and scope.get("method") == "DELETE":
-            self._forget_if_deleted(session_id)
-
-    def _forget_if_deleted(self, session_id: str) -> None:
-        """Drop a session its client just DELETEd (F-960).
-
-        The SDK's DELETE only marks the transport terminated and leaves the entry
-        listed, relying on the sweep to remove it ``ABANDONED_AFTER_SECONDS``
-        later. Dropping it now changes only the 404's body: a terminated
-        transport answered "Session has been terminated", an unknown id answers
-        "Session not found", both 404, which is what the client reads.
-        """
-        transport = self._server_instances.get(session_id)
-        if transport is None or not transport.is_terminated:
-            return  # refused (bad headers) or already gone: nothing was deleted
-        del self._server_instances[session_id]
-        self._session_owners.pop(session_id, None)
-        self.last_seen.pop(session_id, None)
 
     @contextlib.asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
