@@ -399,7 +399,16 @@ class TestIdleCanary:
             while c._ready_at is None and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
             assert c._ready_at is not None
-            await asyncio.sleep(0.8)
+            # Wait for the first wake as well as for the window, not for a clock
+            # alone: on a loaded host the child can take longer than any fixed sleep
+            # to be scheduled (T-7496).
+            wake_deadline = time.monotonic() + 10
+            while time.monotonic() < wake_deadline and not (
+                c._wakes > 0
+                and scheduling_lag._now() - c._ready_at
+                >= scheduling_lag.CANARY_MIN_WINDOW_SECONDS
+            ):
+                await asyncio.sleep(0.05)
             factor = await c.factor()
             proc = c._proc
         assert factor is not None and 1.0 <= factor <= scheduling_lag.MAX_STRETCH

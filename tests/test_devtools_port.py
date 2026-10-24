@@ -76,6 +76,9 @@ def logged(monkeypatch):
     return seen
 
 
+ANSWER_PATIENCE_SECONDS = 60.0
+
+
 def _browser(*processes: tuple[str, int]) -> SimpleNamespace:
     return SimpleNamespace(
         connection=_Connection(
@@ -84,11 +87,17 @@ def _browser(*processes: tuple[str, int]) -> SimpleNamespace:
     )
 
 
-def _short_waits(monkeypatch) -> None:
-    """Scale the identity waits down so the pins run in a fraction of a second."""
+def _short_waits(monkeypatch, *, patience: float = 1.0) -> None:
+    """Scale the identity waits down so the pins run in a fraction of a second.
+
+    A pin that EXPECTS an answer passes ``patience=ANSWER_PATIENCE_SECONDS``: it ends
+    the moment the answer lands, so the long patience costs nothing, and a loaded host
+    that stalls the loop past a 1 s patience before the first throwaway is asked (T-7518)
+    cannot turn the answer into F-1009. A pin that expects the REFUSAL keeps the short
+    default, which is what makes it end."""
     monkeypatch.setattr(devtools_port, "IDENTITY_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.02)
-    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 1.0)
+    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", patience)
 
 
 @pytest.fixture
@@ -217,7 +226,7 @@ class TestConfirmOurs:
         and the spawn of OUR OWN browser was refused. While the pid we launched is
         running, the wait goes on past the floor (here 0.05 s) and the late answer
         is the proof, as ever; the delay is logged so a slow host is visible."""
-        _short_waits(monkeypatch)
+        _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         me = os.getpid()
         browser = _browser(("browser", me))
         browser.connection.behaviour = ("slow", 0.4)
@@ -228,7 +237,7 @@ class TestConfirmOurs:
 
     async def test_a_stranger_answering_late_is_still_refused(self, monkeypatch):
         """Patience is not trust: the pid in the answer decides, however late."""
-        _short_waits(monkeypatch)
+        _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         browser = _browser(("browser", OTHER))
         browser.connection.behaviour = ("slow", 0.4)
         with pytest.raises(ToolError, match=f"process {OTHER}"):
@@ -358,9 +367,9 @@ class TestAskedAgain:
     async def test_the_first_answer_counts_and_the_losers_end_cleanly(
         self, monkeypatch, throwaways
     ):
-        _short_waits(monkeypatch)
+        _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         browser = _lost_browser(("browser", os.getpid()))
-        await devtools_port.confirm_ours(browser, os.getpid())
+        await asyncio.wait_for(devtools_port.confirm_ours(browser, os.getpid()), 30.0)
         assert not browser.connection.disconnected
         assert browser.connection.send_cancelled
         assert throwaways.made
@@ -388,7 +397,7 @@ class TestAskedAgain:
     async def test_a_failed_request_does_not_beat_one_that_answers(
         self, monkeypatch, throwaways, logged
     ):
-        _short_waits(monkeypatch)
+        _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         browser = _lost_browser(("browser", os.getpid()))
         browser.connection.behaviour = OSError("died under the request")
         throwaways.plan.append(None)
@@ -504,7 +513,7 @@ class TestTheCancelledFirstAsk:
             tool_runtime,  # noqa: F401  PERMANENT(importing it is what installs the transport patch in production)
         )
 
-        _short_waits(monkeypatch)
+        _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         socket = _Websocket()
         connection = Connection("ws://127.0.0.1:1/devtools/browser/x")
         connection._websocket = socket  # noqa: SLF001  PERMANENT(a fake websocket under the real Connection)

@@ -115,6 +115,11 @@ DUMP_BUDGET_SECONDS = 45.0
 #: probe interval earlier, so this is the tail of a slow dump, never the whole of one.
 HEAL_WAITS_FOR_CAPTURE_SECONDS = 10.0
 
+#: How long the heal waits for the rename of the healed dump (one thread hop and a
+#: file rename). Its own budget, not the capture's: a test shortens the capture's wait
+#: to make a hung dump quick, and a loaded host takes longer than that to run a thread.
+HEAL_WAITS_FOR_MARK_SECONDS = 10.0
+
 #: Slack on top of the dump's own budget for the heal's outer ``wait_for``, so a dump
 #: that keeps its budget says why itself and only one that does not return is cut.
 _DUMP_OUTER_GRACE_SECONDS = 2.0
@@ -811,7 +816,7 @@ class Incidents:
         try:
             kept = await asyncio.wait_for(
                 asyncio.to_thread(self._mark_healed, label),
-                HEAL_WAITS_FOR_CAPTURE_SECONDS,
+                HEAL_WAITS_FOR_MARK_SECONDS,
             )
         except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
             parts.append(f"dump_not_marked_healed({type(error).__name__})")
