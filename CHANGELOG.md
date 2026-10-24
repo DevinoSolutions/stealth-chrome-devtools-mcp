@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: the Proactor reset pins run on Python 3.11 (T-7495)
+
+- `tests/test_proactor_accept_survives_reset.py` called `asyncio.run(scenario(), loop_factory=asyncio.ProactorEventLoop)` in `test_the_listener_survives_a_storm_of_resets` and `test_close_still_ends_the_accept_loop_without_spinning`. `loop_factory` on `asyncio.run` is Python 3.12+; the project supports `>=3.11`, so both raised `TypeError: run() got an unexpected keyword argument 'loop_factory'`.
+- Measured in publish run 40046879814, gate / unit-tests (Windows/X64 py3.11): 2 failed, 5333 passed. 2.1.41 was tagged but not published because of it.
+- Both calls now use `with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner: runner.run(scenario())` (`asyncio.Runner` exists since 3.11), which keeps the real `ProactorEventLoop`. Test-only; `src/` is unchanged.
+- Verified on Python 3.11.14 with that file: before 2 failed, 10 passed; after 12 passed (3.13 venv: 12 passed).
+
 ## 2.1.41
 
 ### Security: fastmcp 3.4.11 (GHSA-7xgj-8392-5q4r, T-7399)
