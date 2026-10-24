@@ -19,6 +19,12 @@
 
 - **A real-Chrome pin that F-1011's focus emulation delivers INPUT, not just frames (T-5332).** New `tests/test_e2e_hidden_tab_input.py` with `tests/fixture_app/hidden_input_probe.html`, whose key and click listeners drop everything while `document.visibilityState` is `hidden`. On a `new_tab` tab covered by a later tab, `type_text` must leave the field holding the typed text and `click_element` must register one click, each in its own node, with the page `visible` and `hasFocus()` true. A third node is a fixture self-test (a covered tab no tool armed reads `hidden` and the page drops in-page keys and a click). Headless and headed; the premise that a covered tab reads `hidden` is asserted everywhere except headed Linux on bare Xvfb, which skips by name. With `window_sizing.enable_focus_emulation` rebound to a no-op both the typing and the click nodes fail in both modes. Test-only.
 
+### Fixed: three load-sensitive test pins no longer flake under a busy lane (T-7509, T-7518, T-7496)
+
+- T-7509: `freeze_capture.before_heal` gave the thread hop that renames the healed dump the capture's `HEAL_WAITS_FOR_CAPTURE_SECONDS` as its budget, so a test that shortens the capture's wait to 0.05 s to cut a hung dump also cut the rename on a loaded host (`dump_kept` missing). The rename has its own `HEAL_WAITS_FOR_MARK_SECONDS` (same 10 s default, production unchanged), which that pin leaves alone.
+- T-7518: the `devtools_port` pins that expect an answer (`_short_waits(patience=ANSWER_PATIENCE_SECONDS)`) no longer share the 1 s patience of the pins that expect the refusal: a loop stalled past 1 s before the first throwaway was asked turned the answer into F-1009. They end when the answer lands, so the long patience costs nothing.
+- T-7496: the real-canary pin waits (10 s deadline) until the child has woken and the window has passed, instead of sleeping a fixed 0.8 s that a starved host spends before the child is scheduled.
+
 ## 2.1.42
 
 ### Fixed: the Proactor reset pins run on Python 3.11 (T-7495)
