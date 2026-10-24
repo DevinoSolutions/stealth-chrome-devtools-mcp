@@ -25,6 +25,15 @@
 - T-7518: the `devtools_port` pins that expect an answer (`_short_waits(patience=ANSWER_PATIENCE_SECONDS)`) no longer share the 1 s patience of the pins that expect the refusal: a loop stalled past 1 s before the first throwaway was asked turned the answer into F-1009. They end when the answer lands, so the long patience costs nothing.
 - T-7496: the real-canary pin waits (10 s deadline) until the child has woken and the window has passed, instead of sleeping a fixed 0.8 s that a starved host spends before the child is scheduled.
 
+### The session manager relies on mcp 1.30's own discard of ended sessions (T-6904)
+
+`HygienicSessionManager._forget_if_deleted` (F-960) dropped a session from the
+table when its client's DELETE landed. Since mcp 1.30 the SDK's
+`_discard_session` does that for every way a session can end (client DELETE, idle
+timeout, crash), so the local copy was a second way to do the same thing and is
+gone; the sweep still prunes the manager's own `last_seen` entry for any id no
+longer listed. The leak-control test now turns off only the SDK's discard.
+
 ## 2.1.42
 
 ### Fixed: the Proactor reset pins run on Python 3.11 (T-7495)
