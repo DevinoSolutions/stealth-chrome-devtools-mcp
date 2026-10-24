@@ -99,7 +99,8 @@ def test_the_listener_survives_a_storm_of_resets(installed):
             server.close()
             await asyncio.wait_for(server.wait_closed(), 3)
 
-    asyncio.run(scenario(), loop_factory=asyncio.ProactorEventLoop)
+    with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
+        runner.run(scenario())
 
 
 @windows_only
@@ -116,7 +117,8 @@ def test_close_still_ends_the_accept_loop_without_spinning(installed):
         with pytest.raises(OSError):
             await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 3)
 
-    asyncio.run(scenario(), loop_factory=asyncio.ProactorEventLoop)
+    with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
+        runner.run(scenario())
 
 
 def _win_error(message: str, winerror: int) -> OSError:
