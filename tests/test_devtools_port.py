@@ -519,8 +519,11 @@ class TestTheCancelledFirstAsk:
         connection._websocket = socket  # noqa: SLF001  PERMANENT(a fake websocket under the real Connection)
         connection._listener_task = asyncio.ensure_future(connection._listener())  # noqa: SLF001  PERMANENT(the real listener over the fake websocket)
         try:
-            await devtools_port.confirm_ours(
-                SimpleNamespace(connection=connection), os.getpid()
+            await asyncio.wait_for(
+                devtools_port.confirm_ours(
+                    SimpleNamespace(connection=connection), os.getpid()
+                ),
+                30.0,
             )
             assert throwaways.made, "the throwaway never asked"
             (first,) = socket.sent
