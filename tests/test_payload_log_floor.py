@@ -922,7 +922,7 @@ class TestTheFamiliesDeliberatelyLeftOut:
 
     def test_the_fastmcp_argument_line_is_unreachable_from_root(self):
         """``fastmcp/server/server.py``:1537 (2.14.7; :672 in 2.11.2; moved in
-        3.4.8 to ``fastmcp/server/mixins/mcp_operations.py``:211, ``"Handler
+        3.4.8 to ``fastmcp/server/mixins/mcp_operations.py``:212 (3.4.11), ``"Handler
         called: call_tool %s with %s"``, which this premise still shields; 3.4.8's
         ``server.py`` argument line is a WARNING and
         :class:`TestTheFastmcpWarningLine`'s) DEBUG-logs
