@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.43
 
 ### A closed tab's python-binding watch is reaped (T-6561)
 
