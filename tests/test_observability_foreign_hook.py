@@ -140,3 +140,69 @@ class TestAFrameIsOursByFileToo:
     def test_a_main_module_frame_elsewhere_is_dropped(self, tmp_path):
         event, hint = _hook_event(tmp_path / "analyze-python.py", "__main__")
         assert observability._scrub_event(event, hint) is None
+
+
+def _hand_event(*chain: tuple[str, ...]) -> dict:
+    """An excepthook event whose i-th exception has the frames ``chain[i]``, each a
+    ``(module, abs_path)`` pair. Hand-built on purpose: the SDK cannot be made to
+    put an arbitrary frame at an arbitrary position in a chain."""
+    return {
+        "exception": {
+            "values": [
+                {
+                    "type": "ValueError",
+                    "value": "x",
+                    "mechanism": {"type": "excepthook", "handled": False},
+                    "stacktrace": {
+                        "frames": [
+                            {"module": module, "abs_path": abs_path, "lineno": 1}
+                            for module, abs_path in frames
+                        ]
+                    },
+                }
+                for frames in chain
+            ]
+        }
+    }
+
+
+OURS = ("stealth_chrome_devtools_mcp.x", "/elsewhere/x.py")
+FOREIGN = ("analyze_python", "/elsewhere/analyze-python.py")
+
+
+class TestEveryExceptionInTheChainIsJudged:
+    """An unrelated crash must not hide behind, or be exposed by, its position."""
+
+    def test_an_event_with_no_frames_is_kept(self):
+        event = _hand_event(())
+        assert observability._scrub_event(event, None) is not None
+
+    def test_ours_in_a_later_value_keeps_the_event(self):
+        event = _hand_event((FOREIGN,), (OURS,))
+        assert observability._scrub_event(event, None) is not None
+
+    def test_ours_in_the_first_value_keeps_the_event(self):
+        event = _hand_event((OURS,), (FOREIGN,))
+        assert observability._scrub_event(event, None) is not None
+
+    def test_foreign_in_every_value_drops_the_event(self):
+        event = _hand_event((FOREIGN,), (FOREIGN,))
+        assert observability._scrub_event(event, None) is None
+
+
+class TestAKeptHookEventIsStillScrubbed:
+    def test_the_home_directory_is_anonymised_and_the_mechanism_unchanged(self):
+        event = _hand_event(
+            (
+                (FOREIGN[0], "/home/jdoe/analyze-python.py"),
+                ("stealth_chrome_devtools_mcp.x", "/home/jdoe/site-packages/x.py"),
+            )
+        )
+        out = observability._scrub_event(event, None)
+        assert out is not None
+        value = out["exception"]["values"][0]
+        assert value["mechanism"] == {"type": "excepthook", "handled": False}
+        assert "jdoe" not in repr(out)
+        assert (
+            value["stacktrace"]["frames"][1]["abs_path"] == "/home/~/site-packages/x.py"
+        )
