@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### A foreign interpreter's own crash is no longer reported as ours (T-7828)
+
+- **`observability._scrub_event` drops a hook-captured event with no frame of ours in it (T-7828).** `sentry_sdk.init` installs `sys.excepthook` for the whole process, and the OSSF package-analysis sandbox runs our entry points inside its own `analyze-python.py`: that script's unrelated `ValueError: I/O operation on closed file` reached the hook and was reported under our release, one event per PyPI release. An event whose mechanism is `excepthook` or `threading` (the two process-global hooks the SDK installs) is now dropped when no frame of any exception in it is in this package, by module name or by file path (the backend runs `embedded/server.py` as `__main__` under `runpy`). Judged on the event, not on `argv[0]` or how the process was launched. A handled `capture_exception`, an uncaught raise through our code, and an exception with no frames at all are still reported. Pinned in `tests/test_observability_foreign_hook.py` through child interpreters that run the real `sentry_init` over a capturing transport.
+
 ### A closed tab's python-binding watch is reaped (T-6561)
 
 - **`Bindings.watches` no longer keeps every tab it ever watched (T-6561, #278 review).** A tab's `TabWatch` stayed in the registry, and kept a reference to its

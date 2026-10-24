@@ -54,6 +54,7 @@ import importlib.metadata
 import logging
 import re
 from functools import cache
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from stealth_chrome_devtools_mcp import expected_events
@@ -70,6 +71,9 @@ _PACKAGE_NAME = "stealth-chrome-devtools-mcp"
 _DSN = "https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34"
 
 _log = logging.getLogger(__name__)
+
+_IMPORT_NAME = "stealth_chrome_devtools_mcp"
+_PACKAGE_DIR = Path(__file__).parent
 
 
 #: A home directory under either path flavor, whatever the host OS is: a
@@ -547,6 +551,50 @@ def _is_expected_tool_failure(
     return True
 
 
+#: ``mechanism.type`` of the events the SDK raises from a PROCESS-GLOBAL hook:
+#: ``sys.excepthook`` (``integrations/excepthook.py``) and ``threading.excepthook``
+#: (``integrations/threading.py``), sdk 2.64.0. A hook reports whatever the
+#: interpreter dies of, which is only ours when our code is in the traceback.
+_HOOK_MECHANISMS = frozenset({"excepthook", "threading"})
+
+
+def _is_foreign_hook_crash(event: "Event") -> bool:
+    """Was this captured by a process-global hook with none of OUR code in it?
+
+    ``sentry_sdk.init`` installs ``sys.excepthook`` for the whole interpreter,
+    and a foreign one can run our entry points: the OSSF package-analysis
+    sandbox imports every PyPI release under ``/usr/local/bin/analyze-python.py``,
+    and that script's own ``ValueError: I/O operation on closed file`` reached
+    the hook and shipped under our release (T-7828). Keyed on the EVENT, never on
+    ``argv[0]`` or how we were launched: any host process that is not ours dies
+    the same way. A frame counts as ours by module or by file, because the
+    backend runs ``embedded/server.py`` as ``__main__`` under ``runpy``. A
+    handled ``capture_exception`` is never judged here (its mechanism is not a
+    hook), and an exception with no frames at all is kept: nothing says it is
+    not ours.
+    """
+    try:
+        values = (event.get("exception") or {}).get("values") or []
+        if not any(
+            (v.get("mechanism") or {}).get("type") in _HOOK_MECHANISMS for v in values
+        ):
+            return False
+        frames = [
+            f for v in values for f in (v.get("stacktrace") or {}).get("frames") or []
+        ]
+        return bool(frames) and not any(_is_our_frame(f) for f in frames)
+    except Exception:  # noqa: BLE001  PERMANENT(never-raises contract, #55)
+        _log.debug("Sentry foreign-hook check failed; shipping", exc_info=True)
+        return False
+
+
+def _is_our_frame(frame: "dict[str, object]") -> bool:
+    module, abs_path = frame.get("module"), frame.get("abs_path")
+    if isinstance(module, str) and module.split(".")[0] == _IMPORT_NAME:
+        return True
+    return isinstance(abs_path, str) and Path(abs_path).is_relative_to(_PACKAGE_DIR)
+
+
 def _scrub_event(
     event: "Event", hint: "dict[str, object] | None" = None
 ) -> "Event | None":
@@ -557,7 +605,8 @@ def _scrub_event(
 
     0. an event that is only this product working as designed is dropped — see
        :func:`_is_expected_tool_failure` and the five named classes in
-       :mod:`expected_events`;
+       :mod:`expected_events` — and so is a foreign interpreter's own crash
+       caught by our process-global hook, see :func:`_is_foreign_hook_crash`;
     1. everything that survives is scrubbed.
 
     Five removals, all universal — there is no maintainer-only path:
@@ -589,7 +638,7 @@ def _scrub_event(
     that runs before an event leaves the machine, so it defends against being
     handed something else rather than dying at the boundary.
     """
-    if _is_expected_tool_failure(event, hint):
+    if _is_expected_tool_failure(event, hint) or _is_foreign_hook_crash(event):
         return None
     try:
         scrubbed = _anonymize(event)

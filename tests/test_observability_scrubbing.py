@@ -53,7 +53,7 @@ def _event_with_frames(*paths: str) -> dict[str, object]:
                 {
                     "type": "FileNotFoundError",
                     "value": "boom",
-                    "mechanism": {"type": "excepthook", "handled": False},
+                    "mechanism": {"type": "generic", "handled": True},
                     "stacktrace": {
                         "frames": [
                             {"abs_path": p, "filename": p, "lineno": 12} for p in paths
@@ -293,7 +293,7 @@ def test_the_diagnostic_value_of_the_event_is_untouched():
     assert out["contexts"] == {"trace": {"trace_id": "0123456789abcdef"}}
     value = out["exception"]["values"][0]
     assert value["type"] == "FileNotFoundError"
-    assert value["mechanism"] == {"type": "excepthook", "handled": False}
+    assert value["mechanism"] == {"type": "generic", "handled": True}
     assert _frames(out)[0]["lineno"] == 12
     # The module path AFTER the home segment is the whole point of a stacktrace.
     assert _frames(out)[0]["abs_path"].endswith(r"src\browser_manager.py")
@@ -639,7 +639,7 @@ def test_a_scrub_that_explodes_drops_the_free_text_it_could_not_prove_clean():
                     "type": "AttributeError",
                     "module": "stealth_chrome_devtools_mcp.embedded.dom_handler",
                     "value": "alice@example.com on https://h.example.com/a?token=SECRET",
-                    "mechanism": {"type": "excepthook", "handled": False},
+                    "mechanism": {"type": "generic", "handled": True},
                 }
             ]
         },
@@ -655,7 +655,7 @@ def test_a_scrub_that_explodes_drops_the_free_text_it_could_not_prove_clean():
     value = out["exception"]["values"][0]
     assert value["type"] == "AttributeError"
     assert value["module"] == "stealth_chrome_devtools_mcp.embedded.dom_handler"
-    assert value["mechanism"] == {"type": "excepthook", "handled": False}
+    assert value["mechanism"] == {"type": "generic", "handled": True}
     assert value["value"] == "[redacted-unscrubbable]"
     # …and the caller's object is still untouched, on the failure path too.
     assert hostile["server_name"] == "DESKTOP-ABC123"
