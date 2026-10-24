@@ -34,6 +34,10 @@ timeout, crash), so the local copy was a second way to do the same thing and is
 gone; the sweep still prunes the manager's own `last_seen` entry for any id no
 longer listed. The leak-control test now turns off only the SDK's discard.
 
+### Changed
+
+- Docs only: fastmcp line citations in `logging_setup.py` and `test_payload_log_floor.py` re-pointed to 3.4.11 (`mcp_operations.py`:212) and the argument-validation census note corrected (T-7456).
+
 ## 2.1.42
 
 ### Fixed: the Proactor reset pins run on Python 3.11 (T-7495)

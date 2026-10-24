@@ -169,7 +169,7 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #: and close no door that ``mcp.client`` does not already close.
 #:
 #: ``fastmcp``'s tool-ARGUMENT DEBUG line (``server/server.py``:1537 in fastmcp
-#: 2.14.7; :672 in 2.11.2; ``server/mixins/mcp_operations.py``:211 in 3.4.8,
+#: 2.14.7; :672 in 2.11.2; ``server/mixins/mcp_operations.py``:212 in 3.4.11,
 #: ``"Handler called: call_tool %s with %s"``) is real, and the library already
 #: shields its DEBUG: every
 #: one of its loggers hangs under a ``fastmcp`` root that carries its own level
@@ -203,9 +203,12 @@ PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets", "sse_starlette", "mcp.client")
 
 #: Loggers whose payload line sits AT WARNING, so they are held at ERROR (F-946).
 #: fastmcp 3's ``FastMCP.call_tool`` logs ``"Invalid arguments for tool %r: %s"``
-#: with pydantic's ``errors()``, whose ``input`` is the caller's value WHOLE and
-#: untruncated (measured on 3.4.8: a missing ``instance_id`` renders the entire
-#: ``script``). fastmcp 2.14 logged nothing there. The census of this logger's
+#: (``fastmcp/server/server.py``:1403; :1415 for a bare pydantic error) with
+#: pydantic's ``errors(include_url=False)``, whose ``input`` is the caller's
+#: value WHOLE and untruncated (inferred from that code path, not measured on
+#: 3.4.11: ``errors()`` keeps ``input`` by default, so a missing ``instance_id``
+#: would render the entire ``script``).
+#: fastmcp 2.14 logged nothing there. The census of this logger's
 #: other calls below ERROR is the reason the floor costs nothing. They log a
 #: ``FastMCPError`` at its own level, and no tool or ``browser://`` resource
 #: here raises one; or they are the prompt, mount and import lines, and we
