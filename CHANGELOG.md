@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.42
 
 ### Fixed: the Proactor reset pins run on Python 3.11 (T-7495)
 
