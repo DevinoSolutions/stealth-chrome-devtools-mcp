@@ -203,9 +203,11 @@ PAYLOAD_LOG_FAMILIES = ("nodriver", "websockets", "sse_starlette", "mcp.client")
 
 #: Loggers whose payload line sits AT WARNING, so they are held at ERROR (F-946).
 #: fastmcp 3's ``FastMCP.call_tool`` logs ``"Invalid arguments for tool %r: %s"``
-#: (``server.py``:1403; :1414 for a bare pydantic error) with pydantic's
-#: ``errors(include_url=False)``, whose ``input`` is the caller's value WHOLE
-#: and untruncated (a missing ``instance_id`` renders the entire ``script``).
+#: (``fastmcp/server/server.py``:1403; :1415 for a bare pydantic error) with
+#: pydantic's ``errors(include_url=False)``, whose ``input`` is the caller's
+#: value WHOLE and untruncated (inferred from that code path, not measured on
+#: 3.4.11: ``errors()`` keeps ``input`` by default, so a missing ``instance_id``
+#: would render the entire ``script``).
 #: fastmcp 2.14 logged nothing there. The census of this logger's
 #: other calls below ERROR is the reason the floor costs nothing. They log a
 #: ``FastMCPError`` at its own level, and no tool or ``browser://`` resource
