@@ -1,0 +1,171 @@
+{
+ "backend_launcher_pid": 102888,
+ "token_handshake_http_status": {
+  "no_token": 401,
+  "wrong_token": 401,
+  "with_token": 307,
+  "slash_no_token": 401,
+  "slash_with_token": 200,
+  "token_file_present": true
+ },
+ "tool_count_over_token_session": 97,
+ "spawn": {
+  "headless": false,
+  "profile_role": "clone",
+  "seed_warning": "There is no shared profile or seed yet, so this browser started EMPTY: it holds no logins and is deleted when it closes. To keep a signed-in profile, open one with spawn_browser(session=\"default\"), sign in there, and close it with close_instance(instance_id=..., session=\"default\"): every later spawn is then copied from it."
+ },
+ "versions": {
+  "stealth-chrome-devtools-mcp": "2.1.42",
+  "fastmcp": "3.4.11",
+  "fastmcp-slim": "3.4.11",
+  "certifi": "2026.10.23",
+  "Pillow": "13.0.0",
+  "mcp": "1.30.0"
+ },
+ "package_path_in_prove_venv": true,
+ "basic_click": {
+  "click_result_keys": [
+   "dispatch",
+   "hit",
+   "hit_is_target",
+   "point",
+   "reason",
+   "selector",
+   "size",
+   "target"
+  ],
+  "page_hits": {
+   "success": true,
+   "result": [
+    {
+     "trusted": true,
+     "x": 111,
+     "y": 115
+    }
+   ],
+   "error": null
+  }
+ },
+ "basic_click_screenshot": "saved",
+ "cookies_set_results": {
+  "site_a": [
+   true,
+   true
+  ],
+  "site_b": [
+   true
+  ]
+ },
+ "get_cookies": {
+  "page_default_count": 2,
+  "page_default_domains": [
+   "127.0.0.1"
+  ],
+  "all_sites_count": 3,
+  "all_sites_distinct_domains": 2,
+  "all_sites_includes_localhost_site_b": true,
+  "urls_site_b_count": 1,
+  "about_blank_default": [],
+  "errors": []
+ },
+ "path_tools": {
+  "upload_dotenv": {
+   "__error__": "Error calling tool 'upload_file': upload_file refuses to attach a file in .env files (secrets by convention): path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+  },
+  "upload_aws_credentials": {
+   "__error__": "Error calling tool 'upload_file': upload_file refuses to attach a file in ~/.aws (AWS credentials): path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+  },
+  "upload_ordinary_file_control": {
+   "selector": "#f",
+   "requested": 1,
+   "attached": 1,
+   "multiple": false,
+   "total_bytes": 6
+  },
+  "file_input_after": {
+   "success": true,
+   "result": 1,
+   "error": null
+  },
+  "screenshot_to_dot_ssh": {
+   "__error__": "Error calling tool 'take_screenshot': take_screenshot refuses to write to a file in ~/.ssh (SSH keys): path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+  },
+  "dot_ssh_file_exists_after": false,
+  "screenshot_into_session_root": {
+   "__error__": "Error calling tool 'take_screenshot': take_screenshot refuses to write to a file in the stealth browser-session root: path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+  },
+  "session_root_file_exists_after": false,
+  "export_debug_logs_to_dot_aws": {
+   "__error__": "Error calling tool 'export_debug_logs': export_debug_logs refuses to write to a file in ~/.aws (AWS credentials): path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+  },
+  "dot_aws_file_exists_after": false,
+  "screenshot_new_file": "Screenshot saved. AI agents should use the Read tool to view this image: <PROVE_DIR>\\work\\shot.png",
+  "screenshot_existing_no_overwrite": {
+   "__error__": "Error calling tool 'take_screenshot': take_screenshot refuses to overwrite an existing file (rule: no silent overwrite, F-1025). Pass overwrite=True to replace it, or choose a new path."
+  },
+  "screenshot_existing_overwrite_true": "Screenshot saved. AI agents should use the Read tool to view this image: <PROVE_DIR>\\work\\shot.png",
+  "export_debug_logs_default_name_ok": "ok",
+  "export_debug_logs_existing_no_overwrite": {
+   "__error__": "Error calling tool 'export_debug_logs': export_debug_logs refuses to overwrite an existing file (rule: no silent overwrite, F-1025). Pass overwrite=True to replace it, or choose a new path."
+  },
+  "screenshot_posix_mode": "0o666",
+  "export_network_default": {
+   "success": true,
+   "capture_note": "response-body capture is off; enable via set_network_capture_filters(capture_bodies=True) or STEALTH_MCP_NETWORK_CAPTURE_BODIES=1"
+  },
+  "export_network_with_credentials": {
+   "success": true,
+   "capture_note": "response-body capture is off; enable via set_network_capture_filters(capture_bodies=True) or STEALTH_MCP_NETWORK_CAPTURE_BODIES=1"
+  },
+  "network_default_has_decoy_secret": false,
+  "network_default_has_REDACTED": true,
+  "network_creds_has_decoy_secret": true
+ },
+ "python_binding": {
+  "create_result_keys": [
+   "available_as",
+   "binding_name",
+   "success"
+  ],
+  "create_error": null,
+  "main_context_call_result": {
+   "success": true,
+   "result": "py-answered:MAIN-CONTEXT",
+   "error": null
+  },
+  "hits_after_main_call": 1,
+  "hits_after_cross_origin_frame_raw_call": 1,
+  "frame_beacon": [
+   {
+    "who": "frame",
+    "t": "undefined",
+    "called": "false"
+   }
+  ],
+  "hits_after_navigation_and_new_page_attempt": 1,
+  "hostile_page_beacon": [
+   {
+    "who": "hostile",
+    "t": "function",
+    "called": "true"
+   }
+  ],
+  "backend_log_binding_lines": []
+ },
+ "close": {
+  "closed": true,
+  "seed_refreshed": null
+ },
+ "backend_tree": [
+  [
+   166108,
+   "python.exe"
+  ]
+ ],
+ "ci_only_items_no_png": "T-7495, T-6555, T-6148, T-6909/6907/6910, T-7028, CI flakes (F-1014/1015/1016/1022): CI-only, proven by publish run 40063770416 green",
+ "notes": {
+  "binding_cross_origin_frame": "localhost iframe saw typeof binding = undefined, so no raw call was possible from it",
+  "binding_after_navigation": "window.pyb is still typeof function on the next page, but a raw bindingCalled from it ran no Python (hits stayed 1)",
+  "post_mcp_with_token": "307 is the redirect from /mcp to /mcp/; the authenticated request to /mcp/ is 200"
+ }
+}
