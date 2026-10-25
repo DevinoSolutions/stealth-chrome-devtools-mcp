@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### browser_health names the step that hung, not the cleanup it triggered (T-6232)
+
+- `probe_browser` appended `closeTarget` to its step list from the `finally` that closes the probe target, so a probe cut off while `Runtime.evaluate` hung was logged as `TimeoutError at closeTarget` and sent a reader to the wrong step. `closeTarget` is now named only after the evaluate answered; the close is still always tried, it just is not a step on the failure path. `test_browser_health.py::TestTheRealProbe` pins the step list and the `_describe` label of a hung evaluate.
+
 ## 2.1.44
 
 ### Tests: the two-browser dump pin no longer races the wall clock (T-8255)
