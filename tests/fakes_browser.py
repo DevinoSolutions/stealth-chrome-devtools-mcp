@@ -70,11 +70,13 @@ class FakeBrowser:
             code = None if alive else 0
             self._process = SimpleNamespace(poll=lambda: code, returncode=code)
         self._process_pid = pid
-        self.target = SimpleNamespace(url="https://fake.test/page")
+        self.target = SimpleNamespace(url="https://fake.test/page", type_="browser")
         self.tabs = list(tabs or [])
         self.update_targets_calls = 0
         # nodriver's ``Browser.config`` — the host/port its tab URLs are built on.
         self.config = SimpleNamespace(host="127.0.0.1", port=9222)
+        # nodriver 0.50 gives every ``Tab`` its parent's ``websocket_url``.
+        self.websocket_url = "ws://127.0.0.1:9222/devtools/browser/fake"
         self.connection = FakeTab(
             url="ws://fake.test/devtools/browser",
             cdp_responses={

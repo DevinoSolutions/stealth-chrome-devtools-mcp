@@ -40,7 +40,6 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
     browser_health,
     browser_reattach,
-    cdp_transport,
     clone_storage,
     cookie_handoff,
     desktop_launch,
@@ -93,7 +92,6 @@ __all__ = [
     "browser_reattach",
     "cdp_element_cloner",
     "cdp_function_executor",
-    "cdp_transport",
     "clone_storage",
     "cookie_handoff",
     "debug_logger",
@@ -202,8 +200,10 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
 
     Cancelling this coroutine used to ALSO cancel ``nodriver``'s ``Transaction``
     for whichever send was in flight, which ended the connection's listener task
-    and wedged the instance (F-788 / F-794 / F-883 B1). That is fixed one layer
-    down, around the SEND, by ``cdp_transport`` — never here.
+    and wedged the instance (F-788 / F-794 / F-883 B1). nodriver 0.50 fixed that
+    itself, around the SEND: ``Connection.send`` owns its future and removes its
+    registration in a ``finally`` (T-8501, pinned in
+    ``tests/test_cdp_transport.py``) — never here.
     """
     t = timeout or CDP_OPERATION_TIMEOUT
     try:
@@ -222,22 +222,15 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
 # load share ONE of each instead of holding three (plan_SERVERSPLIT §7 R4);
 # ``BrowserManager.start_idle_reaper``/``stop_idle_reaper`` are already idempotent,
 # which is the axis that change is felt on.
-# THE one call site for F-883 B1's transport protection. It sits with the
+# THE one call site for F-912's element-box protection. It sits with the
 # singletons because it has their shape — once per process, before any tool body
 # can run — and because THIS module is loaded once where ``server.py`` is
-# executed three times under runpy. Every CDP send in the tree goes through the
-# class it patches, ours and nodriver's own alike; ``cdp_transport``'s docstring
-# argues why that class is the only possible home for it.
-cdp_transport.install()
-
-# THE one call site for F-912's element-box protection, here for the same three
-# reasons and not as a fourth half of the line above: nodriver's
+# executed three times under runpy. Nodriver's
 # ``Element.get_position`` renders the whole element — every attribute VALUE and
 # all of its text — into the bare ``Exception`` it raises when the element lays
 # out no box, and that text reaches the client, the debug ring and the backend
 # log through whichever handler relays it. ``element_box``'s docstring argues
-# why the raise is the only home a TYPE-keyed rule can be applied at, and why
-# this is a separate seam from the connection's.
+# why the raise is the only home a TYPE-keyed rule can be applied at.
 element_box.install()
 
 network_interceptor = NetworkInterceptor()

@@ -24,7 +24,7 @@ when the fixture ledger shows the network was never touched, and the offline
 read is taken after the fixture server has actually been shut down — not after
 an emulated-offline toggle. W10 established that
 ``Network.emulateNetworkConditions`` wedged the connection it was issued on
-(F-788, since fixed in ``embedded/cdp_transport.py``); nothing here re-tries it,
+(F-788, since fixed in nodriver 0.50's ``Connection.send``); nothing here re-tries it,
 because shutting the server down is the stronger witness either way — absence of
 traffic, not a flag we asked Chrome to believe.
 

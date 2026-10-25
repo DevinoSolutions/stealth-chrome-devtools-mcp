@@ -138,7 +138,7 @@ class TestWithCdpTimeoutMechanism:
         was waiting for run to completion, so a cancelled ``navigate``
         navigated anyway and ``tests/test_wire_semantics.py`` caught it over
         real frames. The listener-safety half lives one layer down, around the
-        SEND (``cdp_transport``), where a cancelled caller no longer cancels
+        SEND (nodriver 0.50's ``Connection.send``), where a cancelled caller no longer cancels
         nodriver's ``Transaction``. Cancellation at THIS layer is the contract.
         """
         cancelled = False

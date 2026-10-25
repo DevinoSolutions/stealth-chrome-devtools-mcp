@@ -2,10 +2,10 @@
 15-17, the final three of the 17-site sweep). See test_silent_excepts_log.py
 (7a) for the fixture/rationale this file continues.
 
-server.py:181 (_install_nodriver_cookie_compat) and server.py:1001
-(_client_session_seed) are classified WARNING: both are real degraded
-conditions (a nodriver internals import failing at startup; the MCP client
-roots API failing at session-seed time), not routine/expected cases.
+server.py:1001 (_client_session_seed) is classified WARNING: a real degraded
+condition (the MCP client roots API failing at session-seed time), not a
+routine/expected case. (Row 15, ``_install_nodriver_cookie_compat``, went with
+its shim when nodriver 0.50 dropped ``Cookie.sameParty`` -- T-8501.)
 
 server.py:1249 (apply_disabled_sections) is classified DEBUG: removing a
 tool that's already been removed by another section's disable policy is the
@@ -14,7 +14,6 @@ default.
 """
 
 import logging
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -40,16 +39,6 @@ def captured_backend_records():
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prior_level)
-
-
-class TestInstallNodriverCookieCompatSilentExcept:
-    def test_import_failure_logs_at_warning(self, captured_backend_records):
-        with patch.dict(sys.modules, {"nodriver.cdp.network": None}):
-            server._install_nodriver_cookie_compat()
-
-        assert len(captured_backend_records) == 1
-        record = captured_backend_records[0]
-        assert record.levelno == logging.WARNING
 
 
 class TestClientSessionSeedSilentExcept:

@@ -508,7 +508,7 @@ class TestNoPageContentInTheException:
     def test_the_sentry_leg_depends_on_include_local_variables(self):
         """The element is a LOCAL of the raising frame, in both versions.
 
-        ``cdp_transport``'s F-902 node makes the same link for the same reason:
+        ``tests/test_cdp_transport.py``'s F-902 node makes the same link for the same reason:
         this module's PII argument rests on a setting another module owns, so
         flipping it must fail a pin in the file that depends on it.
         """

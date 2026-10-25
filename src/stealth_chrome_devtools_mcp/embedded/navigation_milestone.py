@@ -419,8 +419,8 @@ async def _send_navigate(
     already marks as such, early enough for the ONE recovery retry (F-824) to
     have a real budget. Once Chrome has STARTED the navigation, the reply waits
     for the server's headers under the caller's whole budget, as it always did.
-    The reply is shielded by cdp_transport, so abandoning it cannot kill the
-    listener (F-883 B1).
+    Abandoning the reply cannot kill the listener: ``Connection.send`` owns its
+    future (nodriver 0.50, T-8501).
     """
 
     async def send() -> tuple[object, object, str | None]:

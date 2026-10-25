@@ -290,7 +290,7 @@ async def test_a_popup_nodriver_registered_as_a_bare_connection_is_armed_as_a_ta
     await spawn(manager, browser, main)
     monkeypatch.setattr(manager, "_apply_tab_overrides", no_overrides)
     info = created("T-bare").target_info
-    bare = Connection("ws://127.0.0.1:9222/devtools/page/T-bare", target=info)
+    bare = Connection(target=info)
     browser.tabs.append(bare)
 
     browser.connection._deliver(created("T-bare"))

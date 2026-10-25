@@ -744,7 +744,7 @@ class TestNodriversOrphanedRefresh:
         assert not dropped(pair)
 
     def test_f883s_invalid_state_error_still_ships(self):
-        """Fixed in 2.1.9 (`cdp_transport`). If nodriver's listener starts dying
+        """Fixed in 2.1.9 and again by nodriver 0.50 (T-8501). If nodriver's listener starts dying
         again we want the event, not a filter that learned to expect it."""
 
         def chain():

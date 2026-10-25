@@ -371,9 +371,8 @@ class TestTheWholeJarPremise:
     browser context's cookies — which is every cookie in the browser only
     because this product never creates another context, and never launches one
     incognito. That is an absence, and an absence is exactly the kind of premise
-    this repo pins rather than believes (review S6; ``cdp_transport``'s AST scan
-    of nodriver's 810 ``from_json`` parsers and ``profile_seed``'s grep for a
-    second spelling of ``LOGIN_WITNESSES`` are the precedents).
+    this repo pins rather than believes (review S6; ``profile_seed``'s grep for a
+    second spelling of ``LOGIN_WITNESSES`` is the precedent).
 
     Scanned as TOKENS and not as text, so prose explaining the premise — this
     docstring included — cannot trip it, and so a future ``--incognito`` feature
@@ -458,9 +457,8 @@ class TestTheCookieParamACookieBecomes:
 
     def test_d_same_party_is_never_written_back(self):
         """F-902's fix read from the other side. Chrome 153 does not SEND
-        ``sameParty``; ``cdp_transport._RETIRED_COOKIE_FIELDS`` synthesises it
-        so the reply can be parsed at all. Forwarding that invention would write
-        a value Chrome never gave us straight back into a browser."""
+        ``sameParty`` and nodriver 0.50's ``Cookie`` has no ``same_party``, so
+        nothing may write one back into a browser."""
         assert "sameParty" in SESSION_COOKIE  # the measurement's own input
         for row in MEASURED_JAR:
             assert "sameParty" not in self._sent(row)

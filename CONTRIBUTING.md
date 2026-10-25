@@ -173,7 +173,7 @@ proxy and cold-started a backend — which is how F-903 reproduced itself while
 being investigated. It has the `if __name__ == "__main__":` guard now.
 `tests/test_package_entrypoints.py::TestNoModuleBodyDoesWork`
 enforces the general rule by AST and carries the single allowance
-(`tool_runtime`'s `cdp_transport.install()`); adding a second means writing down
+(`tool_runtime`'s `element_box.install()`); adding a second means writing down
 why. There is no exclusion list to add a module to — fix the module instead.
 
 **`--help` and `--list-sections` used to cold-start a backend** (F-905, fixed on
