@@ -36,7 +36,6 @@ from stealth_chrome_devtools_mcp.embedded import (
     forced_end,
     freeze_capture,
     scheduling_lag,
-    shared_session,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
@@ -159,9 +158,6 @@ class _Stage:
             SimpleNamespace(identity_problem=lambda _entry, _pid: None),
         )
         monkeypatch.setattr(process_cleanup, "_kill_process_by_pid", self.kill)
-        monkeypatch.setattr(
-            shared_session, "holder_of", lambda _d: self.held_after_kill
-        )
         monkeypatch.setattr(forced_end, "SETTLE_SECONDS", 0.0)
 
     def _held(self) -> bool:
@@ -294,6 +290,7 @@ class _Stage:
             "mark_healed": self.mark_healed,
             "browser_pid": lambda _process, _pid: OLD_PID,
             "wait_exit": self.wait_exit,
+            "holder": lambda _directory: self.held_after_kill,
             "clock": lambda: self.now,
         }
         kwargs.update(overrides)

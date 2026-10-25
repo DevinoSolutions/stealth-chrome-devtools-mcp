@@ -47,6 +47,20 @@ def _argv(**overrides: str | None) -> list[str]:
     return ["chrome.exe", *(f"{k}={v}" for k, v in flags.items() if v is not None)]
 
 
+NOT_A_BROWSER = (
+    f"pid {PID} is not a browser process on this instance's profile directory "
+    "(a child, another profile, or gone)"
+)
+OTHER_PORT = f"pid {PID} is not on this instance's DevTools port"
+UNREADABLE = f"the command line of pid {PID} could not be read"
+NOT_RECORDED = "its pid, start time, DevTools port or profile directory is not recorded"
+RECYCLED = f"pid {PID} is gone or not the process recorded (start time differs)"
+
+
+def _refused(why: str) -> str:
+    return f"was NOT force-ended ({why})"
+
+
 class _Log:
     def __init__(self) -> None:
         self.warnings: list[str] = []
@@ -262,7 +276,7 @@ class TestAPrefixIsNotAMatch:
             directory=recorded_directory,
         )
 
-        assert reason is not None and "NOT force-ended" in reason
+        assert reason == _refused(NOT_A_BROWSER)
         assert kill.calls == []
 
     @pytest.mark.parametrize(
@@ -279,7 +293,7 @@ class TestAPrefixIsNotAMatch:
             entry={**ENTRY, "cdp_port": recorded},
         )
 
-        assert reason is not None and "NOT force-ended" in reason
+        assert reason == _refused(OTHER_PORT)
         assert kill.calls == []
 
 
@@ -303,34 +317,60 @@ class TestABrowserThatLeavesOnItsOwnIsLeftAlone:
 
 class TestAnUnverifiedProcessIsNeverKilled:
     """Every one of these is a process that is NOT established as the instance's
-    own browser; none may reach the kill ladder."""
+    own browser; none may reach the kill ladder, and each says WHY."""
 
     @pytest.mark.parametrize(
-        ("label", "argv"),
+        ("label", "argv", "why"),
         [
-            ("another profile", _argv(**{"--user-data-dir": "C:/sessions/master"})),
-            ("another debugging port", _argv(**{"--remote-debugging-port": "9444"})),
-            ("no debugging port", _argv(**{"--remote-debugging-port": None})),
-            ("no profile", _argv(**{"--user-data-dir": None})),
-            ("a child process", [*_argv(), "--type=renderer"]),
-            ("an unreadable argv", []),
+            (
+                "another profile",
+                _argv(**{"--user-data-dir": "C:/sessions/master"}),
+                NOT_A_BROWSER,
+            ),
+            (
+                "another debugging port",
+                _argv(**{"--remote-debugging-port": "9444"}),
+                OTHER_PORT,
+            ),
+            (
+                "no debugging port",
+                _argv(**{"--remote-debugging-port": None}),
+                OTHER_PORT,
+            ),
+            ("no profile", _argv(**{"--user-data-dir": None}), NOT_A_BROWSER),
+            ("a child process", [*_argv(), "--type=renderer"], NOT_A_BROWSER),
+            ("an empty argv of a pid that is gone", [], NOT_A_BROWSER),
         ],
     )
-    async def test_a_mismatched_command_line_is_not_killed(self, process, label, argv):
+    async def test_a_mismatched_command_line_is_not_killed(
+        self, process, label, argv, why
+    ):
         kill = _Kill()
 
         reason = await _run(kill, argv)
 
-        assert reason is not None and "NOT force-ended" in reason, label
+        assert reason == _refused(why), label
         assert kill.calls == [], label
+
+    async def test_a_command_line_that_cannot_be_read_of_a_pid_that_exists_is_not_killed(
+        self, process, monkeypatch
+    ):
+        """An empty argv of a LIVE pid is "could not be asked", not "not a
+        browser": ``browser_members`` reports it as unreadable."""
+        monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
+        monkeypatch.setattr(browser_cmdline, "command_line_is_gone", lambda _pid: False)
+        kill = _Kill()
+
+        reason = await _run(kill, [])
+
+        assert reason == _refused(UNREADABLE)
+        assert kill.calls == []
 
     async def test_a_recycled_pid_is_not_killed(self, process):
         process.created = CREATED + 3600
         kill = _Kill()
 
-        reason = await _run(kill, _argv())
-
-        assert reason is not None and "start time differs" in reason
+        assert await _run(kill, _argv()) == _refused(RECYCLED)
         assert kill.calls == []
 
     async def test_a_pid_that_is_not_the_recorded_one_is_not_killed(self, process):
@@ -338,7 +378,9 @@ class TestAnUnverifiedProcessIsNeverKilled:
 
         reason = await _run(kill, _argv(), entry={**ENTRY, "pid": PID + 1})
 
-        assert reason is not None and "NOT force-ended" in reason
+        assert reason == _refused(
+            f"pid {PID} is not the recorded browser pid {PID + 1}"
+        )
         assert kill.calls == []
 
     @pytest.mark.parametrize(
@@ -359,16 +401,12 @@ class TestAnUnverifiedProcessIsNeverKilled:
         to contradict" (right for a capture, wrong for a kill)."""
         kill = _Kill()
 
-        reason = await _run(kill, _argv(), entry=entry)
-
-        assert reason is not None and "NOT force-ended" in reason
+        assert await _run(kill, _argv(), entry=entry) == _refused(NOT_RECORDED)
         assert kill.calls == []
 
     async def test_a_process_that_is_already_gone_is_not_killed(self, process):
         process.gone = True
         kill = _Kill()
 
-        reason = await _run(kill, _argv())
-
-        assert reason is not None and "NOT force-ended" in reason
+        assert await _run(kill, _argv()) == _refused(RECYCLED)
         assert kill.calls == []
