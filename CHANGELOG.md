@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.44
 
 ### Tests: the two-browser dump pin no longer races the wall clock (T-8255)
 
