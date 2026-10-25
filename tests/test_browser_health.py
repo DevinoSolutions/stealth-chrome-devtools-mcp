@@ -19,6 +19,7 @@ import contextvars
 import json
 import os
 import re
+import threading
 import time
 from types import SimpleNamespace
 
@@ -1567,24 +1568,36 @@ class TestTheCaptureRunsBesideTheHealTiming:
 
     async def test_two_browsers_frozen_together_both_get_a_dump(self, tmp_path):
         """Both captures run at once; the dumps queue one behind the other inside
-        the budget instead of the second being skipped."""
+        the budget instead of the second being skipped.
+
+        "Slow" is an ordering here, not a number of seconds: the first dump is held
+        open until the second capture is demonstrably queued behind it, and the
+        budget is far above anything a loaded host takes, so a skip can only come
+        from a second dump that is not queued at all (the T-8255 flake was a 0.15 s
+        stub overrunning a 5 s budget on a busy lane)."""
         manager = BrowserManager()
         _install(manager, "i-default", user_data_dir="C:/sessions/default")
         _install(manager, "i-fleet", user_data_dir="C:/sessions/fleet")
         order: list[str] = []
+        first_writing = threading.Event()
+        release_first = threading.Event()
+        entered: list[int] = []
 
         def slow_write(pid: int, path) -> None:
             order.append(f"start-{pid}")
-            time.sleep(0.15)
+            if not first_writing.is_set():  # the first dump to start is the slow one
+                first_writing.set()
+                assert release_first.wait(timeout=120), "the test never released it"
             path.write_bytes(b"MDMP")
             order.append(f"end-{pid}")
 
         async def capture(**facts) -> str:
+            entered.append(facts["pid"])
             return await freeze_capture.write_minidump(
                 facts["pid"],
                 tmp_path,
                 facts["label"],
-                budget=5.0,
+                budget=600.0,
                 platform="win32",
                 write=slow_write,
             )
@@ -1608,9 +1621,23 @@ class TestTheCaptureRunsBesideTheHealTiming:
             manager._instances[iid]["browser"]._process_pid = pid
 
         await bh.check_once()
-        records = await asyncio.gather(*bh._incidents._tasks.values())
+        try:
+
+            async def both_in() -> None:
+                while not (first_writing.is_set() and len(entered) == 2):
+                    await asyncio.sleep(0.001)
+
+            await asyncio.wait_for(both_in(), timeout=60)
+            await asyncio.sleep(0.2)  # the second one polls the held lock meanwhile
+            assert len(order) == 1, order  # queued: it has not started writing
+        finally:
+            release_first.set()
+        records = await asyncio.wait_for(
+            asyncio.gather(*bh._incidents._tasks.values()), timeout=120
+        )
 
         assert all("skipped" not in record for record in records), records
+        assert all(".dmp" in record for record in records), records
         assert sorted(order) == ["end-1001", "end-1002", "start-1001", "start-1002"]
         assert order[1].startswith("end") and order[3].startswith("end")  # serial
 
