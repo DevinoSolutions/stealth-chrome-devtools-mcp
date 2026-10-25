@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### observability derives its package import name and directory (T-8254)
+
+- `observability._IMPORT_NAME` and `_PACKAGE_DIR`, which decide whether a crash frame is ours (`_is_our_frame`, the foreign-hook drop), were typed literals. They are now read off the module (`__package__`, `__file__`), so a rename or vendoring cannot make our own crash look foreign. A test pins them to the shipped values.
+
 ### The job-escape pin retries and skips, loudly, when the scheduler is slow rather than missing (T-8308)
 
 `test_the_backend_survives_the_clients_job_ending[close_handle]` failed once in a loaded 16-minute

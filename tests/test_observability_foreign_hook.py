@@ -30,6 +30,7 @@ sentry_sdk = pytest.importorskip("sentry_sdk")
 event_from_exception = pytest.importorskip("sentry_sdk.utils").event_from_exception
 
 PACKAGE_DIR = Path(observability.__file__).parent
+_LITERAL = "stealth_chrome_devtools_mcp"
 
 _PRELUDE = """
 import sentry_sdk
@@ -206,3 +207,17 @@ class TestAKeptHookEventIsStillScrubbed:
         assert (
             value["stacktrace"]["frames"][1]["abs_path"] == "/home/~/site-packages/x.py"
         )
+
+
+def test_our_identity_is_derived_but_equals_the_shipped_literals() -> None:
+    """T-8254 -- ``_is_our_frame`` reads its identity off the module.
+
+    The anchors are INDEPENDENT of the derivation (a literal name, and the
+    package directory located from this test file), so a derivation that
+    drifts, or a rename that left a stale literal, fails here.
+    """
+    assert observability._IMPORT_NAME == "stealth_chrome_devtools_mcp"
+    expected = Path(__file__).resolve().parent.parent / "src" / _LITERAL
+    assert observability._PACKAGE_DIR.resolve() == expected.resolve()
+    assert observability._is_our_frame({"module": "stealth_chrome_devtools_mcp.x"})
+    assert not observability._is_our_frame({"module": "other.x"})

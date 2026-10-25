@@ -72,7 +72,12 @@ _DSN = "https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34"
 
 _log = logging.getLogger(__name__)
 
-_IMPORT_NAME = "stealth_chrome_devtools_mcp"
+# What "ours" means for ``_is_our_frame``, read off this module so a rename or a
+# vendored copy cannot leave the rule naming a package that no longer exists (it
+# would then ship a foreign crash AND drop our own). ``__package__`` is the
+# parent package even when this file is run by path or ``runpy``; the
+# ``__name__`` fallback covers a spec-less load.
+_IMPORT_NAME = (__package__ or __name__).partition(".")[0]
 _PACKAGE_DIR = Path(__file__).parent
 
 
