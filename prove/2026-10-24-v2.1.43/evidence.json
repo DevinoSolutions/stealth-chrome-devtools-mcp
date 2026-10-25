@@ -1,0 +1,332 @@
+{
+ "backend_launcher_pid": 85780,
+ "backend_listener_pid": 148212,
+ "token_handshake_http_status": {
+  "no_token": 401,
+  "wrong_token": 401,
+  "with_token": 307,
+  "slash_no_token": 401,
+  "slash_wrong_token": 401,
+  "slash_with_token": 200,
+  "token_file_present": true
+ },
+ "tool_count_over_token_session": 97,
+ "spawn": {
+  "headless": false,
+  "profile_role": "clone",
+  "seed_warning": "There is no shared profile or seed yet, so this browser started EMPTY: it holds no logins and is deleted when it closes. To keep a signed-in profile, open one with spawn_browser(session=\"default\"), sign in there, and close it with close_instance(instance_id=..., session=\"default\"): every later spawn is then copied from it."
+ },
+ "instance_id": "c6b26cc7-9112-455f-9529-8d35ee506420",
+ "versions": {
+  "package_version": "2.1.43",
+  "package_path_in_prove_venv": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2143\\venv\\Lib\\site-packages\\stealth_chrome_devtools_mcp\\__init__.py",
+  "inside_prove_venv": true,
+  "python": "3.13.11",
+  "chrome_product": "Chrome/155.0.8059.85",
+  "navigator_userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+  "fastmcp": "3.4.11",
+  "mcp": "1.30.0",
+  "tool_count_over_token_session": 97
+ },
+ "package_path_in_prove_venv": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2143\\venv\\Lib\\site-packages\\stealth_chrome_devtools_mcp\\__init__.py",
+ "basic_click": {
+  "navigate_ok": true,
+  "title": {
+   "success": true,
+   "result": "click page",
+   "error": null
+  },
+  "click_result": {
+   "selector": "#btn",
+   "dispatch": "coordinate",
+   "point": {
+    "x": 100.16875457763672,
+    "y": 139.0750026702881
+   },
+   "size": {
+    "width": 140.33750915527344,
+    "height": 57.60000228881836
+   },
+   "target": {
+    "tag": "button",
+    "id": "btn",
+    "classes": []
+   },
+   "hit": {
+    "tag": "button",
+    "id": "btn",
+    "classes": []
+   },
+   "hit_is_target": true,
+   "reason": null
+  },
+  "page_text_after_click": {
+   "success": true,
+   "result": "button clicked 1 time(s); trusted=true",
+   "error": null
+  },
+  "screenshot": "ok"
+ },
+ "get_cookies": {
+  "set_own": "ok",
+  "set_other": "ok",
+  "page_127.0.0.1_cookies": [
+   [
+    "own_origin_cookie",
+    "127.0.0.1"
+   ]
+  ],
+  "page_localhost_cookies": [
+   [
+    "other_origin_cookie",
+    "localhost"
+   ]
+  ],
+  "raw_shape_own": [
+   "list",
+   "[{'name': 'own_origin_cookie', 'value': 'own-A', 'domain': '127.0.0.1', 'path': '/', 'size': 22, 'http_only': False, 'secure': False, 'session': True, 'priority': 'Medium', 'same_party': False, 'source_scheme': 'NonSecure', 'source_port': 80, 'expires': -1.0, 'same_site': None, 'partition_key': None"
+  ],
+  "page_scoped": true
+ },
+ "path_tools": {
+  "dot_env": {
+   "refused": true,
+   "answer": {
+    "__error__": "Error calling tool 'upload_file': upload_file refuses to attach a file in .env files (secrets by convention): path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+   }
+  },
+  "home_aws_credentials": {
+   "refused": true,
+   "answer": {
+    "__error__": "Error calling tool 'upload_file': upload_file refuses to attach a file in ~/.aws (AWS credentials): path tools may not touch credential stores, browser profiles, network or device paths or this server's own state (rule: secret-location deny-list, F-1025). Choose a local path outside them."
+   }
+  },
+  "ordinary_control": {
+   "refused": false,
+   "answer": {
+    "selector": "#f",
+    "requested": 1,
+    "attached": 1,
+    "multiple": false,
+    "total_bytes": 21
+   }
+  },
+  "extra_aws_named_file_outside_home": {
+   "refused": false,
+   "answer": {
+    "selector": "#f",
+    "requested": 1,
+    "attached": 1,
+    "multiple": false,
+    "total_bytes": 79
+   }
+  },
+  "verdict": true,
+  "note": "the backend's ~ is the isolated home inside prove2143; ~/.aws is a home-rooted rule, so the same file name outside ~ (extra_aws_named_file_outside_home) is not under that rule"
+ },
+ "binding": {
+  "created": "ok",
+  "call_in_main_context": {
+   "success": true,
+   "result": {
+    "typeof_binding": "function",
+    "answer": 5
+   },
+   "error": null
+  },
+  "call_immediately_after_navigation": {
+   "success": true,
+   "result": {
+    "typeof_binding": "function",
+    "error": "Error: Invalid arguments: should be exactly one string."
+   },
+   "error": null
+  },
+  "call_after_navigation_settled_2_5s": {
+   "success": true,
+   "result": {
+    "typeof_binding": "function",
+    "error": "Error: Invalid arguments: should be exactly one string."
+   },
+   "error": null
+  },
+  "raw_binding_call_after_navigation_answered_by_python": {
+   "answered": false,
+   "note": "no response event in 3s"
+  },
+  "call_after_returning_to_same_url": {
+   "success": true,
+   "result": {
+    "typeof_binding": "undefined",
+    "error": "TypeError: window.add2143 is not a function"
+   },
+   "error": null
+  },
+  "main_context_answers": true,
+  "gone_after_navigation": true
+ },
+ "hidden_tab_input": {
+  "tab_a": "1361C3BA66D8679D819EB6E6954044BA",
+  "tab_b": "AF93F4C4ACCEE2E2BAD95E81C3D1AD9F",
+  "tab_a_default_reads_with_focus_emulation": {
+   "success": true,
+   "result": {
+    "visibilityState": "visible",
+    "hidden": false,
+    "hasFocus": true
+   },
+   "error": null
+  },
+  "focus_emulation_off_on_tab_a": "ok",
+  "tab_a_visibility_before_input": {
+   "success": true,
+   "result": {
+    "visibilityState": "hidden",
+    "hidden": true,
+    "hasFocus": false
+   },
+   "error": null
+  },
+  "type_text_result": true,
+  "click_result": {
+   "dispatch": "synthetic",
+   "hit_is_target": true,
+   "reason": null
+  },
+  "page_state_after": {
+   "success": true,
+   "result": {
+    "value": "typed into hidden tab",
+    "log": [
+     "visibilitychange -> hidden",
+     "input event, visibilityState=hidden value=t",
+     "input event, visibilityState=hidden value=ty",
+     "input event, visibilityState=hidden value=typ",
+     "input event, visibilityState=hidden value=type",
+     "input event, visibilityState=hidden value=typed",
+     "input event, visibilityState=hidden value=typed ",
+     "input event, visibilityState=hidden value=typed i",
+     "input event, visibilityState=hidden value=typed in",
+     "input event, visibilityState=hidden value=typed int",
+     "input event, visibilityState=hidden value=typed into",
+     "input event, visibilityState=hidden value=typed into ",
+     "input event, visibilityState=hidden value=typed into h",
+     "input event, visibilityState=hidden value=typed into hi",
+     "input event, visibilityState=hidden value=typed into hid",
+     "input event, visibilityState=hidden value=typed into hidd",
+     "input event, visibilityState=hidden value=typed into hidde",
+     "input event, visibilityState=hidden value=typed into hidden",
+     "input event, visibilityState=hidden value=typed into hidden ",
+     "input event, visibilityState=hidden value=typed into hidden t",
+     "input event, visibilityState=hidden value=typed into hidden ta",
+     "input event, visibilityState=hidden value=typed into hidden tab",
+     "click event, visibilityState=hidden trusted=false"
+    ],
+    "vis_now": "hidden"
+   },
+   "error": null
+  },
+  "input_events_logged_hidden": true,
+  "verdict": true,
+  "screenshot_of_hidden_tab": "ok"
+ },
+ "ended_session": {
+  "initialize_status": 200,
+  "got_session_id": true,
+  "initialized_notification_status": 202,
+  "tools_list_before_end_status": 200,
+  "delete_status": 200,
+  "tools_list_after_end_status": 404,
+  "reuse_after_end_body_head": "{\"jsonrpc\":\"2.0\",\"id\":\"server-error\",\"error\":{\"code\":-32600,\"message\":\"Session not found\"}}",
+  "second_reuse_status": 404,
+  "never_issued_id_status": 404,
+  "main_session_still_serves_tools": 97,
+  "verdict": true
+ },
+ "foreign_crash": {
+  "foreign": {
+   "mode": "foreign",
+   "mechanism": [
+    "excepthook"
+   ],
+   "exception_type": [
+    "ValueError"
+   ],
+   "frame_modules": [
+    "__main__",
+    "foreign_mod"
+   ],
+   "our_frame_flags": [
+    false,
+    false
+   ],
+   "is_foreign_hook_crash": true,
+   "scrub_event_drops_it": true,
+   "child_exit_code": 1,
+   "child_stderr_last_line": "ValueError: foreign module crash (not stealth_chrome_devtools_mcp)"
+  },
+  "ours": {
+   "mode": "ours",
+   "mechanism": [
+    "excepthook"
+   ],
+   "exception_type": [
+    "TypeError"
+   ],
+   "frame_modules": [
+    "__main__",
+    "stealth_chrome_devtools_mcp.embedded.path_confinement",
+    "stealth_chrome_devtools_mcp.embedded.path_confinement"
+   ],
+   "our_frame_flags": [
+    false,
+    true,
+    true
+   ],
+   "is_foreign_hook_crash": false,
+   "scrub_event_drops_it": false,
+   "child_exit_code": 1,
+   "child_stderr_last_line": "TypeError: expected str, bytes or os.PathLike object, not NoneType"
+  },
+  "verdict": true
+ },
+ "close": {
+  "closed": true,
+  "seed_refreshed": null
+ },
+ "backend_tree": [
+  [
+   148212,
+   "python.exe",
+   1792890581.6749403,
+   "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2143\\venv\\Scripts\\python.exe -m stealth_chrome_devtools_mcp --transport http --port 41243 --host 127.0.0.1"
+  ],
+  [
+   141792,
+   "chrome.exe",
+   1792890613.2376394,
+   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe --remote-allow-origins=* --no-first-run --no-service-autorun --no-default-browser-check --homepage=about:b"
+  ],
+  [
+   180216,
+   "chrome.exe",
+   1792890613.284694,
+   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe --type=crashpad-handler --user-data-dir=C:\\Users\\amind\\AppData\\Local\\Temp\\prove2143\\root\\sessions\\prove214"
+  ],
+  [
+   85780,
+   "python.exe",
+   1792890581.659587,
+   "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2143\\venv\\Scripts\\python.exe -m stealth_chrome_devtools_mcp --transport http --port 41243 --host 127.0.0.1"
+  ]
+ ],
+ "backend_stopped": {
+  "gone": [
+   141792,
+   148212,
+   180216,
+   85780
+  ],
+  "still_alive": []
+ }
+}
