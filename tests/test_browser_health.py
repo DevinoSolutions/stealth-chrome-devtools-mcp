@@ -33,6 +33,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_health,
     directory_gate,
     fleet_session,
+    forced_end,
     freeze_capture,
     scheduling_lag,
     tab_binding,
@@ -124,6 +125,12 @@ class _Stage:
         self.launch_error: BaseException | None = None
         self.close_kills = True
         self.waits: list[tuple[int | None, float]] = []
+        # T-4686: the last rung. Its identity verdict (None = the recorded browser),
+        # the kill ladder's, and what each was asked; nothing real is ever signalled.
+        self.refusal_reason: str | None = "pid 4242 is not verified (test default)"
+        self.refusals: list[tuple[int, dict, str | None]] = []
+        self.kill_result = True
+        self.kills: list[tuple[int, str]] = []
         # F-993: every seam the heal touches, in the order it touched them.
         self.events: list[str] = []
         self.captures: list[dict] = []
@@ -142,6 +149,8 @@ class _Stage:
         self.probe_error: type[Exception] = ConnectionError
         self.process_asked: list[str | None] = []
         monkeypatch.setattr(manager, "spawn_browser", self._spawn)
+        monkeypatch.setattr(forced_end, "refusal", self.refusal)
+        monkeypatch.setattr(process_cleanup, "_kill_process_by_pid", self.kill)
 
     def _held(self) -> bool:
         return directory_gate.gate_for(DIRECTORY)._lock.locked()
@@ -224,6 +233,16 @@ class _Stage:
         self.events.append("wait")
         self.waits.append((pid, timeout))
         return SimpleNamespace(exited=self.close_kills)
+
+    def refusal(self, pid, entry, *, user_data_dir, **_seams):
+        self.events.append("verify")
+        self.refusals.append((pid, dict(entry), user_data_dir))
+        return self.refusal_reason
+
+    def kill(self, pid, instance_id):
+        self.events.append("force")
+        self.kills.append((pid, instance_id))
+        return self.kill_result
 
     async def own_ok(self, _browser) -> None:
         return None
@@ -779,6 +798,80 @@ class TestTheHeal:
 
         assert stage.launches == []
         assert any("left the browser running" in line for line in log.at("error"))
+
+    async def test_a_browser_the_close_path_left_is_force_ended_then_relaunched(
+        self, stage, log, monkeypatch
+    ):
+        """T-4686: the rung after the wait. The registry entry is read BEFORE the
+        close (which untracks it), the kill is the recorded pid's, and the relaunch
+        follows the kill, not the other way round."""
+        entry = {"pid": OLD_PID, "create_time": 1.5, "cdp_port": 9333}
+        monkeypatch.setitem(process_cleanup.browser_processes, INSTANCE_ID, entry)
+        stage.close_kills = False
+        stage.refusal_reason = None
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+        close = health._close
+
+        async def close_and_untrack(instance_id, session=None):
+            process_cleanup.browser_processes.pop(instance_id, None)
+            return await close(instance_id, session)
+
+        health._close = close_and_untrack
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.refusals == [(OLD_PID, entry, DIRECTORY)]
+        assert stage.kills == [(OLD_PID, INSTANCE_ID)]
+        assert [iid for _o, iid in stage.launches] == [INSTANCE_ID]
+        order = [
+            stage.events.index(n) for n in ("close", "wait", "verify", "force", "spawn")
+        ]
+        assert order == sorted(order)
+        assert not any("left the browser running" in line for line in log.at("error"))
+
+    async def test_a_browser_with_an_unverified_identity_is_not_killed_or_relaunched_over(
+        self, stage, log
+    ):
+        stage.close_kills = False
+        stage.refusal_reason = "pid 4242 is not on this instance's DevTools port"
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.kills == []
+        assert stage.launches == []
+        (message,) = [e for e in log.at("error") if "left the browser running" in e]
+        assert "was NOT force-ended (pid 4242 is not on this instance's" in message
+
+    async def test_a_kill_ladder_that_fails_leaves_the_heal_refused(self, stage, log):
+        stage.close_kills = False
+        stage.refusal_reason = None
+        stage.kill_result = False
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.kills == [(OLD_PID, INSTANCE_ID)]
+        assert stage.launches == []
+        assert any(
+            "left the browser running and it could not be force-ended" in e
+            for e in log.at("error")
+        )
+
+    async def test_a_browser_the_close_path_ended_is_not_force_ended(self, stage):
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.refusals == [] and stage.kills == []
+        assert len(stage.launches) == 1
 
     async def test_a_relaunch_that_still_fails_its_probe_is_an_error(self, stage, log):
         # failure 1, failure 2 (heals), then the re-probe of the new browser
