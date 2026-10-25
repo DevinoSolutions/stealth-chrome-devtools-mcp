@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Tests: the two-browser dump pin no longer races the wall clock (T-8255)
+
+- `test_browser_health.py::TestTheCaptureRunsBesideTheHealTiming::test_two_browsers_frozen_together_both_get_a_dump` queued two dumps with a 0.15 s stub inside a 5 s `budget`, so a loaded pre-push lane that held the first dump past 5 s made the second report `skipped: an earlier dump was still being written` and failed the pin. "Slow" is now an ordering: the first dump blocks on a `threading.Event` until the second capture has entered `write_minidump` and is queued behind it, then is released, and the budget is 600 s so only a second dump that is not queued at all can be skipped. It also asserts each record names a `.dmp`. Holding the first dump 6 s still passes; a queue that skips at budget 0 or 0.1 s fails. No production change.
+
 ### Tests: the heal's mark wait is pinned bounded and independent of the capture budget (T-8253)
 
 - `test_freeze_capture.py::TestIncidents::test_a_mark_that_never_returns_is_cut_at_the_mark_budget` gives `before_heal` a `mark_healed` that blocks forever and a 0.1 s `HEAL_WAITS_FOR_MARK_SECONDS`: the heal must report `dump_not_marked_healed(TimeoutError)` instead of waiting. An unbounded mark wait (`timeout=None`) now fails the suite (the outer `wait_for` makes it a bounded failure, not a hang). `test_the_mark_budget_is_a_literal_not_a_reference_to_the_captures` reads the module source and requires `HEAL_WAITS_FOR_MARK_SECONDS` to be assigned a number: aliasing it to `HEAL_WAITS_FOR_CAPTURE_SECONDS` at import left the T-8241 pin green because that pin rebinds only the capture name. No production change.
