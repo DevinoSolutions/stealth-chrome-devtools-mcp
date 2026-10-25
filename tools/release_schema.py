@@ -259,9 +259,17 @@ REQUIRED_KEYS: tuple[str, ...] = tuple(sorted(CELLS_BY_KEY))
 # only, and the wheel (not the sdist) for install-smoke. Pushes to main, tags
 # and manual runs qualify the FULL ledger; an event this table does not name
 # fails closed to FULL, so a tag can never be qualified by the smaller tier.
+#
+# T-8242: a pull request also RUNS one cell it does not OWE. The publish gate's
+# Windows py3.11 unit cell caught what the Linux-only PR tier could not
+# (asyncio.run(loop_factory=) is 3.12+, T-7495), so the PR tier runs it ahead of
+# the merge, advisory: `plan_matrices` flags it, the workflow's `continue-on-error`
+# reads that flag, and the aggregate neither requires nor reads its record. The
+# full tier is unchanged: the same cell is still in REQUIRED_CELLS and owed.
 FULL_TIER = "full"
 PR_TIER = "pr"
 PR_EVENTS = frozenset({"pull_request"})
+PR_ADVISORY_KEYS = ("unit-tests/Windows-X64-py3.11",)
 RUNS_ON = {
     "Linux": "ubuntu-latest",
     "Windows": "windows-latest",
@@ -279,9 +287,24 @@ def _in_pr_tier(spec: CellSpec) -> bool:
 
 
 def cells_for_tier(tier: str) -> tuple[CellSpec, ...]:
+    """The cells ``tier`` OWES: what its aggregate demands, never the advisory ones."""
     if tier == PR_TIER:
         return tuple(spec for spec in REQUIRED_CELLS if _in_pr_tier(spec))
     return REQUIRED_CELLS
+
+
+def advisory_keys_for_tier(tier: str) -> tuple[str, ...]:
+    """Cells ``tier`` runs without owing them (a failure there blocks nothing)."""
+    return PR_ADVISORY_KEYS if tier == PR_TIER else ()
+
+
+def cells_run_for_tier(tier: str) -> tuple[CellSpec, ...]:
+    """Every cell ``tier`` executes: the owed cells plus its advisory ones."""
+    advisory = set(advisory_keys_for_tier(tier))
+    owed = cells_for_tier(tier)
+    return owed + tuple(
+        spec for spec in REQUIRED_CELLS if spec.key in advisory and spec not in owed
+    )
 
 
 def keys_for_tier(tier: str) -> tuple[str, ...]:
@@ -300,10 +323,13 @@ def plan_matrices(tier: str) -> dict[str, dict[str, list]]:
     """job -> the ``strategy.matrix`` the workflow runs for ``tier``.
 
     release-gate.yml carries no cell list of its own: its matrix jobs read these
-    through ``fromJSON(needs.plan.outputs...)``, so the cells have ONE home.
+    through ``fromJSON(needs.plan.outputs...)``, so the cells have ONE home. An
+    advisory cell (T-8242) carries ``"advisory": true``, which the workflow's
+    ``continue-on-error`` reads, so no job hard-codes which cell may fail.
     """
     plan: dict[str, dict[str, list]] = {}
-    for spec in cells_for_tier(tier):
+    advisory = set(advisory_keys_for_tier(tier))
+    for spec in cells_run_for_tier(tier):
         if spec.job in _JOBS_WITHOUT_MATRIX:
             continue
         matrix = plan.setdefault(spec.job, {})
@@ -319,6 +345,8 @@ def plan_matrices(tier: str) -> dict[str, dict[str, list]]:
         entry = _runner(spec)
         if spec.job == "unit-tests":
             entry["python-version"] = spec.python_version
+        if spec.key in advisory:
+            entry["advisory"] = True
         matrix.setdefault("include", []).append(entry)
     return plan
 

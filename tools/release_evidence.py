@@ -143,6 +143,7 @@ from release_schema import (
     NODE_RE,
     NON_PER_TOOL_NODES,
     NUMERIC_RE,
+    PR_ADVISORY_KEYS,
     PR_TIER,
     PYTHON_RE,
     RECORD_KEYS,
@@ -163,7 +164,9 @@ from release_schema import (
     CellSpec,
     _build_required_cells,
     _spec,
+    advisory_keys_for_tier,
     cells_for_tier,
+    cells_run_for_tier,
     keys_for_tier,
     plan_matrices,
     tier_for_event,
@@ -199,6 +202,7 @@ __all__ = [
     "NON_PER_TOOL_NODES",
     "NUMERIC_RE",
     "PRESERVED_DIAGNOSTIC_FIELDS",
+    "PR_ADVISORY_KEYS",
     "PR_TIER",
     "PYTHON_RE",
     "RECORD_KEYS",
@@ -250,8 +254,10 @@ __all__ = [
     "_validate_runner",
     "_validate_threat_contract",
     "_validate_workflow",
+    "advisory_keys_for_tier",
     "build_record",
     "cells_for_tier",
+    "cells_run_for_tier",
     "dumps",
     "host_secret_values",
     "keys_for_tier",
@@ -293,7 +299,9 @@ def _discover_children(
     """Map ``job/cell`` → record path; report extras and duplicates.
 
     A record for a declared cell the ``tier`` does not owe is tolerated; a missing
-    record is only reported for a cell the tier owes (T-6910).
+    record is only reported for a cell the tier owes (T-6910). A record for a cell
+    the tier runs only as ADVISORY (T-8242) is not read at all: its outcome, red or
+    green, neither fails nor credits the aggregate, and it is not a child of it.
     """
     found: dict[str, Path] = {}
     problems: list[str] = []
@@ -303,6 +311,7 @@ def _discover_children(
     # case-insensitively BEFORE the declared-cell check so a second record for a
     # cell reads as the duplicate it is rather than as an unrelated stray.
     by_lowered: dict[str, str] = {}
+    advisory = set(advisory_keys_for_tier(tier))
     for path in sorted(sha_dir.rglob("*.json")):
         rel = path.relative_to(sha_dir).as_posix()
         if rel.startswith(f"{AGGREGATE_JOB}/") or "/artifacts/" in rel:
@@ -316,6 +325,8 @@ def _discover_children(
             )
             continue
         by_lowered[lowered] = key
+        if key in advisory:
+            continue
         if key not in CELLS_BY_KEY:
             problems.append(f"extra child record for undeclared cell {key!r}")
             continue
