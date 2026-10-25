@@ -64,8 +64,7 @@ the heal the ERROR line carries it, waited for at most
 :data:`freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS`. It never raises into the loop,
 and a pid is opened only once its create time matches the registry entry. A
 shared-session browser that EXITED has its exit code in the relaunch line
-(:func:`process_exit.exit_status`). Forensics are counts and shapes only, never a
-URL, title or cookie.
+(:func:`process_exit.exit_status`). Forensics are counts and shapes only.
 """
 
 import asyncio
@@ -825,6 +824,7 @@ class BrowserHealth:
                     user_data_dir=options.user_data_dir,
                     wait_exit=self._wait_exit,
                     timeout=EXIT_WAIT_SECONDS,
+                    holder=self._holder,
                 )
             ):
                 debug_logger.log_error(
