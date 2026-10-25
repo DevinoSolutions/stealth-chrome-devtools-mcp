@@ -2,16 +2,20 @@
 
 ## Unreleased
 
-### The job-escape pin skips, loudly, when the scheduler is slow rather than missing (T-8308)
+### The job-escape pin retries and skips, loudly, when the scheduler is slow rather than missing (T-8308)
 
 `test_the_backend_survives_the_clients_job_ending[close_handle]` failed once in a loaded 16-minute
 pre-push lane with the message "the scheduler was unavailable on this runner". It was not: the task
 was created and run, its pid hand-back took 60.9 s against the helper's 60 s budget, and the plain
-spawn served. The pin now classifies the transcript (`_rung_verdict`): the `never handed back a pid
-within` line means slow, and the test skips naming the measured hand-back and the budget, while
-every other plain-spawn case still fails as unavailable and the breakaway/scheduler escape
-assertions are unchanged. A new hermetic test drives the real `_run_task` log line through the
-classifier. The shipped 20 s budget is not touched.
+spawn served. The pin now classifies the transcript (`_rung_verdict`): a plain-rung run is "slow"
+only when `backend_launch.HANDBACK_TIMEOUT_PHRASE` is logged AND the measured hand-back reached the
+budget. That line is logged for any created-and-run task with no pid (a hung intermediary included),
+so a slow verdict is retried once on a fresh job, helper and state dir, and the test skips only when
+both attempts are slow, naming both measured hand-backs and the budget. Every other plain-spawn case,
+including a hand-back under the budget, still fails, and the breakaway/scheduler escape assertions
+are unchanged. The phrase is now one constant in `backend_launch.py` that the production log call
+and the test both use. Hermetic tests cover slow, under-budget, unavailable, escaped and the retry.
+The shipped 20 s budget is not touched.
 
 ### Tests: two regression pins from the T-7509 and T-6904 reviews (T-8241)
 

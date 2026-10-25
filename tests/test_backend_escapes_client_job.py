@@ -39,11 +39,15 @@ import threading
 import warnings
 from ctypes import wintypes
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import backend_launch, desktop_launch
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Applied to the one real-spawn test only: the verdict classifier below is pure
 # and its pin must run on every platform.
@@ -218,46 +222,69 @@ def _read_until_pid(helper, sink: list[str]) -> None:
             return
 
 
-# The line backend_launch._run_task logs when the task was created and run but
-# no pid came back in time. It is how "the scheduler is slow" is told apart from
-# "the scheduler is unavailable" (no task, no console session, ...), which log a
-# different line. The hermetic pin below feeds the REAL line, so a reword cannot
-# silently turn a slow host back into a red.
-_SLOW_HANDBACK_LINE = "never handed back a pid within"
+# backend_launch.HANDBACK_TIMEOUT_PHRASE is the phrase _run_task logs when the
+# task was created and run but no pid came back in time. It is how "the scheduler
+# is slow" is told apart from "the scheduler is unavailable" (no task, no console
+# session, ...), which log other lines. Importing the constant rather than
+# retyping it means a reword cannot silently turn a slow host back into a red.
+
+
+def _handback_seconds(transcript: str) -> float | None:
+    """The helper's measured pid hand-back, or None when it printed none."""
+    for line in transcript.splitlines():
+        if line.startswith("HANDBACK "):
+            try:
+                return float(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
 
 
 def _rung_verdict(rung: str, transcript: str, budget: float) -> tuple[str, str]:
     """Classify a helper transcript as ``(kind, message)``.
 
     ``escaped`` for the breakaway/scheduler rungs (the escape assertions then
-    run, unchanged); ``slow`` when the scheduler task ran but its hand-back
-    exceeded ``budget`` (a loaded host: the escape was not exercised, which is
-    not a regression); ``unavailable`` for every other plain-spawn case (a real
-    red: the backend stayed inside the client's job).
+    run, unchanged). ``slow`` only when the scheduler task ran, no pid came back
+    AND the measured hand-back reached ``budget``: a hand-back well under the
+    budget that still logged the line means the task itself broke. Everything
+    else on the plain rung is ``unavailable``, a real red.
     """
     if rung in {"breakaway", "scheduler"}:
         return "escaped", ""
-    measured = next(
-        (
-            line.split()[1]
-            for line in transcript.splitlines()
-            if line.startswith("HANDBACK ")
-        ),
-        "?",
-    )
-    if rung == "plain" and _SLOW_HANDBACK_LINE in transcript:
-        return "slow", (
-            f"F-867: the scheduler task ran but its pid hand-back took {measured}s "
-            f"against a {budget:.0f}s budget on this loaded host, so the plain "
-            "spawn served and the escape was NOT exercised. Skipped, not passed: "
-            "the scheduler rung was slow, not unavailable (T-8308); an idle host "
-            f"hands back in about 1s:\n{transcript}"
+    measured = _handback_seconds(transcript)
+    if (
+        rung == "plain"
+        and backend_launch.HANDBACK_TIMEOUT_PHRASE in transcript
+        and measured is not None
+        and measured >= budget
+    ):
+        return (
+            "slow",
+            f"pid hand-back took {measured:.1f}s against a {budget:.0f}s budget",
         )
     return "unavailable", (
-        f"F-867: rung {rung!r} served — the scheduler was unavailable on this "
-        f"runner (F-867 §6), so the backend stayed inside the client's "
-        f"job:\n{transcript}"
+        f"F-867: rung {rung!r} served (hand-back {measured}s, budget "
+        f"{budget:.0f}s) — the scheduler was unavailable on this runner "
+        f"(F-867 §6), or its task ran and broke, so the backend stayed inside "
+        f"the client's job:\n{transcript}"
     )
+
+
+def _slow_on_every_attempt(attempt: Callable[[int], str | None]) -> list[str] | None:
+    """Run ``attempt`` up to twice; return both slow messages, else None.
+
+    ``attempt`` returns None once the escape was exercised (and its assertions
+    passed) or a message when the hand-back was slow. A slow hand-back is retried
+    ONCE on a fresh spawn, because "task ran, no pid" is also what a hung or
+    crashed intermediary looks like: only two slow attempts in a row are skipped.
+    """
+    first = attempt(1)
+    if first is None:
+        return None
+    second = attempt(2)
+    if second is None:
+        return None
+    return [first, second]
 
 
 @_windows_only
@@ -275,6 +302,22 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
             "cannot exist here, so the escape cannot be exercised — the fix is "
             "UNVERIFIED on this cell"
         )
+    slow = _slow_on_every_attempt(
+        lambda n: _exercise_once(tmp_path / f"attempt{n}", session_end)
+    )
+    if slow is not None:
+        pytest.skip(
+            "F-867: the scheduler task ran but handed back no pid on both attempts "
+            f"({slow[0]}; then {slow[1]}), so the plain spawn served and the escape "
+            "was NOT exercised. Skipped, not passed (T-8308): a scheduler that "
+            "hangs for good looks the same, so a green run elsewhere is what "
+            "verifies this fix; an idle host hands back in about 1s"
+        )
+
+
+def _exercise_once(tmp_path: Path, session_end: str) -> str | None:
+    """One spawn from inside a fresh job: None once verified, else a slow message."""
+    tmp_path.mkdir()
     helper_py = tmp_path / "helper.py"
     helper_py.write_text(
         _HELPER.format(sleep=120, pid_timeout=_PID_READY_TIMEOUT), encoding="utf-8"
@@ -329,7 +372,7 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         # only a rung that leaves the job can pass them.
         verdict, message = _rung_verdict(rung, transcript, _PID_READY_TIMEOUT)
         if verdict == "slow":
-            pytest.skip(message)
+            return message
         assert verdict == "escaped", message
 
         backend_handle = kernel.OpenProcess(
@@ -370,6 +413,7 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
             f"({session_end}), pid hand-back took {handback}s",
             stacklevel=1,
         )
+        return None
     finally:
         if backend_handle:
             kernel.CloseHandle(wintypes.HANDLE(backend_handle))
@@ -430,8 +474,8 @@ def _kill(pid: int) -> None:
 def test_a_slow_scheduler_handback_is_told_apart_from_an_unavailable_scheduler(
     caplog, monkeypatch
 ):
-    # The slow line is the REAL one: drive _run_task with a task that is created
-    # and run but never hands back a pid, rather than typing the sentence here.
+    # The timeout line is the REAL one: drive _run_task with a task that is
+    # created and run but never hands back a pid, rather than typing it here.
     class _Ok:
         returncode = 0
         stderr = ""
@@ -442,13 +486,21 @@ def test_a_slow_scheduler_handback_is_told_apart_from_an_unavailable_scheduler(
     pid = backend_launch._run_task("t", "cmd", Path("nope.pid"), Path("nope.err"))
     assert pid is None
     real_line = "\n".join(r.getMessage() for r in caplog.records)
-    assert _SLOW_HANDBACK_LINE in real_line
+    assert backend_launch.HANDBACK_TIMEOUT_PHRASE in real_line
 
-    slow = f"LOG F-867: {real_line}\nHANDBACK 60.9\nRUNG plain\nPID 1"
-    kind, message = _rung_verdict("plain", slow, 60.0)
+    def transcript(handback):
+        return f"LOG F-867: {real_line}\nHANDBACK {handback}\nRUNG plain\nPID 1"
+
+    kind, message = _rung_verdict("plain", transcript("60.9"), 60.0)
     assert kind == "slow"
     assert "60.9s" in message
     assert "60s budget" in message
+
+    # The line is logged for ANY created-and-run task with no pid, so a hand-back
+    # well under the budget is a broken task, not a slow host.
+    kind, message = _rung_verdict("plain", transcript("3.2"), 60.0)
+    assert kind == "unavailable"
+    assert "3.2s" in message
 
     # No hand-back line: the task was never created or run.
     gone = "LOG F-867: could not create the backend-launch task t\nRUNG plain"
@@ -457,4 +509,19 @@ def test_a_slow_scheduler_handback_is_told_apart_from_an_unavailable_scheduler(
     assert "unavailable" in message
 
     for rung in ("breakaway", "scheduler"):
-        assert _rung_verdict(rung, slow, 60.0)[0] == "escaped"
+        assert _rung_verdict(rung, transcript("60.9"), 60.0)[0] == "escaped"
+
+
+def test_a_slow_handback_is_retried_once_and_only_two_in_a_row_skip():
+    def run(outcomes):
+        calls = []
+
+        def attempt(n):
+            calls.append(n)
+            return outcomes[n - 1]
+
+        return _slow_on_every_attempt(attempt), calls
+
+    assert run([None]) == (None, [1])
+    assert run(["slow", None]) == (None, [1, 2])
+    assert run(["slow a", "slow b"]) == (["slow a", "slow b"], [1, 2])
