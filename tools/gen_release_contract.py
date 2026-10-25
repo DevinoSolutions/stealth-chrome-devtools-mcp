@@ -638,6 +638,13 @@ def _matrix_section() -> str:
             "and manual runs execute and demand **every** cell above, and an event",
             "the tier table does not name fails closed to all of them, so a smaller",
             "ledger never qualifies a release.",
+            "",
+            "A pull request also runs "
+            + ", ".join(f"`{k}`" for k in release_evidence.PR_ADVISORY_KEYS)
+            + " as an **advisory** cell: the same command as the full tier, but its",
+            "failure blocks nothing, its record is not read by the PR aggregate, and",
+            "it is not counted in the PR cells above. The cell is still required on",
+            "every other event.",
         ]
     )
     lines.extend(

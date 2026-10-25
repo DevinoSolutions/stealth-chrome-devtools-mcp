@@ -98,6 +98,11 @@ and manual runs execute and demand **every** cell above, and an event
 the tier table does not name fails closed to all of them, so a smaller
 ledger never qualifies a release.
 
+A pull request also runs `unit-tests/Windows-X64-py3.11` as an **advisory** cell: the same command as the full tier, but its
+failure blocks nothing, its record is not read by the PR aggregate, and
+it is not counted in the PR cells above. The cell is still required on
+every other event.
+
 The exact Chrome Stable executable path and version are **not** written
 into this document: they are image-provided and change under us. They
 are recorded per run in

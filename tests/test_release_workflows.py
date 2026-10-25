@@ -163,10 +163,16 @@ def test_a_pull_request_runs_a_strict_subset_and_every_other_event_the_full_ledg
         tier = release_evidence.tier_for_event(event)
         assert set(release_evidence.keys_for_tier(tier)) == full, event
     assert release_evidence.tier_for_event("pull_request") == release_evidence.PR_TIER
-    # What the plan runs is exactly what the tier owes (no cross-product extras).
+    # What the plan runs is exactly what the tier owes plus its advisory cells
+    # (T-8242), with no cross-product extras.
     for tier, owed in (("pr", pr), ("full", full)):
         ran = _expand_plan(release_evidence.plan_matrices(tier))
-        assert ran == {k for k in owed if "/default" not in k}, tier
+        advisory = set(release_evidence.advisory_keys_for_tier(tier))
+        assert advisory.isdisjoint(owed), tier
+        assert ran == {k for k in owed | advisory if "/default" not in k}, tier
+    assert set(release_evidence.advisory_keys_for_tier("pr")) == {
+        "unit-tests/Windows-X64-py3.11"
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +258,19 @@ def test_the_gap_declaration_job_exists_and_is_required(gate_jobs):
         assert lane in script, f"known-gaps does not mention the {lane!r} gap"
 
 
+ADVISORY_FLAG = "${{ matrix.advisory == true }}"
+
+
 def test_no_gate_job_hides_failure(gate_jobs):
-    """continue-on-error anywhere would let a red lane report green."""
+    """continue-on-error anywhere would let a red lane report green.
+
+    The one exception (T-8242) is `unit-tests`, and only as the plan-driven flag:
+    the plan marks the advisory PR cell `advisory`, nothing else carries it, and
+    the full tier flags no cell, so every cell a tag runs is still blocking.
+    """
     for name, job in gate_jobs.items():
-        assert not job.get("continue-on-error"), (
+        allowed = ADVISORY_FLAG if name == "unit-tests" else None
+        assert job.get("continue-on-error") == allowed, (
             f"job {name!r} sets continue-on-error — a required gate may not "
             f"absorb a failure"
         )

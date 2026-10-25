@@ -51,7 +51,8 @@ jobs:
   # ── Lint / type / static gates (OS-independent → one cell) ──────────────────
   # T-6910: the cells have ONE home, tools/release_evidence.py. `plan` asks it which
   # matrices this event runs (a pull_request runs the PR tier: Linux only, wheel
-  # only; pushes to main, tags and manual runs run every REQUIRED_CELLS cell) and
+  # only, plus ONE advisory Windows py3.11 unit cell, T-8242; pushes to main, tags
+  # and manual runs run every REQUIRED_CELLS cell) and
   # each matrix job reads its slice through fromJSON. The release-evidence
   # aggregate derives the SAME tier from the same event, so a tag still owes every
   # cell and a PR is never credited with a cell it did not run.
@@ -150,6 +151,13 @@ jobs:
     name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    # T-8242: the ONE continue-on-error in this file, and the plan decides it. A
+    # pull request also runs a cell it does not owe (Windows py3.11, which the
+    # Linux-only PR tier never saw); the plan flags it `advisory`, so its failure
+    # shows red on that cell but leaves this job's result, and so `release-gate`,
+    # green. The aggregate neither requires nor reads its record. Every cell the
+    # full tier runs is un-flagged, so a tag still fails on any red cell.
+    continue-on-error: ${{ matrix.advisory == true }}
     # The org runner pool is shared (28 runners) and one run once held 15 of them.
     # unit-tests 3 at a time, every other matrix 2, in two waves (integration,
     # transport, offline-stealth and install-smoke wait for unit-tests and coverage):

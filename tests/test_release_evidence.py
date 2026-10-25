@@ -300,6 +300,89 @@ def test_a_missing_pr_tier_cell_is_still_rejected_on_a_pull_request(pr_ledger: P
     assert any("missing child record" in p for p in problems)
 
 
+# ── the advisory PR cell (T-8242) ───────────────────────────────────────────
+ADVISORY = "unit-tests/Windows-X64-py3.11"
+
+
+def _emit_advisory(root: Path, tmp_path: Path, *, outcome: str) -> None:
+    work = tmp_path / "advisory-work"
+    work.mkdir()
+    spec = re_mod.CELLS_BY_KEY[ADVISORY]
+    _emit_cell(root, work, spec, outcome=outcome)
+
+
+def test_the_pr_plan_adds_exactly_one_advisory_cell():
+    assert re_mod.PR_ADVISORY_KEYS == (ADVISORY,)
+    assert re_mod.advisory_keys_for_tier("pr") == (ADVISORY,)
+    assert re_mod.advisory_keys_for_tier("full") == ()
+    owed = {s.key for s in re_mod.cells_for_tier("pr")}
+    run = {s.key for s in re_mod.cells_run_for_tier("pr")}
+    assert run - owed == {ADVISORY}, "the PR tier runs ONE cell it does not owe"
+    assert owed < run
+    plan = re_mod.plan_matrices("pr")["unit-tests"]["include"]
+    flagged = [c for c in plan if c.get("advisory")]
+    assert flagged == [
+        {
+            "os": "windows-latest",
+            "runner_os": "Windows",
+            "runner_arch": "X64",
+            "python-version": "3.11",
+            "advisory": True,
+        }
+    ]
+    assert not any("advisory" in c for c in plan if c not in flagged)
+
+
+def test_the_full_plan_is_unchanged_and_flags_nothing():
+    assert re_mod.cells_run_for_tier("full") == re_mod.REQUIRED_CELLS
+    assert re_mod.cells_for_tier("full") == re_mod.REQUIRED_CELLS
+    for matrix in re_mod.plan_matrices("full").values():
+        assert all("advisory" not in c for c in matrix.get("include", []))
+    windows = [
+        c
+        for c in re_mod.plan_matrices("full")["unit-tests"]["include"]
+        if c["runner_os"] == "Windows" and c["python-version"] == "3.11"
+    ]
+    assert len(windows) == 1 and "advisory" not in windows[0]
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+def test_the_pr_aggregate_does_not_read_the_advisory_cell(
+    pr_ledger: Path, tmp_path: Path, outcome: str
+):
+    """Red, green or cancelled, the advisory record neither fails nor credits."""
+    _emit_advisory(pr_ledger, tmp_path, outcome=outcome)
+    aggregate, problems = _aggregate(pr_ledger, event="pull_request")
+    assert problems == []
+    assert ADVISORY not in aggregate["required_cells"]
+    assert ADVISORY not in [child["key"] for child in aggregate["children"]]
+
+
+def test_the_pr_aggregate_does_not_require_the_advisory_cell(pr_ledger: Path):
+    assert not _record_path(pr_ledger, ADVISORY).exists()
+    _, problems = _aggregate(pr_ledger, event="pull_request")
+    assert problems == []
+
+
+def test_the_full_aggregate_still_owes_the_advisory_cell(ledger: Path):
+    assert ADVISORY in re_mod.keys_for_tier("full")
+    _record_path(ledger, ADVISORY).unlink()
+    _, problems = _aggregate(ledger, event="push")
+    assert [p for p in problems if "missing child record" in p] == [
+        f"missing child record for required cell {ADVISORY!r}"
+    ]
+
+
+def test_the_full_aggregate_rejects_a_red_advisory_cell(ledger: Path):
+    _mutate(
+        ledger,
+        ADVISORY,
+        lambda r: r["job"].__setitem__("terminal_outcome", "failure"),
+    )
+    _, problems = _aggregate(ledger, event="push")
+    assert any(p.startswith(ADVISORY) for p in problems)
+
+
 def test_the_required_cell_set_covers_all_three_qualified_runners(ledger: Path):
     labels = {spec.label for spec in re_mod.REQUIRED_CELLS}
     assert labels == {"Linux/X64", "Windows/X64", "macOS/ARM64"}

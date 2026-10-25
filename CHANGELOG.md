@@ -7,6 +7,15 @@
 - `test_freeze_capture.py::TestIncidents::test_the_mark_wait_is_its_own_budget_not_the_captures` shortens `HEAL_WAITS_FOR_CAPTURE_SECONDS` to 0.05 s and makes the healed-dump rename take 0.3 s, well under `HEAL_WAITS_FOR_MARK_SECONDS`: the heal must still report `dump_kept`. Reverting the mark wait in `before_heal` to the capture's budget used to fail only on a loaded host; it now fails every run (`dump_not_marked_healed(TimeoutError)`).
 - `test_liveness_heartbeat.py::test_the_sweep_drops_a_session_the_sdk_discarded_from_last_seen` DELETEs a session over real streamable HTTP, so the SDK (not our code) unlists it from `_server_instances`, and asserts the next `sweep_once` drops its `last_seen` entry. Skipping that prune in `sweep_once` now fails the suite. No production change.
 
+### The PR gate also runs the Windows py3.11 unit cell, advisory (T-8242)
+
+- **A pull request now runs `unit-tests/Windows-X64-py3.11` too, and its failure blocks nothing (T-8242).** 2.1.41 never published because the publish gate's Windows py3.11 unit cell failed on
+  `asyncio.run(loop_factory=)`, which exists only on 3.12+ (fixed in T-7495); the PR tier is Linux only, so no pull request ever ran that cell. The cell is declared in the one home,
+  `tools/release_schema.py` (`PR_ADVISORY_KEYS`), and `plan_matrices` flags it `advisory` in the PR plan; `release-gate.yml`'s `unit-tests` job reads that flag through
+  `continue-on-error: ${{ matrix.advisory == true }}`, so the cell shows red on a bad change while `release-gate` stays green. The PR aggregate neither requires nor reads its
+  record, and the PR cell count in `RELEASE_CONTRACT.md` is still the owed cells. Pushes to main, tags and manual runs are unchanged: the cell is flagged on none of them and is still
+  owed (and a red record still fails the aggregate). Promote it to required by moving it into `_in_pr_tier`.
+
 ## 2.1.43
 
 ### A closed tab's python-binding watch is reaped (T-6561)
