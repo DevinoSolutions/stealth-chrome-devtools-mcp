@@ -13,6 +13,7 @@ python), the dump writer is a keyword seam, and the one real ``MiniDumpWriteDump
 node runs only on Windows against a throwaway child that is killed by exact pid.
 """
 
+import ast
 import asyncio
 import os
 import subprocess
@@ -845,6 +846,60 @@ class TestIncidents:
         )
 
         assert said == "evidence@probe1(none); dump_kept(l-healed.dmp)"
+
+    async def test_a_mark_that_never_returns_is_cut_at_the_mark_budget(
+        self, monkeypatch
+    ):
+        """The rename is bounded: a ``mark_healed`` that blocks forever is cut at
+        ``HEAL_WAITS_FOR_MARK_SECONDS`` and the heal goes on, saying so. The capture's
+        budget stays at its default so only the mark budget can cut it; the outer
+        ``wait_for`` makes an unbounded mark wait FAIL here instead of hanging."""
+        monkeypatch.setattr(freeze_capture, "HEAL_WAITS_FOR_MARK_SECONDS", 0.1)
+        assert freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS > 1
+        release = threading.Event()
+
+        def never(_label: str) -> str:
+            release.wait()
+            return "unreachable"
+
+        incidents = freeze_capture.Incidents(
+            capture=lambda **_k: asyncio.sleep(0, "r"),
+            dump_now=lambda *_a, **_k: asyncio.sleep(0, "x"),
+            mark_healed=never,
+            clock=lambda: 0.0,
+            log=lambda _line: None,
+        )
+
+        try:
+            said = await asyncio.wait_for(
+                incidents.before_heal("i", pid=1, label="l"), timeout=5
+            )
+        finally:
+            release.set()  # free the worker thread so the loop can shut down
+
+        assert said == "evidence@probe1(none); dump_not_marked_healed(TimeoutError)"
+
+    def test_the_mark_budget_is_a_literal_not_a_reference_to_the_captures(self):
+        """``HEAL_WAITS_FOR_MARK_SECONDS = HEAL_WAITS_FOR_CAPTURE_SECONDS`` (or any
+        expression over it) binds the value at import, so a test that rebinds the
+        capture name leaves the mark's copy alone and the behavioural pin above stays
+        green. Both are 10.0 today, so the values cannot tell them apart; the module
+        source can: the mark budget must be assigned a number, not a name."""
+        tree = ast.parse(Path(freeze_capture.__file__).read_text(encoding="utf-8"))
+        assigned = [
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == "HEAL_WAITS_FOR_MARK_SECONDS"
+                for t in node.targets
+            )
+        ]
+
+        assert len(assigned) == 1
+        assert isinstance(assigned[0], ast.Constant)
+        assert isinstance(assigned[0].value, (int, float))
+        assert freeze_capture.HEAL_WAITS_FOR_MARK_SECONDS > 0
 
     async def test_no_incident_is_said_so_and_still_marks_what_there_is(self):
         incidents = self._incidents([0.0], [], [])
