@@ -1130,8 +1130,21 @@ class TestTheRealProbe:
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(browser_health.probe_browser(chrome.url, steps), 0.3)
 
-        assert steps[-2:] == ["evaluate", "closeTarget"]
+        assert steps == ["createTarget", "attachToTarget", "evaluate"]
         assert chrome.methods[-1] == "Target.closeTarget"
+
+    async def test_a_hung_evaluate_is_described_at_evaluate_not_at_close_target(
+        self, chrome
+    ):
+        chrome.evaluate = "hang"
+        steps: list[str] = []
+
+        with pytest.raises(TimeoutError) as caught:
+            await asyncio.wait_for(browser_health.probe_browser(chrome.url, steps), 0.3)
+
+        assert (
+            browser_health._describe(caught.value, steps) == "TimeoutError at evaluate"
+        )
 
     async def test_nothing_listening_is_a_failure_not_a_hang(self):
         with pytest.raises(OSError):

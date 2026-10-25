@@ -247,9 +247,9 @@ async def probe_browser(websocket_url: str, steps: list[str]) -> None:
                 raise ProbeError(
                     f"Runtime.evaluate(1+1) did not answer {_EXPECTED_SUM}"
                 )
+            steps.append("closeTarget")
         finally:
             if target_id is not None:
-                steps.append("closeTarget")
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
                         wire.call("Target.closeTarget", {"targetId": target_id}),
