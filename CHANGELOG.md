@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### The job-escape pin skips, loudly, when the scheduler is slow rather than missing (T-8308)
+
+`test_the_backend_survives_the_clients_job_ending[close_handle]` failed once in a loaded 16-minute
+pre-push lane with the message "the scheduler was unavailable on this runner". It was not: the task
+was created and run, its pid hand-back took 60.9 s against the helper's 60 s budget, and the plain
+spawn served. The pin now classifies the transcript (`_rung_verdict`): the `never handed back a pid
+within` line means slow, and the test skips naming the measured hand-back and the budget, while
+every other plain-spawn case still fails as unavailable and the breakaway/scheduler escape
+assertions are unchanged. A new hermetic test drives the real `_run_task` log line through the
+classifier. The shipped 20 s budget is not touched.
+
 ### Tests: two regression pins from the T-7509 and T-6904 reviews (T-8241)
 
 - `test_freeze_capture.py::TestIncidents::test_the_mark_wait_is_its_own_budget_not_the_captures` shortens `HEAL_WAITS_FOR_CAPTURE_SECONDS` to 0.05 s and makes the healed-dump rename take 0.3 s, well under `HEAL_WAITS_FOR_MARK_SECONDS`: the heal must still report `dump_kept`. Reverting the mark wait in `before_heal` to the capture's budget used to fail only on a loaded host; it now fails every run (`dump_not_marked_healed(TimeoutError)`).

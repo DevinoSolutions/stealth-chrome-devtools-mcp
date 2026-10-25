@@ -38,17 +38,16 @@ import sys
 import threading
 import warnings
 from ctypes import wintypes
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import backend_launch, desktop_launch
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-pytestmark = pytest.mark.skipif(
+# Applied to the one real-spawn test only: the verdict classifier below is pure
+# and its pin must run on every platform.
+_windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="Windows Job Objects (F-867)"
 )
 
@@ -219,6 +218,49 @@ def _read_until_pid(helper, sink: list[str]) -> None:
             return
 
 
+# The line backend_launch._run_task logs when the task was created and run but
+# no pid came back in time. It is how "the scheduler is slow" is told apart from
+# "the scheduler is unavailable" (no task, no console session, ...), which log a
+# different line. The hermetic pin below feeds the REAL line, so a reword cannot
+# silently turn a slow host back into a red.
+_SLOW_HANDBACK_LINE = "never handed back a pid within"
+
+
+def _rung_verdict(rung: str, transcript: str, budget: float) -> tuple[str, str]:
+    """Classify a helper transcript as ``(kind, message)``.
+
+    ``escaped`` for the breakaway/scheduler rungs (the escape assertions then
+    run, unchanged); ``slow`` when the scheduler task ran but its hand-back
+    exceeded ``budget`` (a loaded host: the escape was not exercised, which is
+    not a regression); ``unavailable`` for every other plain-spawn case (a real
+    red: the backend stayed inside the client's job).
+    """
+    if rung in {"breakaway", "scheduler"}:
+        return "escaped", ""
+    measured = next(
+        (
+            line.split()[1]
+            for line in transcript.splitlines()
+            if line.startswith("HANDBACK ")
+        ),
+        "?",
+    )
+    if rung == "plain" and _SLOW_HANDBACK_LINE in transcript:
+        return "slow", (
+            f"F-867: the scheduler task ran but its pid hand-back took {measured}s "
+            f"against a {budget:.0f}s budget on this loaded host, so the plain "
+            "spawn served and the escape was NOT exercised. Skipped, not passed: "
+            "the scheduler rung was slow, not unavailable (T-8308); an idle host "
+            f"hands back in about 1s:\n{transcript}"
+        )
+    return "unavailable", (
+        f"F-867: rung {rung!r} served — the scheduler was unavailable on this "
+        f"runner (F-867 §6), so the backend stayed inside the client's "
+        f"job:\n{transcript}"
+    )
+
+
+@_windows_only
 @pytest.mark.parametrize("session_end", ["close_handle", "terminate_job"])
 def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
     # The helper runs in THIS session, so the leaf's own gate answers for it. A
@@ -285,11 +327,10 @@ def test_the_backend_survives_the_clients_job_ending(tmp_path, session_end):
         )
         # Named before the escape assertions, because it is the reason for them:
         # only a rung that leaves the job can pass them.
-        assert rung in {"breakaway", "scheduler"}, (
-            f"F-867: rung {rung!r} served — the scheduler was unavailable on this "
-            f"runner (F-867 §6), so the backend stayed inside the client's "
-            f"job:\n{transcript}"
-        )
+        verdict, message = _rung_verdict(rung, transcript, _PID_READY_TIMEOUT)
+        if verdict == "slow":
+            pytest.skip(message)
+        assert verdict == "escaped", message
 
         backend_handle = kernel.OpenProcess(
             _PROCESS_QUERY_LIMITED_INFORMATION, False, backend_pid
@@ -384,3 +425,36 @@ def _kill(pid: int) -> None:
         process.kill()
     except psutil.Error:
         pass
+
+
+def test_a_slow_scheduler_handback_is_told_apart_from_an_unavailable_scheduler(
+    caplog, monkeypatch
+):
+    # The slow line is the REAL one: drive _run_task with a task that is created
+    # and run but never hands back a pid, rather than typing the sentence here.
+    class _Ok:
+        returncode = 0
+        stderr = ""
+
+    caplog.set_level("WARNING", logger="stealth.proxy")
+    monkeypatch.setattr(desktop_launch, "_schtasks", lambda args: _Ok())
+    monkeypatch.setattr(backend_launch, "PID_READY_TIMEOUT", 0.05)
+    pid = backend_launch._run_task("t", "cmd", Path("nope.pid"), Path("nope.err"))
+    assert pid is None
+    real_line = "\n".join(r.getMessage() for r in caplog.records)
+    assert _SLOW_HANDBACK_LINE in real_line
+
+    slow = f"LOG F-867: {real_line}\nHANDBACK 60.9\nRUNG plain\nPID 1"
+    kind, message = _rung_verdict("plain", slow, 60.0)
+    assert kind == "slow"
+    assert "60.9s" in message
+    assert "60s budget" in message
+
+    # No hand-back line: the task was never created or run.
+    gone = "LOG F-867: could not create the backend-launch task t\nRUNG plain"
+    kind, message = _rung_verdict("plain", gone, 60.0)
+    assert kind == "unavailable"
+    assert "unavailable" in message
+
+    for rung in ("breakaway", "scheduler"):
+        assert _rung_verdict(rung, slow, 60.0)[0] == "escaped"
