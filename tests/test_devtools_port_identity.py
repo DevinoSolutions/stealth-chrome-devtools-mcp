@@ -17,8 +17,9 @@ read-only): its pid must be the one we launched or below it.
 
 Every node drives nodriver's REAL ``Browser.start`` through the REAL
 ``BrowserManager._launch_browser`` over a faked OS: a table of endpoints, a
-virtual clock, a connection that runs the REAL ``cdp.system_info`` generator, and
-the process table. No Chrome is launched, no socket is opened. The pids are far
+virtual clock, a websocket under nodriver's real ``Connection`` and ``_listener``
+that answers each frame as the holder of the port would, and the process table.
+No Chrome is launched, no socket is opened. The pids are far
 above any a machine hands out, so ``psutil`` finds no descendants of them.
 """
 
@@ -32,12 +33,13 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+import websockets
 from nodriver import cdp
 from nodriver.core.browser import Browser, HTTPApi
-from nodriver.core.connection import ProtocolException
 from nodriver.core.util import get_registered_instances
 
 from fakes import ProcessTable, forbid_real_process_kills, nodriver_registry
+from fakes_wire import BrowserSocket
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
     devtools_port,
@@ -77,7 +79,7 @@ class World:
         #: The first identity question has been lost / failed (``lost_once``, ``fails_once``).
         self.lost = False
         self.argv: list[str] = []
-        self.connections: list[FakeConnection] = []
+        self.sockets: list[FakeWebsocket] = []
         self.process = type("P", (), {"pid": OUR_PID, "returncode": None})()
         self._launched = False
 
@@ -109,66 +111,44 @@ class World:
         }
 
 
-class FakeConnection:
-    """nodriver's ``Connection``: opens nothing, and runs the REAL cdp generator
-    for each command, answering ``SystemInfo.getProcessInfo`` as the holder of
-    the port would."""
+class FakeWebsocket(BrowserSocket):
+    """What ``websockets.connect`` hands nodriver's REAL ``Connection``, answering
+    each frame the way the holder of the port would, so the REAL ``Browser.start``,
+    ``Connection.attach``, ``send`` and ``_listener`` run over it (nodriver 0.50:
+    ``Browser`` IS a ``Connection``, ``browser.py``:32). Only the identity question
+    is this file's own; the handshake is ``fakes_wire.BrowserSocket``."""
 
     world: World
 
-    def __init__(self, url, browser=None, **kwargs) -> None:
-        self.url = url
-        self.handlers: dict = {}
-        self.sent: list[str] = []
-        self.disconnected = False
-        self.websocket_url = url
-        #: Chrome scopes ``Target.setDiscoverTargets`` to the websocket it was sent on:
-        #: closing this connection ends the target events it delivered.
-        self.discovering = False
-        self.target = kwargs.get("target")
-        type(self).world.connections.append(self)
-
-    def __getattr__(self, item):
-        return getattr(self.target, item)
-
-    async def send(self, command, **kwargs):
-        method = next(command)["method"]
-        self.sent.append(method)
-        world = type(self).world
-        reply: dict = {}
-        if method == "Target.setDiscoverTargets":
-            self.discovering = True
-        if method == "SystemInfo.getProcessInfo":
-            if world.identity == "silent":
-                await asyncio.Event().wait()
-            if world.identity == "lost_once" and not world.lost:
-                # The request leaves, the transport dies under it, nothing is raised.
-                world.lost = True
-                await asyncio.Event().wait()
-            if world.identity == "fails_once" and not world.lost:
-                world.lost = True
-                raise OSError("the transport died under the request")
-            if world.identity == "unsupported":
-                raise ProtocolException({"code": -32601, "message": "not found"})
-            reply = {
-                "processInfo": [
-                    {"type": "gpu", "id": 1, "cpuTime": 0.0},
-                    {"type": "browser", "id": world.holder_pid, "cpuTime": 0.0},
-                ]
-            }
-        try:
-            command.send(reply)
-        except StopIteration as done:
-            return done.value
-        return None
+    def __init__(self, url) -> None:
+        super().__init__(url)
+        type(self).world.sockets.append(self)
 
     def deliver_target_created(self) -> bool:
         """Would a ``TargetCreated`` reach a handler on this connection now?"""
         return self.discovering and not self.disconnected
 
-    async def disconnect(self):
-        self.disconnected = True
-        self.discovering = False
+    def respond(self, method: str, request_id: int, params: dict) -> None:
+        if method != "SystemInfo.getProcessInfo":
+            super().respond(method, request_id, params)
+            return
+        world = type(self).world
+        if world.identity == "silent":
+            return
+        if world.identity == "lost_once" and not world.lost:
+            world.lost = True  # the request leaves, nothing ever answers it
+            return
+        if world.identity == "fails_once" and not world.lost:
+            world.lost = True
+            raise OSError("the transport died under the request")
+        if world.identity == "unsupported":
+            self.fail(request_id, "not found", code=-32601)
+            return
+        processes = [
+            {"type": "gpu", "id": 1, "cpuTime": 0.0},
+            {"type": "browser", "id": world.holder_pid, "cpuTime": 0.0},
+        ]
+        self.answer(request_id, {"processInfo": processes})
 
 
 @pytest.fixture(autouse=True)
@@ -190,11 +170,14 @@ def profile(tmp_path) -> Path:
 @pytest.fixture
 def world(monkeypatch):
     this = World()
-    FakeConnection.world = this
+    FakeWebsocket.world = this
     monkeypatch.setattr(asyncio, "create_subprocess_exec", this.spawn)
     monkeypatch.setattr("nodriver.core.util.free_port", lambda: OUR_PORT)
-    monkeypatch.setattr("nodriver.core.browser.Connection", FakeConnection)
-    monkeypatch.setattr("nodriver.core.connection.Connection", FakeConnection)
+
+    async def _connect(url, **_kwargs):
+        return FakeWebsocket(url)
+
+    monkeypatch.setattr(websockets, "connect", _connect)
 
     async def _request(api, endpoint_name, method="get", data=None):
         return await this.request(api, endpoint_name, method, data)
@@ -243,10 +226,10 @@ async def test_our_own_chrome_on_the_port_is_attached(world, profile):
     """The other side of it: when the port is ours the spawn attaches."""
     browser = await _launch(profile)
 
-    assert browser.connection is world.connections[0]
+    assert browser.socket is world.sockets[0]
     assert browser.config.port == OUR_PORT
-    assert not browser.connection.disconnected
-    assert "SystemInfo.getProcessInfo" in browser.connection.sent
+    assert not browser.socket.disconnected
+    assert "SystemInfo.getProcessInfo" in browser.socket.methods
 
 
 async def test_chrome_keeps_the_concrete_port_in_its_argv(world, profile):
@@ -267,10 +250,10 @@ async def test_a_refused_foreign_connection_is_dropped_not_closed(world, profile
     with pytest.raises(ToolError):
         await _launch(profile)
 
-    (foreign,) = world.connections
+    (foreign,) = world.sockets
     assert foreign.disconnected
-    assert not [m for m in foreign.sent if m.startswith("Browser.")]
-    assert "Target.closeTarget" not in foreign.sent
+    assert not [m for m in foreign.methods if m.startswith("Browser.")]
+    assert "Target.closeTarget" not in foreign.methods
 
 
 async def test_a_stale_port_file_is_not_trusted(world, profile):
@@ -293,9 +276,9 @@ async def test_a_browser_that_never_says_who_it_is_times_out_by_name(world, prof
         await _launch(profile)
 
     assert "F-1009" in str(err.value)
-    (foreign,) = world.connections
+    (foreign,) = world.sockets
     assert foreign.disconnected
-    assert "Browser.close" not in foreign.sent
+    assert "Browser.close" not in foreign.methods
 
 
 @pytest.fixture
@@ -307,8 +290,8 @@ def running_launcher(monkeypatch):
     monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.01)
 
 
-def _asks(connection: FakeConnection) -> int:
-    return connection.sent.count("SystemInfo.getProcessInfo")
+def _asks(connection: FakeWebsocket) -> int:
+    return connection.methods.count("SystemInfo.getProcessInfo")
 
 
 async def test_a_lost_identity_query_is_asked_again_on_a_throwaway_connection(
@@ -324,17 +307,19 @@ async def test_a_lost_identity_query_is_asked_again_on_a_throwaway_connection(
 
     browser = await _launch(profile)
 
-    own, *throwaways = world.connections
-    assert browser.connection is own
+    own, *throwaways = world.sockets
+    assert browser.socket is own
     assert not own.disconnected
-    assert own.deliver_target_created()
-    assert own.sent.count("Target.setDiscoverTargets") == 1
+    assert "Target.setDiscoverTargets" not in own.methods  # arm_popups sends it
     assert _asks(own) == 1
     assert throwaways
-    assert sum(_asks(c) for c in world.connections) >= 2
+    assert sum(_asks(c) for c in world.sockets) >= 2
     assert all(c.disconnected for c in throwaways)
     assert not [
-        m for c in throwaways for m in c.sent if m != "SystemInfo.getProcessInfo"
+        m
+        for c in throwaways
+        for m in c.methods
+        if m not in ("SystemInfo.getProcessInfo", "Target.attachToBrowserTarget")
     ]
 
 
@@ -348,8 +333,8 @@ async def test_a_sibling_that_answers_the_second_ask_is_still_refused(
     with pytest.raises(ToolError, match="not the Chrome this spawn launched"):
         await _launch(profile)
 
-    assert len(world.connections) >= 2
-    assert all(c.disconnected for c in world.connections)
+    assert len(world.sockets) >= 2
+    assert all(c.disconnected for c in world.sockets)
 
 
 async def test_a_silent_browser_is_asked_a_bounded_number_of_times(
@@ -360,8 +345,8 @@ async def test_a_silent_browser_is_asked_a_bounded_number_of_times(
     with pytest.raises(ToolError, match="did not say which process it is"):
         await _launch(profile)
 
-    assert all(c.disconnected for c in world.connections)
-    assert 2 <= sum(_asks(c) for c in world.connections) <= 0.4 / 0.05 + 1
+    assert all(c.disconnected for c in world.sockets)
+    assert 2 <= sum(_asks(c) for c in world.sockets) <= 0.4 / 0.05 + 1
 
 
 async def test_a_request_that_failed_neither_wins_nor_goes_unretrieved(
@@ -383,7 +368,7 @@ async def test_a_request_that_failed_neither_wins_nor_goes_unretrieved(
     browser = await _launch(profile)
     gc.collect()
 
-    assert not browser.connection.disconnected
+    assert not browser.socket.disconnected
     assert any("OSError" in line for line in logged)
     assert unretrieved == []
 
@@ -408,9 +393,9 @@ async def test_a_browser_without_the_query_is_refused_not_trusted(world, profile
     with pytest.raises(ToolError, match="cannot identify its process"):
         await _launch(profile)
 
-    (foreign,) = world.connections
+    (foreign,) = world.sockets
     assert foreign.disconnected
-    assert not [m for m in foreign.sent if m.startswith("Browser.")]
+    assert not [m for m in foreign.methods if m.startswith("Browser.")]
 
 
 async def test_a_launched_pid_nodriver_did_not_stamp_is_allowed(world, profile):
@@ -421,7 +406,7 @@ async def test_a_launched_pid_nodriver_did_not_stamp_is_allowed(world, profile):
     world.holder_pid = SIBLING_PID
     browser = await _launch(profile)
 
-    assert not browser.connection.disconnected
+    assert not browser.socket.disconnected
 
 
 async def test_a_mismatch_never_touches_the_foreign_browser(
@@ -452,7 +437,7 @@ async def test_a_mismatch_never_touches_the_foreign_browser(
     assert table.procs[SIBLING_PID].terminate_calls == 0
     assert table.procs[SIBLING_PID].alive
     assert table.procs[OUR_PID].terminate_calls == 1
-    (foreign,) = world.connections
+    (foreign,) = world.sockets
     assert foreign.disconnected
     assert manager._instances == {}
     assert await manager.close_instance("anything-the-caller-might-hold") is False

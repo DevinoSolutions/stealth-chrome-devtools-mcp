@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 import pytest
-from nodriver import Connection, Tab, cdp
+from nodriver import cdp
 
 from fakes import FakeBrowser, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
@@ -135,9 +135,7 @@ async def spawn(
 
 def listeners(browser: FakeBrowser) -> list[Any]:
     """The ``Target.targetCreated`` handlers registered on the browser connection."""
-    return [
-        h for evt, h in browser.connection.handlers if evt is cdp.target.TargetCreated
-    ]
+    return [h for evt, h in browser.handlers if evt is cdp.target.TargetCreated]
 
 
 def popup_in(browser: FakeBrowser, target_id: str, **kwargs: Any) -> FakeTab:
@@ -153,7 +151,7 @@ async def test_a_page_opened_popup_is_armed_without_a_switch_tab(manager, launch
     await spawn(manager, browser, main)
     popup = popup_in(browser, "T-popup")
 
-    browser.connection._deliver(created("T-popup"))
+    browser._deliver(created("T-popup"))
     await settle()
 
     frames = focus_frames(popup)
@@ -174,7 +172,7 @@ async def test_the_popup_gets_the_rest_of_the_arming_too(manager, launched):
     await spawn(manager, browser, main, BrowserOptions(extra_headers={"X-A": "b"}))
     popup = popup_in(browser, "T-popup")
 
-    browser.connection._deliver(created("T-popup"))
+    browser._deliver(created("T-popup"))
     await settle()
 
     assert ("T-popup", IID) in armed
@@ -188,7 +186,7 @@ async def test_a_tab_the_backend_opened_itself_is_not_armed_twice(manager, launc
     await spawn(manager, browser, main)
     own = popup_in(browser, "T-own")
 
-    browser.connection._deliver(created("T-own", opener=None))
+    browser._deliver(created("T-own", opener=None))
     await settle()
 
     assert focus_frames(own) == []
@@ -200,7 +198,7 @@ async def test_only_a_page_target_is_a_popup(manager, launched, type_):
     await spawn(manager, browser, main)
     other = popup_in(browser, "T-other")
 
-    browser.connection._deliver(created("T-other", type_=type_))
+    browser._deliver(created("T-other", type_=type_))
     await settle()
 
     assert focus_frames(other) == []
@@ -220,8 +218,8 @@ async def test_a_refused_call_breaks_neither_the_popup_nor_the_listener(
     )
     healthy = popup_in(browser, "T-healthy")
 
-    browser.connection._deliver(created("T-refused"))
-    browser.connection._deliver(created("T-healthy"))
+    browser._deliver(created("T-refused"))
+    browser._deliver(created("T-healthy"))
     await settle()
 
     assert refused.send_calls.count("set_focus_emulation_enabled") == 1
@@ -242,10 +240,10 @@ async def test_a_popup_that_vanished_before_it_could_be_armed_is_not_an_error(
 
     manager._tab_armers = (armer,)
     await spawn(manager, browser, main)
-    wires = [browser.connection, *browser.tabs]
+    wires = [browser, *browser.tabs]
     sent = [len(wire.cdp_frames) for wire in wires]
 
-    browser.connection._deliver(created("T-gone"))
+    browser._deliver(created("T-gone"))
     await settle()
 
     assert not tab_open._POPUP_TASKS
@@ -264,19 +262,19 @@ async def test_a_popup_that_never_answers_is_given_up_on_and_forgotten(
     browser.tabs.append(HangingTab(target_id="T-hung"))
 
     with caplog.at_level(logging.WARNING):
-        browser.connection._deliver(created("T-hung"))
+        browser._deliver(created("T-hung"))
         await asyncio.wait_for(settle(), TEST_WAIT_BUDGET)
 
     assert not tab_open._POPUP_TASKS
     assert "gave up" in caplog.text
 
 
-async def test_a_popup_nodriver_registered_as_a_bare_connection_is_armed_as_a_tab(
+async def test_a_popup_nodriver_has_not_listed_yet_is_found_and_armed(
     manager, launched, monkeypatch
 ):
-    """``update_targets`` registers what it discovers as a bare ``Connection``, which
-    cannot be awaited or closed. ``find`` swaps in a ``Tab`` through ``_register``,
-    and that is what gets armed, listed once in place of the bare entry."""
+    """nodriver 0.50 registers a target from ``Target.getTargets``, never from the
+    ``targetCreated`` event, so the listener asks ``update_targets`` first and arms
+    the ``Tab`` that registers, listed once."""
     browser, main = launched
     armed: list[object] = []
 
@@ -289,16 +287,14 @@ async def test_a_popup_nodriver_registered_as_a_bare_connection_is_armed_as_a_ta
     manager._tab_armers = (armer,)
     await spawn(manager, browser, main)
     monkeypatch.setattr(manager, "_apply_tab_overrides", no_overrides)
-    info = created("T-bare").target_info
-    bare = Connection(target=info)
-    browser.tabs.append(bare)
+    popup = FakeTab(target_id="T-unlisted")
+    browser.unlisted.append(popup)
 
-    browser.connection._deliver(created("T-bare"))
+    browser._deliver(created("T-unlisted"))
     await settle()
 
-    assert len(armed) == 1
-    assert type(armed[0]) is Tab
-    assert [t for t in browser.tabs if str(t.target.target_id) == "T-bare"] == armed
+    assert armed == [popup]
+    assert [t for t in browser.tabs if str(t.target.target_id) == "T-unlisted"] == armed
 
 
 async def test_the_listener_is_registered_once_per_browser(manager, launched):
@@ -318,9 +314,9 @@ async def test_the_listener_is_registered_after_the_instance_is_stored(
     stored: list[bool] = []
     real = tab_open.arm_popups
 
-    def spy(target, arm, *args):
+    async def spy(target, arm, *args):
         stored.append(args[0] in arm.__self__._instances)
-        real(target, arm, *args)
+        await real(target, arm, *args)
 
     monkeypatch.setattr(tab_open, "arm_popups", spy)
     await spawn(manager, browser, main)
@@ -338,7 +334,7 @@ async def test_a_failing_armer_is_logged_not_raised(manager, launched):
     await spawn(manager, browser, main)
     popup = popup_in(browser, "T-popup")
 
-    browser.connection._deliver(created("T-popup"))
+    browser._deliver(created("T-popup"))
     await settle()  # gather would raise here if the task had died with the error
 
     assert len(focus_frames(popup)) == 1
@@ -356,7 +352,7 @@ async def test_arming_a_popup_again_on_switch_tab_adds_no_second_capture_handler
     await spawn(manager, browser, main)
     popup = popup_in(browser, "T-popup")
 
-    browser.connection._deliver(created("T-popup"))
+    browser._deliver(created("T-popup"))
     await settle()
     registered = len(popup.handlers)
     assert registered == 2  # RequestWillBeSent + ResponseReceived
@@ -381,5 +377,5 @@ async def test_a_failing_instance_lookup_is_logged_not_raised(
 
     monkeypatch.setattr(manager, "get_instance", dead)
 
-    browser.connection._deliver(created("T-popup"))
+    browser._deliver(created("T-popup"))
     await settle()  # gather would raise here if the task had died with the error

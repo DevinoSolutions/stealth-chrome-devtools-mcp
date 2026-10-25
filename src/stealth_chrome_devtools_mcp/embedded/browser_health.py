@@ -259,8 +259,8 @@ async def fresh_browser_version(websocket_url: str | None) -> None:
 
 
 async def own_connection_answers(browser: Browser) -> None:
-    """``Browser.getVersion`` over THIS backend's nodriver connection."""
-    await browser.connection.send(uc.cdp.browser.get_version())
+    """``Browser.getVersion`` over THIS backend's connection (the ``Browser``, 0.50)."""
+    await browser.send(uc.cdp.browser.get_version())
 
 
 # ---------------------------------------------------------------------------

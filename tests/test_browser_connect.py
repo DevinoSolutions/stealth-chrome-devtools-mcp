@@ -30,10 +30,14 @@ import urllib.error
 
 import nodriver as uc
 import pytest
+import websockets
 from nodriver import cdp
+from nodriver.core import browser as nodriver_browser
 from nodriver.core.browser import Browser, HTTPApi
+from nodriver.core.tab import Tab
 
 from fakes import nodriver_registry
+from fakes_wire import BrowserSocket
 from stealth_chrome_devtools_mcp.embedded import browser_connect, cdp_attach
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
@@ -50,7 +54,8 @@ OPENS_AT_SECONDS = 4.0
 
 class Clock:
     """Virtual time for both seams: ours (``_now``/``_sleep``) and nodriver's
-    ``Browser.sleep``, which is the 0.5 s between its five attempts."""
+    ``asyncio.sleep(0.5)`` between its five attempts (``browser.py``:374-378;
+    0.47 called ``Browser.sleep`` there, 0.50 calls ``asyncio.sleep``)."""
 
     def __init__(self) -> None:
         self.t = 0.0
@@ -76,28 +81,29 @@ class FakeProcess:
         self.returncode = None
 
 
-class FakeConnection:
-    """nodriver's ``Connection``, as ``Browser.start`` uses it: a handler map
-    and one ``send``. Nothing here opens a websocket."""
+class Targets:
+    """What ``Target.getTargets`` answers right now; a node that cares sets
+    ``now``. The websocket under nodriver's real ``Connection`` reads it."""
 
-    #: What ``Target.getTargets`` answers right now; a node that cares sets it.
-    targets_now = None
+    now = staticmethod(list)
 
-    def __init__(self, url, browser=None, **kwargs) -> None:
-        self.url = url
-        self.handlers: dict = {}
-        self.sent: list = []
-        self.target = kwargs.get("target")
 
-    def __getattr__(self, item):
-        """nodriver's ``Connection`` reads ``type_`` and the rest off its target."""
-        return getattr(self.target, item)
+class _VirtualAsyncio:
+    """``asyncio`` as nodriver's ``browser`` module sees it: the 0.5 s between
+    attempts is virtual time, its 0.25 s lead (which this file never asserted) and
+    everything else is the real thing."""
 
-    async def send(self, command, **kwargs):
-        self.sent.append(command)
-        if kwargs.get("_is_update") and self.targets_now is not None:
-            return self.targets_now()
-        return None
+    def __init__(self, dial: Clock) -> None:
+        self._dial = dial
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, seconds: float, *args, **kwargs):
+        if seconds >= 0.5:
+            await self._dial.sleep(seconds)
+        else:
+            await asyncio.sleep(0)
 
 
 @pytest.fixture
@@ -105,7 +111,7 @@ def clock(monkeypatch) -> Clock:
     dial = Clock()
     monkeypatch.setattr(browser_connect, "_now", dial.now)
     monkeypatch.setattr(browser_connect, "_sleep", dial.sleep)
-    monkeypatch.setattr(Browser, "sleep", lambda self, t=0.1: dial.sleep(t))
+    monkeypatch.setattr(nodriver_browser, "asyncio", _VirtualAsyncio(dial))
     return dial
 
 
@@ -140,7 +146,11 @@ def launcher(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
-    monkeypatch.setattr("nodriver.core.browser.Connection", FakeConnection)
+
+    async def _connect(url, **_kwargs):
+        return BrowserSocket(url, lambda: Targets.now())
+
+    monkeypatch.setattr(websockets, "connect", _connect)
     monkeypatch.setattr(Browser, "update_targets", _no_targets)
 
     def _config():
@@ -184,7 +194,7 @@ async def test_a_chrome_that_answers_after_nodrivers_window_is_connected_to(
     browser = await _start(config_factory)
 
     assert browser.info.webSocketDebuggerUrl == WS_URL
-    assert browser.connection.url == WS_URL
+    assert browser.websocket_url == WS_URL
     # Answered on nodriver's FIRST attempt — the patience is spent inside it,
     # which is why the four remaining ones never run.
     assert clock.now() == pytest.approx(
@@ -380,7 +390,7 @@ async def test_the_window_this_extends_is_still_the_one_in_nodrivers_source():
     assert "await asyncio.sleep(0.25)" in source
     assert "for _ in range(5):" in source
     assert 'await self._http.get("version")' in source
-    assert "await self.sleep(0.5)" in source
+    assert "await asyncio.sleep(0.5)" in source
     assert "Failed to connect to browser" in source
 
     browser_source = inspect.getsource(sys.modules[Browser.__module__])
@@ -421,7 +431,7 @@ def targets(monkeypatch, clock, endpoint, launcher):
                 shown = listed
         return list(shown)
 
-    monkeypatch.setattr(FakeConnection, "targets_now", staticmethod(_now_targets))
+    monkeypatch.setattr(Targets, "now", staticmethod(_now_targets))
     browser_connect.install()
     return schedule
 
@@ -436,8 +446,8 @@ async def test_a_chrome_that_opens_its_first_page_late_is_waited_for(
     targets.extend([(0.0, []), (3.0, [page])])
     _process, config_factory = launcher
     browser = await _start(config_factory)
-    with pytest.raises(IndexError):
-        _ = browser.main_tab  # what spawn_browser did before F-1003
+    with pytest.raises(StopIteration):
+        _ = browser.main_tab  # what spawn_browser did before F-1003 (0.47: IndexError)
 
     tab = await browser_connect.first_page(browser)
 
@@ -447,7 +457,8 @@ async def test_a_chrome_that_opens_its_first_page_late_is_waited_for(
 
 async def test_a_non_page_target_is_never_the_instances_tab(clock, targets, launcher):
     """The latent shape: with only ``background_page``/``service_worker``
-    targets, ``main_tab`` does not raise, it hands back a NON-page one."""
+    targets there is no page to be the tab. (nodriver 0.47's ``main_tab`` handed
+    back a NON-page one here; 0.50's filters on ``page`` and raises.)"""
     background, worker, page = (
         _target("background_page", 1),
         _target("service_worker", 2),
@@ -456,7 +467,8 @@ async def test_a_non_page_target_is_never_the_instances_tab(clock, targets, laun
     targets.extend([(0.0, [background, worker]), (2.0, [background, worker, page])])
     _process, config_factory = launcher
     browser = await _start(config_factory)
-    assert browser.main_tab.type_ == "background_page"
+    with pytest.raises(StopIteration):
+        _ = browser.main_tab
 
     tab = await browser_connect.first_page(browser)
 
@@ -531,7 +543,7 @@ async def test_a_delegated_launch_with_no_process_handle_is_waited_for_too(
 
     async def _opens_a_page_at_two_seconds(self):
         if clock.now() >= 2.0:
-            self.targets.append(FakeConnection("ws://x", target=page))
+            self.targets.append(Tab(target=page, parent=self))
 
     delegated.update_targets = _opens_a_page_at_two_seconds.__get__(delegated)
 

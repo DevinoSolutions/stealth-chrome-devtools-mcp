@@ -19,7 +19,7 @@ import pytest
 import websockets.asyncio.server
 from nodriver.cdp import network as cdp_network
 
-from fakes import FakeTab
+from fakes import FakeBrowser
 from stealth_chrome_devtools_mcp.embedded import google_rotation_guard
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -590,11 +590,8 @@ class TestTheSpawnArmsClonesOnly:
         monkeypatch.setattr(
             bm.process_cleanup, "track_browser_process", lambda *a, **k: None
         )
-        browser = SimpleNamespace(
-            _process=None,
-            config=None,
-            connection=FakeTab(),  # F-1012
-        )
+        browser = FakeBrowser(alive=None)  # F-1012 listens on it
+        browser.config = None
         await manager._apply_post_launch(
             browser, SimpleNamespace(), options, "iid", options.user_data_dir, True, "c"
         )

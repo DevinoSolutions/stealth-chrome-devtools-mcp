@@ -29,7 +29,7 @@ import nodriver
 import psutil
 import pytest
 
-from fakes import FakeTab
+from fakes import FakeBrowser
 from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
     browser_manager,
@@ -309,19 +309,17 @@ def delegation(monkeypatch, tmp_path):
     # squatter holds the port.
     holder = SimpleNamespace(pid=None, disconnected=False, sent=[])
 
-    class _Connection:
+    class _Browser(FakeBrowser):
         async def send(self, command):
             holder.sent.append(next(command)["method"])
             return [nodriver.cdp.system_info.ProcessInfo("browser", holder.pid, 0.0)]
 
-        async def disconnect(self):
+        async def aclose(self):
             holder.disconnected = True
 
     async def fake_start(config):
         started.append(config)
-        return SimpleNamespace(
-            _process=None, _process_pid=None, connection=_Connection()
-        )
+        return _Browser(alive=None)
 
     # F-867: desktop_launch imports nodriver lazily now (the proxy reaches
     # its schtasks seams and must not pay for a browser driver), so there is
@@ -994,11 +992,7 @@ async def test_apply_post_launch_tracks_an_attached_browser(monkeypatch):
     monkeypatch.setattr(manager, "_apply_timezone_override", fake_timezone)
 
     options = browser_manager.BrowserOptions(headless=False)
-    attached = SimpleNamespace(
-        _process=None,
-        _process_pid=1234,
-        connection=FakeTab(),  # F-1012
-    )
+    attached = FakeBrowser(alive=None, pid=1234)  # F-1012 listens on it
     # The trailing executable is F-806's version reconciliation. It is left LIVE
     # here on purpose: this bare tab has no `send`, so the reconcile's guard
     # swallows the AttributeError and the tracking below still happens — which is

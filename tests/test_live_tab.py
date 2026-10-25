@@ -84,9 +84,7 @@ async def test_recovery_never_closes_another_callers_tab(patched_server):
     await browser_management._adopted_instance_record(INSTANCE_ID, None)
 
     assert survivor in browser.tabs
-    assert not [
-        f for f in browser.connection.cdp_frames if f["method"] == "Target.closeTarget"
-    ]
+    assert not [f for f in browser.cdp_frames if f["method"] == "Target.closeTarget"]
 
 
 async def test_a_live_tracked_tab_is_kept_and_nothing_is_opened(patched_server):

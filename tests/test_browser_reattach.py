@@ -1370,7 +1370,7 @@ class TestAnAdoptedInstanceTellsTheTruth:
             browser = manager._instances[held.instance_id]["browser"]
             popup = FakeTab(target_id="T-popup")
             browser.tabs.append(popup)
-            browser.connection._deliver(
+            browser._deliver(
                 cdp.target.TargetCreated(
                     cdp.target.TargetInfo(
                         target_id=cdp.target.TargetID("T-popup"),
@@ -1401,18 +1401,16 @@ class TestAnAdoptedInstanceTellsTheTruth:
         stored: list[bool] = []
         real = tab_open.arm_popups
 
-        def spy(browser, arm, *args):
+        async def spy(browser, arm, *args):
             stored.append(args[0] in arm.__self__._instances)
-            real(browser, arm, *args)
+            await real(browser, arm, *args)
 
         with patch.object(tab_open, "arm_popups", spy):
             manager, held = await self._adopt(tmp_path, FakeTab())
 
         browser = manager._instances[held.instance_id]["browser"]
         listeners = [
-            h
-            for evt, h in browser.connection.handlers
-            if evt is cdp.target.TargetCreated
+            h for evt, h in browser.handlers if evt is cdp.target.TargetCreated
         ]
         assert stored == [True]
         assert len(listeners) == 1
@@ -1916,7 +1914,7 @@ class TestOneDoor:
             # produced is closed rather than left holding a socket.
             await asyncio.sleep(0.2)
 
-        assert browser.connection.disconnected is True, (
+        assert browser.disconnected is True, (
             "an abandoned attach must not leave its CDP connection open"
         )
 
@@ -2019,9 +2017,9 @@ class TestOneDoor:
             let_the_door_answer.set()
             loop = asyncio.get_running_loop()
             deadline = loop.time() + 5.0
-            while not browser.connection.disconnected and loop.time() < deadline:
+            while not browser.disconnected and loop.time() < deadline:
                 await asyncio.sleep(0.02)
 
-        assert browser.connection.disconnected is True, (
+        assert browser.disconnected is True, (
             "the adoption timed out mid-attach and left its connection open"
         )

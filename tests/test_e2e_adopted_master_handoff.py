@@ -146,7 +146,7 @@ async def test_a_clone_of_a_re_attached_master_carries_its_logins(
             f"document.cookie = '__Host-f950-loopback={loopback_secure_value}; "
             "Path=/; Secure'; document.cookie.length",
         )
-        source_connection = manager._instances[iid]["browser"].connection
+        source_connection = manager._instances[iid]["browser"]
         await source_connection.send(
             uc.cdp.storage.set_cookies(
                 cookies=[

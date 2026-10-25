@@ -59,7 +59,6 @@ must never import ``server`` (the ``tab`` is passed in as an argument).
 """
 
 import asyncio
-import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -305,21 +304,17 @@ class TabWatch:
         browser = getattr(self.tab, "browser", None)
         if browser is not None:
             self._listen(
-                browser.connection,
-                uc.cdp.target.TargetDestroyed,
-                self._on_target_destroyed,
+                browser, uc.cdp.target.TargetDestroyed, self._on_target_destroyed
             )
 
     def detach(self) -> None:
         """Take this watch's handlers off the connections it was attached to.
 
-        By hand, not ``Connection.remove_handler``: that deletes the event type's
-        whole handler list, which on the browser connection is nodriver's own
-        target bookkeeping and on the tab is every other listener.
+        ``Connection.remove_handler`` removes this one callback (nodriver 0.50,
+        ``connection.py``:173); on 0.47 it deleted the event type's whole list.
         """
         for connection, event_type, handler in self._listening:
-            with contextlib.suppress(KeyError, ValueError):
-                connection.handlers[event_type].remove(handler)
+            connection.remove_handler(event_type, handler)
         self._listening.clear()
 
     async def replay_contexts(self) -> None:
@@ -328,8 +323,11 @@ class TabWatch:
         ``Runtime.enable`` sends ``executionContextCreated`` for each existing
         context, but only on a real enable and the domain is normally enabled
         already, so it is disabled first. Run once per watch, with the handlers
-        attached; the replies come after the events they follow.
+        attached; the replies come after the events they follow. It also sends
+        ``Page.enable``, which ``Page.frameNavigated`` needs and which nodriver
+        0.50 no longer sends when a handler is added.
         """
+        await self.tab.send(uc.cdp.page.enable())
         await self.tab.send(uc.cdp.runtime.disable())
         await self.tab.send(uc.cdp.runtime.enable())
         self.replayed = True
@@ -402,9 +400,14 @@ class TabWatch:
     @property
     def dead(self) -> bool:
         """True when the browser's connection is closed: the browser is gone and
-        no ``Target.targetDestroyed`` will ever come for this tab."""
+        no ``Target.targetDestroyed`` will ever come for this tab.
+
+        nodriver 0.50 has no ``closed``; a closed websocket is one with a close
+        code (``connection.py``:231 reads it the same way in ``aopen``)."""
         browser = getattr(self.tab, "browser", None)
-        return browser is not None and bool(browser.connection.closed)
+        if browser is None:
+            return False
+        return browser.socket is None or browser.socket.close_code is not None
 
     def reap(self) -> None:
         """End this watch: forget its tab's bindings (there is no page left to

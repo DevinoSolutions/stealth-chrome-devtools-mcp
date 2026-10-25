@@ -714,7 +714,7 @@ class BrowserManager:
                     "spawn_diagnostics": spawn_diagnostics,
                     "network_data": [],
                 }
-            tab_open.arm_popups(browser, self._arm_tracked_tab, instance_id)
+            await tab_open.arm_popups(browser, self._arm_tracked_tab, instance_id)
 
             instance.state = BrowserState.READY
             instance.last_navigated_url = (
@@ -857,7 +857,7 @@ class BrowserManager:
                     for tab in browser.tabs[:]:
                         try:
                             close = uc.cdp.target.close_target(tab.target.target_id)
-                            await asyncio.wait_for(browser.connection.send(close), 2.0)
+                            await asyncio.wait_for(browser.send(close), 2.0)
                         except Exception as e:
                             tab_close.log_failure("close_instance", instance_id, e)
             except Exception as tabs_err:
@@ -870,9 +870,9 @@ class BrowserManager:
             try:
                 import nodriver.cdp.browser as cdp_browser
 
-                conn = getattr(browser, "connection", None)
-                if conn and not conn.closed:
-                    await asyncio.wait_for(conn.send(cdp_browser.close()), timeout=2.0)
+                # A closed socket fails the send (``ConnectionClosed``), which the
+                # handler below logs: no liveness test of our own to keep honest.
+                await asyncio.wait_for(browser.send(cdp_browser.close()), timeout=2.0)
             except (TimeoutError, Exception) as cdp_err:
                 debug_logger.log_info(
                     "browser_manager",
@@ -881,13 +881,12 @@ class BrowserManager:
                 )
 
             try:
-                if getattr(browser, "connection", None):
-                    await asyncio.wait_for(browser.connection.disconnect(), timeout=2.0)
-                    debug_logger.log_info(
-                        "browser_manager",
-                        "close_connection",
-                        "closed websocket connection",
-                    )
+                await asyncio.wait_for(browser.aclose(), timeout=2.0)
+                debug_logger.log_info(
+                    "browser_manager",
+                    "close_connection",
+                    "closed websocket connection",
+                )
             except (TimeoutError, Exception) as e:
                 debug_logger.log_info(
                     "browser_manager",
@@ -1247,7 +1246,7 @@ class BrowserManager:
 
         try:
             target_id = target_tab.target.target_id
-            await browser.connection.send(uc.cdp.target.activate_target(target_id))
+            await browser.send(uc.cdp.target.activate_target(target_id))
             await self._arm_tracked_tab(instance_id, target_tab)
             async with self._lock:
                 if instance_id in self._instances:
@@ -1303,7 +1302,7 @@ class BrowserManager:
 
         try:
             target_id = target_tab.target.target_id
-            await browser.connection.send(uc.cdp.target.close_target(target_id))
+            await browser.send(uc.cdp.target.close_target(target_id))
         except Exception as e:
             if not tab_close.log_failure("close_tab", instance_id, e):  # F-996b
                 return False

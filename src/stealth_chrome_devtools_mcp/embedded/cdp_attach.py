@@ -138,23 +138,19 @@ async def close(browser: Browser) -> None:
     on the re-attach path only startup recovery is allowed to make it. That rules
     out nodriver's own ``Browser.stop()``, which disconnects AND terminates.
 
-    ``Connection.disconnect`` and nothing else: it cancels the listener task and
-    closes the websocket, which is exactly the half of ``stop()`` we want. There
-    is **no ``aclose``** on a nodriver ``Connection`` (checked against 0.47) —
-    and because ``Connection.__getattr__`` delegates every unknown attribute to
-    ``self.target``, calling one raises ``AttributeError`` rather than failing
-    loudly, so a guarded ``aclose()`` is a cleanup that silently does nothing.
+    ``Connection.aclose`` and nothing else (``connection.py``:239): it fails the
+    pending futures, cancels the listener task and closes the websocket, which is
+    exactly the half of ``stop()`` we want. (On 0.47 the same job was
+    ``disconnect``, and ``aclose`` did not exist.)
 
-    Every TAB is a ``Connection`` too, so a tab we touched on the way to failing
-    holds its own websocket and its own listener task; closing the browser
-    connection alone leaves those behind.
+    The ``Browser`` is a ``Connection`` itself and so is every TAB: a tab we
+    touched on the way to failing holds its own websocket and its own listener
+    task; closing the browser's alone leaves those behind.
     """
     closed = 0
-    for connection in (getattr(browser, "connection", None), *_tabs(browser)):
-        if connection is None:
-            continue
+    for connection in (browser, *_tabs(browser)):
         with contextlib.suppress(Exception):
-            await connection.disconnect()
+            await connection.aclose()
             closed += 1
     debug_logger.log_info(
         "cdp_attach",

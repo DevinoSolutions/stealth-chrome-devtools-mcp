@@ -19,6 +19,8 @@ no real Chrome).
 import json
 from types import SimpleNamespace
 
+from nodriver.cdp.css import ComputedStyleExtraFields
+
 from fakes import FakeTab, fake_element
 from stealth_chrome_devtools_mcp.embedded.cdp_element_cloner import (
     cdp_element_cloner,
@@ -39,9 +41,11 @@ def _pseudo_matched_styles():
 def _styles_cdp_responses():
     return {
         "enable": None,
-        "get_computed_style_for_node": [
-            SimpleNamespace(name="color", value="rgb(0, 0, 0)"),
-        ],
+        # nodriver 0.50 answers ``(properties, extra_fields)``.
+        "get_computed_style_for_node": (
+            [SimpleNamespace(name="color", value="rgb(0, 0, 0)")],
+            ComputedStyleExtraFields(is_appearance_base=False),
+        ),
         "get_matched_styles_for_node": _pseudo_matched_styles(),
     }
 

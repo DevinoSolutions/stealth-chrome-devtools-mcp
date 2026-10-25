@@ -105,15 +105,27 @@ def _navigated(frame: str = "T-a", parent: str | None = None) -> Any:
 
 
 class _FakeConnection:
-    """What nodriver's ``Connection`` keeps: ``handlers`` is a dict of event
-    type -> list of callbacks, and ``add_handler`` appends to the type's list."""
+    """What nodriver 0.50's ``Connection`` keeps: ``handlers`` is a dict of event
+    type -> list of callbacks, ``add_handler`` appends to the type's list and
+    ``remove_handler`` takes THAT callback off (``connection.py``:168-184).
+    ``socket.close_code`` is how a closed connection reads (``connection.py``:231)."""
 
     def __init__(self) -> None:
         self.handlers: dict[type, list[Any]] = collections.defaultdict(list)
-        self.closed = False  # nodriver's ``Connection.closed``: the socket is shut
+        self.socket = types.SimpleNamespace(close_code=None)
 
     def add_handler(self, event_type, handler):
-        self.handlers[event_type].append(handler)
+        if handler not in self.handlers[event_type]:
+            self.handlers[event_type].append(handler)
+
+    def remove_handler(self, event_type, handler) -> bool:
+        callbacks = self.handlers.get(event_type)
+        if not callbacks or handler not in callbacks:
+            return False
+        callbacks.remove(handler)
+        if not callbacks:
+            self.handlers.pop(event_type, None)
+        return True
 
     def handler_count(self) -> int:
         return sum(len(callbacks) for callbacks in self.handlers.values())
@@ -215,15 +227,12 @@ class _FakeTab(_FakeConnection):
         await self.deliver(_created(*self.main, frame=self.target.target_id))
 
 
-class _FakeBrowserOf:
-    """The browser a tab reports: its own ``connection`` is where Chrome's
-    ``Target.targetDestroyed`` arrives."""
-
-    def __init__(self) -> None:
-        self.connection = _FakeConnection()
+class _FakeBrowserOf(_FakeConnection):
+    """The browser a tab reports: it IS the connection (nodriver 0.50) where
+    Chrome's ``Target.targetDestroyed`` arrives."""
 
     async def destroy(self, target_id: str) -> None:
-        await self.connection.deliver(
+        await self.deliver(
             cdp.target.TargetDestroyed(target_id=cdp.target.TargetID(target_id))
         )
 
@@ -453,7 +462,7 @@ async def test_the_context_comes_from_the_replayed_created_events():
     await _install(tab, "ctx", lambda: 1, bindings)
 
     methods = tab.methods()
-    assert methods[:2] == ["Runtime.disable", "Runtime.enable"]
+    assert methods[:3] == ["Page.enable", "Runtime.disable", "Runtime.enable"]
     assert methods.index("Runtime.enable") < methods.index("Runtime.addBinding")
     bound = bindings[("T-a", "ctx")]
     assert (bound.context_id, bound.unique_id) == (41, "unique-41")
@@ -614,7 +623,7 @@ async def test_a_replaced_watch_stops_listening_on_the_old_tab():
     await _install(old, "x", lambda: 1, bindings)
     old_watch = bindings.watches["T-a"]
     assert old.handler_count() == 6
-    assert old.browser.connection.handler_count() == 1
+    assert old.browser.handler_count() == 1
     new = _FakeTab()
 
     await _install(new, "y", lambda: 1, bindings)
@@ -622,9 +631,9 @@ async def test_a_replaced_watch_stops_listening_on_the_old_tab():
     assert bindings.watches["T-a"] is not old_watch
     assert old.handlers[runtime.BindingCalled] == [foreign.append]
     assert old.handler_count() == 1  # the foreign listener only
-    assert old.browser.connection.handler_count() == 0
+    assert old.browser.handler_count() == 0
     assert new.handler_count() == 5
-    assert new.browser.connection.handler_count() == 1
+    assert new.browser.handler_count() == 1
 
 
 async def test_a_destroyed_target_is_reaped_with_its_watch():
@@ -644,7 +653,7 @@ async def test_a_destroyed_target_is_reaped_with_its_watch():
     assert set(bindings) == {("T-b", "x")}
     assert tab.handler_count() == 0
     assert other.handler_count() == 5  # the other tab is untouched
-    assert len(tab.browser.connection.handlers[cdp.target.TargetDestroyed]) == 1
+    assert len(tab.browser.handlers[cdp.target.TargetDestroyed]) == 1
 
 
 async def test_reaping_a_watch_does_not_skip_the_handler_after_it():
@@ -656,7 +665,7 @@ async def test_reaping_a_watch_does_not_skip_the_handler_after_it():
     first = _FakeTab("T-a", context=7)
     await _install(first, "x", lambda: 1, bindings)
     seen = []
-    first.browser.connection.add_handler(
+    first.browser.add_handler(
         cdp.target.TargetDestroyed, lambda e: seen.append("sibling")
     )
     second = _FakeTab("T-b", context=21, browser=first.browser)
@@ -699,7 +708,7 @@ async def test_a_closed_browsers_watches_are_reaped_on_the_next_install():
     bindings = python_binding.Bindings()
     dead = _FakeTab("T-a", context=7)
     await _install(dead, "x", lambda: 1, bindings)
-    dead.browser.connection.closed = True  # the process was killed
+    dead.browser.socket.close_code = 1006  # the process was killed
 
     live = _FakeTab("T-b", context=21)
     await _install(live, "x", lambda: 2, bindings)

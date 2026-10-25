@@ -72,7 +72,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import nodriver as uc
 import websockets.asyncio.client
-from nodriver.core.connection import Connection, ProtocolException
+from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -177,12 +177,12 @@ def params(cookies: Iterable["Cookie"]) -> list["CookieParam"]:
     return [as_param(cookie) for cookie in cookies]
 
 
-def _connection(browser: "Browser") -> Connection:
+def _connection(browser: "Browser") -> "Browser":
     """The BROWSER-level CDP connection, or a refusal naming neither.
 
-    ``getattr`` rather than an attribute read because nodriver sets
-    ``Browser.connection`` to ``None`` in ``__init__`` and fills it during
-    ``start``; a browser that never got there has nothing to ask.
+    Since nodriver 0.50 the ``Browser`` is its own connection (``browser.py``:32);
+    ``socket`` is ``None`` until ``start`` opens it, so a browser that never got
+    there has nothing to ask.
 
     A ``HandoffError`` and not a bare ``RuntimeError`` (review S2): ``failure``
     repeats the text of this class and of nothing else, so a ``RuntimeError``
@@ -191,10 +191,9 @@ def _connection(browser: "Browser") -> Connection:
     to make one on. The text is ours and carries no payload, which is exactly
     the condition under which repeating it is allowed.
     """
-    connection = getattr(browser, "connection", None)
-    if connection is None:
+    if getattr(browser, "socket", None) is None:
         raise HandoffError("browser has no CDP connection")
-    return connection
+    return browser
 
 
 async def read_jar(browser: "Browser") -> list["Cookie"]:

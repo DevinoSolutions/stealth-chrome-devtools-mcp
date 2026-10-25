@@ -52,11 +52,8 @@ def _make_fake_browser():
     """Return a minimal fake browser object with stubs for all close_instance needs."""
     browser = SimpleNamespace(
         tabs=[],
-        connection=SimpleNamespace(
-            closed=True,
-            send=MagicMock(side_effect=lambda *a, **kw: _noop_coro()),
-            disconnect=MagicMock(side_effect=lambda *a, **kw: _noop_coro()),
-        ),
+        send=MagicMock(side_effect=lambda *a, **kw: _noop_coro()),
+        aclose=MagicMock(side_effect=lambda *a, **kw: _noop_coro()),
         _process=SimpleNamespace(
             returncode=0,
             pid=99999,
@@ -321,7 +318,7 @@ async def _close_with_tab_send_failing(instance_id: str, error: Exception):
     async def _send(*_a, **_kw):
         raise error
 
-    browser.connection.send = _send
+    browser.send = _send
     before = len(debug_logger._warnings)
     assert await manager.close_instance(instance_id) is True
     return _tab_close_warnings(before, instance_id)

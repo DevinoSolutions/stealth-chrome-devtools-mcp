@@ -30,6 +30,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import nodriver.cdp.css as _css
 import nodriver.cdp.dom as cdp_dom
 import nodriver.cdp.runtime as cdp_runtime
 import pytest
@@ -62,7 +63,11 @@ def _cdp_responses():
             children=None,
         ),
         "get_outer_html": '<div id="demo">hi</div>',
-        "get_computed_style_for_node": [ns(name="color", value="rgb(0, 0, 0)")],
+        # nodriver 0.50 answers ``(properties, extra_fields)``.
+        "get_computed_style_for_node": (
+            [ns(name="color", value="rgb(0, 0, 0)")],
+            _css.ComputedStyleExtraFields(is_appearance_base=False),
+        ),
         "get_matched_styles_for_node": [None, None, [], [], []],
         "resolve_node": ns(object_id=None),
         "request_child_nodes": None,
