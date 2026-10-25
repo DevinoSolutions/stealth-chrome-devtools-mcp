@@ -135,6 +135,10 @@ DISCARD_WAIT_SECONDS = 5.0
 # it and the F-867 pin parses it, so it is a constant rather than three
 # literals that could drift apart.
 SPAWN_LOG_PREFIX = "backend spawned via the "
+# The phrase of the one line logged when the scheduler task was created and run
+# but no pid came back in time. The F-867 pin reads it to tell a slow hand-back
+# from an unavailable scheduler, so it is a constant, not a second spelling.
+HANDBACK_TIMEOUT_PHRASE = "never handed back a pid within"
 
 # Spelled out rather than read off ``subprocess``: typeshed exposes
 # DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP only under ``sys.platform ==
@@ -712,9 +716,9 @@ def _run_task(
             return None
         time.sleep(POLL_INTERVAL)
     _logger.warning(
-        "F-867: the backend-launch task %s never handed back a pid within %.0fs; "
-        "using the plain spawn",
+        "F-867: the backend-launch task %s %s %.0fs; using the plain spawn",
         task_name,
+        HANDBACK_TIMEOUT_PHRASE,
         PID_READY_TIMEOUT,
     )
     return None
