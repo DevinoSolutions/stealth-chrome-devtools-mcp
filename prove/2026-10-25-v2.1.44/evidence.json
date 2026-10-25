@@ -1,0 +1,163 @@
+{
+ "backend_launcher_pid": 85784,
+ "token_handshake_http_status": {
+  "no_token": 401,
+  "wrong_token": 401,
+  "with_token_not_401": true
+ },
+ "tool_count_over_token_session": 97,
+ "spawn": {
+  "headless": false,
+  "profile_role": null,
+  "seed_warning": "There is no shared profile or seed yet, so this browser started EMPTY: it holds no logins and is deleted when it closes. To keep a signed-in profile, open one with spawn_browser(session=\"default\"), sign in there, and close it with close_instance(instance_id=..., session=\"default\"): every later spawn is then copied from it."
+ },
+ "instance_id": "84233f8a-e656-480c-8b98-9c7a72dd8f4c",
+ "versions": {
+  "package_version": "2.1.44",
+  "expected": "2.1.44",
+  "package_path": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\.venv\\Lib\\site-packages\\stealth_chrome_devtools_mcp\\__init__.py",
+  "inside_prove_venv": true,
+  "editable": false,
+  "python": "3.13.11",
+  "fastmcp": "3.4.11",
+  "mcp": "1.30.0",
+  "tool_count_over_token_session": 97,
+  "token_handshake_http_status": {
+   "no_token": 401,
+   "wrong_token": 401,
+   "with_token_not_401": true
+  },
+  "navigator_userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+ },
+ "shot01": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\out\\01-versions-token-tool-count.png",
+ "basic_click": {
+  "navigate": {
+   "url": "http://127.0.0.1:41218/click.html",
+   "title": "click page",
+   "success": true
+  },
+  "click": {
+   "selector": "#btn",
+   "dispatch": "coordinate",
+   "point": {
+    "x": 118.00312805175781,
+    "y": 140.600004196167
+   },
+   "size": {
+    "width": 156.00625610351562,
+    "height": 55.60000228881836
+   },
+   "target": {
+    "tag": "button",
+    "id": "btn",
+    "classes": []
+   },
+   "hit": {
+    "tag": "button",
+    "id": "btn",
+    "classes": []
+   },
+   "hit_is_target": true,
+   "reason": null
+  },
+  "heading_after": {
+   "success": true,
+   "result": "clicked by stealth 2.1.44",
+   "error": null
+  }
+ },
+ "shot02": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\out\\02-headed-spawn-navigate-click.png",
+ "session_lock": {
+  "acquire_a": {
+   "session": "prove-lock",
+   "locked": true,
+   "holder": "prove-a",
+   "acquired_at": 1792964772.3285584,
+   "expires_at": 1792964832.3285584,
+   "expires_in_seconds": 60.0,
+   "queue_length": 0,
+   "waiting": [],
+   "acquired": true
+  },
+  "status_held": {
+   "session": "prove-lock",
+   "locked": true,
+   "holder": "prove-a",
+   "acquired_at": 1792964772.3285584,
+   "expires_at": 1792964832.3285584,
+   "expires_in_seconds": 60.0,
+   "queue_length": 0,
+   "waiting": [],
+   "your_position": null
+  },
+  "acquire_b_refused": {
+   "__error__": "Error calling tool 'acquire_session_lock': Session 'prove-lock' is locked by 'prove-a' until 1792964832 (epoch seconds; 60.0s from now); you would be at position 1 (nobody ahead)."
+  },
+  "release_by_b_refused": {
+   "__error__": "Error calling tool 'release_session_lock': Session 'prove-lock' is locked by 'prove-a', not 'prove-b'; only the holder can release it (it expires on its own)."
+  },
+  "release_a": {
+   "session": "prove-lock",
+   "locked": false,
+   "released": true
+  },
+  "status_free": {
+   "session": "prove-lock",
+   "locked": false,
+   "queue_length": 0,
+   "waiting": []
+  }
+ },
+ "shot03": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\out\\03-session-lock.png",
+ "release_code": {
+  "T-8254 shipped source line": "_IMPORT_NAME = __package__ or __name__.rpartition(\".\")[0]",
+  "T-8254 name derived from __package__": true,
+  "T-8254 observability._IMPORT_NAME": "stealth_chrome_devtools_mcp",
+  "T-8254 observability._PACKAGE_DIR": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\.venv\\Lib\\site-packages\\stealth_chrome_devtools_mcp",
+  "T-8254 ours: stealth_chrome_devtools_mcp.server": true,
+  "T-8254 ours: stealth_chrome_devtools_mcp": true,
+  "T-8254 NOT ours: stealth_chrome_devtools_mcp_evil.x": false,
+  "T-8254 NOT ours: requests.api": false,
+  "T-8308 backend_launch.HANDBACK_TIMEOUT_PHRASE present": true
+ },
+ "shot04": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\out\\04-release-code-checks.png",
+ "close": {
+  "closed": true,
+  "seed_refreshed": null
+ },
+ "backend_tree": [
+  [
+   85784,
+   "python.exe",
+   1792964761.4384701,
+   "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\.venv\\Scripts\\python.exe -m stealth_chrome_devtools_mcp --transport http --port 41219 --host 127.0.0.1"
+  ],
+  [
+   90896,
+   "python.exe",
+   1792964761.445423,
+   "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2144\\.venv\\Scripts\\python.exe -m stealth_chrome_devtools_mcp --transport http --port 41219 --host 127.0.0.1"
+  ]
+ ],
+ "backend_stopped": {
+  "gone": [
+   85784,
+   90896
+  ],
+  "still_alive": [],
+  "not_ours_skipped": []
+ },
+ "checks": {
+  "version": true,
+  "not_editable": true,
+  "tools_97": true,
+  "no_token_401": true,
+  "headed": true,
+  "clicked": true,
+  "lock_refuses_other": true,
+  "lock_released": true,
+  "t8254": true,
+  "closed": true,
+  "stopped": true
+ }
+}
