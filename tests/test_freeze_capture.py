@@ -886,19 +886,25 @@ class TestIncidents:
         green. Both are 10.0 today, so the values cannot tell them apart; the module
         source can: the mark budget must be assigned a number, not a name."""
         tree = ast.parse(Path(freeze_capture.__file__).read_text(encoding="utf-8"))
-        assigned = [
-            node.value
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(t, ast.Name) and t.id == "HEAL_WAITS_FOR_MARK_SECONDS"
-                for t in node.targets
-            )
-        ]
+        name = "HEAL_WAITS_FOR_MARK_SECONDS"
+        assigned = []
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                assigned.append(node.value)
 
-        assert len(assigned) == 1
-        assert isinstance(assigned[0], ast.Constant)
-        assert isinstance(assigned[0].value, (int, float))
+        assert len(assigned) == 1, (
+            f"{name} must be assigned exactly once at module level"
+        )
+        value = assigned[0]
+        assert isinstance(value, ast.Constant)
+        assert isinstance(value.value, (int, float))
+        assert not isinstance(value.value, bool)
         assert freeze_capture.HEAL_WAITS_FOR_MARK_SECONDS > 0
 
     async def test_no_incident_is_said_so_and_still_marks_what_there_is(self):
