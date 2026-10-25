@@ -36,6 +36,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     forced_end,
     freeze_capture,
     scheduling_lag,
+    shared_session,
     tab_binding,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
@@ -131,6 +132,7 @@ class _Stage:
         self.refusals: list[tuple[int, dict, str | None]] = []
         self.kill_result = True
         self.kills: list[tuple[int, str]] = []
+        self.held_after_kill: str | None = None
         # F-993: every seam the heal touches, in the order it touched them.
         self.events: list[str] = []
         self.captures: list[dict] = []
@@ -150,7 +152,17 @@ class _Stage:
         self.process_asked: list[str | None] = []
         monkeypatch.setattr(manager, "spawn_browser", self._spawn)
         monkeypatch.setattr(forced_end, "refusal", self.refusal)
+        # the kill thread's own last look at the pid's start time (a fake pid has none)
+        monkeypatch.setattr(
+            forced_end,
+            "freeze_capture",
+            SimpleNamespace(identity_problem=lambda _entry, _pid: None),
+        )
         monkeypatch.setattr(process_cleanup, "_kill_process_by_pid", self.kill)
+        monkeypatch.setattr(
+            shared_session, "holder_of", lambda _d: self.held_after_kill
+        )
+        monkeypatch.setattr(forced_end, "SETTLE_SECONDS", 0.0)
 
     def _held(self) -> bool:
         return directory_gate.gate_for(DIRECTORY)._lock.locked()
@@ -860,6 +872,27 @@ class TestTheHeal:
         assert stage.launches == []
         assert any(
             "left the browser running and it could not be force-ended" in e
+            for e in log.at("error")
+        )
+
+    async def test_a_profile_a_killed_browser_still_holds_is_not_relaunched_over(
+        self, stage, log
+    ):
+        """A lingering child of the killed browser: the heal asks who holds the
+        profile (the witness ``relaunch_exited`` asks) before it spawns onto it."""
+        stage.close_kills = False
+        stage.refusal_reason = None
+        stage.held_after_kill = "pid 77"
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert stage.kills == [(OLD_PID, INSTANCE_ID)]
+        assert stage.launches == []
+        assert any(
+            "was force-ended, but pid 77 still holds its profile" in e
             for e in log.at("error")
         )
 
