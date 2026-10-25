@@ -1051,10 +1051,12 @@ class TestForensics:
 
 
 class _FakeChrome:
-    """A browser-level CDP endpoint on loopback. ``evaluate`` picks the answer."""
+    """A browser-level CDP endpoint on loopback. ``evaluate`` picks the answer;
+    ``close="hang"`` never answers ``Target.closeTarget``."""
 
-    def __init__(self, evaluate="ok") -> None:
+    def __init__(self, evaluate="ok", close="ok") -> None:
         self.evaluate = evaluate
+        self.close = close
         self.requests: list[dict] = []
 
     async def handler(self, ws) -> None:
@@ -1072,6 +1074,8 @@ class _FakeChrome:
                     continue
                 value = 2 if self.evaluate == "ok" else 3
                 reply["result"] = {"result": {"type": "number", "value": value}}
+            elif method == "Target.closeTarget" and self.close == "hang":
+                continue
             elif method == "Target.getTargets":
                 reply["result"] = {"targetInfos": SECRET_INFOS}
             await ws.send(json.dumps({"method": "Target.targetCreated", "params": {}}))
@@ -1144,6 +1148,21 @@ class TestTheRealProbe:
 
         assert (
             browser_health._describe(caught.value, steps) == "TimeoutError at evaluate"
+        )
+
+    async def test_a_hung_close_after_a_passing_probe_is_described_at_close_target(
+        self, chrome
+    ):
+        chrome.close = "hang"
+        steps: list[str] = []
+
+        with pytest.raises(TimeoutError) as caught:
+            await asyncio.wait_for(browser_health.probe_browser(chrome.url, steps), 0.3)
+
+        assert steps[-1] == "closeTarget"
+        assert (
+            browser_health._describe(caught.value, steps)
+            == "TimeoutError at closeTarget"
         )
 
     async def test_nothing_listening_is_a_failure_not_a_hang(self):
