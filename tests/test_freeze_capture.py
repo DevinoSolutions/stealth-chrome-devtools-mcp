@@ -822,7 +822,7 @@ class TestIncidents:
         """A mark slower than the capture's wait still lands: the heal's wait for
         the rename is ``HEAL_WAITS_FOR_MARK_SECONDS``, so shortening the capture's
         wait (as the hung-dump pin does) must not cut it. Reverting the mark wait to
-        the capture's budget failed only under host load, which no pin caught."""
+        the capture's budget failed only under host load, which no pin caught deterministically."""
         slow_mark = 0.3
         monkeypatch.setattr(freeze_capture, "HEAL_WAITS_FOR_CAPTURE_SECONDS", 0.05)
         assert slow_mark > freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS
