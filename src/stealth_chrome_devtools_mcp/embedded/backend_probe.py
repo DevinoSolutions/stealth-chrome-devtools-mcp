@@ -191,7 +191,7 @@ def probe(url: str, timeout: float, *, client_name: str = LIVENESS_CLIENT) -> st
             verdict = _verdict_of(resp)
             if verdict == VERDICT_ALIVE:
                 _discard_session(client.delete, url, resp.headers.get("mcp-session-id"))
-    except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not ready")
+    except Exception as exc:
         _logger.debug("liveness probe attempt failed", exc_info=exc)
     _note(url, verdict)
     _last.seen = (url, verdict)
@@ -315,7 +315,7 @@ class Heartbeat:
             resp = self._connection().get(
                 self._health_url, timeout=timeout, headers=backend_token.auth_headers()
             )
-        except Exception as exc:  # noqa: BLE001  PERMANENT(fail-closed: a probe error is "not alive")
+        except Exception as exc:
             _logger.debug("liveness heartbeat failed", exc_info=exc)
             self.close()
             self._said_unauthorized = False  # a 401 after an outage is a new run
@@ -346,7 +346,7 @@ class Heartbeat:
             return
         try:
             client.close()
-        except Exception:  # noqa: BLE001  PERMANENT(closing a probe connection that is being discarded anyway)
+        except Exception:
             _logger.debug("heartbeat connection close failed", exc_info=True)
 
     def _connection(self) -> httpx.Client:
@@ -382,7 +382,7 @@ async def await_ready(
                         client.delete, url, resp.headers.get("mcp-session-id")
                     )
                     return True
-            except Exception:  # noqa: BLE001  PERMANENT(expected during a cold start)
+            except Exception:
                 _logger.debug("backend readiness probe attempt failed", exc_info=True)
                 _note(url, VERDICT_DEAD)
             await anyio.sleep(interval)
@@ -404,7 +404,7 @@ def _discard_session(
         return
     try:
         delete(url, headers={**_headers(), "mcp-session-id": session_id})
-    except Exception:  # noqa: BLE001  PERMANENT(cleanup after an already-successful probe)
+    except Exception:
         _logger.debug("probe session cleanup failed", exc_info=True)
 
 
@@ -416,5 +416,5 @@ async def _discard_session_async(
         return
     try:
         await delete(url, headers={**_headers(), "mcp-session-id": session_id})
-    except Exception:  # noqa: BLE001  PERMANENT(cleanup after an already-successful probe)
+    except Exception:
         _logger.debug("probe session cleanup failed", exc_info=True)

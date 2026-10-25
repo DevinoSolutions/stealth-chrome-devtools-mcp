@@ -211,7 +211,7 @@ def stamp(path: Path, port: int, pid: int) -> bool:
         return backend_registry.stamp_heartbeat(
             path, port=port, pid=pid, at=time.time()
         )
-    except Exception:  # noqa: BLE001  PERMANENT(a liveness stamp must not kill the backend)
+    except Exception:
         _logger.debug("could not stamp the backend heartbeat", exc_info=True)
         return False
 

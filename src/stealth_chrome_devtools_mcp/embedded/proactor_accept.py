@@ -95,7 +95,7 @@ def _close_unclaimed(accepted: tuple) -> None:
     cancelled by ``server.close()``): close it now rather than at GC."""
     try:
         accepted[0].close()
-    except Exception:  # noqa: BLE001  PERMANENT(best-effort cleanup of a socket nobody owns)
+    except Exception:
         _logger.debug("could not close an unclaimed accepted socket", exc_info=True)
 
 

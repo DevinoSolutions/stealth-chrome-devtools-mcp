@@ -407,7 +407,7 @@ def _proven_in_a_job(proc: subprocess.Popen[bytes]) -> bool:
         answered = ctypes.windll.kernel32.IsProcessInJob(
             wintypes.HANDLE(handle), None, ctypes.byref(member)
         )
-    except Exception:  # noqa: BLE001  PERMANENT(a probe may never raise)
+    except Exception:
         _logger.warning(
             "F-867: could not ask whether the new backend is in a Job Object, so "
             "the breakaway spawn stands unverified; if this client's job is a "
@@ -437,7 +437,7 @@ def _own_session_id() -> int | None:
             kernel.GetCurrentProcessId(), ctypes.byref(session)
         ):
             return None
-    except Exception:  # noqa: BLE001  PERMANENT(a probe may never raise)
+    except Exception:
         # DEBUG, not WARNING: the ONE caller turns a missing session id into its
         # own WARNING naming both ids and the rung it drops to, so raising the
         # level here would report one fact twice.

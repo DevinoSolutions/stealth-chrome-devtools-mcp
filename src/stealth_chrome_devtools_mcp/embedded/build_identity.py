@@ -63,7 +63,7 @@ def version(package: str) -> str:
         from importlib.metadata import version as _version
 
         return _version(package)
-    except Exception:  # noqa: BLE001  PERMANENT(a build-identity read may never raise)
+    except Exception:
         _logger.debug("could not resolve installed package version", exc_info=True)
         return UNKNOWN_VERSION
 

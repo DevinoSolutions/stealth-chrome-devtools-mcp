@@ -200,7 +200,7 @@ def _report(message: str, *, level: str = "warning", **fields: object) -> None:
         from stealth_chrome_devtools_mcp.observability import capture_lifecycle
 
         capture_lifecycle(message, level=level, **fields)
-    except Exception:  # noqa: BLE001  PERMANENT(a backstop must not raise)
+    except Exception:
         _logger.debug("could not report a lifecycle transition", exc_info=True)
 
 
@@ -399,7 +399,7 @@ class PendingCalls:
             )
             try:
                 await client_write.send(SessionMessage(message=JSONRPCMessage(error)))
-            except Exception:  # noqa: BLE001  PERMANENT(a backstop must not raise)
+            except Exception:
                 _logger.debug("could not report an in-flight failure", exc_info=True)
 
 
@@ -437,7 +437,7 @@ async def heal_backend(
             _logger.warning(
                 "heal attempt %d/%d produced no ready backend", attempt, HEAL_ATTEMPTS
             )
-        except Exception:  # noqa: BLE001  PERMANENT(a backstop must not raise)
+        except Exception:
             _logger.warning("heal attempt %d/%d failed", attempt, HEAL_ATTEMPTS)
             _logger.debug("heal attempt detail", exc_info=True)
         if attempt < HEAL_ATTEMPTS:
@@ -470,7 +470,7 @@ async def _confirm_bridge_verdict(
 
     try:
         alive = await anyio.to_thread.run_sync(confirm_alive, port)
-    except Exception:  # noqa: BLE001  PERMANENT(a backstop must not raise)
+    except Exception:
         _logger.warning("could not confirm the backend after a lost connection")
         _logger.debug("confirmation detail", exc_info=True)
         alive = False
@@ -528,7 +528,7 @@ async def _one_generation(  # noqa: PLR0913  PERMANENT(function interface)
         async def bridge() -> None:
             try:
                 await connect(url, replay_msg, armed)
-            except Exception:  # noqa: BLE001  PERMANENT(a dead backend must not crash the proxy)
+            except Exception:
                 _logger.warning("backend connection lost", exc_info=True)
             finally:
                 # F-843: the fast witness. Claim the verdict only if the monitor
