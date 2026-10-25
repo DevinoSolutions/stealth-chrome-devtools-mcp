@@ -499,6 +499,26 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 | `STEALTH_MCP_ALLOW_CLONE_GOOGLE_ROTATION` | `false` | Clones never rotate Google session cookies (F-939): on every target of an auto-clone, requests made from tabs, popups, iframes and workers to `accounts.google.com` / `accounts.youtube.com` `/RotateCookies*` and `/RotateBoundCookies*` are failed (the requests a page makes, redirect hops and workers included; a document load of one is NOT failed, whether an iframe's, a popup's, a new tab's, a top-level navigation or a form-POST navigation, and the POST the `RotateCookiesPage` script makes is what is blocked. Not established: whether a document load of RotateCookiesPage rotates the pair by itself.), so only the master rotates. Many clones rotating one copied session fork its `__Secure-*PSIDTS` chain and Google revokes the session everywhere. `true` lets clones rotate. |
 | `STEALTH_MCP_NO_LIVE_MASTER_SEED` | `false` | A clone spawned while the shared (master) session is open in a browser this backend does not drive gets the master's LIVE cookies over its loopback debug port (F-939), not the stale `master-snapshot`. `true` restores the refusal. |
 | `STEALTH_MCP_SEED_SESSION` | _(empty)_ | Copy every NEW clone and NEW named session from this session (e.g. `fleet`) instead of `master-snapshot` (F-952). Its live cookies are handed over when this backend drives it. Empty keeps the snapshot. A name that does not exist is refused naming this setting. |
+| `STEALTH_MCP_LOG_LEVEL` | INFO | Minimum level the file logger records (`DEBUG`, `INFO`, `WARNING`, ...). An unrecognized value falls back to `INFO` instead of failing startup. |
+| `STEALTH_MCP_LOG_DIR` | `~/.stealth-mcp/logs` | Where the file logs and freeze dumps are written ([RUNBOOK](RUNBOOK.md#where-the-logs-are)). |
+| `STEALTH_MCP_NO_AUTO_RECOVERY` | `false` | Internal. Skips the startup orphan-browser recovery and signal-handler install. The read-only `stealthy` commands (`status`, `profiles`, `doctor`, `cleanup` without `--apply`) set it themselves so running them never reaps a live backend's browsers; you should not need to set it. |
+| `STEALTH_MCP_NETWORK_CAPTURE_BODIES` | `false` | Capture response bodies for `get_response_content` (metadata is always captured). Off by default; bounded by the two byte caps below. |
+| `STEALTH_MCP_NETWORK_BODY_MAX_BYTES` | `5242880` (5 MiB) | Per-body cap when body capture is on, in bytes; a larger body is not stored (`0` = unbounded). |
+| `STEALTH_MCP_NETWORK_BODY_STORE_MAX_BYTES` | `134217728` (128 MiB) | Total response-body store cap, in bytes; once exceeded the oldest bodies are evicted (`0` = unbounded). |
+| `STEALTH_MCP_NETWORK_REQUEST_MAX_COUNT` | `10000` | Retained network requests per backend; the oldest are evicted first (`0` = unbounded). |
+| `STEALTH_MCP_NETWORK_POST_DATA_MAX_BYTES` | `5242880` (5 MiB) | Per-request `post_data` cap, in bytes (`0` = unbounded). |
+| `STEALTH_MCP_NETWORK_CAPTURE_INTERNAL_URLS` | `false` | Also capture Chrome's own non-web traffic (new-tab page, extensions, devtools, error pages), excluded by default because it drowns real page requests. `set_network_capture_filters(capture_internal_urls=True)` does the same for one instance. |
+| `CLOSE_KILL_TIMEOUT` | `5` | Seconds `close_instance` waits for Chrome to exit on its own before killing it (must be > 0). |
+| `BROWSER_IDLE_REAPER_INTERVAL` | `60` | Seconds between idle-browser sweeps (>= 1); only matters when `BROWSER_IDLE_TIMEOUT` is non-zero. |
+| `BROWSER_ORPHAN_PROFILE_MAX_AGE` | `21600` (6 h) | Seconds an orphaned profile directory must be idle before startup recovery may reap it (`0` allowed). |
+| `BROWSER_PROFILE_KEY` | unset | Fallback for `STEALTH_CHROME_PROFILE_KEY`: a stable clone key (the latter wins when both are set). |
+| `CDP_OPERATION_TIMEOUT_SECONDS` | `30` | Seconds a single CDP operation may take before it is abandoned. |
+| `EXECUTE_SCRIPT_TIMEOUT_SECONDS` | `10` | Seconds `execute_script` lets user JavaScript run, so a blocking script fails fast. |
+| `MAX_USER_SCRIPT_BYTES` | `100000` | Largest script `execute_script` accepts, in bytes; use `upload_file` for big payloads. |
+| `BROWSER_STATE_TIMEOUT_SECONDS` | `10` | Time budget, in seconds, for `get_instance_state`'s page-storage reads. |
+| `XPOOL_SAFE_MODE` | `false` | Same as the backend's `--xpool-safe`: disables the `cdp-functions` section (tools that trigger `Runtime.enable`). |
+| `PORT` | `8000` | Default of the backend's `--port` (HTTP transport). |
+| `DEBUG` | `false` | Same as `STEALTH_BROWSER_DEBUG` and `--debug`: debug logging to stderr. |
 
 ## CLI
 
@@ -519,10 +539,15 @@ stealthy ls                                          # browser instances
 stealthy spawn --session seller-central --headed     # recover a stranded login
 stealthy spawn --session staging --from seller-central  # a new session, already logged in
 stealthy spawn --headed                              # a disposable copy of `default`
+stealthy spawn --headless --url https://example.com  # no window; navigate once it is up
 stealthy nav e364 https://example.com --wait load    # ids resolve by prefix
 stealthy call get_cookies --arg instance_id=e364c31b --arg domain=example.com
 stealthy tools --section browser-management
 ```
+
+`stealthy spawn` takes `--headed` (show a window) or `--headless` (no window) -- mutually exclusive -- and `--url` to navigate after spawning.
+
+The server entry point (`stealth-chrome-devtools-mcp`) also accepts `--standalone` (run the stdio server in this process instead of bridging to the shared backend), `--singleton-port PORT` (the backend port to find or start; defaults to the standard backend port, and tests pass a free one to get a private backend) and `--exit-if-unadopted` (HTTP only; the backend exits if no client reaches it within five minutes and it hosts no browser -- passed by the cold start that spawns a backend for a proxy, never by an operator running `serve`).
 
 `call` reaches **any** tool the backend serves — there is no per-tool mirror
 here, so a newly added tool is callable the day it ships. `--arg key=value`
