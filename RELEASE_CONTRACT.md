@@ -93,7 +93,8 @@ aggregate unless every cell below is present, current, and successful.
 
 **Tiers.** A `pull_request` run executes the PR tier, a named subset of
 these cells (12 of 28: Linux only, the wheel
-smoke only) and its aggregate demands only those. Pushes to main, tags
+smoke only, plus one advisory cell, below) and its aggregate demands only
+those. Pushes to main, tags
 and manual runs execute and demand **every** cell above, and an event
 the tier table does not name fails closed to all of them, so a smaller
 ledger never qualifies a release.

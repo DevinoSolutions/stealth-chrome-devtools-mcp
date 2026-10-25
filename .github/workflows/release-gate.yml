@@ -371,7 +371,8 @@ jobs:
         # two runs on ONE Windows box (n=2, one machine; the gate is what will
         # produce the actual distribution).
         #
-        # No continue-on-error — test_no_gate_job_hides_failure forbids it and
+        # No continue-on-error (only unit-tests carries the plan-driven advisory
+        # flag, T-8242) — test_no_gate_job_hides_failure pins that, and
         # it is not needed: the script exits 0 on every path by contract, and a
         # launch that never listens inside the deadline is itself the answer.
         shell: bash
