@@ -28,9 +28,11 @@ covered tab can stay visible and there is nothing for the emulation to lift.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import sys
+import time
 
 import pytest
 
@@ -109,7 +111,49 @@ POKE_JS = f"""
 async def _poke(tab) -> dict:
     """:data:`POKE_JS` on a tab no tool armed or drove, read back through CDP."""
     state = await tab.evaluate(POKE_JS, return_by_value=True)
-    return json.loads(getattr(state, "value", state))
+    value = getattr(state, "value", state)
+    # nodriver hands back ``ExceptionDetails`` when the script threw in the page.
+    text = getattr(state, "text", None)
+    description = getattr(getattr(state, "exception", None), "description", None)
+    assert isinstance(value, str), (
+        f"POKE_JS threw in the control tab: {description or text or repr(state)}"
+    )
+    return json.loads(value)
+
+
+READY_JS = """
+JSON.stringify({
+  readyState: document.readyState,
+  email: document.getElementById("email") !== null,
+  url: location.href,
+})
+"""
+
+
+async def _wait_probe_page(tab, timeout: float = 15.0) -> None:
+    """Poll until the probe page has loaded and ``#email`` exists in ``tab``.
+
+    ``open_tab`` returns before the page's load, and :data:`POKE_JS` reads
+    ``#email`` at once, so a poke that beat the load threw in the page (T-8597).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        seen = await tab.evaluate(READY_JS, return_by_value=True)
+        raw = getattr(seen, "value", seen)
+        state = json.loads(raw) if isinstance(raw, str) else {}
+        if state.get("readyState") == "complete" and state.get("email"):
+            return
+        if time.monotonic() >= deadline:
+            missing = (
+                "#email"
+                if state.get("readyState") == "complete"
+                else ('readyState "complete"')
+            )
+            raise AssertionError(
+                f"the control tab never showed {missing} within {timeout:g} s: "
+                f"{state or repr(seen)}"
+            )
+        await asyncio.sleep(0.1)
 
 
 @contextlib.asynccontextmanager
@@ -125,6 +169,7 @@ async def _staged(tmp_path, headless: bool, url: str):
     try:
         browser = await runtime.browser_manager.get_browser(iid)
         control = await tab_open.open_tab(browser, url)
+        await _wait_probe_page(control)
         driven = (await new_tab(instance_id=iid, url=url))["tab_id"]
         # Something in front of both, so neither is the visible tab.
         await tab_open.open_tab(browser, "about:blank")

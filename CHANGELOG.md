@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Tests: the hidden-tab fixture waits for the probe page and names an in-page exception (T-8597)
+
+- `test_e2e_hidden_tab_input.py::test_the_fixture_drops_input_while_hidden[headed]` failed the v2.1.44 publish gate with `TypeError: ... not ExceptionDetails`: `POKE_JS` threw in the control tab, almost certainly because the poke beat the probe page's load (`#email` was still null), and `_poke` fed the exception object to `json.loads`, so the page's error text was lost. `_staged` now polls (15 s) until the control tab shows `readyState` `complete` and `#email`, failing with what was missing, and `_poke` raises an `AssertionError` carrying the in-page exception's description. No production change.
+
 ### browser_health names the step that hung, not the cleanup it triggered (T-6232)
 
 - `probe_browser` appended `closeTarget` to its step list from the `finally` that closes the probe target, so a probe cut off while `Runtime.evaluate` hung was logged as `TimeoutError at closeTarget` and sent a reader to the wrong step. `closeTarget` is now named only after the evaluate answered; the close is still always tried, it just is not a step on the failure path. `test_browser_health.py::TestTheRealProbe` pins the step list and the `_describe` label of a hung evaluate.
