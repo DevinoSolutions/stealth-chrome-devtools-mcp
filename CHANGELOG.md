@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Test-only: two regression pins from the T-7509 and T-6904 reviews (T-8241)
+
+- `test_freeze_capture.py::TestIncidents::test_the_mark_wait_is_its_own_budget_not_the_captures` shortens `HEAL_WAITS_FOR_CAPTURE_SECONDS` to 0.05 s and makes the healed-dump rename take 0.3 s, well under `HEAL_WAITS_FOR_MARK_SECONDS`: the heal must still report `dump_kept`. Reverting the mark wait in `before_heal` to the capture's budget used to fail only on a loaded host; it now fails every run (`dump_not_marked_healed(TimeoutError)`).
+- `test_liveness_heartbeat.py::test_the_sweep_drops_a_session_the_sdk_discarded_from_last_seen` DELETEs a session over real streamable HTTP, so the SDK (not our code) unlists it from `_server_instances`, and asserts the next `sweep_once` drops its `last_seen` entry. Skipping that prune in `sweep_once` now fails the suite. No production change.
+
 ## 2.1.43
 
 ### A closed tab's python-binding watch is reaped (T-6561)

@@ -389,6 +389,36 @@ async def test_a_delete_the_transport_refuses_does_not_unlist(monkeypatch):
         assert backend.sessions == 1
 
 
+async def test_the_sweep_drops_a_session_the_sdk_discarded_from_last_seen(monkeypatch):
+    """The other half of a DELETE's cleanup: the SDK unlists the id from
+    ``_server_instances`` (not our code), and the NEXT ``sweep_once`` prunes the
+    manager's own ``last_seen`` entry for it. Without that prune every probe the
+    old watchdog DELETEs leaves a float behind for the life of the backend."""
+    async with _serving(monkeypatch) as backend:
+        manager = session_hygiene.active_manager()
+        assert manager is not None, "FastMCP did not build OUR manager"
+        session_id = (await _initialize(backend.url)).headers["mcp-session-id"]
+
+        async with httpx.AsyncClient(timeout=TIMEOUT) as raw:
+            deleted = await raw.delete(
+                backend.url,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "mcp-session-id": session_id,
+                },
+            )
+        assert deleted.status_code == 200
+
+        # The state the prune exists for: the SDK has unlisted the id, and the
+        # request that carried it was noted before the SDK saw it.
+        assert session_id not in manager._server_instances
+        assert session_id in manager.last_seen
+
+        await asyncio.wait_for(manager.sweep_once(), timeout=TIMEOUT)
+
+        assert session_id not in manager.last_seen
+
+
 def test_health_url_swaps_only_the_path():
     assert (
         backend_probe.health_url("http://127.0.0.1:4242/mcp/?x=1")

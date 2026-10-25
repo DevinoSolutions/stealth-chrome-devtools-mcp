@@ -818,6 +818,34 @@ class TestIncidents:
 
         assert said == "evidence@probe1(none); dump_not_marked_healed(OSError)"
 
+    async def test_the_mark_wait_is_its_own_budget_not_the_captures(self, monkeypatch):
+        """A mark slower than the capture's wait still lands: the heal's wait for
+        the rename is ``HEAL_WAITS_FOR_MARK_SECONDS``, so shortening the capture's
+        wait (as the hung-dump pin does) must not cut it. Reverting the mark wait to
+        the capture's budget failed only under host load, which no pin caught."""
+        slow_mark = 0.3
+        monkeypatch.setattr(freeze_capture, "HEAL_WAITS_FOR_CAPTURE_SECONDS", 0.05)
+        assert slow_mark > freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS
+        assert slow_mark < freeze_capture.HEAL_WAITS_FOR_MARK_SECONDS
+
+        def slow(label: str) -> str:
+            time.sleep(slow_mark)
+            return f"{label}-healed.dmp"
+
+        incidents = freeze_capture.Incidents(
+            capture=lambda **_k: asyncio.sleep(0, "r"),
+            dump_now=lambda *_a, **_k: asyncio.sleep(0, "x"),
+            mark_healed=slow,
+            clock=lambda: 0.0,
+            log=lambda _line: None,
+        )
+
+        said = await asyncio.wait_for(
+            incidents.before_heal("i", pid=1, label="l"), timeout=5
+        )
+
+        assert said == "evidence@probe1(none); dump_kept(l-healed.dmp)"
+
     async def test_no_incident_is_said_so_and_still_marks_what_there_is(self):
         incidents = self._incidents([0.0], [], [])
 
