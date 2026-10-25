@@ -10,6 +10,10 @@
 
 - README's env table now lists the `Settings` fields it omitted (`STEALTH_MCP_LOG_LEVEL`, `_LOG_DIR`, `_NO_AUTO_RECOVERY`, the five `_NETWORK_*` caps and switches, and the unprefixed `CLOSE_KILL_TIMEOUT`, `BROWSER_IDLE_REAPER_INTERVAL`, `BROWSER_ORPHAN_PROFILE_MAX_AGE`, `BROWSER_PROFILE_KEY`, `CDP_OPERATION_TIMEOUT_SECONDS`, `EXECUTE_SCRIPT_TIMEOUT_SECONDS`, `MAX_USER_SCRIPT_BYTES`, `BROWSER_STATE_TIMEOUT_SECONDS`, `XPOOL_SAFE_MODE`, `PORT`, `DEBUG`) with defaults and units read from `settings.py`, and the CLI section names `stealthy spawn --headless` / `--url` and the server's `--standalone`, `--singleton-port` and `--exit-if-unadopted`. No code change.
 
+### The heal ends a browser the close path left running, once its identity is verified (T-4686)
+
+- On 2026-10-21 (backend 46612) a heal was refused because `close_instance` left the old browser running, so the session stayed frozen until a human killed it. `browser_health.heal` now ends it itself, through the new `forced_end.run`: after the 15 s exit wait it kills the pid it took before the close only if that pid is the one the registry recorded for the instance, its start time matches the recorded one (a start time that was never recorded is a refusal), and its own command line carries this instance's `--user-data-dir` and `--remote-debugging-port` and no `--type`. The kill is `process_cleanup`'s ladder (terminate, then kill; a pid whose name is not a browser's is refused), never by image name. Any mismatch, unreadable command line or missing record leaves the browser running and the heal refused, with the reason in the ERROR line; the relaunch is otherwise unchanged. Pinned in `tests/test_forced_end.py` (each identity clause refuses on its own, nothing real is signalled) and `tests/test_browser_health.py` (read before the close untracks the entry, kill before relaunch, no kill when the close path ended it).
+
 ## 2.1.44
 
 ### Tests: the two-browser dump pin no longer races the wall clock (T-8255)
