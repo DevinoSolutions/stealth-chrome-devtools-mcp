@@ -6,7 +6,7 @@
 
 - `probe_browser` appended `closeTarget` to its step list from the `finally` that closes the probe target, so a probe cut off while `Runtime.evaluate` hung was logged as `TimeoutError at closeTarget` and sent a reader to the wrong step. `closeTarget` is now named only after the evaluate answered; the close is still always tried, it just is not a step on the failure path. `test_browser_health.py::TestTheRealProbe` pins the step list and the `_describe` label of a hung evaluate.
 
-### Docs: the env keys and CLI flags the docs never named (docs-only)
+### Docs: the env keys and CLI flags the docs never named (docs-only) (T-8497)
 
 - README's env table now lists the `Settings` fields it omitted (`STEALTH_MCP_LOG_LEVEL`, `_LOG_DIR`, `_NO_AUTO_RECOVERY`, the five `_NETWORK_*` caps and switches, and the unprefixed `CLOSE_KILL_TIMEOUT`, `BROWSER_IDLE_REAPER_INTERVAL`, `BROWSER_ORPHAN_PROFILE_MAX_AGE`, `BROWSER_PROFILE_KEY`, `CDP_OPERATION_TIMEOUT_SECONDS`, `EXECUTE_SCRIPT_TIMEOUT_SECONDS`, `MAX_USER_SCRIPT_BYTES`, `BROWSER_STATE_TIMEOUT_SECONDS`, `XPOOL_SAFE_MODE`, `PORT`, `DEBUG`) with defaults and units read from `settings.py`, and the CLI section names `stealthy spawn --headless` / `--url` and the server's `--standalone`, `--singleton-port` and `--exit-if-unadopted`. No code change.
 
