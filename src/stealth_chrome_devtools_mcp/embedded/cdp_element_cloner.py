@@ -179,7 +179,7 @@ class CDPElementCloner:
             Dict[str, str]: Dictionary of computed style properties and their values.
         """
         try:
-            computed_styles_list = await tab.send(
+            computed_styles_list, _extra = await tab.send(
                 uc.cdp.css.get_computed_style_for_node(node_id)
             )
             styles = {}
@@ -502,7 +502,7 @@ class CDPElementCloner:
             result = {"method": "cdp_direct"}
 
             if include_computed:
-                computed_styles_list = await tab.send(
+                computed_styles_list, _extra = await tab.send(
                     uc.cdp.css.get_computed_style_for_node(node_id)
                 )
                 result["computed_styles"] = {

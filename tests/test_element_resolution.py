@@ -253,7 +253,8 @@ def test_the_codeless_dom_error_is_the_shape_sentry_reports():
     ``[code: N]`` only when the CDP error object carried one, so the same failure
     reaches the classifier as two different strings. A classifier that matched on
     the code would miss half of them; one that matches the message sees both."""
-    assert str(_dom_error()) == "DOM Error while querying"
+    # nodriver 0.50 appends its (empty) ``extra`` dict on a new line; 0.47 did not.
+    assert str(_dom_error()).startswith("DOM Error while querying")
     assert "[code" not in str(_dom_error())
     assert str(_dom_error(code=-32000)) == "DOM Error while querying [code: -32000]"
 

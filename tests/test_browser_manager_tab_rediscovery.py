@@ -190,8 +190,8 @@ async def test_close_tab_closes_a_rediscovered_target(manager_and_browser):
     closed = await manager.close_tab(INSTANCE_ID, OTHER["target_id"])
 
     assert closed is True
-    assert browser.connection.send_calls == ["close_target"]
-    assert browser.connection.cdp_frames[0] == {
+    assert browser.send_calls == ["close_target"]
+    assert browser.cdp_frames[0] == {
         "method": "Target.closeTarget",
         "params": {"targetId": OTHER["target_id"]},
     }
@@ -202,7 +202,7 @@ async def test_close_tab_reports_an_unknown_tab_id_unchanged(manager_and_browser
     manager, browser, _tracked = manager_and_browser
 
     assert await manager.close_tab(INSTANCE_ID, "T-nope") is False
-    assert browser.connection.send_calls == []
+    assert browser.send_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ def _close_target_answers(browser, error):
     def _raise(_name):
         raise error
 
-    browser.connection._cdp_responses["close_target"] = _raise
+    browser._cdp_responses["close_target"] = _raise
 
 
 @pytest.fixture()
@@ -368,8 +368,8 @@ async def test_switch_to_tab_activates_a_rediscovered_target(manager_and_browser
     switched = await manager.switch_to_tab(INSTANCE_ID, OTHER["target_id"])
 
     assert switched is True
-    assert browser.connection.send_calls == ["activate_target"]
-    assert browser.connection.cdp_frames[0] == {
+    assert browser.send_calls == ["activate_target"]
+    assert browser.cdp_frames[0] == {
         "method": "Target.activateTarget",
         "params": {"targetId": OTHER["target_id"]},
     }
@@ -380,7 +380,7 @@ async def test_switch_to_tab_reports_an_unknown_tab_id_unchanged(manager_and_bro
     manager, browser, _tracked = manager_and_browser
 
     assert await manager.switch_to_tab(INSTANCE_ID, "T-nope") is False
-    assert browser.connection.send_calls == []
+    assert browser.send_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ async def test_replace_main_tab_opens_its_tab_through_create_target(
     )
 
     assert browser.opened == ["about:blank"]
-    assert browser.connection.cdp_frames[0]["method"] == "Target.createTarget"
+    assert browser.cdp_frames[0]["method"] == "Target.createTarget"
     assert manager._instances[INSTANCE_ID]["tab"] is new_tab
     assert new_tab.awaited == 1
 

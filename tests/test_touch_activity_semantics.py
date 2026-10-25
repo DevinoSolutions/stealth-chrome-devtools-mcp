@@ -25,7 +25,6 @@ def _make_fake_tab():
 def _make_fake_browser():
     return SimpleNamespace(
         tabs=[_make_fake_tab()],
-        connection=SimpleNamespace(closed=True),
         _process=SimpleNamespace(returncode=None, pid=99999, poll=lambda: None),
         _process_pid=99999,
         stop=MagicMock(return_value=None),

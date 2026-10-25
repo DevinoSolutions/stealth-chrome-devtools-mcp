@@ -96,7 +96,8 @@ class Wire:
 
 
 def browser(wire):
-    return SimpleNamespace(connection=wire)
+    wire.socket = SimpleNamespace(close_code=None)
+    return wire
 
 
 def _no_secret_in(blob):

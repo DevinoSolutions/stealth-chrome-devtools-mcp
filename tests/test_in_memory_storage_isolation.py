@@ -145,7 +145,8 @@ def _blocking_browser(entered: asyncio.Event) -> SimpleNamespace:
 
     return SimpleNamespace(
         tabs=[],
-        connection=SimpleNamespace(closed=False, send=_never, disconnect=_never),
+        send=_never,
+        aclose=_never,
         _process=SimpleNamespace(returncode=0, pid=0),
         _process_pid=0,
         stop=lambda: None,

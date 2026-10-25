@@ -424,8 +424,13 @@ async def _send_navigate(
     """
 
     async def send() -> tuple[object, object, str | None]:
+        # ``Page.enable`` is what makes Chrome send ``frameStartedLoading``;
+        # nodriver 0.50 no longer sends it when a handler is added (T-8501).
+        await tab.send(cdp.page.enable())
         await tab.send(cdp.page.set_lifecycle_events_enabled(enabled=True))
-        return await tab.send(
+        # nodriver 0.50's ``Page.navigate`` answers a 4-tuple (it added
+        # ``is_download``); the first three are what this reads.
+        frame_id, loader_id, error_text, *_ = await tab.send(
             cdp.page.navigate(
                 url,
                 referrer=referrer or None,
@@ -434,6 +439,7 @@ async def _send_navigate(
                 ),
             )
         )
+        return frame_id, loader_id, error_text
 
     sending = asyncio.ensure_future(send())
     sign = asyncio.ensure_future(life.wait())
@@ -513,11 +519,10 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
     tab.add_handler(cdp.page.LifecycleEvent, on_lifecycle)
     tab.add_handler(cdp.page.FrameStartedLoading, on_started)
     try:
-        # nodriver re-sends Page.enable ahead of this on EVERY navigation: once
-        # the listener below is removed, its next send forgets `cdp.page` from
-        # `enabled_domains` (connection.py's _register_handlers), so the domain
-        # reads as new each time. Both commands are idempotent, ~1 ms together,
-        # and that beats tracking either flag per tab.
+        # Page.enable and the lifecycle switch go out ahead of every Page.navigate:
+        # nodriver 0.47 sent the first itself whenever a handler was added
+        # (`enabled_domains`), 0.50 does not. Both commands are idempotent, ~1 ms
+        # together, and that beats tracking either flag per tab.
         frame_id, loader_id, error_text = await _send_navigate(
             tab, url, referrer, budget_seconds, life
         )

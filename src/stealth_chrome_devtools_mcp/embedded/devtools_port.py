@@ -141,12 +141,13 @@ async def _disconnect(connection: Connection) -> None:
     """
     with contextlib.suppress(Exception):
         await asyncio.wait_for(
-            asyncio.shield(connection.disconnect()), DROP_TIMEOUT_SECONDS
+            asyncio.shield(connection.aclose()), DROP_TIMEOUT_SECONDS
         )
 
 
 async def _drop(browser: Browser) -> None:
-    await _disconnect(browser.connection)
+    # The Browser IS its connection since nodriver 0.50 (``browser.py``:32).
+    await _disconnect(browser)
 
 
 def _running(pid: int) -> bool:
@@ -161,16 +162,21 @@ def _running(pid: int) -> bool:
 async def _ask_afresh(websocket_url: str) -> list:
     """The same query over a THROWAWAY connection to the same browser endpoint.
 
-    Never ``browser.connection``: nodriver sends ``Target.setDiscoverTargets`` once, in
-    ``Browser.start``, and Chrome scopes it to that websocket, so dropping and
-    reopening the launch's own connection would silence every later target event
-    (``tab_open`` documents the failure). This connection enables nothing and is
+    Never the launch's own ``browser``: closing it would take its Target discovery
+    (``tab_open.arm_popups``) with it, and a request waiting on a socket that never
+    answers is what this exists to get past. This connection enables nothing and is
     closed whatever ends the request, cancellation included.
+
+    nodriver 0.50 has no constructor that takes a URL: a ``Connection`` reads
+    ``websocket_url`` (``connection.py``:146, a class attribute a child copies from
+    its parent) and its first ``send`` opens and attaches to the browser target
+    itself (``connection.py``:397-398).
     """
     from nodriver import cdp
     from nodriver.core.connection import Connection
 
-    probe = Connection(websocket_url)
+    probe = Connection()
+    probe.websocket_url = websocket_url
     try:
         return await probe.send(cdp.system_info.get_process_info())
     finally:
@@ -251,11 +257,11 @@ async def _answer(browser: Browser, launched_pid: int) -> list[list]:
     """
     from nodriver import cdp
 
-    url = getattr(browser.connection, "websocket_url", None)
+    url = getattr(browser, "websocket_url", None)
     clock = asyncio.get_running_loop().time
     started = clock()
     asks = _Asks()
-    asks.add(browser.connection.send(cdp.system_info.get_process_info()))
+    asks.add(browser.send(cdp.system_info.get_process_info()))
     next_ask = started + IDENTITY_TIMEOUT_SECONDS
     try:
         while not (answers := asks.answers()):

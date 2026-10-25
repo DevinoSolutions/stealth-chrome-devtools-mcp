@@ -37,7 +37,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fakes import FakeBrowser, FakeBrowserManager
+from fakes import FakeBrowser, FakeBrowserManager, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     cookie_handoff,
@@ -645,13 +645,13 @@ async def _spawn_with_live_seed(
     """
     source = FakeBrowser()
     target = FakeBrowser()
-    source.connection._cdp_responses = {
+    source._cdp_responses = {
         "get_cookies": _raise_or(jar),
         "set_cookies": None,
     }
-    target.connection._cdp_responses = {"get_cookies": [], "set_cookies": None}
+    target._cdp_responses = {"get_cookies": [], "set_cookies": None}
     if not source_connection:
-        source.connection = None
+        source.socket = None
 
     fbm = FakeBrowserManager(
         instances=[
@@ -675,7 +675,7 @@ async def _spawn_with_live_seed(
             viewport={"width": 800, "height": 600},
         ),
         spawn_diagnostics={},
-        tabs={"target-1": target.connection},
+        tabs={"target-1": FakeTab()},
     )
 
     async def fake_resolve(user_data_dir, **kwargs):

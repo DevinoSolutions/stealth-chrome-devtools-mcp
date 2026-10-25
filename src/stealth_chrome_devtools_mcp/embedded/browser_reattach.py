@@ -949,7 +949,7 @@ async def _attach_one(
                 "network_data": [],
             }
         # After the store: `_arm_tracked_tab` finds no instance before it (F-1012).
-        tab_open.arm_popups(browser, manager._arm_tracked_tab, instance_id)
+        await tab_open.arm_popups(browser, manager._arm_tracked_tab, instance_id)
         instance.state = BrowserState.READY
         instance.last_navigated_url = view["url"]
         instance.last_navigated_title = view["title"]

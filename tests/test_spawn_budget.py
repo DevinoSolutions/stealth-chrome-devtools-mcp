@@ -208,11 +208,18 @@ class LaunchedChrome:
         self.config = config
         self._process = SimpleNamespace(pid=pid, returncode=None)
         self._process_pid = pid
-        self.connection = _OwnProcess(pid)
+        self._own = _OwnProcess(pid)
         self.main_tab = tab
         # A launched Chrome with a tab has opened a page (F-1003 reads targets).
         self.targets = [] if tab is None else [tab]
         self.stops = 0
+
+    # The Browser IS its connection since nodriver 0.50 (``browser.py``:32).
+    def add_handler(self, event_type, handler) -> None:
+        self._own.add_handler(event_type, handler)
+
+    async def send(self, command):
+        return await self._own.send(command)
 
     def stop(self) -> None:
         self.stops += 1

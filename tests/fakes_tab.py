@@ -500,19 +500,21 @@ class FakeTab:
         """
         return [f for f in self.cdp_frames if f.get("method") == method]
 
-    async def disconnect(self) -> None:
-        """nodriver's ``Connection.disconnect`` — every ``Tab`` IS a Connection.
+    async def aclose(self) -> None:
+        """nodriver 0.50's ``Connection.aclose`` (``connection.py``:239) — every
+        ``Tab`` and the ``Browser`` IS a Connection.
 
         A different verb from ``close`` above and modelled separately because the
         product distinguishes them: ``Tab.close`` is ``Target.closeTarget`` (the
-        page goes away), while ``disconnect`` cancels the listener task and closes
-        OUR websocket, leaving the page and the browser exactly as they were. The
-        F-888 cleanup path may only ever do the second. Deliberately NOT named
-        ``aclose``: nodriver has no such method, and since ``Connection.__getattr__``
-        delegates unknown attributes to ``self.target``, a double that answered
-        one would hide production calling a method that does not exist.
+        page goes away), while ``aclose`` fails the pending futures, cancels the
+        listener task and closes OUR websocket, leaving the page and the browser
+        exactly as they were. The F-888 cleanup path may only ever do the second.
+        ``disconnect`` (0.47's name) does not exist: a double that answered it
+        would hide production calling a method that is gone.
         """
         self.disconnected = True
+        if getattr(self, "socket", None) is not None:
+            self.socket.close_code = 1000
 
     async def query_selector(self, selector: str, *args: Any, **kwargs: Any) -> Any:
         """The nodriver element-resolution seam used by the CDP styles path and
@@ -538,16 +540,16 @@ class FakeTab:
         """
         self.handlers.append((event_type, handler))
 
-    def remove_handler(self, event_type: Any, handler: Any = None) -> None:
-        """nodriver's ``Connection.remove_handler``, with its real semantics
-        (F-824, F-881): the *handler* argument is ignored (the library's
-        ``cb == self`` comparison never matches) and EVERY handler for the event
-        type is dropped — ``del self.handlers[evt]`` — so a type with no handler
-        left raises ``KeyError`` carrying the event class, which is exactly what
-        an overlapping ``Tab.wait()`` hands the other waiter."""
-        if not any(evt is event_type for evt, _ in self.handlers):
-            raise KeyError(event_type)
-        self.handlers = [(evt, h) for evt, h in self.handlers if evt is not event_type]
+    def remove_handler(self, event_type: Any, handler: Any) -> bool:
+        """nodriver 0.50's ``Connection.remove_handler`` (``connection.py``:173):
+        removes THAT callback only and answers whether one was removed, never
+        raising. (0.47 deleted the event type's whole list and raised ``KeyError``
+        for an absent one — F-824's race — which no longer exists.)"""
+        for index, (evt, registered) in enumerate(self.handlers):
+            if evt is event_type and registered == handler:
+                del self.handlers[index]
+                return True
+        return False
 
     async def send(self, cdp_obj: Any, *args: Any, **kwargs: Any) -> Any:
         name = cdp_command_name(cdp_obj)

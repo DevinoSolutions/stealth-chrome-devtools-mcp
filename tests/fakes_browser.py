@@ -10,8 +10,6 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-import nodriver.cdp.target as cdp_target
-
 from fakes_tab import FakeTab
 
 # ---------------------------------------------------------------------------
@@ -19,7 +17,7 @@ from fakes_tab import FakeTab
 # ---------------------------------------------------------------------------
 
 
-class FakeBrowser:
+class FakeBrowser(FakeTab):
     """A fake nodriver browser for the ``list_instances`` liveness path (F-611).
 
     ``browser_is_alive`` inspects ``_process.poll()`` first, then falls
@@ -34,19 +32,22 @@ class FakeBrowser:
     ``close_tab`` read it after ``update_targets()``); seed it with
     :class:`FakeAttachedTab` / :class:`FakeDiscoveredTarget`.
 
-    ``connection`` is the BROWSER-level websocket (nodriver ``Browser.connection``,
-    ``core/browser.py:437``) — the one every by-id Target-domain command travels
-    over. It is a :class:`FakeTab`, so ``connection.send_calls`` /
-    ``connection.cdp_frames`` record the command name AND its arguments.
+    The browser IS its own BROWSER-level connection, as in nodriver 0.50
+    (``Browser(Connection)``, ``core/browser.py``:32; ``Browser.connection`` is
+    always ``None`` there) — the one every by-id Target-domain command travels
+    over. So it is a :class:`FakeTab`: ``send_calls`` / ``cdp_frames`` record the
+    command name AND its arguments, ``add_handler`` / ``_deliver`` model the
+    event listeners, and ``aclose`` is the verb that closes OUR websocket.
 
     ``Target.createTarget`` over that connection opens a tab (F-940): the URL is
     recorded in ``opened``, so a test can assert that a code path opened NO extra
-    tab (the F-775a leak), and the tab is registered in ``targets`` BEFORE the
-    reply, the way nodriver's ``targetCreated`` handler registers it on a healthy
-    session. ``discovers_targets=False`` is the session that lost discovery to a
-    reconnect, where nothing registers it and only ``Target.getTargetInfo``
-    still knows the target. ``create_target_error`` is a ``createTarget`` that
-    Chrome refuses.
+    tab (the F-775a leak). The tab joins ``targets`` when :meth:`update_targets`
+    runs, which is where nodriver 0.50 registers every target (``Target.getTargets``,
+    ``browser.py``:498); ``lists_new_targets=False`` is a Chrome that answers
+    ``createTarget`` and then does not list the target (it closed again at once).
+    ``unlisted`` holds targets Chrome has that nodriver has not listed yet (a
+    popup), which the next ``update_targets`` registers. ``create_target_error``
+    is a ``createTarget`` that Chrome refuses.
 
     ``main_tab`` is what an ATTACH hands back (F-888) — nodriver's
     ``Browser.main_tab``, which the adoption path reads to decide whether a
@@ -61,7 +62,7 @@ class FakeBrowser:
         opened_tab: Any = None,
         update_targets_stalls: bool = False,
         main_tab: Any = None,
-        discovers_targets: bool = True,
+        lists_new_targets: bool = True,
         create_target_error: BaseException | None = None,
     ) -> None:
         if alive is None:
@@ -70,24 +71,30 @@ class FakeBrowser:
             code = None if alive else 0
             self._process = SimpleNamespace(poll=lambda: code, returncode=code)
         self._process_pid = pid
-        self.target = SimpleNamespace(url="https://fake.test/page", type_="browser")
         self.tabs = list(tabs or [])
         self.update_targets_calls = 0
         # nodriver's ``Browser.config`` — the host/port its tab URLs are built on.
         self.config = SimpleNamespace(host="127.0.0.1", port=9222)
         # nodriver 0.50 gives every ``Tab`` its parent's ``websocket_url``.
         self.websocket_url = "ws://127.0.0.1:9222/devtools/browser/fake"
-        self.connection = FakeTab(
+        super().__init__(
             url="ws://fake.test/devtools/browser",
             cdp_responses={
                 "create_target": self._create_target,
-                "get_target_info": self._get_target_info,
             },
         )
+        # The browser's OWN target is the ``browser`` one, which is what makes
+        # ``Tab.browser`` (``tab.py``:163) answer its parent.
+        self.target = SimpleNamespace(url="https://fake.test/page", type_="browser")
+        # nodriver's ``Connection.socket``: ``None`` until opened, a close code
+        # once closed (``connection.py``:231, the test ``aopen`` itself makes).
+        self.socket = SimpleNamespace(close_code=None)
         self.opened: list[str] = []
         self._created: dict[str, Any] = {}
         self._opened_tab = opened_tab
-        self._discovers_targets = discovers_targets
+        self._lists_new_targets = lists_new_targets
+        self.unlisted: list[Any] = []
+        self.stopped = False
         self._create_target_error = create_target_error
         self._update_targets_stalls = update_targets_stalls
         # nodriver's ``Browser.main_tab`` — the tab an ATTACH hands back (F-888).
@@ -117,31 +124,20 @@ class FakeBrowser:
         """
         if self._create_target_error is not None:
             raise self._create_target_error
-        url = self.connection.cdp_frames[-1]["params"]["url"]
+        url = self.cdp_frames[-1]["params"]["url"]
         self.opened.append(url)
         tab = self._opened_tab or FakeTab(
             url=url, target_id=f"T-opened-{len(self.opened)}"
         )
         tab.opened_by = self
         self._created[tab.target.target_id] = tab
-        if self._discovers_targets:
-            self.tabs.append(tab)
+        if self._lists_new_targets:
+            self.unlisted.append(tab)
         return tab.target.target_id
 
-    def _get_target_info(self, _name: str) -> Any:
-        """``Target.getTargetInfo`` — Chrome's own answer, discovery or not,
-        as the real ``TargetInfo`` nodriver parses it into."""
-        target = self._created[
-            self.connection.cdp_frames[-1]["params"]["targetId"]
-        ].target
-        return cdp_target.TargetInfo(
-            target_id=target.target_id,
-            type_=target.type_,
-            title=target.title,
-            url=target.url,
-            attached=False,
-            can_access_opener=False,
-        )
+    def stop(self) -> None:
+        """nodriver's ``Browser.stop`` (terminates the process)."""
+        self.stopped = True
 
     async def update_targets(self) -> None:
         """nodriver's target refresh. The real one rewrites every known
@@ -157,6 +153,9 @@ class FakeBrowser:
         self.update_targets_calls += 1
         if self._update_targets_stalls:
             await asyncio.Event().wait()
+        # ``Target.getTargets``: every target Chrome has that is not listed yet.
+        listed, self.unlisted = self.unlisted, []
+        self.tabs.extend(tab for tab in listed if tab not in self.tabs)
 
 
 class FakeBrowserManager:

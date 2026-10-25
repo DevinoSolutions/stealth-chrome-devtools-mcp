@@ -6,7 +6,6 @@ door)."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -15,9 +14,10 @@ from types import SimpleNamespace
 import psutil
 import pytest
 from nodriver import cdp
-from nodriver.core.connection import Connection, ProtocolException
+from nodriver.core.connection import ProtocolException
 
 from fakes import forbid_real_process_kills
+from fakes_wire import listener_alive, registered, until, wire
 from stealth_chrome_devtools_mcp.embedded import devtools_port
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -51,7 +51,7 @@ class _Connection:
             raise self.behaviour
         return self.processes
 
-    async def disconnect(self):
+    async def aclose(self):
         self.disconnected = True
 
 
@@ -80,11 +80,8 @@ ANSWER_PATIENCE_SECONDS = 60.0
 
 
 def _browser(*processes: tuple[str, int]) -> SimpleNamespace:
-    return SimpleNamespace(
-        connection=_Connection(
-            [cdp.system_info.ProcessInfo(t, i, 0.0) for t, i in processes]
-        )
-    )
+    """The launched ``Browser``: since nodriver 0.50 it IS its own connection."""
+    return _Connection([cdp.system_info.ProcessInfo(t, i, 0.0) for t, i in processes])
 
 
 def _short_waits(monkeypatch, *, patience: float = 1.0) -> None:
@@ -107,11 +104,10 @@ def throwaways(monkeypatch):
     made: list[_Connection] = []
     plan: list[object] = []
 
-    def build(url):
+    def build():
         connection = _Connection(
             [cdp.system_info.ProcessInfo("browser", os.getpid(), 0.0)]
         )
-        connection.websocket_url = url
         connection.behaviour = plan.pop(0) if plan else None
         made.append(connection)
         return connection
@@ -131,8 +127,8 @@ def _launcher_exits_after_two(monkeypatch, throwaways) -> None:
 def _lost_browser(*processes: tuple[str, int]) -> SimpleNamespace:
     """A browser whose own connection loses the first query (never answers)."""
     browser = _browser(*processes)
-    browser.connection.behaviour = "hang"
-    browser.connection.websocket_url = "ws://127.0.0.1:1/devtools/browser/x"
+    browser.behaviour = "hang"
+    browser.websocket_url = "ws://127.0.0.1:1/devtools/browser/x"
     return browser
 
 
@@ -175,10 +171,8 @@ class TestConfirmOurs:
     async def test_the_launched_pid_passes_and_asks_the_read_only_query(self):
         browser = _browser(("gpu", 5), ("browser", LAUNCHED))
         await devtools_port.confirm_ours(browser, LAUNCHED)
-        assert [c["method"] for c in browser.connection.sent] == [
-            "SystemInfo.getProcessInfo"
-        ]
-        assert not browser.connection.disconnected
+        assert [c["method"] for c in browser.sent] == ["SystemInfo.getProcessInfo"]
+        assert not browser.disconnected
 
     async def test_another_browser_is_refused_naming_both_and_dropped(self):
         browser = _browser(("browser", OTHER))
@@ -186,25 +180,25 @@ class TestConfirmOurs:
             await devtools_port.confirm_ours(browser, LAUNCHED)
         assert f"process {OTHER}" in str(err.value)
         assert f"pid {LAUNCHED}" in str(err.value)
-        assert browser.connection.disconnected
+        assert browser.disconnected
 
     async def test_a_descendant_of_the_launched_pid_passes(self, monkeypatch):
         monkeypatch.setattr(devtools_port, "owned_pids", lambda pid: {pid, OTHER})
         browser = _browser(("browser", OTHER))
         await devtools_port.confirm_ours(browser, LAUNCHED)
-        assert not browser.connection.disconnected
+        assert not browser.disconnected
 
     async def test_no_browser_process_in_the_answer_is_allowed_but_logged(self, logged):
         browser = _browser(("gpu", 5), ("renderer", 6))
         await devtools_port.confirm_ours(browser, LAUNCHED)
-        assert not browser.connection.disconnected
+        assert not browser.disconnected
         assert [fn for fn, _ in logged] == ["confirm_ours"]
         assert "no `browser` process" in logged[0][1]
 
     async def test_no_launched_pid_means_nothing_to_compare_and_is_logged(self, logged):
         browser = _browser(("browser", OTHER))
         await devtools_port.confirm_ours(browser, None)
-        assert browser.connection.sent == []
+        assert browser.sent == []
         assert [fn for fn, _ in logged] == ["confirm_ours"]
         assert "no launched pid" in logged[0][1]
 
@@ -212,12 +206,12 @@ class TestConfirmOurs:
         """An Electron or CEF app squatting on the port has no SystemInfo domain;
         real Chrome always answers. Not being able to answer is not being ours."""
         browser = _browser()
-        browser.connection.behaviour = ProtocolException(
+        browser.behaviour = ProtocolException(
             {"code": -32601, "message": "'SystemInfo.getProcessInfo' wasn't found"}
         )
         with pytest.raises(ToolError, match="cannot identify its process"):
             await devtools_port.confirm_ours(browser, LAUNCHED)
-        assert browser.connection.disconnected
+        assert browser.disconnected
 
     async def test_a_slow_answer_from_our_own_running_launch_is_accepted(
         self, monkeypatch, logged
@@ -229,9 +223,9 @@ class TestConfirmOurs:
         _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         me = os.getpid()
         browser = _browser(("browser", me))
-        browser.connection.behaviour = ("slow", 0.4)
+        browser.behaviour = ("slow", 0.4)
         await devtools_port.confirm_ours(browser, me)
-        assert not browser.connection.disconnected
+        assert not browser.disconnected
         assert [fn for fn, _ in logged] == ["confirm_ours"]
         assert "to say which process it is" in logged[0][1]
 
@@ -239,23 +233,23 @@ class TestConfirmOurs:
         """Patience is not trust: the pid in the answer decides, however late."""
         _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         browser = _browser(("browser", OTHER))
-        browser.connection.behaviour = ("slow", 0.4)
+        browser.behaviour = ("slow", 0.4)
         with pytest.raises(ToolError, match=f"process {OTHER}"):
             await devtools_port.confirm_ours(browser, os.getpid())
-        assert browser.connection.disconnected
+        assert browser.disconnected
 
     async def test_silence_past_the_patience_is_refused_and_the_request_ended(
         self, monkeypatch
     ):
         _short_waits(monkeypatch)
         browser = _browser()
-        browser.connection.behaviour = "hang"
+        browser.behaviour = "hang"
         with pytest.raises(ToolError, match="did not say which process it is"):
             await asyncio.wait_for(
                 devtools_port.confirm_ours(browser, os.getpid()), 10.0
             )
-        assert browser.connection.disconnected
-        assert browser.connection.send_cancelled
+        assert browser.disconnected
+        assert browser.send_cancelled
 
     async def test_a_launcher_that_is_gone_gets_no_wait_past_the_floor(
         self, monkeypatch
@@ -266,10 +260,10 @@ class TestConfirmOurs:
         _short_waits(monkeypatch)
         monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 60.0)
         browser = _browser()
-        browser.connection.behaviour = "hang"
+        browser.behaviour = "hang"
         with pytest.raises(ToolError, match="did not say which process it is"):
             await asyncio.wait_for(devtools_port.confirm_ours(browser, LAUNCHED), 10.0)
-        assert browser.connection.disconnected
+        assert browser.disconnected
 
     async def test_the_refusal_names_a_separate_pid_namespace(self):
         browser = _browser(("browser", OTHER))
@@ -280,17 +274,15 @@ class TestConfirmOurs:
         """Cancellation is how a spawn budget or a caller ends the wait; it must
         not leave a websocket open to somebody else's browser."""
         browser = _browser()
-        browser.connection.behaviour = "hang"
+        browser.behaviour = "hang"
         task = asyncio.ensure_future(devtools_port.confirm_ours(browser, LAUNCHED))
-        while not browser.connection.sent:
+        while not browser.sent:
             await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert browser.connection.disconnected
-        assert [c["method"] for c in browser.connection.sent] == [
-            "SystemInfo.getProcessInfo"
-        ]
+        assert browser.disconnected
+        assert [c["method"] for c in browser.sent] == ["SystemInfo.getProcessInfo"]
 
     async def test_a_second_cancel_during_a_slow_drop_still_closes_the_socket(self):
         """The drop runs while the spawn is already being cancelled, and a caller
@@ -298,17 +290,17 @@ class TestConfirmOurs:
         disconnect is shielded, so it finishes on its own. Without the shield the
         second cancel kills it mid-flight and the socket stays open."""
         browser = _browser()
-        browser.connection.behaviour = "hang"
+        browser.behaviour = "hang"
         started = asyncio.Event()
 
-        async def slow_disconnect():
+        async def slow_aclose():
             started.set()
             await asyncio.sleep(0.1)
-            browser.connection.disconnected = True
+            browser.disconnected = True
 
-        browser.connection.disconnect = slow_disconnect
+        browser.aclose = slow_aclose
         task = asyncio.ensure_future(devtools_port.confirm_ours(browser, LAUNCHED))
-        while not browser.connection.sent:
+        while not browser.sent:
             await asyncio.sleep(0)
         task.cancel()
         await asyncio.wait_for(started.wait(), 5)
@@ -316,7 +308,7 @@ class TestConfirmOurs:
         with pytest.raises(asyncio.CancelledError):
             await task
         await asyncio.sleep(0.3)
-        assert browser.connection.disconnected
+        assert browser.disconnected
 
     async def test_a_disconnect_that_never_returns_cannot_hold_the_refusal_up(
         self, monkeypatch
@@ -331,7 +323,7 @@ class TestConfirmOurs:
         async def stuck_disconnect():
             await release.wait()
 
-        browser.connection.disconnect = stuck_disconnect
+        browser.disconnect = stuck_disconnect
         try:
             with pytest.raises(ToolError, match="not the Chrome this spawn launched"):
                 await asyncio.wait_for(
@@ -370,13 +362,11 @@ class TestAskedAgain:
         _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         browser = _lost_browser(("browser", os.getpid()))
         await asyncio.wait_for(devtools_port.confirm_ours(browser, os.getpid()), 30.0)
-        assert not browser.connection.disconnected
-        assert browser.connection.send_cancelled
+        assert not browser.disconnected
+        assert browser.send_cancelled
         assert throwaways.made
         assert all(c.disconnected for c in throwaways.made)
-        assert {c.websocket_url for c in throwaways.made} == {
-            browser.connection.websocket_url
-        }
+        assert {c.websocket_url for c in throwaways.made} == {browser.websocket_url}
 
     async def test_a_stranger_among_the_answers_is_refused(self, monkeypatch):
         """Two asks answered by the time the wait ends, ours first: one that names a
@@ -392,17 +382,17 @@ class TestAskedAgain:
         browser = _browser()
         with pytest.raises(ToolError, match=f"process {OTHER}"):
             await devtools_port.confirm_ours(browser, LAUNCHED)
-        assert browser.connection.disconnected
+        assert browser.disconnected
 
     async def test_a_failed_request_does_not_beat_one_that_answers(
         self, monkeypatch, throwaways, logged
     ):
         _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
         browser = _lost_browser(("browser", os.getpid()))
-        browser.connection.behaviour = OSError("died under the request")
+        browser.behaviour = OSError("died under the request")
         throwaways.plan.append(None)
         await devtools_port.confirm_ours(browser, os.getpid())
-        assert not browser.connection.disconnected
+        assert not browser.disconnected
         assert any("OSError" in msg for _, msg in logged)
 
     async def test_a_throwaway_that_cannot_connect_ends_as_the_named_refusal(
@@ -433,7 +423,7 @@ class TestAskedAgain:
             await asyncio.wait_for(
                 devtools_port.confirm_ours(browser, os.getpid()), 10.0
             )
-        assert browser.connection.send_cancelled
+        assert browser.send_cancelled
         assert len(throwaways.made) >= 2
         assert all(c.disconnected and c.send_cancelled for c in throwaways.made)
 
@@ -448,7 +438,7 @@ class TestAskedAgain:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert browser.connection.disconnected
+        assert browser.disconnected
         assert all(c.disconnected for c in throwaways.made)
 
     async def test_a_connection_without_an_endpoint_is_asked_once(
@@ -459,7 +449,7 @@ class TestAskedAgain:
         _short_waits(monkeypatch)
         monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.3)
         browser = _browser()
-        browser.connection.behaviour = "hang"
+        browser.behaviour = "hang"
         with pytest.raises(ToolError, match="did not say which process it is"):
             await asyncio.wait_for(
                 devtools_port.confirm_ours(browser, os.getpid()), 10.0
@@ -467,33 +457,8 @@ class TestAskedAgain:
         assert throwaways.made == []
 
 
-class _Websocket:
-    """The websocket under a REAL nodriver ``Connection``: records what is sent, and
-    delivers whatever the test puts on ``inbox`` to the connection's own listener."""
-
-    close_code = None
-
-    def __init__(self) -> None:
-        self.inbox: asyncio.Queue[str] = asyncio.Queue()
-        self.sent: list[dict] = []
-
-    async def send(self, text: str) -> None:
-        self.sent.append(json.loads(text))
-
-    async def recv(self) -> str:
-        return await self.inbox.get()
-
-    async def close(self) -> None:
-        self.close_code = 1000
-
-
-def _process_reply(message_id: int, pid: int) -> str:
-    return json.dumps(
-        {
-            "id": message_id,
-            "result": {"processInfo": [{"type": "browser", "id": pid, "cpuTime": 0.0}]},
-        }
-    )
+def _process_info(pid: int) -> dict:
+    return {"processInfo": [{"type": "browser", "id": pid, "cpuTime": 0.0}]}
 
 
 @pytest.mark.asyncio
@@ -504,47 +469,29 @@ class TestTheCancelledFirstAsk:
         """When a throwaway answers first, the first ask on the launch's own
         connection is CANCELLED while Chrome still has the command. The late reply must
         reach a listener that survives it, or the launch's CDP session dies right
-        after the spawn is accepted. That holds only because ``cdp_transport`` shields
-        ``Transaction.__await__`` (and guards its delivery): the production import path
-        installs it, so this test does not, and the real nodriver ``send`` and
-        ``_listener`` run over a fake websocket."""
-        from stealth_chrome_devtools_mcp.embedded import (
-            cdp_transport,
-            tool_runtime,  # noqa: F401  PERMANENT(importing it is what installs the transport patch in production)
-        )
-
+        after the spawn is accepted. That holds because nodriver 0.50's
+        ``Connection.send`` owns its future and drops its registration in a
+        ``finally`` (``connection.py``:435-438): the real ``send`` and ``_listener``
+        run here over a fake websocket, and the browser IS the connection."""
         _short_waits(monkeypatch, patience=ANSWER_PATIENCE_SECONDS)
-        socket = _Websocket()
-        connection = Connection("ws://127.0.0.1:1/devtools/browser/x")
-        connection._websocket = socket  # noqa: SLF001  PERMANENT(a fake websocket under the real Connection)
-        connection._listener_task = asyncio.ensure_future(connection._listener())  # noqa: SLF001  PERMANENT(the real listener over the fake websocket)
-        try:
+        async with wire() as (connection, socket):
+            connection.websocket_url = "ws://127.0.0.1:1/devtools/browser/x"
             await asyncio.wait_for(
-                devtools_port.confirm_ours(
-                    SimpleNamespace(connection=connection), os.getpid()
-                ),
-                30.0,
+                devtools_port.confirm_ours(connection, os.getpid()), 30.0
             )
             assert throwaways.made, "the throwaway never asked"
             (first,) = socket.sent
             assert first["method"] == "SystemInfo.getProcessInfo"
-            pending = connection.mapper[first["id"]]
-            assert not pending.cancelled(), "the cancelled ask took its Transaction"
+            assert registered(connection) == 0, "the cancelled ask kept its future"
 
-            socket.inbox.put_nowait(_process_reply(first["id"], os.getpid()))
+            socket.answer(first["id"], _process_info(os.getpid()))  # the late reply
             await asyncio.sleep(0.2)
-            assert not connection._listener_task.done(), (  # noqa: SLF001  PERMANENT(is the listener alive)
-                "the late reply killed the launch's listener"
-            )
-            assert pending.done()
+            assert listener_alive(connection), "the late reply killed the listener"
 
             following = asyncio.ensure_future(
                 connection.send(cdp.system_info.get_process_info())
             )
-            await _until(lambda: len(socket.sent) == 2)
-            socket.inbox.put_nowait(_process_reply(socket.sent[1]["id"], os.getpid()))
+            await until(lambda: len(socket.sent) == 2)
+            socket.answer(socket.sent[1]["id"], _process_info(os.getpid()))
             reply = await asyncio.wait_for(following, 5.0)
             assert reply[0].id_ == os.getpid()
-            assert cdp_transport.installed()
-        finally:
-            connection._listener_task.cancel()  # noqa: SLF001  PERMANENT(end the real listener)

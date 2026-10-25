@@ -146,13 +146,14 @@ async def test_binding_answers_same_origin_blank_frame_and_refuses_the_rest(
         await close(instance_id=iid)
 
 
-async def test_closing_a_tab_reaps_its_watch_and_leaves_nodrivers_handler(
+async def test_closing_a_tab_reaps_its_watch_and_its_handler(
     fixture_origin_pair,
 ):
     """The reap of #278: a closed tab's ``TabWatch`` leaves ``Bindings.watches``
-    (with its reference to the Tab) when Chrome reports ``Target.targetDestroyed``,
-    and removing the watch's handler does not take nodriver's own handler for the
-    same event off the browser's connection with it."""
+    (with its reference to the Tab) when Chrome reports ``Target.targetDestroyed``
+    (which it does because ``tab_open.arm_popups`` switched Target discovery on),
+    and takes its own handler for that event off the browser's connection with
+    it."""
     origin_a, _ = fixture_origin_pair
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
@@ -180,7 +181,7 @@ async def test_closing_a_tab_reaps_its_watch_and_leaves_nodrivers_handler(
         browser = await runtime.browser_manager.get_browser(iid)
         # Settled: the deferred detach has run by the time the loop has waited.
         await asyncio.sleep(0.2)
-        callbacks = browser.connection.handlers[cdp.target.TargetDestroyed]
-        assert callbacks == [browser._handle_target_update], callbacks
+        callbacks = browser.handlers.get(cdp.target.TargetDestroyed, [])
+        assert callbacks == [], callbacks
     finally:
         await close(instance_id=iid)
