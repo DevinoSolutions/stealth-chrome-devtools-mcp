@@ -14,6 +14,12 @@ updates:
       minor-and-patch:
         applies-to: version-updates
         update-types: [minor, patch]
+    # nodriver is pinned `==` because its internals are monkeypatched (the CDP listener
+    # and Transaction wrappers), so a bump is a migration, not a group update. 0.x minors
+    # break it; the 0.50 migration is T-8501. Delete this entry when T-8501 lands.
+    ignore:
+      - dependency-name: nodriver
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
   - package-ecosystem: npm            # root package.json holds husky only
     directory: /
     schedule: { interval: weekly, day: monday }

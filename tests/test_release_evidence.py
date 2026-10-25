@@ -950,7 +950,7 @@ def test_a_claim_that_cites_the_representative_journey_is_rejected(
     ledger: Path, tmp_path: Path
 ):
     """plan_RELEASE §2.5: ONE journey node may never qualify an individual tool."""
-    journey = sorted(re_mod.NON_PER_TOOL_NODES)[0]
+    journey = min(re_mod.NON_PER_TOOL_NODES)
     claims = _claims(tmp_path, [_claim(node_id=journey)])
     _, problems = _aggregate(ledger, claims=str(claims))
     assert any("representative journey" in p for p in problems)

@@ -78,7 +78,7 @@ def _run(job: Callable[[], object], name: str) -> None:
     started = time.monotonic()
     try:
         job()
-    except Exception:  # noqa: BLE001  PERMANENT(startup work is best-effort)
+    except Exception:
         _logger.warning("startup job %r failed after serving began", name)
         _logger.debug("startup job detail", exc_info=True)
         return
