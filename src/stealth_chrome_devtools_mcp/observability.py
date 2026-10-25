@@ -555,6 +555,9 @@ def _is_expected_tool_failure(
 #: ``sys.excepthook`` (``integrations/excepthook.py``) and ``threading.excepthook``
 #: (``integrations/threading.py``), sdk 2.64.0. A hook reports whatever the
 #: interpreter dies of, which is only ours when our code is in the traceback.
+#: Accepted cost (T-7828): an uncaught crash in a LIBRARY-started thread with no
+#: frame of ours is dropped too; our own threads run targets in this package and
+#: are still reported.
 _HOOK_MECHANISMS = frozenset({"excepthook", "threading"})
 
 
