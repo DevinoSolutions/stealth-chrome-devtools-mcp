@@ -221,3 +221,25 @@ def test_our_identity_is_derived_but_equals_the_shipped_literals() -> None:
     assert observability._PACKAGE_DIR.resolve() == expected.resolve()
     assert observability._is_our_frame({"module": "stealth_chrome_devtools_mcp.x"})
     assert not observability._is_our_frame({"module": "other.x"})
+
+
+def test_package_dir_is_the_unresolved_module_parent() -> None:
+    """T-8254 -- unresolved on purpose: frame ``abs_path`` values are not resolved."""
+    assert Path(observability.__file__).parent == observability._PACKAGE_DIR
+
+
+def test_a_vendored_name_claims_only_its_own_package(monkeypatch) -> None:
+    """T-8254 -- the full parent package is matched, never its top-level segment."""
+    monkeypatch.setattr(
+        observability, "_IMPORT_NAME", "vendor.stealth_chrome_devtools_mcp"
+    )
+    other = {"module": "vendor.other_lib.x", "abs_path": "/elsewhere/other_lib/x.py"}
+    ours = {"module": "vendor.stealth_chrome_devtools_mcp.server"}
+    assert not observability._is_our_frame(other)
+    assert observability._is_our_frame(ours)
+
+
+def test_a_shared_prefix_without_a_dot_is_not_ours() -> None:
+    """T-8254 -- ``pkg_evil`` is not ``pkg``."""
+    frame = {"module": "stealth_chrome_devtools_mcp_evil.x", "abs_path": "/e/x.py"}
+    assert not observability._is_our_frame(frame)

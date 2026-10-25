@@ -4,7 +4,7 @@
 
 ### observability derives its package import name and directory (T-8254)
 
-- `observability._IMPORT_NAME` and `_PACKAGE_DIR`, which decide whether a crash frame is ours (`_is_our_frame`, the foreign-hook drop), were typed literals. They are now read off the module (`__package__`, `__file__`), so a rename or vendoring cannot make our own crash look foreign. A test pins them to the shipped values.
+- `observability._IMPORT_NAME` and `_PACKAGE_DIR`, which decide whether a crash frame is ours (`_is_our_frame`, the foreign-hook drop), were typed literals. They are now read off the module: the name is the full parent package (`__package__`), matched as that name or a dotted child of it, so a vendored copy claims only its own package and a shared prefix (`pkg_evil`) is not ours. Loaded by path the name is empty and only the `abs_path` rule applies. Tests pin the values and both matcher cases.
 
 ### The job-escape pin retries and skips, loudly, when the scheduler is slow rather than missing (T-8308)
 
