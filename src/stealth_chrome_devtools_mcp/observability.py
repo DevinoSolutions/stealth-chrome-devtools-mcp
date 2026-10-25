@@ -73,11 +73,13 @@ _DSN = "https://3206541bdab9246f00d7099e692e2ee2@sentry.devino.ca/34"
 _log = logging.getLogger(__name__)
 
 # What "ours" means for ``_is_our_frame``, read off this module so a rename or a
-# vendored copy cannot leave the rule naming a package that no longer exists (it
-# would then ship a foreign crash AND drop our own). ``__package__`` is the
-# parent package even when this file is run by path or ``runpy``; the
-# ``__name__`` fallback covers a spec-less load.
-_IMPORT_NAME = (__package__ or __name__).partition(".")[0]
+# vendored copy cannot leave the rule naming a package that no longer exists. The
+# name is the FULL parent package (``vendor.pkg`` when vendored), so a sibling
+# top-level name is never claimed. It derives from the normal or ``-m`` import;
+# loaded by path ``__package__`` is None (``runpy.run_path``: ``""``) and the name
+# is empty, which matches nothing -- the ``abs_path`` rule alone then decides,
+# and it is still right for our frames.
+_IMPORT_NAME = __package__ or __name__.rpartition(".")[0]
 _PACKAGE_DIR = Path(__file__).parent
 
 
@@ -598,7 +600,9 @@ def _is_foreign_hook_crash(event: "Event") -> bool:
 
 def _is_our_frame(frame: "dict[str, object]") -> bool:
     module, abs_path = frame.get("module"), frame.get("abs_path")
-    if isinstance(module, str) and module.split(".")[0] == _IMPORT_NAME:
+    if (isinstance(module, str) and _IMPORT_NAME) and (
+        module == _IMPORT_NAME or module.startswith(_IMPORT_NAME + ".")
+    ):
         return True
     return isinstance(abs_path, str) and Path(abs_path).is_relative_to(_PACKAGE_DIR)
 
