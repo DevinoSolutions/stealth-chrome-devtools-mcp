@@ -729,6 +729,7 @@ newer. If browsers are still closing unexpectedly, check that nothing old is lef
 `uv tool list` and any pinned `uvx` version in your MCP client config.
 
 ### Upgrading on Windows while the stdio proxy runs
+
 `uv tool upgrade stealth-chrome-devtools-mcp` fails with "failed to copy ...
 stealth-chrome-devtools-mcp.exe ... os error 32" when a Claude Code session is
 holding the stdio proxy (the file is in use). The tool venv **is** upgraded, but uv
