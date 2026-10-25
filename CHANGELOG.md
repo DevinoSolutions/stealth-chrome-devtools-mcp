@@ -16,6 +16,10 @@
   record, and the PR cell count in `RELEASE_CONTRACT.md` is still the owed cells. Pushes to main, tags and manual runs are unchanged: the cell is flagged on none of them and is still
   owed (and a red record still fails the aggregate). Promote it to required by moving it into `_in_pr_tier`.
 
+### Docs: follow-up nits from the 2.1.43 reviews (T-8243)
+
+- **Docs only (T-8243).** RUNBOOK gains "Upgrading on Windows while the stdio proxy runs": `uv tool upgrade` fails copying the shim (os error 32) and leaves the other shims deleted, with the copy-back fix. Two comments tidied: a fastmcp line cite now reads `3.4.x`, and `_HOOK_MECHANISMS` states the T-7828 accepted cost.
+
 ## 2.1.43
 
 ### A closed tab's python-binding watch is reaped (T-6561)

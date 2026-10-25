@@ -728,6 +728,17 @@ serving, so the guarantee only holds once every install on the machine is 2.1.9 
 newer. If browsers are still closing unexpectedly, check that nothing old is left:
 `uv tool list` and any pinned `uvx` version in your MCP client config.
 
+### Upgrading on Windows while the stdio proxy runs
+`uv tool upgrade stealth-chrome-devtools-mcp` fails with "failed to copy ...
+stealth-chrome-devtools-mcp.exe ... os error 32" when a Claude Code session is
+holding the stdio proxy (the file is in use). The tool venv **is** upgraded, but uv
+leaves the other shims (`stealthy.exe`, `stealth-chrome-devtools.exe`) deleted from
+`~/.local/bin`, so those commands stop resolving.
+
+Copy the missing `.exe` shims from `%APPDATA%/uv/tools/stealth-chrome-devtools-mcp/Scripts`
+into `~/.local/bin`, then check `stealthy --version`. Or close the Claude Code
+sessions that hold the proxy first and re-run the upgrade.
+
 ### Headed spawn fails: "cannot display a window"
 
 `spawn_browser(headless=False)` raises a `ToolError` naming a display context
