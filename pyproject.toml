@@ -193,7 +193,7 @@ select = [
 #
 # PLR0917 (too-many-positional-arguments) is OFF as a deliberate decision: it was a
 # preview rule we never enabled, and ruff 0.17 promoted it to stable, so "PL" began
-# selecting it (52 sites). It is the positional-only twin of PLR0913, which already
+# selecting it (52 sites). It is the positional-count twin of PLR0913, which already
 # owns argument-count policy here (per-file-ignores and owner-tagged inline noqa on
 # the same signatures); a second gate on the same signatures is a second way.
 ignore = ["TRY003", "PLC0415", "UP017", "PLR0917"]
