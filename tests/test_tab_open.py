@@ -67,7 +67,7 @@ async def test_a_session_that_lost_discovery_still_gets_a_real_tab():
     assert _methods(browser) == ["Target.createTarget", "Target.getTargetInfo"]
     assert tab.target.target_id == "T-opened-1"
     assert isinstance(tab.target, cdp.target.TargetInfo)
-    assert tab.websocket_url == "ws://127.0.0.1:9222/devtools/page/T-opened-1"
+    assert tab.websocket_url == browser.websocket_url
     assert tab.browser is browser
     assert _entries_for(browser, "T-opened-1") == [tab]
     assert browser.update_targets_calls == 1
@@ -80,7 +80,7 @@ async def test_a_bare_connection_registered_meanwhile_is_replaced_in_place():
     browser = FakeBrowser(discovers_targets=False)
     _arrives_during_get_target_info(
         browser,
-        lambda info: Connection("ws://127.0.0.1:9222/devtools/page/x", target=info),
+        lambda info: Connection(target=info),
     )
 
     tab = await tab_open.open_tab(browser, "about:blank")
@@ -96,9 +96,7 @@ async def test_a_tab_registered_meanwhile_is_the_one_handed_back():
     registered: list[Tab] = []
 
     def _late_tab(info: cdp.target.TargetInfo) -> Tab:
-        registered.append(
-            Tab("ws://127.0.0.1:9222/devtools/page/late", target=info, browser=browser)
-        )
+        registered.append(Tab(target=info, parent=browser))
         return registered[0]
 
     _arrives_during_get_target_info(browser, _late_tab)

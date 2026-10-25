@@ -25,10 +25,9 @@ and the message the stdio proxy parses back out of it) — and holds
 :data:`PAYLOAD_WARNING_LOGGERS` at ERROR, for fastmcp 3's WARNING that quotes a
 caller's arguments (F-946). One caller-side
 ``logging.basicConfig(level=DEBUG)`` is enough to route any of them to our
-stderr and to a Sentry breadcrumb. It belongs HERE and not at the seam that
-patches nodriver
-(``cdp_transport``, which owns what nodriver may DO with a reply): a level is
-log configuration, and log configuration has one home.
+stderr and to a Sentry breadcrumb. It belongs HERE and not at a seam that
+patches nodriver: a level is log configuration, and log configuration has one
+home.
 
 ``singleton.py`` also needs this module (the boot-log redirect and the
 ``configure_logging("proxy")`` call), while :func:`resolve_log_dir` reuses

@@ -97,7 +97,7 @@ async def attach_reclaiming(config: Config, pid: int) -> Browser:
     """:func:`attach`, but a cancellation cannot strand the connection it opens.
 
     Cancelling an ``await`` never un-opens a websocket nodriver has already
-    connected — the same sentence :mod:`cdp_transport` is built on. A plain
+    connected. A plain
     ``wait_for`` around the door therefore leaves, on timeout, a live connection
     and a live listener task belonging to a ``Browser`` nobody holds a reference
     to any more. So the attach runs as its own TASK behind a shield: the

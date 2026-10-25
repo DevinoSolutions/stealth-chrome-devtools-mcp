@@ -91,29 +91,6 @@ def _install_asyncio_close_noise_filter() -> None:
     setattr(loop, marker, True)
 
 
-def _install_nodriver_cookie_compat() -> None:
-    try:
-        import nodriver.cdp.network as cdp_network
-    except Exception as e:
-        rt.debug_logger.log_warning("server", "_install_nodriver_cookie_compat", str(e))
-        return
-
-    marker = "_stealth_chrome_devtools_cookie_compat"
-    if getattr(cdp_network.Cookie, marker, False):
-        return
-
-    original_from_json = cdp_network.Cookie.from_json
-
-    def from_json(json_obj: dict[str, Any]):
-        if isinstance(json_obj, dict) and "sameParty" not in json_obj:
-            json_obj = dict(json_obj)
-            json_obj["sameParty"] = False
-        return original_from_json(json_obj)
-
-    cdp_network.Cookie.from_json = staticmethod(from_json)
-    setattr(cdp_network.Cookie, marker, True)
-
-
 DEBUG_LOGGING_ENABLED = get_settings().stealth_browser_debug or get_settings().debug
 
 # B1 (RELEASE-FIX-B): FastMCP re-enters the server ``lifespan`` whenever its last
@@ -158,7 +135,6 @@ async def app_lifespan(server):
     if not _LIFESPAN_STARTED:
         _LIFESPAN_STARTED = True
         _install_asyncio_close_noise_filter()
-        _install_nodriver_cookie_compat()
         rt.debug_logger.log_info(
             "server", "startup", "Starting Browser Automation MCP Server..."
         )

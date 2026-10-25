@@ -1054,7 +1054,7 @@ class TestTheSdkStillOwnsItsOwnException:
         )
 
     def test_the_substitute_does_not_chain_back_to_the_original(self):
-        """``cdp_transport``'s trap exactly: an exception built while another is
+        """F-902's trap exactly: an exception built while another is
         being handled must not carry it as ``__context__``, or every formatting
         sink renders the text we just withheld."""
         with contextlib.redirect_stderr(io.StringIO()):

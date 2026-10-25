@@ -34,27 +34,23 @@ deliberately not built here.
 
 **Why the generated types and not a raw socket.** The measurement drove CDP over
 a websocket of its own because ``network.Cookie.from_json`` read a field Chrome
-153 had retired and killed the connection's listener — F-902, fixed since, in
-``cdp_transport``: half 2 guards the delivery, half 3 supplies the retired
-``sameParty``. So the jar goes through ``Connection.send`` like every other
-command in this tree, which is the one door ``cdp_transport`` protects. A second
-transport here would be a second answer to "how does a CDP reply reach us", one
-layer below the module that exists to make that answer safe.
+153 had retired and killed the connection's listener — F-902. nodriver 0.50
+dropped the field from its generated ``Cookie`` and moved the parse into the
+caller's ``send`` (T-8501), so the jar goes through ``Connection.send`` like
+every other command in this tree. A second transport here would be a second
+answer to "how does a CDP reply reach us".
 
-**``same_party`` is deliberately NOT carried, and that is F-902's fix read from
-the other side.** ``_RETIRED_COOKIE_FIELDS`` SYNTHESISES ``sameParty: False``
-for a Chrome that no longer sends it, so every cookie read here carries a value
-Chrome did not give us; ``CookieParam.to_json`` would then write that invention
-straight back. ``expires`` is the other field held out of the derived set, for
-the opposite reason — it needs a translation rather than a pass-through (see
-``as_param``).
+**Chrome 153's ``Network.Cookie`` has no ``sameParty`` and nodriver 0.50's
+``Cookie`` has no ``same_party``**, so nothing here reads, synthesises or writes
+it back. ``expires`` is the one field held out of the derived set: it needs a
+translation rather than a pass-through (see ``as_param``).
 
 **PII: no cookie NAME and no cookie VALUE may leave this module.** Not in a
 return, not in an exception, not in a log line, not in a Sentry breadcrumb.
 A jar is the credentials themselves, and a NAME alone identifies (``NID`` names
 Google; a list of names is a list of the sites its human uses). Everything here
 reports counts, the CDP METHOD and an exception TYPE —
-``cdp_transport._report``'s discipline, applied to the one subsystem whose whole
+F-902's shape-only discipline, applied to the one subsystem whose whole
 payload is secrets. This is also why the caller must NOT pass a failure here to
 ``debug_logger.log_warning(error=...)``: that forwards ``exc_info``, and the
 exception behind a failed ``Storage.setCookies`` is Chrome's answer to a command
@@ -114,11 +110,9 @@ VIA_CDP = "cdp-cookies"
 #: did run.
 VIA_COPY = "copy"
 
-#: Held out of the DERIVED carried set, each for its own reason.
-#: ``same_party`` is F-902's synthesised field (see the module docstring) and
-#: forwarding it would write an invention back to Chrome. ``expires`` needs a
-#: translation rather than a pass-through and ``as_param`` makes it.
-_NOT_CARRIED = frozenset({"same_party", "expires"})
+#: Held out of the DERIVED carried set: ``expires`` needs a translation rather
+#: than a pass-through and ``as_param`` makes it.
+_NOT_CARRIED = frozenset({"expires"})
 
 
 def _carried_fields() -> tuple[str, ...]:
@@ -288,7 +282,7 @@ def _failed(method: str, error: BaseException) -> HandoffError:
     """Name the CDP method that failed and the TYPE that failed it.
 
     Built from the type NAME only, so the instance behind it is not referenced
-    and cannot be reached from the raised error — ``cdp_transport``'s rule for
+    and cannot be reached from the raised error — F-902's rule for
     the same payload, which is why the caller raises this OUTSIDE its ``except``
     as well (a chained ``__context__`` is a second door onto the same string).
     """
@@ -534,7 +528,7 @@ def failure(error: BaseException) -> str:
     writes is shape. Anything else is reported by its TYPE alone — the text of
     a ``Storage.setCookies`` failure is Chrome's answer to a command whose
     parameters were the jar, and that string reaches the tool's answer, the
-    durable log and Sentry at once. ``cdp_transport``'s rule for the same
+    durable log and Sentry at once. F-902's rule for the same
     payload, which is where a cookie-carrying reply's own re-raise was found
     interpolating the whole jar.
     """

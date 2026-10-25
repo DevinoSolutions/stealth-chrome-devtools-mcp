@@ -380,9 +380,9 @@ _MAX_CHAIN = 24
 class WithheldInputError(Exception):
     """What a record carries instead of an exception that quotes its input.
 
-    Carries SHAPE only, on ``cdp_transport.CdpReplyError``'s precedent (F-902),
-    which reports the CDP method, the exception type and the reply's field
-    COUNT rather than nodriver's interpolation of the whole reply. Same answer,
+    Carries SHAPE only, on F-902's precedent (a retired ``CdpReplyError`` that
+    reported the CDP method, the exception type and the reply's field COUNT
+    rather than nodriver's interpolation of the whole reply). Same answer,
     one layer out: this one reports the validation error's type, its model, its
     error count and each error's ``type``/``loc`` — and never the input.
 

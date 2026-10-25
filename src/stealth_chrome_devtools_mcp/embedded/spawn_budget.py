@@ -55,8 +55,8 @@ the caller cancels the child the same way, so it is never left running.
 exchanges and every one of them is bounded by the phase's budget, which is no
 looser than bounding each: a phase that would have taken longer than its budget
 by summing six healthy sends is not a healthy phase. Cancelling a send is safe
-because ``cdp_transport`` protects the connection's listener from exactly that
-(F-883 B1).
+because nodriver 0.50's ``Connection.send`` owns its future and cannot take the
+listener with it (F-883 B1, T-8501).
 
 A leaf: asyncio and ``tool_errors`` only.
 """

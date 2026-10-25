@@ -249,27 +249,21 @@ class TestNoModuleBodyDoesWork:
     property: importing any module in this package only defines things.
 
     Every allowed call is named with its REASON rather than pattern-matched, so
-    adding one is a decision someone writes down. Both entries are the same
-    shape -- a nodriver patch installed from ``tool_runtime``'s module body --
-    and they are two rather than one because CLAUDE.md's rule is **one home per
-    QUESTION, not one nodriver patch in the tree**: ``cdp_transport`` is about
-    the CONNECTION, ``element_box`` about an ELEMENT's box. A third with that
-    shape is fine; a third that opens a socket, reads a record or starts a
-    process is the defect F-904 was, and no comment makes it allowable.
+    adding one is a decision someone writes down. The entry is a nodriver patch
+    installed from ``tool_runtime``'s module body, and CLAUDE.md's rule is **one
+    home per QUESTION, not one nodriver patch in the tree**: ``element_box`` is
+    about an ELEMENT's box (the connection's own question, ``cdp_transport``,
+    left with nodriver 0.50 -- T-8501). Another with that shape is fine; one that
+    opens a socket, reads a record or starts a process is the defect F-904 was,
+    and no comment makes it allowable.
     """
 
     ALLOWED: frozenset[tuple[str, str]] = frozenset(
         {
-            # CLAUDE.md: tool_runtime is THE one call site of cdp_transport
-            # .install(). It is idempotent, does no I/O, spawns nothing, and has
-            # to run once per process before any tool body -- a module body is
-            # the only place with that shape.
-            ("embedded/tool_runtime.py", "cdp_transport.install()"),
-            # F-912, landed on main after this fence was written. The same four
-            # properties hold verbatim -- idempotent (guarded on the wrapper's
-            # own _MARKER), no I/O, spawns nothing, once per process ahead of
-            # every tool body -- and it is deliberately a SECOND install beside
-            # the first rather than folded into it.
+            # F-912. tool_runtime is THE one call site of element_box.install().
+            # It is idempotent (guarded on the wrapper's own _MARKER), does no
+            # I/O, spawns nothing, and has to run once per process before any
+            # tool body -- a module body is the only place with that shape.
             ("embedded/tool_runtime.py", "element_box.install()"),
         }
     )

@@ -75,9 +75,7 @@ async def open_tab(browser: Browser, url: str) -> Tab:
     tab = _registered_tab(browser, target_id)
     if tab is None:
         info = await browser.connection.send(cdp.target.get_target_info(target_id))
-        tab = _register(
-            browser, Tab(_websocket_url(browser, info), target=info, browser=browser)
-        )
+        tab = _register(browser, Tab(target=info, parent=browser))
     await browser.update_targets()
     return tab
 
@@ -147,12 +145,7 @@ def find(browser: Browser, tab_id: str) -> Tab | None:
     )
     if entry is None or not _is_bare_connection(entry):
         return entry
-    return _register(
-        browser,
-        Tab(
-            _websocket_url(browser, entry.target), target=entry.target, browser=browser
-        ),
-    )
+    return _register(browser, Tab(target=entry.target, parent=browser))
 
 
 def _is_bare_connection(entry: Connection) -> bool:
@@ -185,11 +178,3 @@ def _register(browser: Browser, tab: Tab) -> Tab:
         return tab
     browser.targets.append(tab)
     return tab
-
-
-def _websocket_url(browser: Browser, info: cdp.target.TargetInfo) -> str:
-    """The URL nodriver's ``targetCreated`` handler gives the tabs it builds."""
-    return (
-        f"ws://{browser.config.host}:{browser.config.port}"
-        f"/devtools/{info.type_ or 'page'}/{info.target_id}"
-    )

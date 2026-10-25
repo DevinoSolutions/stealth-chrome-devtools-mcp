@@ -60,12 +60,10 @@ The ELEMENT is still an OBJECT at the raise, which is the one place F-907's
 shape rule can be applied to it the way F-907 applies it: by TYPE, never by
 text. That is exactly the home F-907's own residual 9 names for a
 payload-bearing library exception — "shape-only **at the source**", on F-902's
-``cdp_transport.CdpReplyError`` precedent.
+(since retired) ``CdpReplyError`` precedent.
 
-**Why a module of its own rather than a fourth half of ``cdp_transport``.**
-That module's docstring forbids splitting ITS question across two seams, and the
-question is the CONNECTION: "handing the listener a reply must not end it". An
-element's box is not that. ``browser_connect`` is the standing precedent — a
+**Why a module of its own.** An element's box is its own question, not the
+connection's. ``browser_connect`` is the standing precedent — a
 separate leaf, one question, its own ``install()``, installed at the site that
 needs it — and "every nodriver patch in one file" is not an invariant this tree
 has ever held.
@@ -73,7 +71,7 @@ has ever held.
 **The key is the exception's TYPE and the raise site, never its text.**
 ``type(exc) is Exception`` — the bare builtin, exactly, not a subclass — is what
 ``element.py``:499 raises and what nothing else in ``get_position`` produces: a
-CDP failure there is a ``ProtocolException`` or a ``CdpReplyError``, a missing
+CDP failure there is a ``ProtocolException`` or a ``KeyError``, a missing
 remote object is an ``AttributeError``, a cancelled budget is a
 ``BaseException``. All of those still propagate UNCHANGED, because their text is
 Chrome's own diagnostic and shaping it would withhold the only thing an operator
@@ -109,7 +107,7 @@ the context is ABSENT rather than SUPPRESSED, so anything that reads
 stops consulting the flag — finds nothing, and an absence is not a setting
 anyone can flip. It costs one line's placement, which is why the stronger form
 is the one taken; ``cdp_transport._guard_result`` builds its error outside the
-handler for the same reason at a different seam. The pin asserts the ABSENCE
+handler for the same reason (F-902's). The pin asserts the ABSENCE
 (``__cause__ is None`` and ``__context__ is None``), never a third party's
 walking behaviour.
 
@@ -153,9 +151,9 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import _shape
 __all__ = ["ElementBoxError", "install", "installed"]
 
 #: On the WRAPPER and never on this module, so "is the protection in place" is a
-#: question about the object Python will actually call — ``cdp_transport``'s
-#: reasoning. It also holds nodriver's own function, which is what lets the
-#: premise pins drive the UNGUARDED raise in a process where we are installed.
+#: question about the object Python will actually call. It also holds
+#: nodriver's own function, which is what lets the premise pins drive the
+#: UNGUARDED raise in a process where we are installed.
 _MARKER = "__stealth_element_box__"
 
 
@@ -178,7 +176,7 @@ def _guard(original: Callable) -> Callable:
         # type is re-raised one line down, untouched.
         except Exception as exc:
             if type(exc) is not Exception:
-                # A ProtocolException, a CdpReplyError, an AttributeError: the
+                # A ProtocolException, a KeyError, an AttributeError: the
                 # text is Chrome's or Python's own diagnostic, not a rendering
                 # of the page, and shaping it would withhold the one thing an
                 # operator can act on.
