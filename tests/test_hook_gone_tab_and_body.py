@@ -394,3 +394,24 @@ class TestAResponseBodyIsAskedForOnlyWhenThereIsOne:
         await _run(RESPONSE_STAGE, get_body=refuse)
 
         assert any("body broke" in m for m in _levels(backend_log, logging.ERROR))
+
+
+async def test_a_tab_with_no_browser_is_kept_and_the_missing_report_is_debug_logged(
+    backend_log,
+):
+    """``_listen_for_destroyed`` has nothing to listen on for a tab with no browser
+    connection: not a defect (DEBUG, not WARNING/ERROR), and the tab is still kept."""
+    system = DynamicHookSystem()
+    system.add_instance(INSTANCE_ID)
+    tab = _Tab(None, FIRST)
+
+    await asyncio.wait_for(system.setup_interception(tab, INSTANCE_ID), BOUND)
+
+    assert system._armed_tabs[INSTANCE_ID] == {FIRST: tab}
+    assert INSTANCE_ID not in system._destroyed_listeners
+    assert any(
+        "no browser connection" in m and FIRST in m
+        for m in _levels(backend_log, logging.DEBUG)
+    )
+    assert _levels(backend_log, logging.WARNING) == []
+    assert _levels(backend_log, logging.ERROR) == []
