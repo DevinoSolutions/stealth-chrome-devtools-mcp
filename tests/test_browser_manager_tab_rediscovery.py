@@ -256,8 +256,12 @@ async def test_close_tab_of_a_target_chrome_already_dropped_is_closed(
     [
         ProtocolException({"code": -32602, "message": "Invalid parameters"}),
         RuntimeError("No target with given id found"),
+        # The BROWSER's own session is stale, which says nothing about the tab.
+        ProtocolException(
+            {"code": -32001, "message": "Session with given id not found"}
+        ),
     ],
-    ids=["other-protocol-failure", "gone-wording-not-protocol"],
+    ids=["other-protocol-failure", "gone-wording-not-protocol", "browser-session-gone"],
 )
 async def test_close_tab_any_other_failure_still_warns_and_is_false(
     manager_and_browser, warnings_ring, error
