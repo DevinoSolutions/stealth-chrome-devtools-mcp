@@ -31,6 +31,11 @@
 - `_listen_for_destroyed` returns when a tab has no browser connection (nodriver gives every tab it opened one, so only a hand-built tab hits this); it now says so at DEBUG, and its docstring no longer promises `close_tab`'s own cancel, which T-9117 removed. A test pins the DEBUG line, the tab still being kept, and no WARNING/ERROR.
 - `tests/test_hook_gone_tab_and_body.py` (21 tests, every wait bounded by `asyncio.wait_for`) was written first and was RED against main for the arming and body cases; the body cases build `Fetch.requestPaused` with nodriver's own `from_json`, with and without the response fields. 27 clause mutations by runtime rebinding are all killed.
 
+### CI artifact steps wait out a GitHub OIDC outage instead of failing on it (T-9190)
+
+- `DevinoSolutions/artifact` fetched the job's GitHub OIDC token with 3 attempts and 2, 4 and 6 s of sleep, so a GitHub-side HTTP 503 lasting more than ~30 s failed the step: twice in 3 days here (runs 39956132580 install-smoke, 2026-10-23, and 40398194992 release-evidence, 2026-10-26). artifact#6 (5bb08e7) gives the OIDC fetch and the MinIO STS exchange the action's jittered `MC_BACKOFF` schedule with a 120 s budget, retrying only HTTP 429, 5xx and network errors (any `OSError` but an SSL error); a certificate failure or another 4xx still fails at once.
+- The 22 `DevinoSolutions/artifact` refs in `publish.yml` and `release-gate.yml` move from 44df166 (v1.2.1) to 5bb08e7. The `v1` tag is not moved.
+
 ## 2.1.47
 
 ### A disposable clone is probed, and its first missed probe is captured (T-1665)
