@@ -36,6 +36,7 @@ from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import (
     RequestInfo,
 )
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import DynamicHookSystem
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 
@@ -121,53 +122,103 @@ class TestMatches:
         assert h.matches(_req(method="POST")) is False
 
 
-class TestProcess:
-    def test_hookaction_return_is_passed_through(self):
-        h = _hook(
-            {},
-            code="def process_request(request):\n    return HookAction(action='block')\n",
+class TestRunningTheFunction:
+    """The hook function through the one real path, ``_process_request_hooks``
+    (``DynamicHook.process`` was a dead second path and is gone, T-9135)."""
+
+    @staticmethod
+    async def _drive(code):
+        system = await _hooked(code)
+        actions = []
+        execute = system._execute_hook_action
+
+        async def spy(tab, req, action, *rest):
+            actions.append(action)
+            return await execute(tab, req, action, *rest)
+
+        system._execute_hook_action = spy
+        tab = FakeTab()
+        await system._process_request_hooks(tab, _req())
+        return next(iter(system.hooks.values())), tab, actions
+
+    async def test_hookaction_return_is_passed_through(self):
+        hook, _, actions = await self._drive(
+            "def process_request(request):\n    return HookAction(action='block')\n"
         )
-        result = h.process(_req())
-        assert result.action == "block"
-        assert h.trigger_count == 1
-        assert h.last_triggered is not None
 
-    def test_dict_return_is_coerced(self):
-        h = _hook(
-            {},
-            code="def process_request(request):\n    return {'action': 'redirect', 'url': 'https://x'}\n",
+        assert [a.action for a in actions] == ["block"]
+        assert hook.trigger_count == 1
+        assert hook.last_triggered is not None
+        assert hook.error_count == 0
+
+    async def test_dict_return_is_coerced(self):
+        _, _, actions = await self._drive(
+            "def process_request(request):\n"
+            "    return {'action': 'redirect', 'url': 'https://x'}\n"
         )
-        result = h.process(_req())
-        assert result.action == "redirect" and result.url == "https://x"
 
-    def test_invalid_return_type_becomes_continue(self):
-        h = _hook({}, code="def process_request(request):\n    return 42\n")
-        assert h.process(_req()).action == "continue"
+        assert actions[0].action == "redirect" and actions[0].url == "https://x"
 
-    def test_function_exception_becomes_continue(self):
-        h = _hook(
-            {}, code="def process_request(request):\n    raise RuntimeError('boom')\n"
-        )
-        assert h.process(_req()).action == "continue"
-
-    def test_uncompilable_code_falls_back_to_continue(self):
-        h = _hook({}, code="this is not valid python !!!")
-        assert h.process(_req()).action == "continue"
-
-    def test_missing_entrypoint_falls_back_to_continue(self):
-        h = _hook({}, code="x = 1\n")  # valid python, no process_request
-        assert h.process(_req()).action == "continue"
-
-    def test_function_receives_dict_not_object(self):
-        # process() passes request.to_dict(); a hook using dict access must work.
-        h = _hook(
-            {},
-            code=(
-                "def process_request(request):\n"
-                "    return HookAction(action='block' if request['method'] == 'GET' else 'continue')\n"
+    @pytest.mark.parametrize(
+        ("code", "kind"),
+        [
+            ("def process_request(request):\n    return 42\n", "TypeError"),
+            (
+                "def process_request(request):\n    raise RuntimeError('boom')\n",
+                "RuntimeError",
             ),
+        ],
+    )
+    async def test_a_bad_return_or_an_exception_continues_the_request(
+        self, code, kind, backend_log
+    ):
+        hook, tab, actions = await self._drive(code)
+
+        assert actions == []  # no action ran; the fallback continued it
+        assert tab.send_calls == ["continue_request"]
+        assert hook.error_count == 1 and kind in hook.last_error
+
+    async def test_function_receives_dict_not_object(self):
+        # the request is handed over as a dict; a hook using dict access must work.
+        _, _, actions = await self._drive(
+            "def process_request(request):\n"
+            "    return HookAction(action='block' if request['method'] == 'GET'"
+            " else 'continue')\n"
         )
-        assert h.process(_req(method="GET")).action == "block"
+
+        assert [a.action for a in actions] == ["block"]
+
+
+class TestCodeThatDoesNotLoadIsRefused:
+    """``create_hook`` raises for the caller's code that does not load, instead of
+    keeping a hook that silently continues every request (T-9135)."""
+
+    @pytest.mark.parametrize(
+        ("code", "kind"),
+        [
+            ("this is not valid python !!!", "SyntaxError"),
+            ("x = 1\n", "ValueError"),  # valid python, no process_request
+            ("y = hasattr\ndef process_request(request):\n    pass\n", "NameError"),
+        ],
+    )
+    async def test_the_hook_is_refused_and_nothing_is_kept(
+        self, code, kind, backend_log
+    ):
+        system = DynamicHookSystem()
+
+        with pytest.raises(ToolError, match=kind):
+            await system.create_hook("h", {}, code, instance_ids=["inst-1"])
+
+        assert system.hooks == {} and system.instance_hooks == {}
+        assert _records(backend_log, logging.ERROR) == []
+
+    async def test_a_syntax_error_names_its_line(self):
+        system = DynamicHookSystem()
+
+        with pytest.raises(ToolError, match="line 2"):
+            await system.create_hook(
+                "h", {}, "x = 1\nthis is not python !!!\n", instance_ids=["inst-1"]
+            )
 
 
 class TestRegistry:

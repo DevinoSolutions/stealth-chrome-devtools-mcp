@@ -23,6 +23,7 @@ import pytest
 from fakes import FakeTab, call_tool
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import DynamicHookSystem
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 INSTANCE_ID = "i1"
 BOUND = 2.0
@@ -192,3 +193,52 @@ class TestTheCallerReadsItBack:
         assert record["last_error_at"]
         assert listed["hooks"][0]["error_count"] == 1
         assert "hasattr" in listed["hooks"][0]["last_error"]
+
+
+class TestTheWarningTextIsCapped:
+    async def test_the_function_error_is_capped_like_last_error(self, backend_log):
+        _, hook, _ = await _run(_code("return {}['x' * 5000]"))
+
+        (message,) = [
+            m for m in _levels(backend_log, logging.WARNING) if "caller-hook" in m
+        ]
+        assert len(message) < 700 and "x" * 600 not in message
+        assert len(hook.last_error) == 500
+
+    async def test_the_custom_condition_error_is_capped_too(self, backend_log):
+        long_key = "k" * 5000
+        _, hook, _ = await _run(
+            _code("return HookAction(action='block')"),
+            requirements={"custom_condition": "{}['" + long_key + "']"},
+        )
+
+        (message,) = [
+            m for m in _levels(backend_log, logging.WARNING) if "caller-hook" in m
+        ]
+        assert len(message) < 700 and "k" * 600 not in message
+        assert len(hook.last_error) == 500
+
+
+class TestTheToolRefusesCodeThatDoesNotLoad:
+    async def test_create_dynamic_hook_raises_and_keeps_nothing(
+        self, backend_log, patched_server, monkeypatch
+    ):
+        system = DynamicHookSystem()
+        monkeypatch.setattr(rt.dynamic_hook_ai, "hook_system", system)
+        server = patched_server()
+
+        with pytest.raises(ToolError, match="NameError"):
+            await asyncio.wait_for(
+                call_tool(
+                    server,
+                    "create_dynamic_hook",
+                    name="h",
+                    requirements={},
+                    # valid for the validator, but the module body raises on load
+                    function_code="y = hasattr\n" + _code("pass"),
+                ),
+                BOUND,
+            )
+
+        assert system.hooks == {}
+        assert _levels(backend_log, logging.ERROR) == []
