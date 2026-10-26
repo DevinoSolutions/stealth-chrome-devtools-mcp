@@ -319,19 +319,29 @@ def test_only_pull_request_runs_are_ever_cancelled():
 
 
 def test_publish_creates_and_finalizes_the_sentry_release_after_pypi():
-    """T-8944: the Sentry release is made by the workflow, after the upload, with
-    the token from a secret through env and a client name Cloudflare admits."""
-    steps = _jobs(PUBLISH)["publish"]["steps"]
-    names = [s.get("name", "") for s in steps]
-    sentry = names.index("Create and finalize the Sentry release")
-    assert sentry > names.index("Publish to PyPI")
-    step = steps[sentry]
+    """T-8944: the Sentry release is made by a job of its own after the upload,
+    re-runnable alone, with the token from a secret through env, a client name
+    Cloudflare admits, bounded requests, and both answers checked."""
+    jobs = _jobs(PUBLISH)
+    job = jobs["sentry-release"]
+    assert job["needs"] == "publish"
+    assert job["permissions"] == {"contents": "read"}, "no publishing permission"
+    assert "environment" not in job and int(job["timeout-minutes"]) <= 10
+    assert not any(
+        "sentry" in s.get("run", "").lower() for s in jobs["publish"]["steps"]
+    ), "re-running the Sentry step must not repeat the PyPI upload"
+    (step,) = job["steps"]
     assert step["env"]["SENTRY_AUTH_TOKEN"] == "${{ secrets.SENTRY_AUTH_TOKEN }}"
-    assert "${{" not in step["run"], (
-        "the token and version reach the shell via env only"
-    )
-    assert "-A 'sentry-cli/" in step["run"]
-    assert "/releases/${VERSION}/" in step["run"] and "dateReleased" in step["run"]
+    run = step["run"]
+    assert "${{" not in run, "the token and version reach the shell via env only"
+    assert run.startswith("set -euo pipefail\n")
+    assert "-A 'sentry-cli/" in run
+    assert "--connect-timeout" in run and "--max-time" in run
+    assert '"projects":["%s"]' in run and '"ref":"%s"' in run
+    assert 'case "$created" in 200|201|208)' in run
+    assert "/releases/${VERSION}/" in run and "dateReleased" in run
+    assert '[ "$released" = 200 ] || fail' in run
+    assert 'cat "$body"' in run, "a refused request prints Sentry's answer"
 
 
 UNTRUSTED = re.compile(
