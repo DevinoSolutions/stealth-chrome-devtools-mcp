@@ -22,6 +22,7 @@ from nodriver import Tab
 
 from stealth_chrome_devtools_mcp.embedded import cdp_params, paint_hold, python_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.tab_close import report_gone_aware
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
@@ -166,15 +167,7 @@ class CDPFunctionExecutor:
         self._persistent_functions: dict[str, dict[str, str]] = {}
 
     async def enable_runtime(self, tab: Tab) -> bool:
-        """
-        Enables CDP Runtime domain for a tab.
-
-        Args:
-            tab (Tab): The browser tab.
-
-        Returns:
-            bool: True if enabled, False otherwise.
-        """
+        """Enable the CDP Runtime domain for *tab*; ``False`` if it would not."""
         try:
             await tab.send(uc.cdp.runtime.enable())
             debug_logger.log_info(
@@ -182,7 +175,7 @@ class CDPFunctionExecutor:
             )
             return True
         except Exception as e:
-            debug_logger.log_error("cdp_function_executor", "enable_runtime", e)
+            report_gone_aware("cdp_function_executor", "enable_runtime", e)
             return False
 
     async def list_cdp_commands(self) -> list[str]:
@@ -249,7 +242,7 @@ class CDPFunctionExecutor:
                 "params": params,
             }
         except Exception as e:
-            debug_logger.log_error("cdp_function_executor", "execute_cdp_command", e)
+            report_gone_aware("cdp_function_executor", "execute_cdp_command", e)
             return {
                 "success": False,
                 "error": str(e),
