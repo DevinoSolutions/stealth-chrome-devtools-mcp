@@ -17,12 +17,16 @@ from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
-_ALREADY_GONE = "No target with given id"
+# T-8944: a tab's SESSION that Chrome dropped answers -32001 with the second
+# text, the same state as the first for every command sent through it.
+_ALREADY_GONE = ("No target with given id", "Session with given id not found")
 
 
 def is_already_gone(exc: BaseException) -> bool:
-    """Whether ``exc`` is Chrome saying the tab being closed no longer exists."""
-    return isinstance(exc, ProtocolException) and _ALREADY_GONE in str(exc)
+    """Whether ``exc`` is Chrome saying the tab (or its session) no longer exists."""
+    return isinstance(exc, ProtocolException) and any(
+        text in str(exc) for text in _ALREADY_GONE
+    )
 
 
 def log_failure(method: str, instance_id: str, exc: BaseException) -> bool:

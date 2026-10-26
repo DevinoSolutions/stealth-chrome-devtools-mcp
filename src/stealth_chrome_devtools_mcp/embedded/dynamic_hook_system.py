@@ -29,8 +29,8 @@ from nodriver.core.connection import ProtocolException
 from websockets.exceptions import ConnectionClosed, InvalidMessage, InvalidStatus
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.tab_close import is_already_gone
 
-WINERROR_CONNECTION_REFUSED = 1225  # ERROR_CONNECTION_REFUSED
 HTTP_SERVER_ERROR = 500  # the status Sentry shows when a dead tab's socket is reopened
 
 
@@ -46,21 +46,19 @@ def gone_reason(error: BaseException) -> str | None:
     exception event. ``None`` means a real failure.
 
     The socket cases are the ones Sentry shows and no wider: a ``ConnectionError``
-    or WinError 1225 (asyncio on Windows raises it as a plain ``OSError``, not a
-    ``ConnectionRefusedError``), ``InvalidStatus`` with HTTP 500,
-    ``ConnectionClosed`` and ``InvalidMessage``. A timeout, a missing file or a
-    403/404 says nothing about the request, so those stay errors and the caller
-    still continues it.
+    (WinError 1225 is a ``ConnectionRefusedError`` on Windows), ``InvalidStatus``
+    with HTTP 500, ``ConnectionClosed`` and ``InvalidMessage``. A timeout, a
+    missing file or a 403/404 says nothing about the request, so those stay
+    errors and the caller still continues it. A target or session Chrome says it
+    no longer has is ``tab_close.is_already_gone``, the one predicate for that.
     """
     if isinstance(error, ProtocolException) and "Invalid InterceptionId" in str(error):
         return "the interception id is stale (request resolved or page navigated away)"
-    if (
-        isinstance(error, (ConnectionError, ConnectionClosed, InvalidMessage))
-        or getattr(error, "winerror", None) == WINERROR_CONNECTION_REFUSED
-        or (
-            isinstance(error, InvalidStatus)
-            and error.response.status_code == HTTP_SERVER_ERROR
-        )
+    if is_already_gone(error):
+        return "the target or session is gone (tab closed)"
+    if isinstance(error, (ConnectionError, ConnectionClosed, InvalidMessage)) or (
+        isinstance(error, InvalidStatus)
+        and error.response.status_code == HTTP_SERVER_ERROR
     ):
         return "the tab's socket is gone (tab or browser closed)"
     return None
