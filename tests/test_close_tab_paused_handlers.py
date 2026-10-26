@@ -55,7 +55,7 @@ async def _never_answered(_tab, _request, _event=None):
 async def _system(monkeypatch):
     system = DynamicHookSystem()
     system.add_instance(INSTANCE_ID)
-    system._instance_tabs[INSTANCE_ID] = None  # registered, as setup_interception does
+    system._armed_tabs[INSTANCE_ID] = {}  # registered, as setup_interception does
     monkeypatch.setattr(system, "_process_request_hooks", _never_answered)
     return system
 
@@ -87,7 +87,7 @@ class TestCancelPausedForTarget:
     async def test_another_instance_is_left_alone(self, monkeypatch):
         system = await _system(monkeypatch)
         system.add_instance("i2")
-        system._instance_tabs["i2"] = None
+        system._armed_tabs["i2"] = {}
         system._spawn_paused(FakeTab(target_id=HOOKED), _paused_event(), "i2")
         await _settle()
         (task,) = system._paused_tasks["i2"]

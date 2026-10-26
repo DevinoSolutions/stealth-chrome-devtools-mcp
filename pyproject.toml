@@ -438,6 +438,9 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_system.py" = [
     "ANN001", "ANN201", "ANN202", "ANN204", "BLE001", "TID251", "TRY300",
 ]  # DEBT(F-181) + plan_M4ph1
+"src/stealth_chrome_devtools_mcp/embedded/dynamic_hook_model.py" = [
+    "ANN204", "BLE001", "TID251", "TRY300",
+]  # DEBT(F-181) + plan_M4ph1 — moved verbatim from dynamic_hook_system.py (T-9135)
 "src/stealth_chrome_devtools_mcp/embedded/process_cleanup.py" = [
     "ANN001", "ANN202", "ANN204", "ANN205", "BLE001", "TID251", "TRY300",
 ]  # DEBT(F-181) + plan_M4ph1

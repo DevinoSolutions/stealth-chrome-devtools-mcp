@@ -235,6 +235,9 @@ element_box.install()
 
 network_interceptor = NetworkInterceptor()
 # F-935: a tab the manager starts driving after spawn is captured like the first.
-browser_manager = BrowserManager(tab_armers=(network_interceptor.arm_tab,))
+# T-9135: and hooked like the first, so a hook follows the tab the manager tracks.
+browser_manager = BrowserManager(
+    tab_armers=(network_interceptor.arm_tab, dynamic_hook_system.arm_tab)
+)
 dom_handler = DOMHandler()
 cdp_function_executor = CDPFunctionExecutor()

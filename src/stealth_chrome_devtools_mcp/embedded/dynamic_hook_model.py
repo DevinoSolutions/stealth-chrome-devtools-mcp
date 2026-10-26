@@ -1,0 +1,216 @@
+"""
+The dynamic hook data model: ``RequestInfo``, ``HookAction`` and ``DynamicHook``.
+
+Split from ``dynamic_hook_system`` (T-9135) so that module, which owns interception
+and the paused-request handlers, stays under its file budget.
+
+**This is host Python execution, not a sandbox (T-6206, F-L).** A hook's
+``function_code`` is ``exec``'d and a ``custom_condition`` is ``eval``'d in the
+backend process, with that process's privileges. The trimmed ``__builtins__``
+dicts below only keep the usual hook vocabulary at hand; they are NOT a security
+boundary and must not be read as one — the injected ``fnmatch`` module alone
+reaches ``os`` (``fnmatch.os``), and ``str.__class__.__base__.__subclasses__()``
+works in the eval namespace. Whoever can create a hook can run arbitrary Python
+on the host. Do not build a sandbox here by adding names to or removing names
+from those dicts; a real boundary would be a separate process.
+"""
+
+import fnmatch
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+
+
+@dataclass
+class RequestInfo:
+    """Request information passed to hook functions."""
+
+    request_id: str
+    instance_id: str
+    url: str
+    method: str
+    headers: dict[str, str]
+    post_data: str | None = None
+    resource_type: str | None = None
+    stage: str = "request"  # "request" or "response"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for AI function processing."""
+        return asdict(self)
+
+
+@dataclass
+class HookAction:
+    """Action returned by hook functions."""
+
+    action: str  # "continue", "block", "redirect", "fulfill", "modify"
+    url: str | None = None  # For redirect/modify
+    method: str | None = None  # For modify
+    headers: dict[str, str] | None = None  # For modify/fulfill
+    body: str | None = None  # For fulfill
+    status_code: int | None = None  # For fulfill
+    post_data: str | None = None  # For modify
+
+
+class DynamicHook:
+    """A dynamic hook with AI-generated function."""
+
+    def __init__(
+        self,
+        hook_id: str,
+        name: str,
+        requirements: dict[str, Any],
+        function_code: str,
+        priority: int = 100,
+    ):
+        self.hook_id = hook_id
+        self.name = name
+        self.requirements = requirements
+        self.function_code = function_code
+        self.priority = priority  # Lower number = higher priority
+        self.created_at = datetime.now(tz=timezone.utc)
+        self.trigger_count = 0
+        self.last_triggered: datetime | None = None
+        self.status = "active"
+        self.request_stage = requirements.get(
+            "stage", "request"
+        )  # 'request' or 'response'
+
+        self._compiled_function = self._compile_function()
+
+    def _compile_function(self) -> Callable:
+        """Compile the AI-generated function."""
+        try:
+            # Not a sandbox: see the module docstring.
+            namespace = {
+                "HookAction": HookAction,
+                "datetime": datetime,
+                "fnmatch": fnmatch,
+                "__builtins__": {
+                    "len": len,
+                    "str": str,
+                    "int": int,
+                    "float": float,
+                    "bool": bool,
+                    "dict": dict,
+                    "list": list,
+                    "tuple": tuple,
+                    "print": lambda *args: debug_logger.log_info(
+                        "hook_function", self.name, " ".join(map(str, args))
+                    ),
+                },
+            }
+
+            exec(self.function_code, namespace)  # noqa: S102  PERMANENT(exec hook code by design)
+
+            if "process_request" not in namespace:
+                raise ValueError("Function must define 'process_request(request)'")  # noqa: TRY301  plan_M4ph1
+
+            return namespace["process_request"]
+
+        except Exception as e:
+            debug_logger.log_error(
+                "dynamic_hook",
+                "compile_function",
+                f"Failed to compile function for hook {self.name}: {e}",
+            )
+            return lambda request: HookAction(action="continue")  # noqa: ARG005  PERMANENT(interface stability)
+
+    def matches(self, request: RequestInfo) -> bool:  # noqa: PLR0911  DEBT(F-165)
+        """Check if this hook matches the request."""
+        try:
+            # Check URL pattern
+            if "url_pattern" in self.requirements and not fnmatch.fnmatch(
+                request.url, self.requirements["url_pattern"]
+            ):
+                return False
+
+            # Check method
+            if (
+                "method" in self.requirements
+                and request.method.upper() != self.requirements["method"].upper()
+            ):
+                return False
+
+            # Check resource type
+            if (
+                "resource_type" in self.requirements
+                and request.resource_type != self.requirements["resource_type"]
+            ):
+                return False
+
+            # Check stage
+            if (
+                "stage" in self.requirements
+                and request.stage != self.requirements["stage"]
+            ):
+                return False
+
+            # Check custom conditions (if any)
+            if "custom_condition" in self.requirements:
+                condition_code = self.requirements["custom_condition"]
+                # Host ``eval``, not a sandbox: see the module docstring.
+                namespace = {
+                    "request": request,
+                    "__builtins__": {"len": len, "str": str},
+                }
+                try:
+                    result = eval(condition_code, namespace)  # noqa: S307  PERMANENT(eval hook matching by design)
+                    if not result:
+                        return False
+                except Exception as cond_err:
+                    debug_logger.log_warning(
+                        "dynamic_hook",
+                        "matches",
+                        f"Custom condition eval failed for hook {self.name}: "
+                        f"{cond_err}",
+                    )
+                    return False
+
+            return True
+
+        except Exception as e:
+            debug_logger.log_error(
+                "dynamic_hook", "matches", f"Error matching hook {self.name}: {e}"
+            )
+            return False
+
+    def process(self, request: RequestInfo) -> HookAction:
+        """Execute the hook function."""
+        try:
+            self.trigger_count += 1
+            self.last_triggered = datetime.now(tz=timezone.utc)
+
+            debug_logger.log_info(
+                "dynamic_hook",
+                "process",
+                f"Processing request {request.url} with hook {self.name}",
+            )
+
+            result = self._compiled_function(request.to_dict())
+
+            if isinstance(result, dict):
+                result = HookAction(**result)
+            elif not isinstance(result, HookAction):
+                debug_logger.log_error(
+                    "dynamic_hook",
+                    "process",
+                    f"Hook {self.name} returned invalid type: {type(result)}",
+                )
+                return HookAction(action="continue")
+
+            debug_logger.log_info(
+                "dynamic_hook",
+                "process",
+                f"Hook {self.name} returned action: {result.action}",
+            )
+            return result
+
+        except Exception as e:
+            debug_logger.log_error(
+                "dynamic_hook", "process", f"Error executing hook {self.name}: {e}"
+            )
+            return HookAction(action="continue")
