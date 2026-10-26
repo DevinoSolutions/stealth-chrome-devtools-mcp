@@ -110,7 +110,7 @@ async def _open(browser: Browser, target_id: str) -> Tab | None:
     """The tab *target_id* if it is open, asking Chrome once on a miss."""
     tab = tab_open.find(browser, target_id)
     if tab is None:
-        await browser.update_targets()
+        await tab_open.update_targets(browser)
         tab = tab_open.find(browser, target_id)
     return tab
 

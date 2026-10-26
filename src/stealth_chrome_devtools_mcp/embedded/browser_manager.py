@@ -607,6 +607,7 @@ class BrowserManager:
                 await self._stop_browser(browser)
             except (OSError, RuntimeError, ConnectionError) as err:
                 self._warn_spawn_cleanup("browser.stop()", phase, instance_id, err)
+            spawn_leak.reap_attached(process_cleanup, browser, instance_id)
         elif attempt is not None:
             spawn_leak.reap_launched_browsers(
                 process_cleanup, options.user_data_dir, attempt, instance_id
@@ -849,6 +850,7 @@ class BrowserManager:
         browser = data["browser"]
         instance = data["instance"]
         instance.state = BrowserState.CLOSED
+        tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
 
         try:
             # -- Phase 2: graceful CDP teardown (on loop, bounded) ------------
@@ -870,8 +872,7 @@ class BrowserManager:
             try:
                 import nodriver.cdp.browser as cdp_browser
 
-                # A closed socket fails the send (``ConnectionClosed``), which the
-                # handler below logs: no liveness test of our own to keep honest.
+                # A closed socket fails the send; the handler below logs it.
                 await asyncio.wait_for(browser.send(cdp_browser.close()), timeout=2.0)
             except (TimeoutError, Exception) as cdp_err:
                 debug_logger.log_info(
@@ -1072,7 +1073,7 @@ class BrowserManager:
 
         tracked_tab = data.get("tab")
         try:
-            await data["browser"].update_targets()
+            await tab_open.update_targets(data["browser"])
             tracked_target_id = self._get_tab_target_id(tracked_tab)
             if tracked_target_id:
                 for candidate_tab in data["browser"].tabs:
@@ -1225,7 +1226,7 @@ class BrowserManager:
         # below; a rediscovered target is a raw Connection with no __await__ (its
         # __getattr__ still answers .url); and Tab.wait() costs 0.5s per tab. The
         # record is `tab_identity`'s, shared with get_active_tab/list_instances (F-874).
-        await browser.update_targets()
+        await tab_open.update_targets(browser)
 
         return [tab_identity.record(tab) for tab in browser.tabs]
 
@@ -1238,7 +1239,7 @@ class BrowserManager:
         if not browser:
             return False
 
-        await browser.update_targets()
+        await tab_open.update_targets(browser)
 
         target_tab = tab_open.find(browser, tab_id)
         if not target_tab:
@@ -1246,7 +1247,7 @@ class BrowserManager:
 
         try:
             target_id = target_tab.target.target_id
-            await browser.send(uc.cdp.target.activate_target(target_id))
+            await tab_open.send(browser, uc.cdp.target.activate_target, target_id)
             await self._arm_tracked_tab(instance_id, target_tab)
             async with self._lock:
                 if instance_id in self._instances:
@@ -1279,7 +1280,7 @@ class BrowserManager:
             stored = data.get("tab") if data else None
         if self._get_tab_target_id(stored) != closed_id:
             return
-        await browser.update_targets()
+        await tab_open.update_targets(browser)
         survivor = next(
             (t for t in browser.tabs if self._get_tab_target_id(t) != closed_id),
             None,
@@ -1302,7 +1303,7 @@ class BrowserManager:
 
         try:
             target_id = target_tab.target.target_id
-            await browser.send(uc.cdp.target.close_target(target_id))
+            await tab_open.send(browser, uc.cdp.target.close_target, target_id)
         except Exception as e:
             if not tab_close.log_failure("close_tab", instance_id, e):  # F-996b
                 return False

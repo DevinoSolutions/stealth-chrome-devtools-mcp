@@ -1,6 +1,6 @@
 """F-902 in a REAL Chrome: a cookie in a reply must not kill the tab.
 
-The hermetic half (``tests/test_cdp_transport.py``) drives a real nodriver
+The hermetic half (``tests/test_cdp_reply_path.py``) drives a real nodriver
 ``Connection`` over a fake websocket with a cookie captured off Chrome
 153's wire. This half exists because the hermetic half CANNOT be the evidence:
 the whole finding is a claim about what a live Chrome sends, and

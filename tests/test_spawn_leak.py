@@ -34,6 +34,7 @@ rather than trusted. No test spawns Chrome, and no test touches the real
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import urllib.error
 
@@ -384,3 +385,72 @@ async def test_a_browser_already_collected_is_not_killed(
 
     assert table.alive_on(profile) == [6060]
     assert table.procs[6060].terminate_calls == 0
+
+
+class _Cleanup:
+    def __init__(self) -> None:
+        self.killed: list[int] = []
+
+    def _kill_process_by_pid(self, pid: int, _instance_id: str = "") -> bool:
+        self.killed.append(pid)
+        return True
+
+
+class _Attached:
+    """A ``Browser`` nodriver attached to: no ``_process``, only a stamped pid. Its
+    ``stop()`` is nodriver's, which ends nothing for it (``hasattr(self,
+    "browser_process_pid")`` never holds, ``browser.py`` ``stop``)."""
+
+    def __init__(self, pid: int | None, process: object | None = None) -> None:
+        self._process = process
+        self._process_pid = pid
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+async def test_a_failed_spawn_ends_the_pid_of_a_browser_it_attached_to(monkeypatch):
+    cleanup = _Cleanup()
+    monkeypatch.setattr(
+        "stealth_chrome_devtools_mcp.embedded.browser_manager.process_cleanup", cleanup
+    )
+    browser = _Attached(pid=os.getpid())
+
+    await BrowserManager()._teardown_failed_spawn(
+        "error", "i-1", browser, None, BrowserOptions(), None
+    )
+
+    assert browser.stopped
+    assert cleanup.killed == [os.getpid()], "stop() ended nothing: the pid must be"
+
+
+async def test_a_launched_browser_is_left_to_stop(monkeypatch):
+    cleanup = _Cleanup()
+    monkeypatch.setattr(
+        "stealth_chrome_devtools_mcp.embedded.browser_manager.process_cleanup", cleanup
+    )
+    browser = _Attached(pid=os.getpid(), process=object())
+
+    await BrowserManager()._teardown_failed_spawn(
+        "error", "i-1", browser, None, BrowserOptions(), None
+    )
+
+    assert browser.stopped
+    assert cleanup.killed == []
+
+
+async def test_a_renderer_pid_is_never_taken_for_the_browser(monkeypatch):
+    cleanup = _Cleanup()
+
+    class _Renderer:
+        def cmdline(self) -> list[str]:
+            return ["chrome", "--type=renderer"]
+
+    monkeypatch.setattr(
+        spawn_leak.process_exit.psutil, "Process", lambda _p: _Renderer()
+    )
+
+    spawn_leak.reap_attached(cleanup, _Attached(pid=4242), "i-1")
+
+    assert cleanup.killed == []

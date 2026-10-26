@@ -8,7 +8,7 @@ the library's own class, so a rename in the library fails the test that uses it
 instead of passing against a double that kept the old name.
 
 Only the two websocket methods ``Connection`` calls (``send``, ``recv``) are
-ours. ``tests/test_cdp_transport.py`` pins the listener's own guarantees on this
+ours. ``tests/test_cdp_reply_path.py`` pins the listener's own guarantees on this
 harness; other tests use it when the behaviour under test is the connection's.
 """
 

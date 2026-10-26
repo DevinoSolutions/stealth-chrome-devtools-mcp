@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -147,6 +148,7 @@ async def close(browser: Browser) -> None:
     touched on the way to failing holds its own websocket and its own listener
     task; closing the browser's alone leaves those behind.
     """
+    tab_open.mark_closed(browser)  # ours to end: nothing may reopen it
     closed = 0
     for connection in (browser, *_tabs(browser)):
         with contextlib.suppress(Exception):

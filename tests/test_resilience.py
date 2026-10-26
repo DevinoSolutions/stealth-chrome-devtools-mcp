@@ -41,7 +41,7 @@ the call boundary, not over JSON-RPC request ids — MQ-127 says so in words.
 What the faults actually found. W10's job is to say which recover and which do
 not, rather than to pick assertions that pass. As W10 measured it, two of the
 four recovered cleanly and two did not; one of those two, F-788, has since been
-FIXED (`embedded/cdp_transport.py`, F-883 B1) and its characterization pin is
+FIXED (nodriver 0.50's reply path, T-8501, F-883 B1) and its characterization pin is
 now an assertion of recovery, so three of the four recover today:
 
 * **MQ-127** (a tab vanishes) and **MQ-129** (the connection drops mid-body)
@@ -56,7 +56,7 @@ now an assertion of recovery, so three of the four recover today:
   product's own deadline, with the M6-pinned message. Its recovery half —
   "then prove a normal navigation succeeds" — could not be claimed while a
   timed-out navigation left the instance's CDP connection permanently wedged
-  (F-788). **F-788 is fixed** (``embedded/cdp_transport.py``: a cancelled await
+  (F-788). **F-788 is fixed** (nodriver 0.50's reply path, T-8501: a cancelled await
   no longer cancels nodriver's ``Transaction``, so the connection's listener
   survives Chrome's late answer), the pin that carried it is now an assertion
   of recovery, and the step is satisfied and bound.
@@ -319,7 +319,7 @@ async def _reap(iid: str) -> None:
 
     It was written for the nodes that left the instance wedged (F-788), when the
     product could not be relied on to tear one down. F-788 is fixed
-    (`embedded/cdp_transport.py`), so the close now normally succeeds; the
+    (nodriver 0.50's reply path, T-8501), so the close now normally succeeds; the
     best-effort shape is KEPT, because a helper whose job is "leave nothing
     running whatever happened" must not start failing the node it is cleaning up
     after.
@@ -692,8 +692,8 @@ async def test_a_navigation_timeout_leaves_the_instance_usable(
     single connection listener died resolving a cancelled future and no CDP
     call on that connection was ever resolved again.
 
-    ``embedded/cdp_transport.py`` (F-883 B1) moves the cancellation off the
-    Transaction and onto a shield, one layer below every deadline in the tree —
+    F-883 B1's shield (now nodriver 0.50's own reply path, T-8501) moved the cancellation off the
+    Transaction, one layer below every deadline in the tree —
     including ``browser_manager.navigate``'s own inner ``wait_for``, which is a
     different scope from ``_with_cdp_timeout`` and is why this node is measured
     rather than inferred from the ``execute_script`` case.
@@ -817,7 +817,7 @@ async def test_route_abort_mid_navigation_is_bounded_and_recoverable(
 # connection was ever resolved again (F-788). That wedged the *injection*, so it
 # could not measure the product — and the harness bound correctly reported it
 # rather than letting it hang. F-788 is fixed now
-# (`embedded/cdp_transport.py`), so that reason no longer holds as written; the
+# (nodriver 0.50's reply path, T-8501), so that reason no longer holds as written; the
 # exclusion STANDS because it has not been re-measured, and no offline-emulation
 # coverage may be inferred either way until it is. The route-abort node above is the plan's other
 # named mechanism and is what MQ-129 rests on; the exclusion is stated in the

@@ -67,6 +67,7 @@ import dataclasses
 import json
 import urllib.request
 from collections.abc import Awaitable, Iterable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
@@ -74,7 +75,7 @@ import nodriver as uc
 import websockets.asyncio.client
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp.embedded import profile_seed
+from stealth_chrome_devtools_mcp.embedded import profile_seed, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 #: What one CDP round trip in the hand-off answers with. A type variable rather
@@ -198,7 +199,7 @@ def _connection(browser: "Browser") -> "Browser":
 
 async def read_jar(browser: "Browser") -> list["Cookie"]:
     """Every cookie in the BROWSER — not in a page, not for a url."""
-    return await _connection(browser).send(uc.cdp.storage.get_cookies()) or []
+    return await tab_open.send(_connection(browser), uc.cdp.storage.get_cookies) or []
 
 
 #: Chrome's answer to a batch holding a cookie it will not store: JSON-RPC
@@ -249,7 +250,9 @@ async def write_jar(browser: "Browser", cookies: Sequence["CookieParam"]) -> int
         batch = pending.pop()
         writes += 1
         try:
-            await connection.send(uc.cdp.storage.set_cookies(cookies=batch))
+            await tab_open.send(
+                connection, partial(uc.cdp.storage.set_cookies, cookies=batch)
+            )
         except Exception as error:
             if not _refused(error):
                 raise

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
+from stealth_chrome_devtools_mcp.embedded import tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -147,6 +148,7 @@ async def _disconnect(connection: Connection) -> None:
 
 async def _drop(browser: Browser) -> None:
     # The Browser IS its connection since nodriver 0.50 (``browser.py``:32).
+    tab_open.mark_closed(browser)
     await _disconnect(browser)
 
 
