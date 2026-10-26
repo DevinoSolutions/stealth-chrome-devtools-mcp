@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.46
 
 ### nodriver 0.50.6; `cdp_transport` is deleted because the library owns the reply path now (T-8501)
 
