@@ -63,7 +63,10 @@ async def target_unlisted(tab: Tab) -> bool:
         return True
     try:
         await asyncio.wait_for(tab_open.update_targets(browser), _LISTING_TIMEOUT)
-    except Exception:  # noqa: BLE001  PERMANENT(a failed confirmation means not confirmed)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(a failed confirmation means not confirmed)
+        debug_logger.log_debug(
+            "tab_close", "target_unlisted", f"listing failed, not confirmed: {exc!r}"
+        )
         return False
     return tab_open.find(browser, str(tab.target.target_id)) is None
 
