@@ -9,6 +9,10 @@
 - The record is kept in `CloneProbe.records` until the clone answers a probe again (INFO `answers probes again`) or is gone; later misses of the same incident add no line. This measures nothing about the cause by itself: it is the instrument for the next freeze.
 - `browser_health.py` stays at 999 lines (budget 1000): the clone logic is the new module, and docstring prose was condensed to pay for `_judged`, the one starvation judgement (`_probed` + `_starved`, F-1007) that the persistent check and the clone probe share. A clone miss on a starved host is a WARNING that consumes nothing (within `ExcuseBudget`'s ceiling), so a 100%-CPU host does not raise `FrozenCloneError`s; the round enters ONE idle canary shared by every clone probe (not one process per clone, whose own load would read as starvation), runs at most 4 clones at a time and ends at 70 s (the canary start plus three waves of four frozen clones), after the persistent probes; the clones it never reached are probed first next round, so a larger fleet is rotated, not starved. Each probe reads the shared canary over its own window (`IdleCanary.window()`), so a starvation burst earlier in the round does not excuse a frozen clone later in it. A `Connection` without `_listener_task` (a nodriver rename) reads `listener: unknown(no _listener_task)`, not `none`.
 
+### publish.yml creates and finalizes the Sentry release (T-8944)
+
+- No step made the Sentry release, so 2.1.44 stayed unreleased until it was finalized by hand. `publish.yml` now creates the release (version, tag sha, PyPI URL) and sets `dateReleased` right after the PyPI upload and the GitHub release, with the org token (scope `org:ci`) from the repo secret `SENTRY_AUTH_TOKEN` through `env`. The request names itself as `sentry-cli`: Cloudflare in front of `sentry.devino.ca` answers 403 / error 1010 to Python's default client signature (measured with the token while minting it). A Sentry failure fails that last step visibly and never blocks the upload. Pinned in `tests/test_release_workflows.py`.
+
 ## 2.1.46
 
 ### nodriver 0.50.6; `cdp_transport` is deleted because the library owns the reply path now (T-8501)
