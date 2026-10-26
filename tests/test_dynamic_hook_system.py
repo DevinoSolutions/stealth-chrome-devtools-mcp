@@ -510,6 +510,27 @@ class TestGoneRequestIsNotAnErrorEvent:
         assert len(_records(backend_log, logging.WARNING)) == 1
 
 
+class TestGoneReasonDefersToTheOneSocketPredicate:
+    """``gone_reason`` holds no HTTP-500 test of its own: what
+    ``tab_close.target_socket_gone`` says is what it says (one predicate)."""
+
+    def test_an_unrelated_error_is_gone_when_the_predicate_says_so(self, monkeypatch):
+        error = RuntimeError("nothing a socket would raise")
+        assert dhs.gone_reason(error) is None
+
+        monkeypatch.setattr(dhs, "target_socket_gone", lambda exc: exc is error)
+
+        assert dhs.gone_reason(error) is not None
+
+    def test_a_500_is_not_gone_when_the_predicate_says_not(self, monkeypatch):
+        error = InvalidStatus(Response(500, "x", Headers(), b""))
+        assert dhs.gone_reason(error) is not None
+
+        monkeypatch.setattr(dhs, "target_socket_gone", lambda _exc: False)
+
+        assert dhs.gone_reason(error) is None
+
+
 class TestRealFailuresStillReported:
     async def test_an_unrelated_failed_fallback_is_still_an_error(self, backend_log):
         system = await _hooked(RAISES)
