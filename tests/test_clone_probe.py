@@ -13,13 +13,15 @@ here, not silently in production).
 """
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import nodriver as uc
 import pytest
+from nodriver.core import connection as nodriver_connection
 from nodriver.core.connection import Connection
 
-from stealth_chrome_devtools_mcp.embedded import clone_probe
+from stealth_chrome_devtools_mcp.embedded import backend_eviction, clone_probe
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
     DynamicHookSystem,
 )
@@ -93,6 +95,8 @@ class _Rig:
         self.fresh_answers = False
         self.own_answers = True
         self.paused = 0
+        self.starved: str | None = None  # what the F-1007 judgement says of a miss
+        self.now = 0.0
         self.fresh_asked: list[str | None] = []
         self.own_asked: list[object] = []
 
@@ -103,11 +107,15 @@ class _Rig:
     async def get_instance(self, instance_id: str):
         return self.instances.get(instance_id)
 
-    async def failure_of(self, browser, steps) -> str | None:
+    async def judge(self, data, steps) -> tuple[str | None, str | None]:
+        """``BrowserHealth._judged`` as the probe sees it: (failure, starved)."""
         steps.append("evaluate")
-        iid = next(i for i, d in self.instances.items() if d["browser"] is browser)
+        steps.finish()
+        iid = next(i for i, d in self.instances.items() if d is data)
         queue = self.misses.get(iid, [])
-        return "TimeoutError at evaluate" if queue and queue.pop(0) else None
+        if not (queue and queue.pop(0)):
+            return None, None
+        return "TimeoutError at evaluate", self.starved
 
     async def fresh(self, url: str | None) -> None:
         self.fresh_asked.append(url)
@@ -120,10 +128,10 @@ class _Rig:
             raise ConnectionError("no")
 
     def probe(self, **overrides) -> clone_probe.CloneProbe:
-        kwargs = {"paused": lambda _iid: self.paused}
+        kwargs = {"paused": lambda _iid: self.paused, "clock": lambda: self.now}
         kwargs.update(overrides)
         return clone_probe.CloneProbe(
-            self.get_instance, self.failure_of, self.fresh, self.own, **kwargs
+            self.get_instance, self.judge, self.fresh, self.own, **kwargs
         )
 
 
@@ -183,13 +191,58 @@ class TestListenerState:
             running.cancel()
 
     def test_a_real_nodriver_connection_has_the_attribute_the_fact_reads(self):
-        connection = Connection("ws://127.0.0.1:1/devtools/x")
+        connection = Connection()  # 0.50.6: the first argument is the TARGET
+        connection.websocket_url = "ws://127.0.0.1:1/devtools/x"
 
         assert connection._listener_task is None
         assert (
             clone_probe.listener_state(connection)
             == "browser=none socket=none tabs=0/0"
         )
+
+    async def test_opening_a_real_nodriver_connection_assigns_the_listener_task(
+        self, monkeypatch
+    ):
+        """``Connection.aopen`` (0.50.6) is what creates ``_listener_task``: a fake
+        socket stands in for ``websockets.connect`` and nothing else is faked."""
+
+        class Socket:
+            close_code = None
+
+            async def recv(self):
+                await asyncio.Event().wait()
+
+            async def close(self):
+                self.close_code = 1000
+
+            async def wait_closed(self):
+                return None
+
+        async def connect(*_args, **_kwargs):
+            return Socket()
+
+        monkeypatch.setattr(nodriver_connection.websockets, "connect", connect)
+        connection = Connection()
+        connection.websocket_url = "ws://127.0.0.1:1/devtools/x"
+
+        await connection.aopen()
+        try:
+            assert isinstance(connection._listener_task, asyncio.Task)
+            await asyncio.sleep(0)
+            assert (
+                clone_probe.listener_state(connection)
+                == "browser=running socket=open tabs=0/0"
+            )
+        finally:
+            await connection.aclose()
+        assert clone_probe.listener_state(connection).startswith("browser=none")
+
+    def test_a_missing_attribute_is_unknown_not_none(self):
+        # a nodriver rename must not read as "no listener" (a dead connection)
+        renamed = _browser()
+        del renamed._listener_task
+
+        assert clone_probe.listener_state(renamed) == "unknown(no _listener_task)"
 
 
 # ---------------------------------------------------------------------------
@@ -289,15 +342,15 @@ class TestTheFirstMissIsCaptured:
         rig = _Rig()
         rig.add(_browser())
         rig.misses[CLONE] = [True]
-        original = rig.failure_of
+        original = rig.judge
 
-        async def closing(browser, steps):
-            result = await original(browser, steps)
+        async def closing(data, steps):
+            result = await original(data, steps)
             del rig.instances[CLONE]
             return result
 
         probe = rig.probe()
-        probe._failure_of = closing
+        probe._judge = closing
 
         await probe.check([CLONE])
 
@@ -323,22 +376,133 @@ class TestTheFirstMissIsCaptured:
         rig.add(_browser(), "i-b")
         rig.misses["i-b"] = [True]
         calls = []
-        original = rig.failure_of
+        original = rig.judge
 
-        async def failing(browser, steps):
-            calls.append(browser)
+        async def failing(data, steps):
+            calls.append(data)
             if len(calls) == 1:
                 raise RuntimeError("probe seam broke")
-            return await original(browser, steps)
+            return await original(data, steps)
 
         probe = rig.probe()
-        probe._failure_of = failing
+        probe._judge = failing
 
         await probe.check(["i-a", "i-b"])
 
         assert len(calls) == 2
         assert len(log.at("error")) == 1 and "i-b" in log.at("error")[0]
         assert log.at("warning") == ["i-a: RuntimeError"]
+
+
+class TestAStarvedHostIsNotAFrozenClone:
+    async def test_a_starved_miss_is_a_warning_and_captures_nothing(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True]
+        rig.starved = "idle canary ran 9.0x slow"
+        probe = rig.probe()
+
+        await probe.check([CLONE])
+
+        assert log.at("error") == [] and probe.records == {}
+        assert rig.fresh_asked == [] and rig.own_asked == []
+        (warning,) = log.at("warning")
+        assert "starved, not frozen, not captured" in warning
+        assert "idle canary ran 9.0x slow" in warning
+
+    async def test_a_starved_miss_does_not_consume_the_one_shot(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True, True]
+        probe = rig.probe()
+
+        rig.starved = "idle canary ran 9.0x slow"
+        await probe.check([CLONE])
+        rig.starved = None  # the host recovered; the clone still misses
+        await probe.check([CLONE])
+
+        (error,) = log.at("error")
+        assert error.startswith("FrozenCloneError") and probe.records[CLONE] in error
+
+    async def test_an_unstarved_miss_is_the_error_capture(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True]
+
+        await rig.probe().check([CLONE])
+
+        assert len(log.at("error")) == 1 and log.at("warning") == []
+
+    async def test_starvation_is_believed_only_to_the_ceiling(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True, True, True]
+        rig.starved = "idle canary ran 9.0x slow"
+        probe = rig.probe()
+
+        await probe.check([CLONE])  # the run's first excuse
+        rig.now = backend_eviction.STARVED_CEILING_SECONDS
+        await probe.check([CLONE])  # AT the ceiling: still excused
+        assert log.at("error") == []
+        rig.now = backend_eviction.STARVED_CEILING_SECONDS + 1
+        await probe.check([CLONE])  # past it: a real freeze that coincides
+
+        assert len(log.at("error")) == 1
+
+    async def test_an_answer_ends_the_run_of_excuses(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True, False, True]
+        rig.starved = "idle canary ran 9.0x slow"
+        probe = rig.probe()
+
+        await probe.check([CLONE])
+        rig.now = backend_eviction.STARVED_CEILING_SECONDS * 3
+        await probe.check([CLONE])  # answers: the run is over
+        await probe.check([CLONE])  # a new run, not one long past the ceiling
+
+        assert log.at("error") == []
+
+
+class TestTheRoundIsBounded:
+    async def test_frozen_clones_are_probed_together(self, log):
+        rig = _Rig()
+        ids = [f"i-{n}" for n in range(5)]
+        for iid in ids:
+            rig.add(_browser(), iid)
+
+        async def slow(data, steps):
+            await asyncio.sleep(0.2)
+            return None, None
+
+        probe = rig.probe()
+        probe._judge = slow
+        started = time.monotonic()
+
+        await probe.check(ids)
+
+        assert time.monotonic() - started < 0.7  # serial would be 1.0 s
+
+    async def test_the_round_ends_at_the_bound_whatever_the_clones_do(
+        self, log, monkeypatch
+    ):
+        monkeypatch.setattr(clone_probe, "ROUND_SECONDS", 0.2)
+        rig = _Rig()
+        rig.add(_browser())
+
+        async def hangs(data, steps):
+            await asyncio.Event().wait()
+
+        probe = rig.probe()
+        probe._judge = hangs
+        started = time.monotonic()
+
+        # bounded here too: with the bound removed this goes RED, it does not hang
+        await asyncio.wait_for(probe.check([CLONE]), 2)
+
+        assert time.monotonic() - started < 2
+        (warning,) = log.at("warning")
+        assert warning.startswith("round cut off after ")
 
 
 # ---------------------------------------------------------------------------
@@ -431,9 +595,7 @@ class TestPausedFetchCount:
         rig.misses[CLONE] = [True]
         monkeypatch.setattr(dynamic_hook_system, "_paused_in_flight", {CLONE: 7})
 
-        probe = clone_probe.CloneProbe(
-            rig.get_instance, rig.failure_of, rig.fresh, rig.own
-        )
+        probe = clone_probe.CloneProbe(rig.get_instance, rig.judge, rig.fresh, rig.own)
         await probe.check([CLONE])
 
         assert "paused_fetch: 7" in log.at("error")[0]
