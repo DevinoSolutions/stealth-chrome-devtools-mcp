@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### An error in a caller's hook code is a warning they can read back, not our ERROR (T-9135)
+
+- A hook's `function_code` runs with a trimmed set of builtins (no `hasattr`, `getattr`, `isinstance`), so a hook that uses one raised `NameError` on every paused request, and `_process_request_hooks` logged it as our ERROR (which reaches Sentry) while the caller never heard of it. The same went for a `ZeroDivisionError`, a `process_request` that returned nothing, or a dict `HookAction` rejects. Now an exception from the caller's function, or its result being neither a `HookAction` nor a dict, is a WARNING (with the traceback) through `_release_after_error(callers_code=True)`, the request is continued exactly as before, and the hook records it. Our own failures (executing the action, a failed fallback) stay ERROR.
+- The record is on the hook itself: `error_count`, `last_error` (`NameError: name 'hasattr' is not defined`, at most 500 characters) and `last_error_at`, added to `DynamicHook` (`record_error` / `error_record`) and shown by the existing `list_dynamic_hooks` and `get_dynamic_hook_details`, so there is no new tool and no second place to look. A `custom_condition` that raises (already a WARNING) is recorded the same way. The record is cumulative and is not cleared by a later good run. `DynamicHook.process` (used by tests only; nothing in `src` calls it) is unchanged.
+- The sandbox builtins are unchanged: they are not a security boundary (see the `dynamic_hook_model.py` docstring), and adding names would read as one.
+- `tests/test_hook_code_errors.py` (10 tests, built from nodriver's own `RequestPaused.from_json`, every wait bounded by `asyncio.wait_for`) was written first and was RED. Two pins in `tests/test_dynamic_hook_system.py` that used a raising hook to reach the fallback path now expect that hook error as a WARNING. 12 clause mutations by runtime rebinding are all killed.
+
 ### Dropped the unused jsbeautifier dependency (T-8941)
 
 - `jsbeautifier` was pinned in `pyproject.toml` but nothing in `src/`, `tools/` or `tests/` imports it; the pin and its lock entries are removed. No behaviour changes.

@@ -74,12 +74,33 @@ class DynamicHook:
         self.created_at = datetime.now(tz=timezone.utc)
         self.trigger_count = 0
         self.last_triggered: datetime | None = None
+        # The caller's own code failing (T-9135): theirs to read back, not our defect.
+        self.error_count = 0
+        self.last_error: str | None = None
+        self.last_error_at: datetime | None = None
         self.status = "active"
         self.request_stage = requirements.get(
             "stage", "request"
         )  # 'request' or 'response'
 
         self._compiled_function = self._compile_function()
+
+    def record_error(self, error: BaseException) -> None:
+        """Remember that the CALLER's code (the function, or its ``custom_condition``)
+        raised, so ``list_hooks`` / ``get_hook_details`` can show it to them."""
+        self.error_count += 1
+        self.last_error = f"{type(error).__name__}: {error}"[:500]
+        self.last_error_at = datetime.now(tz=timezone.utc)
+
+    def error_record(self) -> dict[str, Any]:
+        """What the caller reads back about their code failing (T-9135)."""
+        return {
+            "error_count": self.error_count,
+            "last_error": self.last_error,
+            "last_error_at": self.last_error_at.isoformat()
+            if self.last_error_at
+            else None,
+        }
 
     def _compile_function(self) -> Callable:
         """Compile the AI-generated function."""
@@ -162,11 +183,13 @@ class DynamicHook:
                     if not result:
                         return False
                 except Exception as cond_err:
+                    self.record_error(cond_err)
                     debug_logger.log_warning(
                         "dynamic_hook",
                         "matches",
                         f"Custom condition eval failed for hook {self.name}: "
                         f"{cond_err}",
+                        error=cond_err,
                     )
                     return False
 
