@@ -270,6 +270,9 @@ class DynamicHookSystem:
         # to a task, so one parked on a reply that never comes was garbage
         # collected mid-await ("Task was destroyed but it is pending!").
         self._paused_tasks: dict[str, set[asyncio.Task]] = {}
+        # T-8944: which target each of those tasks is paused on, so closing ONE
+        # tab ends only its handlers (``cancel_paused_for_target``).
+        self._paused_target: dict[asyncio.Task, str] = {}
         self._lock = asyncio.Lock()
 
     def paused_in_flight(self, instance_id: str) -> int:
@@ -386,7 +389,9 @@ class DynamicHookSystem:
         task = asyncio.create_task(self._on_request_paused(tab, event, instance_id))
         tasks = self._paused_tasks.setdefault(instance_id, set())
         tasks.add(task)
+        self._paused_target[task] = str(tab.target.target_id)
         task.add_done_callback(tasks.discard)
+        task.add_done_callback(lambda t: self._paused_target.pop(t, None))
 
     async def _release_after_error(  # noqa: PLR0913  PERMANENT(the one fallback home for three call sites)
         self,
@@ -774,6 +779,24 @@ class DynamicHookSystem:
         """Add a new browser instance."""
         if instance_id not in self.instance_hooks:
             self.instance_hooks[instance_id] = []
+
+    def cancel_paused_for_target(self, instance_id: str, target_id: str) -> int:
+        """End the paused-request handlers of *instance_id* that wait on *target_id*.
+
+        A handler parked on ``Fetch.getResponseBody`` has no timeout of its own:
+        it ends only when Chrome tears the page's session down, which took about
+        38 s after ``close_tab`` in a branch-wheel proof. Call it once the tab is
+        closed (never before: a refused close leaves the page, and its held
+        requests, alive). Returns how many handlers it cancelled.
+        """
+        ended = [
+            task
+            for task in self._paused_tasks.get(instance_id, ())
+            if self._paused_target.get(task) == str(target_id)
+        ]
+        for task in ended:
+            task.cancel()
+        return len(ended)
 
     def remove_instance(self, instance_id: str):
         """Remove a browser instance and its hook associations."""
