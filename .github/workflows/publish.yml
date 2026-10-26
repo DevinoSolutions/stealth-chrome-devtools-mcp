@@ -133,13 +133,22 @@ jobs:
           draft: false
           prerelease: false
 
+  # T-8944: no step made the Sentry release, so 2.1.44 stayed unreleased until
+  # it was finalized by hand. A job of its own after `publish`: a Sentry outage
+  # fails it visibly but never blocks the upload, "Re-run failed jobs" retries
+  # it alone without repeating the PyPI upload, and it holds no publishing
+  # permission. The org token is the repo secret SENTRY_AUTH_TOKEN. Cloudflare
+  # in front of sentry.devino.ca answers 1010 to a generic client signature, so
+  # the request names itself as sentry-cli.
+  sentry-release:
+    name: Create and finalize the Sentry release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: publish
+    permissions:
+      contents: read
+    steps:
       - name: Create and finalize the Sentry release
-        # T-8944: no step made the Sentry release, so 2.1.44 stayed unreleased
-        # until it was finalized by hand. Runs after PyPI, so a Sentry outage
-        # fails this step visibly but never blocks the upload. The org token
-        # (scope org:ci) is the repo secret SENTRY_AUTH_TOKEN. Cloudflare in
-        # front of sentry.devino.ca answers 1010 to a generic client
-        # signature, so the request names itself as sentry-cli.
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_URL: https://sentry.devino.ca
@@ -148,16 +157,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          body="${RUNNER_TEMP}/sentry-response.json"
           api() {
-            curl -sS -o /dev/null -w '%{http_code}' -A 'sentry-cli/2.42.2' \
+            curl -sS --connect-timeout 10 --max-time 30 --retry 3 \
+              -o "$body" -w '%{http_code}' -A 'sentry-cli/2.42.2' \
               -H "Authorization: Bearer ${SENTRY_AUTH_TOKEN}" \
               -H 'Content-Type: application/json' "$@"
           }
-          created=$(api -X POST "${SENTRY_URL}/api/0/organizations/${SENTRY_ORG}/releases/" \
-            -d "{\"version\":\"${VERSION}\",\"projects\":[\"${SENTRY_PROJECT}\"],\"ref\":\"${GITHUB_SHA}\",\"url\":\"https://pypi.org/project/stealth-chrome-devtools-mcp/${VERSION}/\"}")
+          fail() { echo "$1"; cat "$body" 2>/dev/null || true; echo; exit 1; }
+          # VERSION is PEP 440 (package_verify checked it) and GITHUB_SHA is hex,
+          # so neither needs JSON escaping.
+          release=$(printf '{"version":"%s","projects":["%s"],"ref":"%s","url":"%s"}' \
+            "$VERSION" "$SENTRY_PROJECT" "$GITHUB_SHA" \
+            "https://pypi.org/project/stealth-chrome-devtools-mcp/${VERSION}/")
+          created=$(api -X POST "${SENTRY_URL}/api/0/organizations/${SENTRY_ORG}/releases/" -d "$release")
           echo "create ${VERSION}: HTTP ${created}"
-          case "$created" in 200|201|208) ;; *) exit 1 ;; esac
-          released=$(api -X PUT "${SENTRY_URL}/api/0/organizations/${SENTRY_ORG}/releases/${VERSION}/" \
-            -d "{\"dateReleased\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
+          case "$created" in 200|201|208) ;; *) fail "create ${VERSION} failed" ;; esac
+          finalized=$(printf '{"dateReleased":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+          released=$(api -X PUT "${SENTRY_URL}/api/0/organizations/${SENTRY_ORG}/releases/${VERSION}/" -d "$finalized")
           echo "finalize ${VERSION}: HTTP ${released}"
-          [ "$released" = 200 ]
+          [ "$released" = 200 ] || fail "finalize ${VERSION} failed"
