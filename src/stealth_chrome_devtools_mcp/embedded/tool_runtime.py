@@ -203,7 +203,7 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
     and wedged the instance (F-788 / F-794 / F-883 B1). nodriver 0.50 fixed that
     itself, around the SEND: ``Connection.send`` owns its future and removes its
     registration in a ``finally`` (T-8501, pinned in
-    ``tests/test_cdp_transport.py``) — never here.
+    ``tests/test_cdp_reply_path.py``) — never here.
     """
     t = timeout or CDP_OPERATION_TIMEOUT
     try:

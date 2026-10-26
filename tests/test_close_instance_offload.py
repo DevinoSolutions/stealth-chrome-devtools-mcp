@@ -32,6 +32,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     clone_protection,
     clone_storage,
     process_exit,
+    tab_open,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -906,3 +907,26 @@ async def test_a_cancelled_grace_still_kills_the_browser(monkeypatch):
         await process_exit.settle("cancel-1", process, None, 2)
 
     process.terminate.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_the_browser_connection_is_marked_closed_before_it_is_ended():
+    """T-8501: after ``aclose`` the socket is ``None``, which nodriver 0.50 reopens
+    for the next ``send``; the browser is marked closed FIRST so a task still in
+    flight (a popup arming, a binding watcher) is refused instead."""
+    manager = BrowserManager()
+    browser, _ = _seed_manager(manager)
+    seen = []
+
+    def ending(*_a, **_kw):
+        seen.append(tab_open.is_closed(browser))
+        return _noop_coro()
+
+    browser.aclose = MagicMock(side_effect=ending)
+    browser.update_targets = MagicMock(side_effect=_noop_coro)
+
+    assert await manager.close_instance("test-1") is True
+
+    assert seen == [True]
+    with pytest.raises(ConnectionError):
+        await tab_open.update_targets(browser)

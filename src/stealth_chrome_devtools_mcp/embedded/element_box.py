@@ -106,8 +106,8 @@ the context is ABSENT rather than SUPPRESSED, so anything that reads
 ``exc.__context__`` directly — a custom formatter, a debugger, a future SDK that
 stops consulting the flag — finds nothing, and an absence is not a setting
 anyone can flip. It costs one line's placement, which is why the stronger form
-is the one taken; ``cdp_transport._guard_result`` builds its error outside the
-handler for the same reason (F-902's). The pin asserts the ABSENCE
+is the one taken; ``cdp_transport._guard_result`` (deleted in T-8501) built its
+error outside the handler for the same reason (F-902's). The pin asserts the ABSENCE
 (``__cause__ is None`` and ``__context__ is None``), never a third party's
 walking behaviour.
 

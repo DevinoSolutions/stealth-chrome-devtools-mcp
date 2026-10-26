@@ -121,6 +121,8 @@ from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
+    from nodriver import Browser
+
     from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
 
@@ -296,3 +298,21 @@ def _kill(
             f"{instance_id}: {error}",
         )
     return []
+
+
+def reap_attached(cleanup: ProcessCleanup, browser: Browser, instance_id: str) -> None:
+    """End the process of a browser the failed spawn ATTACHED to. Never raises.
+
+    nodriver's ``Browser.stop`` ends ``_process`` and an attached browser has
+    none; its fallback tests ``hasattr(self, "browser_process_pid")``, an
+    attribute nothing sets (``browser.py`` ``stop``, 0.50.6 and 0.47 alike), so it
+    kills nothing. ``browser_pid`` refuses a ``--type=`` child and
+    ``_kill_process_by_pid`` a pid whose identity it cannot establish (F-918): the
+    checks ``close_instance`` relies on. A launched browser is ``stop()``'s.
+    """
+    if getattr(browser, "_process", None) is not None:
+        return
+    pid = process_exit.browser_pid(None, getattr(browser, "_process_pid", None))
+    if pid is not None:
+        directory = getattr(getattr(browser, "config", None), "user_data_dir", "")
+        _kill(cleanup, pid, str(directory), instance_id)

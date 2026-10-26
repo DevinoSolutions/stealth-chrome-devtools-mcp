@@ -452,7 +452,7 @@ jobs:
         # is what the note this replaces asked for. A navigation timeout used to
         # leave the instance's CDP connection permanently wedged; the cause was
         # never the deadline but a cancelled await taking nodriver's Transaction
-        # down with it, and it is fixed in embedded/cdp_transport.py. The
+        # down with it, and it is fixed in nodriver 0.50's own reply path (T-8501). The
         # characterization pin that carried the defect is now
         # test_a_navigation_timeout_leaves_the_instance_usable and asserts the
         # full recovery invariant, so the step's second half is real evidence

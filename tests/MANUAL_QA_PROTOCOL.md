@@ -1229,7 +1229,7 @@ a navigation timeout left the instance's CDP connection permanently wedged
 (F-788). Both were characterization-pinned and routed rather than fixed —
 `src/` edits are a plan_RELEASE non-goal — and a characterization can never
 satisfy a step. **F-788 has since been fixed** outside this workstream
-(`embedded/cdp_transport.py`, F-883 B1), its pin inverted to an assertion of
+(nodriver 0.50's reply path, T-8501, F-883 B1), its pin inverted to an assertion of
 recovery, and MQ-128 promoted to `satisfied` in that same change; F-789 stands,
 so MQ-126 stays `planned`.
 Read the `Current support (non-acceptance)` lines literally: they record real,
@@ -1290,7 +1290,7 @@ body.
 The timeout half was always proved (below). The recovery half was blocked by
 F-788 — a timed-out navigation left the instance's CDP connection permanently
 wedged, so "a normal navigation works immediately afterwards" was false — and
-**F-788 is now fixed** (`embedded/cdp_transport.py`, F-883 B1). The
+**F-788 is now fixed** (nodriver 0.50's reply path, T-8501, F-883 B1). The
 characterization pin that carried it is inverted in the same change and asserts
 the full recovery invariant: the same instance is driveable, closes clean, and a
 fresh spawn works. What this step still makes NO claim about is content: a
@@ -1338,7 +1338,7 @@ against a tab parked in an in-flight `Page.navigate`, that command never
 returned — nodriver's connection listener died while resolving an earlier
 transaction and no future on that connection resolved again (the same F-788
 mechanism), so it wedged the injection rather than measuring the product. F-788
-is fixed now (`embedded/cdp_transport.py`), so that reason no longer holds as
+is fixed now (nodriver 0.50's reply path, T-8501), so that reason no longer holds as
 written; whether offline emulation is usable as an injection here has NOT been
 re-measured, and nothing about offline-emulation coverage may be inferred either
 way until it is.
@@ -1529,7 +1529,7 @@ those workstreams land.
 measurements were taken and each found a real defect in the half the step names:
 a cancelled request is answered with JSON-RPC `code: 0` (F-791) and used to
 leave its instance wedged (F-794, since **fixed** in
-`embedded/cdp_transport.py` — MQ-141 is `planned` behind F-791 alone now), and
+nodriver 0.50's reply path, T-8501 — MQ-141 is `planned` behind F-791 alone now), and
 malformed input is answered with nothing at all (F-792). All are characterization-pinned and routed, never fixed — `src/` edits
 are a plan_RELEASE non-goal — and a characterization can never satisfy a step.
 Three further findings own no step of their own and instead narrow the steps
@@ -1662,7 +1662,7 @@ zero is neither a reserved JSON-RPC code nor a documented product code, so a
 client can only recognise a cancellation by matching the English message. The
 other half — the cancelled **instance** left wedged (F-794), its next navigation
 burning the full CDP budget to report that the browser may have crashed — is
-**fixed** (`embedded/cdp_transport.py`, F-883 B1), and the node's assertion is
+**fixed** (nodriver 0.50's reply path, T-8501, F-883 B1), and the node's assertion is
 inverted in that same change: the cancelled instance must now navigate again and
 answer a script round trip. So "the session still works" is true of the server
 AND of the instance, and this step is `planned` behind F-791 alone.
@@ -1991,7 +1991,7 @@ The remaining ownership reservations are:
 - W9: `MQ-122..125` — performance/resource budgets.
 - ~~W10: `MQ-126..129` — resilience/fault injection.~~ **Landed** above as
   current steps; no longer a reservation. `MQ-127` and `MQ-129` are satisfied;
-  `MQ-128` is satisfied (F-788 fixed in `embedded/cdp_transport.py`, its pin
+  `MQ-128` is satisfied (F-788 fixed in nodriver 0.50's reply path, T-8501, its pin
   inverted to an assertion of recovery); `MQ-126` is `planned` behind F-789,
   with its characterization pin recorded as current support.
 - ~~W11: `MQ-130` — documentation examples and claims sync.~~ **Landed** above as
@@ -2002,7 +2002,7 @@ The remaining ownership reservations are:
   reservation. `MQ-138`, `MQ-139`, `MQ-140`, `MQ-142` and `MQ-144` are
   satisfied; `MQ-141` and `MQ-143` are `planned` behind F-791 and F-792, with
   their characterization pins recorded as current support (F-794, MQ-141's other
-  blocker, is fixed in `embedded/cdp_transport.py`). F-790 (the
+  blocker, is fixed in nodriver 0.50's reply path, T-8501). F-790 (the
   auto-clone spawn path waited forever on an unanswered `roots/list`; RESOLVED
   in 2.0.1), F-793 (one instance serializes its calls) and F-795
   (`execute_script` reported success for a script that threw — fixed in 2.0.1)

@@ -43,7 +43,7 @@ not, and each of them was found by asking a question only a wire lane can ask:
   JSON-RPC error with ``code: 0`` (F-791), which no client can classify by code.
   The other — the cancelled INSTANCE was left wedged (F-794), its next call
   burning the full CDP budget to report that the browser may have crashed — is
-  FIXED, at the transport layer (``embedded/cdp_transport.py``, F-883 B1), and
+  FIXED, at the transport layer (nodriver 0.50's reply path, T-8501, F-883 B1), and
   the node below now pins the recovery instead of the wedge.
 * **Malformed input is answered with silence** (F-792). A non-JSON line and a
   method-less request both vanish: no ``-32700``, no ``-32600``, no frame at
@@ -959,7 +959,7 @@ async def test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero(
       ``Transaction`` while it was still registered in ``Connection.mapper``,
       and the late answer's ``set_result`` killed the connection's listener
       task (the same mechanism F-788 records for a navigation timeout). Fixed
-      at the transport layer by ``embedded/cdp_transport.py`` (F-883 B1), and
+      at the transport layer by nodriver 0.50's reply path, T-8501 (F-883 B1), and
       the assertion below is inverted to match: it now pins RECOVERY, so a
       regression is what turns it red.
 
@@ -1015,7 +1015,7 @@ async def test_cancelling_a_confirmed_in_flight_request_ends_it_with_code_zero(
     # longer cancels the in-flight ``Transaction``, so the connection's listener
     # survives Chrome's late answer and the SAME instance takes the next
     # navigation. Inverted deliberately, in the change that fixed it
-    # (``embedded/cdp_transport.py``); a wedge here now reads as the regression
+    # (nodriver 0.50's reply path, T-8501); a wedge here now reads as the regression
     # it would be. The instance has to do real work, not merely answer: the
     # navigation is asserted to SUCCEED and the page's own sentinel is read
     # back, because "no error frame" alone would also describe a tool that
