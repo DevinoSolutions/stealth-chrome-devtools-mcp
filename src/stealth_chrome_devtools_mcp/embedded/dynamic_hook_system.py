@@ -26,9 +26,12 @@ from typing import Any
 
 import nodriver as uc
 from nodriver.core.connection import ProtocolException
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import ConnectionClosed, InvalidMessage, InvalidStatus
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+
+WINERROR_CONNECTION_REFUSED = 1225  # ERROR_CONNECTION_REFUSED
+HTTP_SERVER_ERROR = 500  # the status Sentry shows when a dead tab's socket is reopened
 
 
 def gone_reason(error: BaseException) -> str | None:
@@ -41,10 +44,24 @@ def gone_reason(error: BaseException) -> str | None:
     connection. Sending the same command again cannot succeed, and nothing is
     stuck, so the callers log it at WARNING (a breadcrumb) and not as an
     exception event. ``None`` means a real failure.
+
+    The socket cases are the ones Sentry shows and no wider: a ``ConnectionError``
+    or WinError 1225 (asyncio on Windows raises it as a plain ``OSError``, not a
+    ``ConnectionRefusedError``), ``InvalidStatus`` with HTTP 500,
+    ``ConnectionClosed`` and ``InvalidMessage``. A timeout, a missing file or a
+    403/404 says nothing about the request, so those stay errors and the caller
+    still continues it.
     """
     if isinstance(error, ProtocolException) and "Invalid InterceptionId" in str(error):
         return "the interception id is stale (request resolved or page navigated away)"
-    if isinstance(error, (OSError, WebSocketException)):
+    if (
+        isinstance(error, (ConnectionError, ConnectionClosed, InvalidMessage))
+        or getattr(error, "winerror", None) == WINERROR_CONNECTION_REFUSED
+        or (
+            isinstance(error, InvalidStatus)
+            and error.response.status_code == HTTP_SERVER_ERROR
+        )
+    ):
         return "the tab's socket is gone (tab or browser closed)"
     return None
 
@@ -360,6 +377,15 @@ class DynamicHookSystem:
     def _spawn_paused(self, tab, event, instance_id: str) -> None:
         """Run one ``Fetch.requestPaused`` handler as a task that is kept alive
         until it ends and cancelled with its instance (``remove_instance``)."""
+        if instance_id not in self._instance_tabs:
+            # A late event for an instance already removed: nothing would cancel
+            # this task, and its browser is closing.
+            debug_logger.log_debug(
+                "dynamic_hook_system",
+                "_spawn_paused",
+                f"Ignoring a paused request for removed instance {instance_id}",
+            )
+            return
         task = asyncio.create_task(self._on_request_paused(tab, event, instance_id))
         tasks = self._paused_tasks.setdefault(instance_id, set())
         tasks.add(task)
@@ -551,11 +577,21 @@ class DynamicHookSystem:
                         f"Retrieved response body ({len(response_body)} chars)",
                     )
                 except Exception as e:
-                    debug_logger.log_error(
-                        "dynamic_hook_system",
-                        "_process_request_hooks",
-                        f"Failed to get response body: {e}",
-                    )
+                    reason = gone_reason(e)
+                    if reason:
+                        debug_logger.log_warning(
+                            "dynamic_hook_system",
+                            "_process_request_hooks",
+                            f"No response body for {request.request_id}: "
+                            f"{reason} ({e})",
+                            error=e,
+                        )
+                    else:
+                        debug_logger.log_error(
+                            "dynamic_hook_system",
+                            "_process_request_hooks",
+                            f"Failed to get response body: {e}",
+                        )
 
             hook = matching_hooks[0]
 
