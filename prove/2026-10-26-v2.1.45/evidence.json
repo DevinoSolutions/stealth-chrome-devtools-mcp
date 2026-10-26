@@ -1,0 +1,217 @@
+{
+ "backend_launcher_pid": 119532,
+ "token_handshake_http_status": {
+  "no_token": 401,
+  "wrong_token": 401,
+  "with_token_not_401": true
+ },
+ "tool_count_over_token_session": 97,
+ "spawn": {
+  "headless": false,
+  "profile_role": null,
+  "seed_warning": "There is no shared profile or seed yet, so this browser started EMPTY: it holds no logins and is deleted when it closes. To keep a signed-in profile, open one with spawn_browser(session=\"default\"), sign in there, and close it with close_instance(instance_id=..., session=\"default\"): every later spawn is then copied from it."
+ },
+ "instance_id": "ab1d1573-5537-4c43-8a3a-f7046522c3af",
+ "versions": {
+  "package_version": "2.1.45",
+  "expected": "2.1.45",
+  "package_path": "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\.venv\\Lib\\site-packages\\stealth_chrome_devtools_mcp\\__init__.py",
+  "inside_prove_venv": true,
+  "editable": false,
+  "python": "3.13.11",
+  "fastmcp": "3.4.11",
+  "mcp": "1.30.0",
+  "tool_count_over_token_session": 97,
+  "token_handshake_http_status": {
+   "no_token": 401,
+   "wrong_token": 401,
+   "with_token_not_401": true
+  },
+  "navigator_userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+ },
+ "shot01": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\out\\01-versions-token-tool-count.png",
+ "basic_click": {
+  "navigate": {
+   "url": "http://127.0.0.1:42555/click.html",
+   "title": "click page",
+   "success": true
+  },
+  "click": {
+   "selector": "#btn",
+   "dispatch": "coordinate",
+   "point": {
+    "x": 118.00312805175781,
+    "y": 140.600004196167
+   },
+   "size": {
+    "width": 156.00625610351562,
+    "height": 55.60000228881836
+   },
+   "target": {
+    "tag": "button",
+    "id": "btn",
+    "classes": []
+   },
+   "hit": {
+    "tag": "button",
+    "id": "btn",
+    "classes": []
+   },
+   "hit_is_target": true,
+   "reason": null
+  },
+  "heading_after": {
+   "success": true,
+   "result": "clicked by stealth 2.1.45",
+   "error": null
+  }
+ },
+ "shot02": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\out\\02-headed-spawn-navigate-click.png",
+ "session_lock": {
+  "acquire_a": {
+   "session": "prove-lock",
+   "locked": true,
+   "holder": "prove-a",
+   "acquired_at": 1792986464.108745,
+   "expires_at": 1792986524.108745,
+   "expires_in_seconds": 60.0,
+   "queue_length": 0,
+   "waiting": [],
+   "acquired": true
+  },
+  "status_held": {
+   "session": "prove-lock",
+   "locked": true,
+   "holder": "prove-a",
+   "acquired_at": 1792986464.108745,
+   "expires_at": 1792986524.108745,
+   "expires_in_seconds": 60.0,
+   "queue_length": 0,
+   "waiting": [],
+   "your_position": null
+  },
+  "acquire_b_refused": {
+   "__error__": "Error calling tool 'acquire_session_lock': Session 'prove-lock' is locked by 'prove-a' until 1792986524 (epoch seconds; 59.9s from now); you would be at position 1 (nobody ahead)."
+  },
+  "release_by_b_refused": {
+   "__error__": "Error calling tool 'release_session_lock': Session 'prove-lock' is locked by 'prove-a', not 'prove-b'; only the holder can release it (it expires on its own)."
+  },
+  "release_a": {
+   "session": "prove-lock",
+   "locked": false,
+   "released": true
+  },
+  "status_free": {
+   "session": "prove-lock",
+   "locked": false,
+   "queue_length": 0,
+   "waiting": []
+  }
+ },
+ "shot03": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\out\\03-session-lock.png",
+ "forced_end": {
+  "live_browser_pid": 98656,
+  "accepts: the live browser, recorded pid + start time + port + profile": null,
+  "refuses: start time differs (pid reuse)": "pid 98656 is gone or not the process recorded (start time differs)",
+  "refuses: start time never recorded": "its pid, start time, DevTools port or profile directory is not recorded",
+  "refuses: another DevTools port": "pid 98656 is not on this instance's DevTools port",
+  "refuses: another profile directory": "pid 98656 is not a browser process on this instance's profile directory (a child, another profile, or gone)",
+  "refuses: a --type child of the browser": "pid 117368 is not a browser process on this instance's profile directory (a child, another profile, or gone)",
+  "browser still running after all checks": true
+ },
+ "shot04": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\out\\04-t4686-forced-end-identity.png",
+ "release_code": {
+  "T-6232 closeTarget step appended after evaluate, before the finally (not in it)": true,
+  "T-8493 installed == pinned": {
+   "pydantic": [
+    "2.14.1",
+    "2.14.1",
+    true
+   ],
+   "pydantic-settings": [
+    "2.16.1",
+    "2.16.1",
+    true
+   ],
+   "psutil": [
+    "7.2.2",
+    "7.2.2",
+    true
+   ],
+   "uvicorn": [
+    "0.54.0",
+    "0.54.0",
+    true
+   ],
+   "sentry-sdk": [
+    "2.73.0",
+    "2.73.0",
+    true
+   ],
+   "anyio": [
+    "4.15.1",
+    "4.15.1",
+    true
+   ],
+   "starlette": [
+    "1.9.0",
+    "1.9.0",
+    true
+   ],
+   "nodriver": [
+    "0.47.0",
+    "0.47.0",
+    true
+   ]
+  },
+  "T-8497 README (wheel long description) names STEALTH_MCP_LOG_LEVEL": true,
+  "T-8497 README names CDP_OPERATION_TIMEOUT_SECONDS": true,
+  "T-8497 README names --exit-if-unadopted": true,
+  "T-8597": "test-only (tests/test_e2e_hidden_tab_input.py); not in the wheel; it ran green in the v2.1.45 publish gate"
+ },
+ "shot05": "Screenshot saved. AI agents should use the Read tool to view this image: C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\out\\05-release-code-checks.png",
+ "close": {
+  "closed": true,
+  "seed_refreshed": null
+ },
+ "backend_tree": [
+  [
+   119532,
+   "python.exe",
+   1792986431.8619444,
+   "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\.venv\\Scripts\\python.exe -m stealth_chrome_devtools_mcp --transport http --port 42556 --host 127.0.0.1"
+  ],
+  [
+   98664,
+   "python.exe",
+   1792986431.8759005,
+   "C:\\Users\\amind\\AppData\\Local\\Temp\\prove2145\\.venv\\Scripts\\python.exe -m stealth_chrome_devtools_mcp --transport http --port 42556 --host 127.0.0.1"
+  ]
+ ],
+ "backend_stopped": {
+  "gone": [
+   119532,
+   98664
+  ],
+  "still_alive": [],
+  "not_ours_skipped": []
+ },
+ "checks": {
+  "version": true,
+  "not_editable": true,
+  "tools_97": true,
+  "no_token_401": true,
+  "headed": true,
+  "clicked": true,
+  "lock_refuses_other": true,
+  "lock_released": true,
+  "t4686_accepts_live_browser": true,
+  "t4686_refuses_each_mismatch": true,
+  "t4686_nothing_killed": true,
+  "t6232": true,
+  "t8493": true,
+  "t8497": true,
+  "closed": true,
+  "stopped": true
+ }
+}
