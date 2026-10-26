@@ -1,18 +1,16 @@
 """THE one home for "is a long-lived named-session browser still answering, and if
 not, bring it back" (F-963).
 
-**The incident.** ``default`` (master) and ``fleet`` froze together at ~26.5 h of
-uptime: Chrome's HTTP endpoints answered but ``Runtime.evaluate`` never returned in
-ANY tab (a fresh ``about:blank`` one over a direct websocket included) and
-``Browser.close`` replied ok while the process stayed up. The Chrome-side mechanism
-is not identified, so this module is a self-heal plus forensics.
+**The incident.** ``default`` and ``fleet`` froze together at ~26.5 h: Chrome's HTTP
+endpoints answered but ``Runtime.evaluate`` never returned in ANY tab and
+``Browser.close`` replied ok while the process stayed up. The mechanism is not
+identified, so this module is a self-heal plus forensics.
 
 **The probe does not go through nodriver.** A fresh ``websockets`` client opens a
 background ``about:blank`` target, evaluates ``1+1`` in it and closes it — the exact
-request that hung. This backend's own nodriver connection would let a wedged listener
-HERE fake a Chrome freeze, or hide one. The same check over that connection
-(``Browser.getVersion``) runs only when the direct probe passed; a failure there is
-its own warning ("backend connection wedged") and relaunches nothing.
+request that hung. This backend's own connection would let a wedged listener HERE fake
+a freeze, or hide one; ``Browser.getVersion`` over it runs only when the direct probe
+passed, and a failure there is its own warning and relaunches nothing.
 
 **Scope:** ``browser_pid_registry.on_persistent_profile`` ("a login lives in this
 profile") is probed and healed. **T-1665:** a clone is probed too by :mod:`clone_probe`,
@@ -31,23 +29,19 @@ relaunches from (F-961). **T-4686:** a browser the close path left running past
 else the heal is refused.
 
 **F-964: a browser that EXITED is relaunched too, for the two shared sessions only.**
-On 2026-10-11 ~16:27Z ``default``, ``fleet`` and one clone, all driven by one
-backend, exited within seconds of each other and nobody relaunched them. The manager
-records each browser that died on its own (``BrowserManager.take_exited``: every
-``close_instance`` pops its entry first, so a deliberate close is told apart), and
-the loop relaunches the ones whose directory is ``profile_seed.DEFAULT_SESSION``'s
-or ``fleet_session.FLEET_SESSION``'s through the SAME tail the heal uses
+``BrowserManager.take_exited`` records each browser that died on its own (every
+``close_instance`` pops its entry first, so a deliberate close is told apart), and the
+loop relaunches the ones whose directory is ``profile_seed.DEFAULT_SESSION``'s or
+``fleet_session.FLEET_SESSION``'s through the SAME tail the heal uses
 (:meth:`BrowserHealth._launch_again`: spawn under the same id, re-arm, probe). Any
-other named session and every clone is left alone: an exit there is the caller's
-to notice. Not relaunched: a directory a live browser already holds, a second exit
-inside :data:`HEAL_COOLDOWN_SECONDS` (a crash loop is an ERROR), and anything while
-the backend is stopping. A human who closes a shared headed window gets it back.
+other named session and every clone is left alone. Not relaunched: a directory a live
+browser already holds, a second exit inside :data:`HEAL_COOLDOWN_SECONDS` (a crash
+loop is an ERROR), and anything while the backend is stopping.
 
 **F-1007: a starved browser is not a frozen one.** A timeout is not counted when the
 browser process still answers a fresh ``Browser.getVersion`` AND an IDLE canary child
-run DURING the probe was starved (``scheduling_lag``, THE one home; never a CPU
-poll), bounded by ``scheduling_lag.ExcuseBudget``; an excused round still starts the
-F-993 capture.
+run DURING the probe was starved (``scheduling_lag``), bounded by
+``scheduling_lag.ExcuseBudget``; an excused round still starts the F-993 capture.
 
 **F-993: the frozen state is captured BEFORE the heal can kill it.** The first failed
 probe of an incident starts :class:`freeze_capture.Incidents`' capture as a TASK (CPU
@@ -55,10 +49,8 @@ delta, process facts, a fresh-connection ``Browser.getVersion``, on Windows a bo
 minidump), so the round is not delayed. The first-failure WARNING says
 ``evidence@probe1(capturing)``, the record is logged when it finishes, and just before
 the heal the ERROR line carries it (waited for at most
-:data:`freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS`). It never raises into the loop,
-and a pid is opened only once its create time matches the registry entry. A
-shared-session browser that EXITED has its exit code in the relaunch line. Forensics
-are counts and shapes only.
+:data:`freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS`). It never raises into the loop;
+a pid is opened only once its create time matches the registry. Counts and shapes only.
 """
 
 import asyncio
@@ -68,7 +60,7 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 
 import nodriver as uc
@@ -434,7 +426,7 @@ class BrowserHealth:
         self._shared = shared
         self._holder = holder
         self._clones = clone_probe.CloneProbe(  # T-1665
-            manager.get_instance, self._failure_of, browser_answers, own_check
+            manager.get_instance, self._judged, browser_answers, own_check, clock=clock
         )
         self._incidents = freeze_capture.Incidents(
             capture=capture,
@@ -529,7 +521,7 @@ class BrowserHealth:
         return None if error is None else _describe(error, steps)
 
     async def _starved(
-        self, data: dict[str, object], factor: float | None
+        self, data: Mapping[str, object], factor: float | None
     ) -> str | None:
         """F-1007: a counts-only phrase when this failed probe is put down to a
         starved host (*factor*: ``_probed``'s, a TIMEOUT only), else ``None``."""
@@ -544,6 +536,17 @@ class BrowserHealth:
             )
             return None
         return f"idle canary ran {factor:.1f}x slow"
+
+    async def _judged(
+        self, data: Mapping[str, Browser], steps: freeze_capture.TimedSteps
+    ) -> tuple[str | None, str | None]:
+        """``(failure, starved)`` of one probe, the one judgement ``_check`` and
+        ``clone_probe`` (T-1665) share; ``(None, None)`` when it passed."""
+        error, factor = await self._probed(data["browser"], steps)
+        steps.finish()
+        if error is None:
+            return None, None
+        return _describe(error, steps), await self._starved(data, factor)
 
     async def _probed(
         self, browser: Browser, steps: list[str]
@@ -590,9 +593,8 @@ class BrowserHealth:
             return
         self._watch_exit(instance_id, data)
         steps = freeze_capture.TimedSteps()
-        error, factor = await self._probed(data["browser"], steps)
-        steps.finish()
-        if error is None:
+        failure, starved = await self._judged(data, steps)
+        if failure is None:
             self._incidents.end(instance_id)  # the incident, if any, is over
             self._excuses.reset(instance_id)
             if self._failures.pop(instance_id, 0):
@@ -601,8 +603,6 @@ class BrowserHealth:
                 )
             await self._check_own_connection(instance_id, data["browser"])
             return
-        failure = _describe(error, steps)
-        starved = await self._starved(data, factor)
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
         if starved and self._excused(instance_id, failure, starved):

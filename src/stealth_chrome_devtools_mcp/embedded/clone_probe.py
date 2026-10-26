@@ -11,9 +11,12 @@ is taken at the first miss.
 
 **Capture only.** A clone that misses a probe is never healed, closed or relaunched
 here: it is the caller's browser. ``browser_health`` hands :meth:`CloneProbe.check`
-the live instances that are not persistent, and each is probed with THE one probe
-(``BrowserHealth._failure_of``, injected). On the FIRST miss of an incident, one ERROR
-line records, counts and states only:
+the live instances that are not persistent, and each is probed and judged by THE one
+judgement (``BrowserHealth._judged``, injected: the direct probe, then F-1007's idle
+canary and browser-process answer). A miss on a STARVED host is a WARNING that
+consumes nothing, within ``scheduling_lag.ExcuseBudget``'s ceiling like the persistent
+path. On the FIRST other miss of an incident, one ERROR line records, counts and states
+only:
 
 * ``fresh_cdp`` / ``own_cdp``: ``Browser.getVersion`` over a NEW connection and over
   this backend's own. Fresh answers and own does not: the backend's connection is the
@@ -27,16 +30,19 @@ line records, counts and states only:
 
 The record is kept in :attr:`CloneProbe.records` until the clone answers again or is
 gone, and is the ERROR line's text. A probe that passes ends the incident
-(``answers probes again`` at INFO). No URL, title or cookie is ever read.
+(``answers probes again`` at INFO). The clones are probed together and the whole round
+is bounded by :data:`ROUND_SECONDS`, so frozen clones cannot hold up the next persistent
+probe. No URL, title or cookie is ever read.
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping
 
 from nodriver import Browser
 from nodriver.core.connection import Connection
 
-from stealth_chrome_devtools_mcp.embedded import freeze_capture
+from stealth_chrome_devtools_mcp.embedded import freeze_capture, scheduling_lag
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
 
@@ -44,6 +50,13 @@ _COMPONENT = "clone_probe"
 
 #: How long each fresh-connection and own-connection ``Browser.getVersion`` gets.
 ANSWER_SECONDS = freeze_capture.FRESH_ANSWER_TIMEOUT_SECONDS
+
+#: The bound on one whole round over every clone: a probe (15 s) plus a capture (5 s)
+#: with room to spare. Clones run together: N frozen ones cost this once, not N times.
+ROUND_SECONDS = 30.0
+
+#: What :func:`listener_state` says when the attribute it reads is not there.
+_NO_LISTENER_ATTRIBUTE = "unknown(no _listener_task)"
 
 
 class FrozenCloneError(Exception):
@@ -68,6 +81,8 @@ def listener_state(browser: Connection) -> str:
     """The browser connection's listener (``Connection._listener_task``, nodriver
     0.50: it ENDS, without an error, when the socket closes) and its socket, plus
     how many page connections still have a running listener."""
+    if not hasattr(browser, "_listener_task"):
+        return _NO_LISTENER_ATTRIBUTE  # a nodriver rename, not a dead listener
     socket = getattr(browser, "socket", None)
     code = getattr(socket, "close_code", None)
     wire = "none" if socket is None else "closed" if code is not None else "open"
@@ -77,45 +92,60 @@ def listener_state(browser: Connection) -> str:
         for tab in tabs
         if _task_state(getattr(tab, "_listener_task", None)) == "running"
     )
-    state = _task_state(getattr(browser, "_listener_task", None))
+    state = _task_state(browser._listener_task)
     return f"browser={state} socket={wire} tabs={running}/{len(tabs)}"
 
 
 class CloneProbe:
     """Probes disposable clones and records the first failure of each incident."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  PERMANENT(T-1665: one seam per external effect, so the round runs hermetically)
         self,
         get_instance: Callable[
             [str], Awaitable[Mapping[str, Browser] | None]
         ],  # only "browser" is read
-        failure_of: Callable[[Browser, list[str]], Awaitable[str | None]],
+        judge: Callable[
+            [Mapping[str, Browser], freeze_capture.TimedSteps],
+            Awaitable[tuple[str | None, str | None]],
+        ],
         fresh_check: Callable[[str | None], Awaitable[None]],
         own_check: Callable[[Browser], Awaitable[None]],
         *,
         paused: Callable[[str], int] = dynamic_hook_system.paused_in_flight,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._get_instance = get_instance
-        self._failure_of = failure_of
+        self._judge = judge  # (failure, starved) of one probe, or (None, None)
         self._fresh_check = fresh_check
         self._own_check = own_check
         self._paused = paused
+        self._excuses = scheduling_lag.ExcuseBudget(clock)
         #: instance id -> the record taken at its current incident's first miss.
         self.records: dict[str, str] = {}
 
     async def check(self, instance_ids: list[str]) -> None:
         """One round over *instance_ids* (the live, non-persistent instances); the
         ones that are no longer among them are forgotten. One clone's probe raising
-        costs that clone its round and nobody else theirs."""
-        for gone in set(self.records) - set(instance_ids):
-            del self.records[gone]
-        for instance_id in instance_ids:
-            try:
-                await self._check(instance_id)
-            except Exception as error:  # noqa: BLE001  PERMANENT(T-1665: evidence is best effort; a clone's probe may not end the round nor skip the others)
-                debug_logger.log_warning(
-                    _COMPONENT, "check", f"{instance_id}: {type(error).__name__}"
-                )
+        costs that clone its round and nobody else theirs; the round ends at
+        :data:`ROUND_SECONDS` whatever the clones do."""
+        for gone in (set(self.records) | self._excuses.tracked()) - set(instance_ids):
+            self.records.pop(gone, None)
+            self._excuses.reset(gone)
+        try:
+            async with asyncio.timeout(ROUND_SECONDS):
+                await asyncio.gather(*(self._guarded(iid) for iid in instance_ids))
+        except TimeoutError:
+            debug_logger.log_warning(
+                _COMPONENT, "check", f"round cut off after {ROUND_SECONDS:.0f}s"
+            )
+
+    async def _guarded(self, instance_id: str) -> None:
+        try:
+            await self._check(instance_id)
+        except Exception as error:  # noqa: BLE001  PERMANENT(T-1665: evidence is best effort; a clone's probe may not end the round nor skip the others)
+            debug_logger.log_warning(
+                _COMPONENT, "check", f"{instance_id}: {type(error).__name__}"
+            )
 
     async def _check(self, instance_id: str) -> None:
         data = await self._get_instance(instance_id)
@@ -123,9 +153,9 @@ class CloneProbe:
             return
         browser = data["browser"]
         steps = freeze_capture.TimedSteps()
-        failure = await self._failure_of(browser, steps)
-        steps.finish()
+        failure, starved = await self._judge(data, steps)
         if failure is None:
+            self._excuses.reset(instance_id)
             if self.records.pop(instance_id, None) is not None:
                 debug_logger.log_info(
                     _COMPONENT, "probe", f"{instance_id} answers probes again"
@@ -135,6 +165,15 @@ class CloneProbe:
             return  # the incident is already on record
         if await self._get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
+        if starved and (spent := self._excuses.grant(instance_id)) is not None:
+            debug_logger.log_warning(
+                _COMPONENT,
+                "probe",
+                f"{instance_id}: clone probe failed ({failure}), the browser process "
+                f"answers and the {starved}: starved, not frozen, not captured "
+                f"({spent:.0f}s in)",
+            )
+            return
         record = await self._capture(instance_id, browser, steps)
         self.records[instance_id] = record
         debug_logger.log_error(

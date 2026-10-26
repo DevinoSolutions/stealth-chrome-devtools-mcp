@@ -149,6 +149,7 @@ class _Stage:
         self.lag_factor: float | None = 1.0
         self.lag_reads = 0
         self.probe_error: type[Exception] = ConnectionError
+        self.hang: set[str] = set()  # instances whose probe never returns
         self.process_asked: list[str | None] = []
         monkeypatch.setattr(manager, "spawn_browser", self._spawn)
         monkeypatch.setattr(forced_end, "refusal", self.refusal)
@@ -175,6 +176,8 @@ class _Stage:
         self.events.append("probe")
         queue = self.probe_results.get(iid, [])
         steps.append("evaluate")
+        if iid in self.hang:
+            await asyncio.Event().wait()
         if queue and not queue.pop(0):
             raise self.probe_error("no answer")
 
@@ -649,6 +652,28 @@ class TestScope:
         assert log.at("error") == [] and log.at("warning") == []
         (error,) = recorder.at("error")  # one-shot: the first miss only
         assert error.startswith("FrozenCloneError") and "paused_fetch: 0" in error
+
+    async def test_frozen_clones_never_hold_up_a_persistent_probe(
+        self, stage, log, monkeypatch
+    ):
+        """T-1665: the persistent browsers are probed first, and a round of clones
+        that never answer ends at the clone bound, not at 15 s each."""
+        monkeypatch.setattr(clone_probe, "ROUND_SECONDS", 0.3)
+        monkeypatch.setattr(clone_probe, "debug_logger", _Log())
+        clones = [f"i-clone-{n}" for n in range(6)]
+        for iid in clones:
+            _install(stage.manager, iid, user_data_dir=f"C:/clones/{iid}")
+        stage.hang.update(clones)
+        health = stage.health()
+        started = time.monotonic()
+
+        # bounded here too: with the clone bound removed this goes RED, not hung
+        await asyncio.wait_for(health.check_once(), 5)
+
+        assert stage.probes[0] == INSTANCE_ID  # before any clone was touched
+        assert set(stage.probes[1:]) == set(clones)
+        assert time.monotonic() - started < 3  # six serial 15 s probes would be 90 s
+        assert stage.closes == []
 
     async def test_a_persistent_browser_is_not_also_handed_to_the_clone_path(
         self, stage, log, monkeypatch
