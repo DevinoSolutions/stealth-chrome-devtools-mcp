@@ -13,6 +13,7 @@ here, not silently in production).
 """
 
 import asyncio
+import contextlib
 import time
 from types import SimpleNamespace
 
@@ -97,6 +98,8 @@ class _Rig:
         self.paused = 0
         self.starved: str | None = None  # what the F-1007 judgement says of a miss
         self.now = 0.0
+        self.canaries = 0  # how many times a round entered the canary
+        self.judged_with: list[object] = []
         self.fresh_asked: list[str | None] = []
         self.own_asked: list[object] = []
 
@@ -107,8 +110,9 @@ class _Rig:
     async def get_instance(self, instance_id: str):
         return self.instances.get(instance_id)
 
-    async def judge(self, data, steps) -> tuple[str | None, str | None]:
+    async def judge(self, data, steps, canary) -> tuple[str | None, str | None]:
         """``BrowserHealth._judged`` as the probe sees it: (failure, starved)."""
+        self.judged_with.append(canary)
         steps.append("evaluate")
         steps.finish()
         iid = next(i for i, d in self.instances.items() if d is data)
@@ -126,6 +130,14 @@ class _Rig:
         self.own_asked.append(browser)
         if not self.own_answers:
             raise ConnectionError("no")
+
+    @contextlib.asynccontextmanager
+    async def canary(self):
+        """The canary seam of ``BrowserHealth``: one entry is one spawned process."""
+        self.canaries += 1
+        yield self.the_canary
+
+    the_canary = object()
 
     def probe(self, **overrides) -> clone_probe.CloneProbe:
         kwargs = {"paused": lambda _iid: self.paused, "clock": lambda: self.now}
@@ -260,7 +272,7 @@ class TestTheFirstMissIsCaptured:
         rig.paused = 3
         probe = rig.probe()
 
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
         task.cancel()
 
         (error,) = log.at("error")
@@ -283,7 +295,7 @@ class TestTheFirstMissIsCaptured:
         rig.misses[CLONE] = [True]
         rig.fresh_answers, rig.own_answers = True, False
 
-        await rig.probe().check([CLONE])
+        await rig.probe().check([CLONE], rig.canary)
 
         (error,) = log.at("error")
         assert "fresh_cdp(Browser.getVersion): answered in " in error
@@ -297,7 +309,7 @@ class TestTheFirstMissIsCaptured:
         probe = rig.probe()
 
         for _ in range(3):
-            await probe.check([CLONE])
+            await probe.check([CLONE], rig.canary)
 
         assert len(log.at("error")) == 1
         assert len(rig.fresh_asked) == 1  # the later misses are not re-captured
@@ -308,11 +320,11 @@ class TestTheFirstMissIsCaptured:
         rig.misses[CLONE] = [True, False, True]
         probe = rig.probe()
 
-        await probe.check([CLONE])
-        await probe.check([CLONE])  # passes
+        await probe.check([CLONE], rig.canary)
+        await probe.check([CLONE], rig.canary)  # passes
         assert CLONE not in probe.records
         assert log.at("info") == [f"{CLONE} answers probes again"]
-        await probe.check([CLONE])  # a second incident
+        await probe.check([CLONE], rig.canary)  # a second incident
 
         assert len(log.at("error")) == 2
 
@@ -321,7 +333,7 @@ class TestTheFirstMissIsCaptured:
         rig.add(_browser())
 
         probe = rig.probe()
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
 
         assert log.lines == [] and probe.records == {}
         assert rig.fresh_asked == [] and rig.own_asked == []
@@ -331,10 +343,10 @@ class TestTheFirstMissIsCaptured:
         rig.add(_browser())
         rig.misses[CLONE] = [True]
         probe = rig.probe()
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
         assert CLONE in probe.records
 
-        await probe.check([])
+        await probe.check([], rig.canary)
 
         assert probe.records == {}
 
@@ -344,15 +356,15 @@ class TestTheFirstMissIsCaptured:
         rig.misses[CLONE] = [True]
         original = rig.judge
 
-        async def closing(data, steps):
-            result = await original(data, steps)
+        async def closing(data, steps, canary):
+            result = await original(data, steps, canary)
             del rig.instances[CLONE]
             return result
 
         probe = rig.probe()
         probe._judge = closing
 
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
 
         assert log.at("error") == [] and probe.records == {}
 
@@ -364,7 +376,7 @@ class TestTheFirstMissIsCaptured:
         def broken(_iid):
             raise RuntimeError("hooks")
 
-        await rig.probe(paused=broken).check([CLONE])
+        await rig.probe(paused=broken).check([CLONE], rig.canary)
 
         (error,) = log.at("error")
         assert "paused_fetch: unavailable (RuntimeError)" in error
@@ -378,16 +390,16 @@ class TestTheFirstMissIsCaptured:
         calls = []
         original = rig.judge
 
-        async def failing(data, steps):
+        async def failing(data, steps, canary):
             calls.append(data)
             if len(calls) == 1:
                 raise RuntimeError("probe seam broke")
-            return await original(data, steps)
+            return await original(data, steps, canary)
 
         probe = rig.probe()
         probe._judge = failing
 
-        await probe.check(["i-a", "i-b"])
+        await probe.check(["i-a", "i-b"], rig.canary)
 
         assert len(calls) == 2
         assert len(log.at("error")) == 1 and "i-b" in log.at("error")[0]
@@ -402,7 +414,7 @@ class TestAStarvedHostIsNotAFrozenClone:
         rig.starved = "idle canary ran 9.0x slow"
         probe = rig.probe()
 
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
 
         assert log.at("error") == [] and probe.records == {}
         assert rig.fresh_asked == [] and rig.own_asked == []
@@ -417,9 +429,9 @@ class TestAStarvedHostIsNotAFrozenClone:
         probe = rig.probe()
 
         rig.starved = "idle canary ran 9.0x slow"
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
         rig.starved = None  # the host recovered; the clone still misses
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
 
         (error,) = log.at("error")
         assert error.startswith("FrozenCloneError") and probe.records[CLONE] in error
@@ -429,7 +441,7 @@ class TestAStarvedHostIsNotAFrozenClone:
         rig.add(_browser())
         rig.misses[CLONE] = [True]
 
-        await rig.probe().check([CLONE])
+        await rig.probe().check([CLONE], rig.canary)
 
         assert len(log.at("error")) == 1 and log.at("warning") == []
 
@@ -440,12 +452,12 @@ class TestAStarvedHostIsNotAFrozenClone:
         rig.starved = "idle canary ran 9.0x slow"
         probe = rig.probe()
 
-        await probe.check([CLONE])  # the run's first excuse
+        await probe.check([CLONE], rig.canary)  # the run's first excuse
         rig.now = backend_eviction.STARVED_CEILING_SECONDS
-        await probe.check([CLONE])  # AT the ceiling: still excused
+        await probe.check([CLONE], rig.canary)  # AT the ceiling: still excused
         assert log.at("error") == []
         rig.now = backend_eviction.STARVED_CEILING_SECONDS + 1
-        await probe.check([CLONE])  # past it: a real freeze that coincides
+        await probe.check([CLONE], rig.canary)  # past it: a real freeze that coincides
 
         assert len(log.at("error")) == 1
 
@@ -456,10 +468,12 @@ class TestAStarvedHostIsNotAFrozenClone:
         rig.starved = "idle canary ran 9.0x slow"
         probe = rig.probe()
 
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
         rig.now = backend_eviction.STARVED_CEILING_SECONDS * 3
-        await probe.check([CLONE])  # answers: the run is over
-        await probe.check([CLONE])  # a new run, not one long past the ceiling
+        await probe.check([CLONE], rig.canary)  # answers: the run is over
+        await probe.check(
+            [CLONE], rig.canary
+        )  # a new run, not one long past the ceiling
 
         assert log.at("error") == []
 
@@ -471,7 +485,7 @@ class TestTheRoundIsBounded:
         for iid in ids:
             rig.add(_browser(), iid)
 
-        async def slow(data, steps):
+        async def slow(data, steps, canary):
             await asyncio.sleep(0.2)
             return None, None
 
@@ -479,7 +493,7 @@ class TestTheRoundIsBounded:
         probe._judge = slow
         started = time.monotonic()
 
-        await probe.check(ids)
+        await probe.check(ids, rig.canary)
 
         assert time.monotonic() - started < 0.7  # serial would be 1.0 s
 
@@ -490,7 +504,7 @@ class TestTheRoundIsBounded:
         rig = _Rig()
         rig.add(_browser())
 
-        async def hangs(data, steps):
+        async def hangs(data, steps, canary):
             await asyncio.Event().wait()
 
         probe = rig.probe()
@@ -498,11 +512,96 @@ class TestTheRoundIsBounded:
         started = time.monotonic()
 
         # bounded here too: with the bound removed this goes RED, it does not hang
-        await asyncio.wait_for(probe.check([CLONE]), 2)
+        await asyncio.wait_for(probe.check([CLONE], rig.canary), 2)
 
         assert time.monotonic() - started < 2
         (warning,) = log.at("warning")
         assert warning.startswith("round cut off after ")
+
+
+class TestTheFanOutIsBounded:
+    """50 clones must not mean 50 canaries and 50 websockets at once: our own probes
+    would load the host the canary reads, and excuse a real freeze."""
+
+    async def test_at_most_four_probes_are_in_flight(self, log):
+        rig = _Rig()
+        ids = [f"i-{n}" for n in range(12)]
+        for iid in ids:
+            rig.add(_browser(), iid)
+        running = peak = 0
+
+        async def judge(data, steps, canary):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0.05)
+            running -= 1
+            return None, None
+
+        probe = rig.probe()
+        probe._judge = judge
+
+        await probe.check(ids, rig.canary)
+
+        assert peak == clone_probe.PROBES_AT_ONCE == 4
+
+    async def test_one_canary_per_round_however_many_clones(self, log):
+        rig = _Rig()
+        ids = [f"i-{n}" for n in range(9)]
+        for iid in ids:
+            rig.add(_browser(), iid)
+        probe = rig.probe()
+
+        await probe.check(ids, rig.canary)
+        assert rig.canaries == 1
+        assert rig.judged_with == [rig.the_canary] * 9  # the SAME one, every probe
+        await probe.check(ids, rig.canary)
+
+        assert rig.canaries == 2  # one per round
+
+    async def test_no_clones_spawns_no_canary(self, log):
+        rig = _Rig()
+
+        await rig.probe().check([], rig.canary)
+
+        assert rig.canaries == 0
+
+    async def test_a_cut_off_clone_goes_first_next_round(self, log, monkeypatch):
+        """More frozen clones than one round covers are rotated, not starved: the
+        ones the bound cut off (or never reached) start the next round."""
+        monkeypatch.setattr(clone_probe, "ROUND_SECONDS", 0.3)
+        rig = _Rig()
+        ids = [f"i-{n}" for n in range(8)]
+        for iid in ids:
+            rig.add(_browser(), iid)
+        started: list[str] = []
+
+        async def hangs(data, steps, canary):
+            started.append(next(i for i, d in rig.instances.items() if d is data))
+            await asyncio.Event().wait()
+
+        probe = rig.probe()
+        probe._judge = hangs
+
+        await asyncio.wait_for(probe.check(ids, rig.canary), 3)
+        first = list(started)
+        started.clear()
+        await asyncio.wait_for(probe.check(ids, rig.canary), 3)
+
+        assert first == ids[:4]  # four slots, all hung until the bound
+        assert started[:4] == ids[4:]  # the four never reached go first
+        assert set(started) == set(ids[4:])  # and the first four wait their turn
+
+    async def test_a_clone_that_is_gone_leaves_no_rotation_state(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        probe = rig.probe()
+        await probe.check([CLONE], rig.canary)
+        assert CLONE in probe._started
+
+        await probe.check([], rig.canary)
+
+        assert probe._started == {}
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +695,6 @@ class TestPausedFetchCount:
         monkeypatch.setattr(dynamic_hook_system, "_paused_in_flight", {CLONE: 7})
 
         probe = clone_probe.CloneProbe(rig.get_instance, rig.judge, rig.fresh, rig.own)
-        await probe.check([CLONE])
+        await probe.check([CLONE], rig.canary)
 
         assert "paused_fetch: 7" in log.at("error")[0]

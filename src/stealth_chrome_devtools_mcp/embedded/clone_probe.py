@@ -15,8 +15,10 @@ the live instances that are not persistent, and each is probed and judged by THE
 judgement (``BrowserHealth._judged``, injected: the direct probe, then F-1007's idle
 canary and browser-process answer). A miss on a STARVED host is a WARNING that
 consumes nothing, within ``scheduling_lag.ExcuseBudget``'s ceiling like the persistent
-path. On the FIRST other miss of an incident, one ERROR line records, counts and states
-only:
+path. The round shares ONE idle canary (it is the host's scheduling lag, not a clone's)
+and runs at most :data:`PROBES_AT_ONCE` clones at a time, so N clones cost one canary
+process and four websockets, and our own probes do not load the host the canary reads.
+On the FIRST other miss of an incident, one ERROR line records, counts and states only:
 
 * ``fresh_cdp`` / ``own_cdp``: ``Browser.getVersion`` over a NEW connection and over
   this backend's own. Fresh answers and own does not: the backend's connection is the
@@ -30,12 +32,16 @@ only:
 
 The record is kept in :attr:`CloneProbe.records` until the clone answers again or is
 gone, and is the ERROR line's text. A probe that passes ends the incident
-(``answers probes again`` at INFO). The clones are probed together and the whole round
-is bounded by :data:`ROUND_SECONDS`, so frozen clones cannot hold up the next persistent
-probe. No URL, title or cookie is ever read.
+(``answers probes again`` at INFO). The whole round is bounded by
+:data:`ROUND_SECONDS`, so frozen clones cannot hold up the next persistent probe; a
+clone the bound cut off is probed FIRST in the next round (least recently started
+first), so a fleet larger than one round covers is rotated, not starved. No URL, title
+or cookie is ever read.
 """
 
 import asyncio
+import contextlib
+import itertools
 import time
 from collections.abc import Awaitable, Callable, Mapping
 
@@ -51,9 +57,13 @@ _COMPONENT = "clone_probe"
 #: How long each fresh-connection and own-connection ``Browser.getVersion`` gets.
 ANSWER_SECONDS = freeze_capture.FRESH_ANSWER_TIMEOUT_SECONDS
 
-#: The bound on one whole round over every clone: a probe (15 s) plus a capture (5 s)
-#: with room to spare. Clones run together: N frozen ones cost this once, not N times.
-ROUND_SECONDS = 30.0
+#: Clones probed at once: websockets open, and the load our own probes put on the host.
+PROBES_AT_ONCE = 4
+
+#: The bound on one whole round: three waves of :data:`PROBES_AT_ONCE` frozen clones at
+#: their worst (a 15 s probe, then a 5 s capture), so twelve frozen clones are covered
+#: in one round; more are rotated (see :meth:`CloneProbe.check`). Healthy ones take ms.
+ROUND_SECONDS = 60.0
 
 #: What :func:`listener_state` says when the attribute it reads is not there.
 _NO_LISTENER_ATTRIBUTE = "unknown(no _listener_task)"
@@ -105,7 +115,11 @@ class CloneProbe:
             [str], Awaitable[Mapping[str, Browser] | None]
         ],  # only "browser" is read
         judge: Callable[
-            [Mapping[str, Browser], freeze_capture.TimedSteps],
+            [
+                Mapping[str, Browser],
+                freeze_capture.TimedSteps,
+                scheduling_lag.IdleCanary,
+            ],
             Awaitable[tuple[str | None, str | None]],
         ],
         fresh_check: Callable[[str | None], Awaitable[None]],
@@ -120,40 +134,60 @@ class CloneProbe:
         self._own_check = own_check
         self._paused = paused
         self._excuses = scheduling_lag.ExcuseBudget(clock)
+        self._slots = asyncio.Semaphore(PROBES_AT_ONCE)
+        self._ticks = itertools.count(1)
+        self._started: dict[str, int] = {}  # instance id -> tick of its last start
         #: instance id -> the record taken at its current incident's first miss.
         self.records: dict[str, str] = {}
 
-    async def check(self, instance_ids: list[str]) -> None:
+    async def check(
+        self,
+        instance_ids: list[str],
+        canary: Callable[
+            [], contextlib.AbstractAsyncContextManager[scheduling_lag.IdleCanary]
+        ],
+    ) -> None:
         """One round over *instance_ids* (the live, non-persistent instances); the
-        ones that are no longer among them are forgotten. One clone's probe raising
-        costs that clone its round and nobody else theirs; the round ends at
-        :data:`ROUND_SECONDS` whatever the clones do."""
-        for gone in (set(self.records) | self._excuses.tracked()) - set(instance_ids):
+        ones that are no longer among them are forgotten. *canary* is entered ONCE and
+        the one canary is handed to every probe. One clone's probe raising costs that
+        clone its round and nobody else theirs; the round ends at
+        :data:`ROUND_SECONDS` whatever the clones do, and the clones it did not reach
+        (or cut off) go first next time."""
+        known = set(self.records) | self._excuses.tracked() | set(self._started)
+        for gone in known - set(instance_ids):
             self.records.pop(gone, None)
+            self._started.pop(gone, None)
             self._excuses.reset(gone)
+        if not instance_ids:
+            return
+        order = sorted(instance_ids, key=lambda iid: self._started.get(iid, 0))
         try:
-            async with asyncio.timeout(ROUND_SECONDS):
-                await asyncio.gather(*(self._guarded(iid) for iid in instance_ids))
+            async with asyncio.timeout(ROUND_SECONDS), canary() as shared:
+                await asyncio.gather(*(self._guarded(iid, shared) for iid in order))
         except TimeoutError:
             debug_logger.log_warning(
                 _COMPONENT, "check", f"round cut off after {ROUND_SECONDS:.0f}s"
             )
 
-    async def _guarded(self, instance_id: str) -> None:
+    async def _guarded(
+        self, instance_id: str, canary: scheduling_lag.IdleCanary
+    ) -> None:
         try:
-            await self._check(instance_id)
+            async with self._slots:
+                self._started[instance_id] = next(self._ticks)
+                await self._check(instance_id, canary)
         except Exception as error:  # noqa: BLE001  PERMANENT(T-1665: evidence is best effort; a clone's probe may not end the round nor skip the others)
             debug_logger.log_warning(
                 _COMPONENT, "check", f"{instance_id}: {type(error).__name__}"
             )
 
-    async def _check(self, instance_id: str) -> None:
+    async def _check(self, instance_id: str, canary: scheduling_lag.IdleCanary) -> None:
         data = await self._get_instance(instance_id)
         if data is None:
             return
         browser = data["browser"]
         steps = freeze_capture.TimedSteps()
-        failure, starved = await self._judge(data, steps)
+        failure, starved = await self._judge(data, steps, canary)
         if failure is None:
             self._excuses.reset(instance_id)
             if self.records.pop(instance_id, None) is not None:

@@ -671,7 +671,11 @@ class TestScope:
         await asyncio.wait_for(health.check_once(), 5)
 
         assert stage.probes[0] == INSTANCE_ID  # before any clone was touched
-        assert set(stage.probes[1:]) == set(clones)
+        assert set(stage.probes[1:]) == set(
+            clones[:4]
+        )  # four at a time, then the bound
+        # one canary for the persistent browser, ONE for all six clones (not six)
+        assert stage.events.count("canary-start") == 2
         assert time.monotonic() - started < 3  # six serial 15 s probes would be 90 s
         assert stage.closes == []
 
