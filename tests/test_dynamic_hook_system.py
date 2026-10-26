@@ -20,7 +20,12 @@ import nodriver as uc
 import pytest
 from nodriver.core.connection import ProtocolException
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidMessage, InvalidStatus
+from websockets.exceptions import (
+    ConnectionClosed,
+    InvalidMessage,
+    InvalidStatus,
+    WebSocketException,
+)
 from websockets.http11 import Response
 
 from fakes import FakeTab, cdp_command_name
@@ -384,6 +389,8 @@ GONE_ERRORS = {
         Response(500, "Internal Server Error", Headers(), b"")
     ),
     "not-an-http-response": InvalidMessage("did not receive a valid HTTP response"),
+    "connection-closed": ConnectionClosed(None, None),
+    "posix-connection-refused": ConnectionRefusedError(111, "Connection refused"),
 }
 # The hook namespace has no exception builtins; a missing key still raises.
 RAISES = "def process_request(request):\n    return {}['hook blew up']\n"
@@ -609,3 +616,100 @@ class TestPausedHandlerTasks:
         await asyncio.wait([task], timeout=1)
 
         assert system._paused_tasks["inst-1"] == set()
+
+
+def _http_error(status):
+    return InvalidStatus(Response(status, "Refused", Headers(), b""))
+
+
+# Errors that say nothing about whether the request is still paused in a LIVE
+# page. Treating one as "gone" skips the continue and leaves the page hanging.
+NOT_GONE_ERRORS = {
+    "timeout": TimeoutError("timed out"),
+    "file-not-found": FileNotFoundError(2, "No such file"),
+    "permission-denied": PermissionError(13, "Access is denied"),
+    "other-os-error": OSError(5, "Input/output error"),
+    "http-403": _http_error(403),
+    "http-404": _http_error(404),
+    "other-websocket-error": WebSocketException("handshake failed"),
+    "other-protocol-error": ProtocolException(
+        {"code": -32602, "message": "Invalid parameters"}
+    ),
+    "target-closed-protocol-error": ProtocolException(
+        {"code": -32000, "message": "Target closed"}
+    ),
+}
+
+
+@pytest.mark.parametrize("error", NOT_GONE_ERRORS.values(), ids=NOT_GONE_ERRORS.keys())
+class TestOtherErrorsAreStillReportedAndContinued:
+    async def test_a_failed_action_is_an_error_and_the_request_continues(
+        self, error, backend_log
+    ):
+        system = DynamicHookSystem()
+        tab = _FailingTab({"fail_request": error})
+
+        await system._execute_hook_action(tab, _req(), HookAction(action="block"))
+
+        assert tab.send_calls == ["fail_request", "continue_request"]
+        assert len(_records(backend_log, logging.ERROR)) == 1
+        assert _records(backend_log, logging.WARNING) == []
+
+    async def test_a_failed_fallback_is_a_stuck_request_error(self, error, backend_log):
+        system = await _hooked(RAISES)
+        tab = _FailingTab({"continue_request": error})
+
+        await system._process_request_hooks(tab, _req())
+
+        stuck = [m for m in _records(backend_log, logging.ERROR) if "stuck" in m]
+        assert len(stuck) == 1
+        assert _records(backend_log, logging.WARNING) == []
+
+
+class TestResponseBodyOfAGoneRequest:
+    """The same family at the one other place a paused request is read: the
+    response body of a request whose interception id is already stale."""
+
+    @staticmethod
+    async def _run(error):
+        system = DynamicHookSystem()
+        await system.create_hook(
+            "resp", {"stage": "response"}, CONTINUE, instance_ids=["inst-1"]
+        )
+        tab = _FailingTab({"get_response_body": error})
+        event = SimpleNamespace(response_status_code=200, response_headers=None)
+        await system._process_request_hooks(tab, _req(stage="response"), event)
+        return tab
+
+    @pytest.mark.parametrize("error", GONE_ERRORS.values(), ids=GONE_ERRORS.keys())
+    async def test_a_gone_request_is_a_warning(self, error, backend_log):
+        await self._run(error)
+
+        assert _records(backend_log, logging.ERROR) == []
+        assert any(
+            "No response body" in m for m in _records(backend_log, logging.WARNING)
+        )
+
+    async def test_another_error_is_still_an_error(self, backend_log):
+        await self._run(RuntimeError("cdp exploded"))
+
+        errors = _records(backend_log, logging.ERROR)
+        assert len(errors) == 1 and "Failed to get response body" in errors[0]
+        assert _records(backend_log, logging.WARNING) == []
+
+
+class TestLateEventForARemovedInstance:
+    async def test_it_spawns_no_task_and_leaves_nothing_behind(self, monkeypatch):
+        system, handler = await TestPausedHandlerTasks._armed(
+            monkeypatch, TestPausedHandlerTasks._never_answered
+        )
+        system.remove_instance("inst-1")
+
+        handler(_paused_event(request=_request_obj()))
+        await asyncio.sleep(0)
+
+        assert "inst-1" not in system._paused_tasks
+        assert system.paused_in_flight("inst-1") == 0
+        assert not [
+            t for t in asyncio.all_tasks() if "_on_request_paused" in repr(t.get_coro())
+        ]
