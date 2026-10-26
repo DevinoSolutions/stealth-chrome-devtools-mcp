@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.45
 
 ### Tests: the hidden-tab fixture waits for the probe page and names an in-page exception (T-8597)
 
