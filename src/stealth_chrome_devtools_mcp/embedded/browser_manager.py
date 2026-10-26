@@ -1304,7 +1304,6 @@ class BrowserManager:
             if not tab_close.log_failure("close_tab", instance_id, e):  # F-996b
                 return False
         # Outside the handler: the close already succeeded (F-775b lying-False).
-        dynamic_hook_system.cancel_paused_for_target(instance_id, target_id)
         await self._repoint_after_close(instance_id, browser, str(target_id))
         return True
 

@@ -102,6 +102,8 @@ async def test_a_browser_that_refuses_discovery_is_logged_not_failed(caplog):
         await tab_open.arm_popups(browser, arm)  # does not raise
 
     assert "could not enable Target discovery" in caplog.text
+    # T-9117: the warning also names what else it costs (the hook handlers).
+    assert "paused-request handlers will wait for Chrome" in caplog.text
     assert any(evt is cdp.target.TargetCreated for evt, _ in browser.handlers)
 
 

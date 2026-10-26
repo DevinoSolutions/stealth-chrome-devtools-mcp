@@ -255,7 +255,9 @@ async def arm_popups(
     Chrome replay one ``targetCreated`` per EXISTING target, so a popup that was
     already open when a browser is re-attached (F-888) is armed too. A browser that
     does not answer is logged and left without popup arming, not failed: the
-    instance works without it.
+    instance works without it. Discovery is also what ends a closed tab's paused
+    hook handlers (``DynamicHookSystem._listen_for_destroyed``), which the warning
+    says.
     """
 
     def on_created(event: cdp.target.TargetCreated, *_: object) -> None:
@@ -278,7 +280,8 @@ async def arm_popups(
             "tab_open",
             "arm_popups",
             f"could not enable Target discovery ({type(error).__name__}); "
-            "popups will not be armed on arrival",
+            "popups will not be armed on arrival, and a closed tab's paused-request "
+            "handlers will wait for Chrome to end its session, not end at once",
         )
 
 
