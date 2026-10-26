@@ -5,8 +5,11 @@ A hooked response that Chrome holds paused has its handler parked on
 has no timeout of its own: it ends only when Chrome tears the page's session down.
 In a branch-wheel proof that was about 38 s after ``close_tab``, and the two
 warnings (``No response body ...``, ``Not resuming ...``) came only then.
-``close_tab`` now cancels that tab's handlers as soon as the close has succeeded,
-the way ``remove_instance`` already cancels an instance's.
+``close_tab`` ends that tab's handlers through the same ``Target.targetDestroyed``
+listener that ends them for every other way a target goes (T-9117,
+``tests/test_target_gone_cancel.py``): Chrome reports the close, and
+``cancel_paused_for_target`` cancels one target's handlers the way
+``remove_instance`` cancels an instance's. ``close_tab`` has no cancel of its own.
 
 Every wait below is bounded by ``asyncio.wait_for``; a regression fails in two
 seconds instead of hanging the lane.
@@ -22,9 +25,6 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import FakeAttachedTab, FakeBrowser, FakeTab, fake_instance, fake_target
-from stealth_chrome_devtools_mcp.embedded import (
-    browser_manager as browser_manager_module,
-)
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import DynamicHookSystem
 
@@ -32,6 +32,7 @@ INSTANCE_ID = "i1"
 HOOKED = "T-hooked"
 OTHER = "T-other"
 BOUND = 2.0
+CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 
 
 def _paused_event():
@@ -120,8 +121,21 @@ class TestCancelPausedForTarget:
         assert system._paused_target == {}
 
 
+def _chrome_reports_the_close(browser):
+    """Chrome answering ``Target.closeTarget`` and then, discovery being on
+    (``tab_open.arm_popups``), sending ``Target.targetDestroyed`` for it."""
+
+    def answer(_name):
+        target_id = browser.cdp_frames[-1]["params"]["targetId"]
+        browser._deliver(
+            uc.cdp.target.TargetDestroyed(target_id=uc.cdp.target.TargetID(target_id))
+        )
+
+    browser._cdp_responses["close_target"] = answer
+
+
 @pytest.fixture
-def manager_and_system(monkeypatch):
+async def manager_and_system(monkeypatch):
     hooked = FakeAttachedTab(fake_target(target_id=HOOKED))
     other = FakeAttachedTab(fake_target(target_id=OTHER))
     browser = FakeBrowser(tabs=[hooked, other])
@@ -134,9 +148,12 @@ def manager_and_system(monkeypatch):
     }
     system = DynamicHookSystem()
     system.add_instance(INSTANCE_ID)
-    system._instance_tabs[INSTANCE_ID] = None
+    await system.create_hook("h", {}, CONTINUE, instance_ids=[INSTANCE_ID])
+    armed = FakeTab(target_id=HOOKED)
+    armed.browser = browser
+    await system.setup_interception(armed, INSTANCE_ID)
     monkeypatch.setattr(system, "_process_request_hooks", _never_answered)
-    monkeypatch.setattr(browser_manager_module, "dynamic_hook_system", system)
+    _chrome_reports_the_close(browser)
     return manager, browser, system
 
 
@@ -178,11 +195,18 @@ class TestCloseTab:
         system.remove_instance(INSTANCE_ID)
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), BOUND)
 
-    async def test_a_tab_chrome_already_dropped_ends_them_too(self, manager_and_system):
+    async def test_a_tab_chrome_already_dropped_is_closed_and_already_ended(
+        self, manager_and_system
+    ):
+        """Chrome reported the target gone when it dropped it, so the handler ended
+        then; ``close_tab`` on that target answers ``True`` and does not need to."""
         manager, browser, system = manager_and_system
         system._spawn_paused(FakeTab(target_id=HOOKED), _paused_event(), INSTANCE_ID)
         await _settle()
         (task,) = system._paused_tasks[INSTANCE_ID]
+        browser._deliver(
+            uc.cdp.target.TargetDestroyed(target_id=uc.cdp.target.TargetID(HOOKED))
+        )
 
         def dropped(_name):
             raise ProtocolException(
