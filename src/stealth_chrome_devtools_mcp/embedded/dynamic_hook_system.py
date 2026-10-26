@@ -231,7 +231,14 @@ class DynamicHookSystem:
         ] = {}  # instance_id -> list of hook_ids
         self._instance_tabs: dict[str, Any] = {}  # instance_id -> tab (for re-arming)
         self._paused_handlers: set[str] = set()  # instances with a RequestPaused hook
+        self._paused_in_flight: dict[str, int] = {}  # T-1665: handlers not yet done
         self._lock = asyncio.Lock()
+
+    def paused_in_flight(self, instance_id: str) -> int:
+        """T-1665: how many ``Fetch.requestPaused`` handlers for *instance_id* have
+        started and not finished. Chrome holds each such request until its handler
+        continues it, so this is the count of requests this backend is sitting on."""
+        return self._paused_in_flight.get(instance_id, 0)
 
     async def setup_interception(self, tab, instance_id: str):
         """Set up request and response interception for a browser tab.
@@ -330,6 +337,7 @@ class DynamicHookSystem:
 
     async def _on_request_paused(self, tab, event, instance_id: str):
         """Handle intercepted requests and responses - process hooks immediately."""
+        self._paused_in_flight[instance_id] = self.paused_in_flight(instance_id) + 1
         try:
             # Determine if this is request stage or response stage
             # According to nodriver docs: "The stage of the request can be determined
@@ -396,6 +404,12 @@ class DynamicHookSystem:
                         f"request may be stuck: {fallback_err}"
                     ),
                 )
+        finally:
+            left = self.paused_in_flight(instance_id) - 1
+            if left > 0:
+                self._paused_in_flight[instance_id] = left
+            else:
+                self._paused_in_flight.pop(instance_id, None)
 
     async def _process_request_hooks(self, tab, request: RequestInfo, event=None):  # noqa: C901,PLR0912,PLR0915  DEBT(F-165)
         """Process hooks for a request/response in real-time.

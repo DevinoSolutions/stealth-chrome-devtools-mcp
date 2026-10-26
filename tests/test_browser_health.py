@@ -31,6 +31,7 @@ from fakes import FakeBrowser, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
     backend_eviction,
     browser_health,
+    clone_probe,
     directory_gate,
     fleet_session,
     forced_end,
@@ -631,15 +632,39 @@ class TestCooldown:
 
 
 class TestScope:
-    async def test_clones_are_skipped(self, stage):
+    async def test_clones_are_probed_and_never_healed(self, stage, log, monkeypatch):
+        """T-1665: a clone is probed (so a freeze leaves a record), but a miss closes
+        nothing and relaunches nothing: it is the caller's browser."""
+        recorder = _Log()
+        monkeypatch.setattr(clone_probe, "debug_logger", recorder)
         stage.persistent.clear()
+        stage.probe_results[INSTANCE_ID] = [False, False, False]
+        health = stage.health()
+
+        for _ in range(3):
+            await health.check_once()
+
+        assert stage.probes == [INSTANCE_ID] * 3
+        assert stage.closes == [] and stage.launches == [] and stage.captures == []
+        assert log.at("error") == [] and log.at("warning") == []
+        (error,) = recorder.at("error")  # one-shot: the first miss only
+        assert error.startswith("FrozenCloneError") and "paused_fetch: 0" in error
+
+    async def test_a_persistent_browser_is_not_also_handed_to_the_clone_path(
+        self, stage, log, monkeypatch
+    ):
+        recorder = _Log()
+        monkeypatch.setattr(clone_probe, "debug_logger", recorder)
         stage.probe_results[INSTANCE_ID] = [False, False]
         health = stage.health()
 
         await health.check_once()
-        await health.check_once()
+        await health.check_once()  # heals, as ever
 
-        assert stage.probes == [] and stage.closes == []
+        # two rounds, and the heal's own probe of the relaunch: once per round each
+        assert stage.probes == [INSTANCE_ID] * 3
+        assert recorder.lines == []
+        assert stage.closes == [INSTANCE_ID]
 
     def test_the_default_predicate_is_on_persistent_profile(self, monkeypatch):
         from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
