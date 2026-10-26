@@ -10,9 +10,20 @@ Safety focus: a malformed or malicious hook function must NEVER crash request
 processing — every bad path must degrade to HookAction("continue").
 """
 
-import pytest
+import asyncio
+import gc
+import logging
+import weakref
+from types import SimpleNamespace
 
-from fakes import FakeTab
+import nodriver as uc
+import pytest
+from nodriver.core.connection import ProtocolException
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidMessage, InvalidStatus
+from websockets.http11 import Response
+
+from fakes import FakeTab, cdp_command_name
 from stealth_chrome_devtools_mcp.embedded import dynamic_hook_system as dhs
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
     DynamicHook,
@@ -354,3 +365,247 @@ class TestResponseStageHooksRemoved:
         )
 
         assert HookAction is not None and RequestInfo is not None
+
+
+# ---------------------------------------------------------------------------
+# T-8944: a paused request that can no longer be resumed is not an error event
+# ---------------------------------------------------------------------------
+
+# Each is the exception type and message of one Sentry family, built from the
+# library's own constructors.
+GONE_ERRORS = {
+    "stale-interception-id": ProtocolException(
+        {"code": -32602, "message": "Invalid InterceptionId."}
+    ),
+    "connection-refused": OSError(
+        0, "The remote computer refused the network connection", None, 1225
+    ),
+    "http-500-on-reconnect": InvalidStatus(
+        Response(500, "Internal Server Error", Headers(), b"")
+    ),
+    "not-an-http-response": InvalidMessage("did not receive a valid HTTP response"),
+}
+# The hook namespace has no exception builtins; a missing key still raises.
+RAISES = "def process_request(request):\n    return {}['hook blew up']\n"
+
+
+class _FailingTab(FakeTab):
+    """A tab whose CDP commands fail by name, after being recorded."""
+
+    def __init__(self, errors):
+        super().__init__()
+        self._errors = errors
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        name = cdp_command_name(cdp_obj)
+        result = await super().send(cdp_obj, *args, **kwargs)
+        if name in self._errors:
+            raise self._errors[name]
+        return result
+
+
+def _request_obj():
+    return SimpleNamespace(url="https://example.invalid/", method="GET", headers={})
+
+
+def _paused_event(*, response_status_code=None, request=None):
+    """A ``Fetch.requestPaused`` event. Without a ``request`` building the
+    ``RequestInfo`` fails, which is the path ``_on_request_paused`` itself
+    catches."""
+    event = SimpleNamespace(
+        request_id=uc.cdp.fetch.RequestId("req-1"),
+        response_status_code=response_status_code,
+        response_error_reason=None,
+        resource_type="Document",
+    )
+    if request is not None:
+        event.request = request
+    return event
+
+
+def _records(caplog, level):
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "stealth.backend" and r.levelno == level
+    ]
+
+
+@pytest.fixture
+def backend_log(caplog):
+    caplog.set_level(logging.DEBUG, logger="stealth.backend")
+    return caplog
+
+
+async def _hooked(code=CONTINUE):
+    system = DynamicHookSystem()
+    await system.create_hook("h", {}, code, instance_ids=["inst-1"])
+    return system
+
+
+@pytest.mark.parametrize("error", GONE_ERRORS.values(), ids=GONE_ERRORS.keys())
+class TestGoneRequestIsNotAnErrorEvent:
+    """The page navigated away or the tab/browser closed, so Chrome forgot the
+    request (``Invalid InterceptionId``) or nodriver could not reopen the socket.
+    Nothing is stuck and re-sending cannot help: a warning, never an ERROR record
+    (the level Sentry turns into an exception event)."""
+
+    async def test_a_failed_continue_is_not_sent_twice(self, error, backend_log):
+        system = DynamicHookSystem()
+        tab = _FailingTab({"continue_request": error})
+
+        await system._process_request_hooks(tab, _req())
+
+        assert tab.send_calls == ["continue_request"]
+        assert _records(backend_log, logging.ERROR) == []
+        warned = _records(backend_log, logging.WARNING)
+        assert len(warned) == 1 and str(error) in warned[0]
+
+    async def test_the_failed_fallback_after_a_hook_error_is_a_warning(
+        self, error, backend_log
+    ):
+        system = await _hooked(RAISES)
+        tab = _FailingTab({"continue_request": error})
+
+        await system._process_request_hooks(tab, _req())
+
+        assert tab.send_calls == ["continue_request"]
+        errors = _records(backend_log, logging.ERROR)
+        assert len(errors) == 1 and "hook blew up" in errors[0]  # the hook's own bug
+        assert len(_records(backend_log, logging.WARNING)) == 1
+
+    async def test_a_failed_action_is_not_retried_or_reported(self, error, backend_log):
+        system = DynamicHookSystem()
+        tab = _FailingTab({"fail_request": error})
+
+        await system._execute_hook_action(tab, _req(), HookAction(action="block"))
+
+        assert tab.send_calls == ["fail_request"]
+        assert _records(backend_log, logging.ERROR) == []
+        assert len(_records(backend_log, logging.WARNING)) == 1
+
+    async def test_the_paused_handler_itself_does_not_report_it(
+        self, error, backend_log
+    ):
+        system = DynamicHookSystem()
+        tab = _FailingTab({"continue_request": error})
+
+        await system._on_request_paused(tab, _paused_event(), "inst-1")
+
+        stuck = [m for m in _records(backend_log, logging.ERROR) if "stuck" in m]
+        assert stuck == []
+        assert len(_records(backend_log, logging.WARNING)) == 1
+
+
+class TestRealFailuresStillReported:
+    async def test_an_unrelated_failed_fallback_is_still_an_error(self, backend_log):
+        system = await _hooked(RAISES)
+        tab = _FailingTab({"continue_request": RuntimeError("cdp exploded")})
+
+        await system._process_request_hooks(tab, _req())
+
+        stuck = [
+            m
+            for m in _records(backend_log, logging.ERROR)
+            if "request may be stuck: cdp exploded" in m
+        ]
+        assert len(stuck) == 1
+        assert _records(backend_log, logging.WARNING) == []
+
+    async def test_an_unrelated_action_failure_still_continues_the_request(
+        self, backend_log
+    ):
+        system = DynamicHookSystem()
+        tab = _FailingTab({"fail_request": RuntimeError("cdp exploded")})
+
+        await system._execute_hook_action(tab, _req(), HookAction(action="block"))
+
+        assert tab.send_calls == ["fail_request", "continue_request"]
+        assert len(_records(backend_log, logging.ERROR)) == 1
+
+    async def test_a_response_stage_request_is_resumed_as_a_response(self):
+        system = DynamicHookSystem()
+        tab = FakeTab()
+
+        await system._on_request_paused(
+            tab, _paused_event(response_status_code=200), "inst-1"
+        )
+
+        assert tab.send_calls == ["continue_response"]
+
+
+class TestPausedHandlerTasks:
+    """D7 (`Task was destroyed but it is pending!`): asyncio keeps only a weak
+    reference to a task, so a handler parked on a reply that never comes was
+    collected mid-await."""
+
+    @staticmethod
+    async def _armed(monkeypatch, process):
+        system = DynamicHookSystem()
+        system.add_instance("inst-1")
+        await system.create_hook("h", {}, CONTINUE, instance_ids=["inst-1"])
+        tab = FakeTab()
+        await system.setup_interception(tab, "inst-1")
+        monkeypatch.setattr(system, "_process_request_hooks", process)
+        return system, tab.handlers[0][1]
+
+    @staticmethod
+    async def _never_answered(_tab, _request, _event=None):
+        # A future nothing else references: the shape of a reply that never comes.
+        await asyncio.get_running_loop().create_future()
+
+    async def test_an_in_flight_handler_survives_garbage_collection(self, monkeypatch):
+        system, handler = await self._armed(monkeypatch, self._never_answered)
+        handler(_paused_event(request=_request_obj()))
+        await asyncio.sleep(0)
+        (task,) = system._paused_tasks["inst-1"]
+        ref = weakref.ref(task)
+        del task
+
+        gc.collect()
+
+        survivor = ref()
+        assert survivor is not None and not survivor.done()
+        del survivor
+        system.remove_instance("inst-1")
+        await asyncio.sleep(0)
+
+    async def test_removing_the_instance_cancels_its_handlers(self, monkeypatch):
+        system, handler = await self._armed(monkeypatch, self._never_answered)
+        handler(_paused_event(request=_request_obj()))
+        handler(_paused_event(request=_request_obj()))
+        await asyncio.sleep(0)
+        tasks = list(system._paused_tasks["inst-1"])
+        assert len(tasks) == 2 and system.paused_in_flight("inst-1") == 2
+
+        system.remove_instance("inst-1")
+        await asyncio.wait(tasks, timeout=1)
+
+        assert all(t.cancelled() for t in tasks)
+        assert system.paused_in_flight("inst-1") == 0
+        assert "inst-1" not in system._paused_tasks
+
+    async def test_removing_another_instance_leaves_them_running(self, monkeypatch):
+        system, handler = await self._armed(monkeypatch, self._never_answered)
+        handler(_paused_event(request=_request_obj()))
+        await asyncio.sleep(0)
+        (task,) = system._paused_tasks["inst-1"]
+
+        system.remove_instance("inst-2")
+        await asyncio.sleep(0)
+
+        assert not task.done()
+        system.remove_instance("inst-1")
+        await asyncio.wait([task], timeout=1)
+
+    async def test_a_finished_handler_is_forgotten(self, monkeypatch):
+        async def answered(_tab, _request, _event=None):
+            return None
+
+        system, handler = await self._armed(monkeypatch, answered)
+        handler(_paused_event(request=_request_obj()))
+        (task,) = system._paused_tasks["inst-1"]
+
+        await asyncio.wait([task], timeout=1)
+
+        assert system._paused_tasks["inst-1"] == set()
