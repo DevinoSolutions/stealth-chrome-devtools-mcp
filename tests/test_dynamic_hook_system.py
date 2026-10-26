@@ -382,9 +382,6 @@ GONE_ERRORS = {
     "stale-interception-id": ProtocolException(
         {"code": -32602, "message": "Invalid InterceptionId."}
     ),
-    "http-500-on-reconnect": InvalidStatus(
-        Response(500, "Internal Server Error", Headers(), b"")
-    ),
     "not-an-http-response": InvalidMessage("did not receive a valid HTTP response"),
     "connection-closed": ConnectionClosed(None, None),
     # asyncio.open_connection to a closed port, as Windows words it (WinError 1225).
@@ -508,27 +505,6 @@ class TestGoneRequestIsNotAnErrorEvent:
         stuck = [m for m in _records(backend_log, logging.ERROR) if "stuck" in m]
         assert stuck == []
         assert len(_records(backend_log, logging.WARNING)) == 1
-
-
-class TestGoneReasonDefersToTheOneSocketPredicate:
-    """``gone_reason`` holds no HTTP-500 test of its own: what
-    ``tab_close.target_socket_gone`` says is what it says (one predicate)."""
-
-    def test_an_unrelated_error_is_gone_when_the_predicate_says_so(self, monkeypatch):
-        error = RuntimeError("nothing a socket would raise")
-        assert dhs.gone_reason(error) is None
-
-        monkeypatch.setattr(dhs, "target_socket_gone", lambda exc: exc is error)
-
-        assert dhs.gone_reason(error) is not None
-
-    def test_a_500_is_not_gone_when_the_predicate_says_not(self, monkeypatch):
-        error = InvalidStatus(Response(500, "x", Headers(), b""))
-        assert dhs.gone_reason(error) is not None
-
-        monkeypatch.setattr(dhs, "target_socket_gone", lambda _exc: False)
-
-        assert dhs.gone_reason(error) is None
 
 
 class TestRealFailuresStillReported:
@@ -656,6 +632,9 @@ NOT_GONE_ERRORS = {
     "file-not-found": FileNotFoundError(2, "No such file"),
     "permission-denied": PermissionError(13, "Access is denied"),
     "other-os-error": OSError(5, "Input/output error"),
+    # On nodriver 0.50 a tab shares the BROWSER endpoint, so a 500 there is the
+    # browser's own fault and says nothing about the paused request (T-8944).
+    "http-500": _http_error(500),
     "http-403": _http_error(403),
     "http-404": _http_error(404),
     "other-websocket-error": WebSocketException("handshake failed"),
