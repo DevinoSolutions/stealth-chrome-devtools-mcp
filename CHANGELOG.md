@@ -18,6 +18,10 @@
 - A `Fetch.requestPaused` that Chrome sent after the target's end used to spawn a fresh handler nothing would end. `cancel_paused_for_target` now remembers the target (at most `CLOSED_TARGETS_KEPT` = 128 per instance, oldest first out, cleared by `remove_instance`) and `_spawn_paused` drops such an event. `_spawn_paused` also reads the target id before it creates the task, so a tab with no target leaves no task running.
 - `tests/test_target_gone_cancel.py` (14 tests, every wait bounded by `asyncio.wait_for`) was written first and was RED against main (11 of 14); it delivers the real `Target.targetDestroyed` through nodriver's own `Connection.process_event`. 16 clause mutations of the listener, the guard, the remembered set, the id read and the discovery warning are all killed. `tests/test_close_tab_paused_handlers.py` now drives `close_tab` through Chrome's report.
 
+### The background-tab frames node measured a held tab past its own linger (T-9132)
+
+- `test_an_undriven_background_tab_stays_throttled_until_a_tool_acts` patched `paint_hold.LINGER_SECONDS` to 2.0 s and then read the driven tab for 2 s, starting a CDP round trip after the call that held it, so the reading ran past the hold: the v2.1.47 publish run read 14 frames against the bar of 30 on macOS headed. The linger seam is now 5.0 s (longer than the 2 s reading, with the reason in a comment) and the two held readings use `_held_rate`, which repeats a reading under the bar only while a whole further reading still ends inside the linger (0.5 s margin), reading the page directly so no tool call re-holds the tab. `MIN_FRAMES` is unchanged and the hold is never extended to make a reading pass. Test-only: no product code changes.
+
 ## 2.1.47
 
 ### A disposable clone is probed, and its first missed probe is captured (T-1665)
