@@ -601,8 +601,10 @@ def _logging_calls(source: str) -> list[tuple[str, str, set[str]]]:
 
 
 def _payload_violations(sources: dict[str, str]) -> list[str]:
-    """Calls at WARNING or above that mention a payload-bearing name, as a bare
-    argument (``message.get('id')`` is an id, so a method call on it is not one)."""
+    """Calls at WARNING or above that mention a payload-bearing name. Only the two
+    non-payload fields of a CDP message are exempt: ``message.get('id')`` and
+    ``message.get('method')``. Anything else done to the name (``.get('params')``,
+    ``.items()``, a bare use) is a payload."""
     bad = []
     for name, source in sources.items():
         for level, text, _ in _logging_calls(source):
@@ -616,17 +618,26 @@ def _payload_violations(sources: dict[str, str]) -> list[str]:
                     for sub in ast.walk(arg)
                     if isinstance(sub, ast.Name)
                     and sub.id in PAYLOAD_NAMES
-                    and not _is_method_receiver(arg, sub)
+                    and not _is_non_payload_field(arg, sub)
                 ]
                 if bare:
                     bad.append(f"{name}: {text}")
     return bad
 
 
-def _is_method_receiver(root: ast.AST, name: ast.Name) -> bool:
-    """``message`` in ``message.get(...)``: an accessor's receiver, not the payload."""
+NON_PAYLOAD_FIELDS = {"id", "method"}
+
+
+def _is_non_payload_field(root: ast.AST, name: ast.Name) -> bool:
+    """*name* is the receiver of ``.get('id')`` or ``.get('method')`` in *root*."""
     return any(
-        isinstance(node, ast.Attribute) and node.value is name
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.value is name
+        and node.func.attr == "get"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value in NON_PAYLOAD_FIELDS
         for node in ast.walk(root)
     )
 
@@ -645,7 +656,12 @@ class TestPremises:
         sources and check every logging call. Payload-bearing sites left are the
         cookie DEBUG lines (``browser.py``:747/:792), below the floor; every
         call at WARNING or above in ``connection.py`` is pinned by text, so a new
-        or reworded one fails here until it is re-measured."""
+        or reworded one fails here until it is re-measured.
+
+        What this scan does NOT cover: it looks for CDP payload NAMES. An ``Element``
+        or ``Tab`` repr passed as ``self`` (``element.py``:537/:624/:633, WARNING) is
+        F-907's, closed at the arguments and pinned in ``logging_setup.py``:310 and
+        ``tests/test_nodriver_element_repr_logging.py``, not here."""
         sources = _nodriver_sources()
         assert "connection.py" in sources, "nodriver moved its connection module"
         assert _payload_violations(sources) == []
@@ -675,6 +691,9 @@ class TestPremises:
             "logger.error(f'bad reply {raw}')",
             "logger.exception('reply %s', response_message)",
             "logger.critical('event %s', message)",
+            "logger.warning('event %s', message.get('params'))",
+            "logger.warning('event %s', message.items())",
+            "logger.error('reply %s', raw.decode())",
         ):
             assert _payload_violations({"connection.py": source}), source
         harmless = "logger.warning('received response id=%s', message.get('id'))"
