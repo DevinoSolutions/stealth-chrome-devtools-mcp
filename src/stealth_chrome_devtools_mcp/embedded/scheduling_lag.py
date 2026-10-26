@@ -214,15 +214,25 @@ class IdleCanary:
         """How starved the canary was since it announced itself, as ``expected
         wakes / kept wakes`` clamped to ``[1.0, MAX_STRETCH]``, or ``None`` when it
         cannot say."""
+        return await self.factor_since(0, None)
+
+    def window(self) -> CanaryWindow:
+        """A reading of THIS canary from now on (T-1665): a canary shared by many
+        probes must not let a burst before one probe's window excuse that probe."""
+        return CanaryWindow(self, self._wakes, _now())
+
+    async def factor_since(self, wakes: int, start: float | None) -> float | None:
+        """:meth:`factor` over the window that began at *start* with *wakes* already
+        kept (``None``: the whole life of the canary)."""
         await asyncio.sleep(CANARY_DRAIN_SECONDS)
         if self._proc is None or self._ready_at is None:
             return None
         if self._proc.returncode is not None:
             return None  # it exited: it did not get to run, which is no evidence
-        window = _now() - self._ready_at
+        window = _now() - (self._ready_at if start is None else start)
         if window < CANARY_MIN_WINDOW_SECONDS:
             return None
-        kept = max(self._wakes, 1) * CANARY_NAP_SECONDS
+        kept = max(self._wakes - wakes, 1) * CANARY_NAP_SECONDS
         return min(max(window / kept, 1.0), MAX_STRETCH)
 
     async def stop(self) -> None:
@@ -239,6 +249,19 @@ class IdleCanary:
                 debug_logger.log_warning(
                     "scheduling_lag", "canary", f"pid {proc.pid} not reaped yet"
                 )
+
+
+class CanaryWindow:
+    """An :class:`IdleCanary` read from the moment :meth:`IdleCanary.window` took it:
+    ``await window.factor()`` is the canary's factor over THAT stretch only."""
+
+    def __init__(self, canary: IdleCanary, wakes: int, start: float) -> None:
+        self._canary = canary
+        self._wakes = wakes
+        self._start = start
+
+    async def factor(self) -> float | None:
+        return await self._canary.factor_since(self._wakes, self._start)
 
 
 @contextlib.asynccontextmanager
