@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.47
 
 ### A disposable clone is probed, and its first missed probe is captured (T-1665)
 
