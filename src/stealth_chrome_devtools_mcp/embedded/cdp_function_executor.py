@@ -175,16 +175,11 @@ class CDPFunctionExecutor:
             )
             return True
         except Exception as e:
-            report_gone_aware("cdp_function_executor", "enable_runtime", e)
+            await report_gone_aware("cdp_function_executor", "enable_runtime", e, tab)
             return False
 
     async def list_cdp_commands(self) -> list[str]:
-        """
-        Lists all available CDP Runtime commands.
-
-        Returns:
-            List[str]: List of command names.
-        """
+        """The CDP Runtime command names this executor resolves."""
         return [
             "evaluate",
             "callFunctionOn",
@@ -242,7 +237,9 @@ class CDPFunctionExecutor:
                 "params": params,
             }
         except Exception as e:
-            report_gone_aware("cdp_function_executor", "execute_cdp_command", e)
+            await report_gone_aware(
+                "cdp_function_executor", "execute_cdp_command", e, tab
+            )
             return {
                 "success": False,
                 "error": str(e),

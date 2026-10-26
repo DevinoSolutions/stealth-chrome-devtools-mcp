@@ -1,11 +1,20 @@
-"""T-8944: a websocket Chrome refuses for a page target that is gone is not a fault.
+"""T-8944: a command that failed because its page target is gone is not a fault.
 
-Sentry -37, -BK, -BM, -BY (and -DW on the hook path) all read ``InvalidStatus:
-server rejected WebSocket connection: HTTP 500``. nodriver's ``Connection.send``
-re-opens a tab's own websocket when it is down; for a closed page target Chrome
-answers that handshake with HTTP 500 (measured in F-963). Nothing is wrong with
-the command, so ``tab_close.report_gone_aware`` files it as a WARNING at the three
-tab-send sites the groups showed (and only there), and ``_replace_main_tab`` no longer lets it fail a navigation.
+Sentry -37, -BK, -BM, -BY (and -DW on the hook path) read ``InvalidStatus: server
+rejected WebSocket connection: HTTP 500``, but every one of those events is from
+a 2.1.27 / 2.1.39 backend, i.e. nodriver 0.47, where a tab opened its OWN page
+websocket and Chrome answered the handshake for a closed page with HTTP 500. On
+nodriver 0.50 a ``Tab`` takes its parent's ``websocket_url`` (the BROWSER
+endpoint) and addresses its page through a flattened session, so a closed page
+answers ``-32001 Session with given id not found`` (a command on the live
+session) or ``No target with given id`` (a re-attach), and never a 500. So the
+three tab-send sites (``execute_cdp_command``, ``enable_runtime``,
+``setup_interception``) report through ``tab_close.report_gone_aware``: a WARNING
+only when the error says the target is gone AND Chrome's own target listing no
+longer has it (a ``-32001`` on a target that is still listed stays an ERROR).
+
+``_replace_main_tab`` no longer lets a failed close of the previous tab fail a
+navigation.
 
 The CH half: ``schtasks`` writes the OEM code page, and a strict text decode
 killed ``subprocess``'s reader thread (``UnicodeDecodeError`` in ``_readerthread``).
@@ -16,8 +25,11 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
+from nodriver import cdp
+from nodriver.core.browser import Browser as NodriverBrowser
 from nodriver.core.connection import ProtocolException
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidMessage, InvalidStatus
@@ -44,19 +56,26 @@ def _status(code):
     return InvalidStatus(Response(code, "x", Headers(), b""))
 
 
-GONE = _status(500)
-NOT_GONE = {
-    "403": _status(403),
-    "404": _status(404),
-    "502": _status(502),
+# What Chrome sends for a closed page, as nodriver 0.50 raises it.
+SESSION_GONE = ProtocolException(
+    {"code": -32001, "message": "Session with given id not found"}
+)
+NO_TARGET = ProtocolException(
+    {"code": -32602, "message": "No target with given id found"}
+)
+# Errors that must stay ERRORs wherever the target is.
+OTHER = {
+    "http-500": _status(500),
+    "http-403": _status(403),
     "refused": ConnectionRefusedError(1225, "refused"),
     "timeout": TimeoutError("timed out"),
     "invalid-message": InvalidMessage("did not receive a valid HTTP response"),
-    "protocol-500-text": ProtocolException(
-        {"code": -32000, "message": "HTTP 500 server rejected"}
+    "invalid-parameters": ProtocolException(
+        {"code": -32602, "message": "Invalid parameters"}
     ),
-    "plain": RuntimeError("server rejected WebSocket connection: HTTP 500"),
+    "plain": RuntimeError("Session with given id not found"),
 }
+TARGET_ID = "T-closed"
 
 
 @pytest.fixture
@@ -73,52 +92,147 @@ def _levels(caplog, level):
     ]
 
 
-class FailingTab(FakeTab):
-    """A tab whose websocket cannot be re-opened: every command raises."""
+def _info(target_id):
+    return cdp.target.TargetInfo(
+        target_id=cdp.target.TargetID(target_id),
+        type_="page",
+        title="t",
+        url="https://x.test/",
+        attached=False,
+        can_access_opener=False,
+    )
 
-    def __init__(self, error):
+
+class ChromeBrowser(FakeBrowser):
+    """The browser connection of a Chrome that lists ``listed`` target ids.
+
+    ``update_targets`` is nodriver's OWN (``Browser.update_targets``), run over
+    a stand-in that answers ``Target.getTargets`` from ``listed``, so what a
+    vanished target does to ``tabs`` is the library's rule, not ours.
+    """
+
+    def __init__(self, *known, listed=(), list_error=None):
         super().__init__()
+        self._stand_in = SimpleNamespace(
+            _targets=[FakeAttachedTab(_info(t)) for t in known],
+            listed=[_info(t) for t in listed],
+        )
+
+        async def send(_command):
+            if list_error is not None:
+                raise list_error
+            return self._stand_in.listed
+
+        self._stand_in.send = send
+        self.tabs = list(self._stand_in._targets)
+
+    async def update_targets(self) -> None:
+        self.update_targets_calls += 1
+        await NodriverBrowser.update_targets(self._stand_in)
+        self.tabs = list(self._stand_in._targets)
+
+
+class FailingTab(FakeTab):
+    """A tab on ``browser`` whose commands all raise ``error``."""
+
+    def __init__(self, error, browser=None, target_id=TARGET_ID):
+        super().__init__(target_id=target_id)
         self._error = error
+        self.parent = browser
 
     async def send(self, cdp_obj, *args, **kwargs):
         await super().send(cdp_obj, *args, **kwargs)
         raise self._error
 
 
-class TestTargetSocketGone:
-    def test_only_http_500_is_a_gone_target(self):
-        assert tab_close.target_socket_gone(GONE)
+def _closed_tab(error):
+    """A tab whose page Chrome has closed: the browser no longer lists it."""
+    return FailingTab(error, ChromeBrowser(TARGET_ID, "T-other", listed=["T-other"]))
 
-    @pytest.mark.parametrize("error", NOT_GONE.values(), ids=NOT_GONE.keys())
-    def test_everything_else_is_not(self, error):
-        assert not tab_close.target_socket_gone(error)
+
+def _live_tab(error):
+    """The same error on a target Chrome still lists."""
+    return FailingTab(
+        error, ChromeBrowser(TARGET_ID, "T-other", listed=[TARGET_ID, "T-other"])
+    )
+
+
+class TestTargetUnlisted:
+    async def test_a_target_the_listing_dropped_is_unlisted(self):
+        assert await tab_close.target_unlisted(_closed_tab(SESSION_GONE))
+
+    async def test_a_target_the_listing_has_is_not(self):
+        assert not await tab_close.target_unlisted(_live_tab(SESSION_GONE))
+
+    async def test_a_tab_with_no_browser_is_not_shown_to_be_gone(self):
+        assert not await tab_close.target_unlisted(FailingTab(SESSION_GONE))
+
+    async def test_a_listing_that_fails_is_not_shown_to_be_gone(self):
+        browser = ChromeBrowser(TARGET_ID, listed=[], list_error=RuntimeError("down"))
+
+        assert not await tab_close.target_unlisted(FailingTab(SESSION_GONE, browser))
+
+    async def test_a_target_that_is_not_a_page_is_not_judged(self):
+        tab = _closed_tab(SESSION_GONE)
+        tab.target.type_ = "iframe"
+
+        assert not await tab_close.target_unlisted(tab)
 
 
 class TestReportGoneAware:
-    def test_a_gone_target_is_a_warning(self, backend_log):
-        tab_close.report_gone_aware("comp", "meth", GONE)
+    @pytest.mark.parametrize(
+        "error", [SESSION_GONE, NO_TARGET], ids=["session-gone", "no-target"]
+    )
+    async def test_a_gone_error_on_an_unlisted_target_is_a_warning(
+        self, error, backend_log
+    ):
+        await tab_close.report_gone_aware("comp", "meth", error, _closed_tab(error))
 
         assert _levels(backend_log, logging.ERROR) == []
         (warned,) = _levels(backend_log, logging.WARNING)
-        assert "InvalidStatus" in warned and "HTTP 500" in warned
+        assert "ProtocolException" in warned
 
-    @pytest.mark.parametrize("error", NOT_GONE.values(), ids=NOT_GONE.keys())
-    def test_any_other_error_is_still_an_error(self, error, backend_log):
-        tab_close.report_gone_aware("comp", "meth", error)
+    @pytest.mark.parametrize(
+        "error", [SESSION_GONE, NO_TARGET], ids=["session-gone", "no-target"]
+    )
+    async def test_the_same_error_on_a_listed_target_stays_an_error(
+        self, error, backend_log
+    ):
+        await tab_close.report_gone_aware("comp", "meth", error, _live_tab(error))
 
         assert len(_levels(backend_log, logging.ERROR)) == 1
         assert _levels(backend_log, logging.WARNING) == []
 
+    @pytest.mark.parametrize("error", OTHER.values(), ids=OTHER.keys())
+    async def test_any_other_error_stays_an_error_even_on_an_unlisted_target(
+        self, error, backend_log
+    ):
+        await tab_close.report_gone_aware("comp", "meth", error, _closed_tab(error))
+
+        assert len(_levels(backend_log, logging.ERROR)) == 1
+        assert _levels(backend_log, logging.WARNING) == []
+
+    async def test_a_listing_failure_keeps_the_error(self, backend_log):
+        browser = ChromeBrowser(TARGET_ID, list_error=RuntimeError("down"))
+
+        await tab_close.report_gone_aware(
+            "comp", "meth", SESSION_GONE, FailingTab(SESSION_GONE, browser)
+        )
+
+        assert len(_levels(backend_log, logging.ERROR)) == 1
+
 
 class TestLogErrorStaysBlind:
-    """A websockets response carries no URL, so ``log_error`` cannot tell a closed
-    page from a failing browser-level endpoint; it must keep filing a 500 as an
-    ERROR (``browser_health``'s relaunch and heal paths rely on it)."""
+    """``log_error`` itself decides nothing about gone targets (``browser_health``'s
+    relaunch and heal paths log through it, and a 500 there is a fault)."""
 
-    def test_a_500_through_log_error_is_an_error(self, backend_log):
+    @pytest.mark.parametrize(
+        "error", [SESSION_GONE, _status(500)], ids=["session-gone", "http-500"]
+    )
+    def test_it_files_an_error(self, error, backend_log):
         log = DebugLogger()
 
-        log.log_error("comp", "meth", GONE)
+        log.log_error("comp", "meth", error)
 
         assert len(_levels(backend_log, logging.ERROR)) == 1
         assert _levels(backend_log, logging.WARNING) == []
@@ -126,38 +240,56 @@ class TestLogErrorStaysBlind:
 
 
 class TestTheSentrySites:
-    """-BM, -BK and -BY, through the real call sites."""
+    """The three tab-send sites, through the real call sites, on the error a closed
+    page really gives on nodriver 0.50."""
 
     async def test_enable_runtime_returns_false_without_an_error_record(
         self, backend_log
     ):
-        assert await CDPFunctionExecutor().enable_runtime(FailingTab(GONE)) is False
+        tab = _closed_tab(SESSION_GONE)
+
+        assert await CDPFunctionExecutor().enable_runtime(tab) is False
 
         assert _levels(backend_log, logging.ERROR) == []
         assert len(_levels(backend_log, logging.WARNING)) == 1
 
     async def test_execute_cdp_command_still_answers_the_failure(self, backend_log):
         answer = await CDPFunctionExecutor().execute_cdp_command(
-            FailingTab(GONE), "evaluate", {"expression": "1"}
+            _closed_tab(SESSION_GONE), "evaluate", {"expression": "1"}
         )
 
         assert answer["success"] is False
-        assert "HTTP 500" in answer["error"]
+        assert "Session with given id not found" in answer["error"]
         assert _levels(backend_log, logging.ERROR) == []
+        # enable_runtime and the command itself each fail on the closed page.
+        assert len(_levels(backend_log, logging.WARNING)) == 2
 
     async def test_setup_interception_still_raises_but_logs_a_warning(
         self, backend_log
     ):
-        with pytest.raises(Exception, match="HTTP 500"):
-            await NetworkInterceptor().setup_interception(FailingTab(GONE), "i1")
+        with pytest.raises(Exception, match="Session with given id not found"):
+            await NetworkInterceptor().setup_interception(
+                _closed_tab(SESSION_GONE), "i1"
+            )
 
         assert _levels(backend_log, logging.ERROR) == []
         assert len(_levels(backend_log, logging.WARNING)) == 1
 
+    async def test_a_session_error_on_a_listed_target_is_still_an_error(
+        self, backend_log
+    ):
+        answer = await CDPFunctionExecutor().execute_cdp_command(
+            _live_tab(SESSION_GONE), "evaluate", {"expression": "1"}
+        )
+
+        assert answer["success"] is False
+        assert len(_levels(backend_log, logging.ERROR)) == 2
+        assert _levels(backend_log, logging.WARNING) == []
+
     async def test_a_real_failure_at_the_same_site_is_still_an_error(self, backend_log):
         with pytest.raises(Exception, match="boom"):
             await NetworkInterceptor().setup_interception(
-                FailingTab(RuntimeError("boom")), "i1"
+                _closed_tab(RuntimeError("boom")), "i1"
             )
 
         assert len(_levels(backend_log, logging.ERROR)) == 1
@@ -179,7 +311,8 @@ def manager_and_tabs():
 
 class TestReplacingADeadMainTab:
     """-37: ``navigate`` failed because closing the previous, already-gone tab
-    raised out of ``_replace_main_tab``."""
+    raised out of ``_replace_main_tab`` (on nodriver 0.50 a closed page answers the
+    close ``-32001``)."""
 
     @staticmethod
     def _closing_raises(tab, error):
@@ -192,7 +325,7 @@ class TestReplacingADeadMainTab:
         self, manager_and_tabs, backend_log
     ):
         manager, tracked = manager_and_tabs
-        self._closing_raises(tracked, GONE)
+        self._closing_raises(tracked, SESSION_GONE)
 
         new_tab = await manager._replace_main_tab("i1", reason="test")
 
@@ -200,7 +333,7 @@ class TestReplacingADeadMainTab:
         assert new_tab is not tracked
         assert _levels(backend_log, logging.ERROR) == []
         (warned,) = _levels(backend_log, logging.WARNING)
-        assert "HTTP 500" in warned
+        assert "Session with given id not found" in warned
 
     async def test_a_target_chrome_already_dropped_is_fine_too(
         self, manager_and_tabs, backend_log

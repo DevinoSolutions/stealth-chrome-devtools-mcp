@@ -220,7 +220,7 @@ class NetworkInterceptor:
                 if instance_id not in self._instance_requests:
                     self._instance_requests[instance_id] = []
         except Exception as e:
-            report_gone_aware("network_interceptor", "setup_interception", e)
+            await report_gone_aware("network_interceptor", "setup_interception", e, tab)
             raise Exception(f"Failed to setup network interception: {e!s}")
 
     async def arm_tab(self, tab: Tab, instance_id: str) -> None:
