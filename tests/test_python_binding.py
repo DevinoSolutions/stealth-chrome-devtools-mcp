@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 from nodriver import cdp
 
-from stealth_chrome_devtools_mcp.embedded import python_binding
+from stealth_chrome_devtools_mcp.embedded import python_binding, tab_open
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     CDPFunctionExecutor,
 )
@@ -708,7 +708,7 @@ async def test_a_closed_browsers_watches_are_reaped_on_the_next_install():
     bindings = python_binding.Bindings()
     dead = _FakeTab("T-a", context=7)
     await _install(dead, "x", lambda: 1, bindings)
-    dead.browser.socket.close_code = 1006  # the process was killed
+    tab_open.mark_closed(dead.browser)  # what close_instance does first
 
     live = _FakeTab("T-b", context=21)
     await _install(live, "x", lambda: 2, bindings)
@@ -717,6 +717,40 @@ async def test_a_closed_browsers_watches_are_reaped_on_the_next_install():
     assert set(bindings) == {("T-b", "x")}
     assert dead.handler_count() == 0
     assert live.handler_count() == 5
+
+
+async def test_an_exited_browsers_watches_are_reaped_too():
+    """A browser whose process is gone (crashed, killed from outside) never sends
+    ``targetDestroyed`` either, and nobody called ``close_instance``."""
+    bindings = python_binding.Bindings()
+    dead = _FakeTab("T-a", context=7)
+    await _install(dead, "x", lambda: 1, bindings)
+    dead.browser._process = types.SimpleNamespace(returncode=1)
+
+    await _install(_FakeTab("T-b", context=21), "x", lambda: 2, bindings)
+
+    assert set(bindings.watches) == {"T-b"}
+    assert dead.handler_count() == 0
+
+
+async def test_a_dropped_browser_socket_does_not_reap_live_tabs():
+    """A dropped browser websocket is repaired by ``tab_open`` (the tab keeps its own
+    socket and listeners), so it must not read as a gone browser: the watches stay,
+    and a binding call after the recovery still runs."""
+    calls = []
+    bindings = python_binding.Bindings()
+    first = _FakeTab("T-a", context=7)
+    await _install(first, "x", lambda: calls.append("x") or 1, bindings)
+    first.browser.socket.close_code = 1006  # dropped, not gone
+
+    other = _FakeTab("T-b", context=21)
+    await _install(other, "y", lambda: 2, bindings)
+
+    assert set(bindings.watches) == {"T-a", "T-b"}
+    assert set(bindings) == {("T-a", "x"), ("T-b", "y")}
+    first.browser.socket.close_code = None  # tab_open re-attached it
+    await first.deliver(_event("x", "c1", [], 7))
+    assert calls == ["x"]
 
 
 async def test_a_target_destroyed_during_the_replay_fails_the_install_cleanly():

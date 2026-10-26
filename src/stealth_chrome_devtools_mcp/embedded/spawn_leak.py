@@ -307,12 +307,31 @@ def reap_attached(cleanup: ProcessCleanup, browser: Browser, instance_id: str) -
     none; its fallback tests ``hasattr(self, "browser_process_pid")``, an
     attribute nothing sets (``browser.py`` ``stop``, 0.50.6 and 0.47 alike), so it
     kills nothing. ``browser_pid`` refuses a ``--type=`` child and
-    ``_kill_process_by_pid`` a pid whose identity it cannot establish (F-918): the
-    checks ``close_instance`` relies on. A launched browser is ``stop()``'s.
+    ``_kill_process_by_pid`` a pid whose identity it cannot establish (F-918). As in
+    :func:`reap_launched_browsers`, the pid must also be among the processes holding
+    THIS browser's ``user_data_dir``: a stamped pid that is not on the profile (a
+    recycled one, a browser-named stranger) is refused and logged. A launched
+    browser is ``stop()``'s.
     """
     if getattr(browser, "_process", None) is not None:
         return
     pid = process_exit.browser_pid(None, getattr(browser, "_process_pid", None))
-    if pid is not None:
-        directory = getattr(getattr(browser, "config", None), "user_data_dir", "")
-        _kill(cleanup, pid, str(directory), instance_id)
+    directory = getattr(getattr(browser, "config", None), "user_data_dir", None)
+    if pid is None or not directory:
+        return
+    try:
+        held = pid in cleanup._get_browser_pids_for_profile(str(directory))
+    except Exception as error:  # noqa: BLE001  PERMANENT(a reap inside a failure handler must not raise)
+        debug_logger.log_warning(
+            "spawn_leak", "reap_attached", f"profile scan failed: {error}"
+        )
+        return
+    if not held:
+        debug_logger.log_warning(
+            "spawn_leak",
+            "reap_attached",
+            f"Failed spawn {instance_id}: pid {pid} is not on {directory}; "
+            "refusing to kill it",
+        )
+        return
+    _kill(cleanup, pid, str(directory), instance_id)

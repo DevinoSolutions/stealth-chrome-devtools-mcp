@@ -67,6 +67,7 @@ from typing import Any
 import nodriver as uc
 from nodriver import Tab
 
+from stealth_chrome_devtools_mcp.embedded import process_exit, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -399,15 +400,15 @@ class TabWatch:
 
     @property
     def dead(self) -> bool:
-        """True when the browser's connection is closed: the browser is gone and
-        no ``Target.targetDestroyed`` will ever come for this tab.
-
-        nodriver 0.50 has no ``closed``; a closed websocket is one with a close
-        code (``connection.py``:231 reads it the same way in ``aopen``)."""
+        """True when the browser is GONE: this backend closed it
+        (``tab_open.mark_closed``) or its process exited, so no
+        ``Target.targetDestroyed`` will ever come for this tab. A dropped socket
+        is not that: ``tab_open`` re-attaches it and the tab's own websocket and
+        listeners are untouched, so reaping here would strip live tabs."""
         browser = getattr(self.tab, "browser", None)
         if browser is None:
             return False
-        return browser.socket is None or browser.socket.close_code is not None
+        return tab_open.is_closed(browser) or not process_exit.browser_is_alive(browser)
 
     def reap(self) -> None:
         """End this watch: forget its tab's bindings (there is no page left to

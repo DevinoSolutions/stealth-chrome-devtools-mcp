@@ -192,8 +192,8 @@ class BrowserManager:
     @staticmethod
     async def _stop_browser(browser: Browser) -> None:
         """Stop a nodriver browser regardless of sync or async stop semantics."""
-        stop_result = browser.stop()
-        if asyncio.iscoroutine(stop_result):
+        tab_open.mark_closed(browser)  # first: a lingering task must not reopen it
+        if asyncio.iscoroutine(stop_result := browser.stop()):
             await stop_result
 
     def _discard_instance_unlocked(

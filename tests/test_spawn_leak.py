@@ -37,6 +37,7 @@ import asyncio
 import os
 import sys
 import urllib.error
+from types import SimpleNamespace
 
 import pytest
 from nodriver.core.browser import Browser, HTTPApi
@@ -47,6 +48,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
+    tab_open,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -388,8 +390,12 @@ async def test_a_browser_already_collected_is_not_killed(
 
 
 class _Cleanup:
-    def __init__(self) -> None:
+    def __init__(self, on_profile: set[int] | None = None) -> None:
         self.killed: list[int] = []
+        self.on_profile = on_profile if on_profile is not None else {os.getpid()}
+
+    def _get_browser_pids_for_profile(self, _user_data_dir: str) -> set[int]:
+        return self.on_profile
 
     def _kill_process_by_pid(self, pid: int, _instance_id: str = "") -> bool:
         self.killed.append(pid)
@@ -404,6 +410,7 @@ class _Attached:
     def __init__(self, pid: int | None, process: object | None = None) -> None:
         self._process = process
         self._process_pid = pid
+        self.config = SimpleNamespace(user_data_dir="C:/profiles/attached")
         self.stopped = False
 
     def stop(self) -> None:
@@ -454,3 +461,28 @@ async def test_a_renderer_pid_is_never_taken_for_the_browser(monkeypatch):
     spawn_leak.reap_attached(cleanup, _Attached(pid=4242), "i-1")
 
     assert cleanup.killed == []
+
+
+async def test_a_browser_named_pid_off_the_profile_is_never_killed(monkeypatch):
+    """The stamped pid must be among the processes holding THIS browser's profile,
+    as ``reap_launched_browsers`` requires: a recycled pid or a stranger that merely
+    looks like a browser is refused."""
+    cleanup = _Cleanup(on_profile={os.getpid() + 1})
+    spawn_leak.reap_attached(cleanup, _Attached(pid=os.getpid()), "i-1")
+    assert cleanup.killed == []
+
+
+async def test_a_failed_spawn_marks_its_browser_closed_before_stopping_it(monkeypatch):
+    cleanup = _Cleanup()
+    monkeypatch.setattr(
+        "stealth_chrome_devtools_mcp.embedded.browser_manager.process_cleanup", cleanup
+    )
+    browser = _Attached(pid=os.getpid())
+    seen = []
+    browser.stop = lambda: seen.append(tab_open.is_closed(browser))
+
+    await BrowserManager()._teardown_failed_spawn(
+        "error", "i-1", browser, None, BrowserOptions(), None
+    )
+
+    assert seen == [True]
