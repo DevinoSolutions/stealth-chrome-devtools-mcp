@@ -420,7 +420,7 @@ class BrowserHealth:
         self._shared = shared
         self._holder = holder
         self._clones = clone_probe.CloneProbe(  # T-1665
-            manager.get_instance, self._judged, browser_answers, own_check, clock=clock
+            manager, self._judged, browser_answers, own_check, clock=clock
         )
         self._incidents = freeze_capture.Incidents(
             capture=capture,

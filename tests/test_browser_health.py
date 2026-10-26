@@ -687,6 +687,36 @@ class TestASharedCanaryIsReadOverTheProbesOwnWindow:
         assert stage.events.count("canary-start") == 1
 
 
+class TestConstruction:
+    def test_a_manager_with_only_list_instances_constructs(self, stage):
+        """T-1665: the lifespan's spy manager has no ``get_instance``; the clone path
+        reads it when a round runs, never while the loop is built."""
+        spy = SimpleNamespace(list_instances=stage.manager.list_instances)
+
+        health = browser_health.BrowserHealth(
+            spy, close=stage.close, arm_interception=stage.arm
+        )
+
+        assert health.stopping is False
+
+    async def test_the_clone_path_reads_get_instance_when_a_round_runs(self, stage):
+        asked = []
+
+        class Late(SimpleNamespace):
+            async def get_instance(self, instance_id):
+                asked.append(instance_id)
+
+        late = Late(list_instances=stage.manager.list_instances)
+        stage.persistent.clear()
+        health = stage.health()
+        health._manager = late
+        health._clones._manager = late
+
+        await health._clones.check([INSTANCE_ID], stage.canary)
+
+        assert asked == [INSTANCE_ID]
+
+
 class TestScope:
     async def test_clones_are_probed_and_never_healed(self, stage, log, monkeypatch):
         """T-1665: a clone is probed (so a freeze leaves a record), but a miss closes

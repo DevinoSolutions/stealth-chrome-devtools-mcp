@@ -142,9 +142,7 @@ class _Rig:
     def probe(self, **overrides) -> clone_probe.CloneProbe:
         kwargs = {"paused": lambda _iid: self.paused, "clock": lambda: self.now}
         kwargs.update(overrides)
-        return clone_probe.CloneProbe(
-            self.get_instance, self.judge, self.fresh, self.own, **kwargs
-        )
+        return clone_probe.CloneProbe(self, self.judge, self.fresh, self.own, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +692,7 @@ class TestPausedFetchCount:
         rig.misses[CLONE] = [True]
         monkeypatch.setattr(dynamic_hook_system, "_paused_in_flight", {CLONE: 7})
 
-        probe = clone_probe.CloneProbe(rig.get_instance, rig.judge, rig.fresh, rig.own)
+        probe = clone_probe.CloneProbe(rig, rig.judge, rig.fresh, rig.own)
         await probe.check([CLONE], rig.canary)
 
         assert "paused_fetch: 7" in log.at("error")[0]
