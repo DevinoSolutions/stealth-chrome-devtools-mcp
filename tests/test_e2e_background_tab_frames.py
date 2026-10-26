@@ -57,7 +57,8 @@ ARMING_BUDGET_SECONDS = 15.0
 #: before the reading is (macOS headed read 14 frames against the 30 bar at 2.0 s).
 #: It also leaves room for one retry reading while armed (:func:`_held_rate`).
 SHORT_LINGER_SECONDS = 5.0
-#: What a held reading keeps back from the end of the linger: the call's own return.
+#: What a held reading keeps back from the end of the linger (the clock starts BEFORE
+#: the holding call, so this covers the hold timer's own scheduling, not the call).
 LINGER_MARGIN_SECONDS = 0.5
 
 #: Paints the page every frame (a page that changes nothing is not held back) and counts.
@@ -148,12 +149,14 @@ async def _undriven_rate(iid: str, tab_id: str) -> int:
     return await counted() - before
 
 
-async def _held_rate(iid: str, tab_id: str) -> int:
+async def _held_rate(iid: str, tab_id: str, held_at: float) -> int:
     """Frames in :data:`MEASURE_MS` of a tab a tool JUST acted on, read straight from
     the page (no tool call, so nothing re-holds it). Arming is not instant, so a
     reading under the bar is repeated while a whole further reading still ends inside
-    the linger; bounded, and never past it: the hold is not extended to make it pass."""
-    hold_ends = time.monotonic() + SHORT_LINGER_SECONDS - LINGER_MARGIN_SECONDS
+    the linger; bounded, and never past it: the hold is not extended to make it pass.
+    *held_at* is ``time.monotonic()`` taken BEFORE the holding call, so a slow call
+    shortens the window instead of letting a retry run past the hold."""
+    hold_ends = held_at + SHORT_LINGER_SECONDS - LINGER_MARGIN_SECONDS
     best = 0
     while True:
         best = max(best, await _undriven_rate(iid, tab_id))
@@ -285,8 +288,9 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         )
 
         # A tool call starts the driven tab's loop: it is held from that call on.
+        held_at = time.monotonic()
         await execute(instance_id=iid, script=START_LOOP_JS, tab_id=driven)
-        assert await _held_rate(iid, driven) >= MIN_FRAMES
+        assert await _held_rate(iid, driven, held_at) >= MIN_FRAMES
 
         # Without another call it falls back after the linger.
         await asyncio.sleep(SHORT_LINGER_SECONDS + 1)
@@ -294,8 +298,9 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         assert await _undriven_rate(iid, undriven) <= MAX_UNHELD_FRAMES
 
         # A new call holds it again.
+        held_at = time.monotonic()
         await execute(instance_id=iid, script="return 1", tab_id=driven)
-        assert await _held_rate(iid, driven) >= MIN_FRAMES
+        assert await _held_rate(iid, driven, held_at) >= MIN_FRAMES
     finally:
         await close(instance_id=iid)
 
