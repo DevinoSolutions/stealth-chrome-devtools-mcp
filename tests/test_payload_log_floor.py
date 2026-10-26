@@ -58,7 +58,9 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 # --------------------------------------------------------------------------
-# The call shapes, copied from the INSTALLED nodriver 0.47.0 / websockets 16.0
+# The call shapes, copied from nodriver 0.47.0 / websockets 16.0 (nodriver 0.50.6 no
+# longer logs the reply or the event; they stay as defence in depth, because the floor
+# is what covers them if a library logs them again)
 # rather than paraphrased, so these pins measure the library's real lines.
 # One marker each, so a failure names WHICH line escaped.
 # --------------------------------------------------------------------------
@@ -546,33 +548,137 @@ class TestTheFloorIsSetOnTheFamilyItself:
         assert logging.getLogger(CONN_LOGGER).getEffectiveLevel() == logging.WARNING
 
 
+BELOW_THE_FLOOR = {"debug", "info"}
+ABOVE_THE_FLOOR = {"warning", "error", "exception", "critical"}
+#: Names that hold a CDP reply, event or cookie in nodriver's listener and cookie code.
+PAYLOAD_NAMES = {"message", "raw", "response_message", "result", "cookie"}
+#: nodriver 0.50.6 ``connection.py``: every call at WARNING or above, as
+#: ``ast.unparse`` renders it. None names a payload: ids, a class name, the
+#: exception object (a key name or the user callback's own error, F-907's rule).
+CONNECTION_SITES_AT_OR_ABOVE_THE_FLOOR = {
+    "logger.warning('received response for already-completed future id=%s', "
+    "message.get('id'))",
+    "logger.error(f'background listener error: {e}', exc_info=True)",
+    "logger.exception(e)",
+    "logger.warning('exception in callback %s for event %s => %s', callback, "
+    "event.__class__.__name__, e, exc_info=True)",
+}
+
+
+def _nodriver_sources() -> dict[str, str]:
+    """The installed ``nodriver/core`` modules that log, by file name. ``util.py``
+    holds nodriver's own HTTP/SOCKS forwarder, which this product never starts
+    (it has ``AuthenticatedProxyForwarder``), so it is not a CDP payload path."""
+    from nodriver.core import connection
+
+    folder = Path(connection.__file__).parent
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in folder.glob("*.py")
+        if path.name != "util.py"
+    }
+
+
+def _logging_calls(source: str) -> list[tuple[str, str, set[str]]]:
+    """``(level, unparsed call, names it mentions)`` for each ``logger.<level>(...)``."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        func = getattr(node, "func", None)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "logger"
+            and func.attr in BELOW_THE_FLOOR | ABOVE_THE_FLOOR
+        ):
+            names = {
+                ast.unparse(sub)
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Name | ast.Attribute)
+            }
+            found.append((func.attr, ast.unparse(node), names))
+    return found
+
+
+def _payload_violations(sources: dict[str, str]) -> list[str]:
+    """Calls at WARNING or above that mention a payload-bearing name, as a bare
+    argument (``message.get('id')`` is an id, so a method call on it is not one)."""
+    bad = []
+    for name, source in sources.items():
+        for level, text, _ in _logging_calls(source):
+            if level not in ABOVE_THE_FLOOR:
+                continue
+            call = ast.parse(text).body[0].value
+            args = [*call.args, *(kw.value for kw in call.keywords)]
+            for arg in args:
+                bare = [
+                    sub.id
+                    for sub in ast.walk(arg)
+                    if isinstance(sub, ast.Name)
+                    and sub.id in PAYLOAD_NAMES
+                    and not _is_method_receiver(arg, sub)
+                ]
+                if bare:
+                    bad.append(f"{name}: {text}")
+    return bad
+
+
+def _is_method_receiver(root: ast.AST, name: ast.Name) -> bool:
+    """``message`` in ``message.get(...)``: an accessor's receiver, not the payload."""
+    return any(
+        isinstance(node, ast.Attribute) and node.value is name
+        for node in ast.walk(root)
+    )
+
+
 class TestPremises:
     """The two facts this fix rests on, measured against the installed
     libraries rather than assumed — so a dependency bump that invalidates
     either one fails HERE instead of shipping cookies."""
 
-    def test_the_payload_lines_are_all_below_the_floor(self):
-        """If nodriver ever logs a raw reply at WARNING, a WARNING floor stops
-        covering it. Read the installed source and check the two known sites."""
-        from nodriver.core import connection
-
-        source = Path(connection.__file__).read_text(encoding="utf-8").splitlines()
-        reply_lines = [line for line in source if "got answer for (message_id" in line]
-        event_lines = [
-            index
-            for index, line in enumerate(source)
-            if "during parsing of json from event" in line
-        ]
-        assert reply_lines, "nodriver no longer logs the raw reply — re-measure F-906"
-        assert all("logger.debug(" in line for line in reply_lines), (
-            f"the raw-reply line moved off DEBUG: {reply_lines}"
+    def test_no_payload_site_is_at_or_above_the_floor(self):
+        """The floor is WARNING, so a payload logged at WARNING or above is not
+        covered by it. nodriver 0.50.6 no longer logs the raw reply
+        (``got answer for (message_id``) or the unparseable event at all
+        (``connection.py`` logs ids and method names only, :471/:496), so the
+        0.47 premise is replaced by the one that still matters: read the INSTALLED
+        sources and check every logging call. Payload-bearing sites left are the
+        cookie DEBUG lines (``browser.py``:747/:792), below the floor; every
+        call at WARNING or above in ``connection.py`` is pinned by text, so a new
+        or reworded one fails here until it is re-measured."""
+        sources = _nodriver_sources()
+        assert "connection.py" in sources, "nodriver moved its connection module"
+        assert _payload_violations(sources) == []
+        known = {
+            text
+            for level, text, _ in _logging_calls(sources["connection.py"])
+            if level in ABOVE_THE_FLOOR
+        }
+        assert known == CONNECTION_SITES_AT_OR_ABOVE_THE_FLOOR, (
+            "nodriver's connection.py logs differently at WARNING or above; "
+            "re-measure F-906 (does any argument carry a CDP payload?)"
         )
-        assert event_lines, "nodriver no longer logs the raw event — re-measure F-906"
-        for index in event_lines:
-            window = "".join(source[max(0, index - 3) : index + 1])
-            assert "logger.info(" in window, (
-                f"the raw-event line moved off INFO near line {index + 1}"
-            )
+        cookie = [
+            level
+            for level, _, names in _logging_calls(sources["browser.py"])
+            if "cookie.value" in names
+        ]
+        assert cookie and all(level in BELOW_THE_FLOOR for level in cookie), (
+            f"the cookie value lines moved: {cookie}"
+        )
+
+    def test_the_premise_check_catches_a_payload_at_the_floor(self):
+        """The check above must fail loudly, not pass vacuously: feed it the shapes
+        that WOULD escape the floor."""
+        for source in (
+            "logger.warning('got answer for (message_id:%d) => %s', tx.id, message)",
+            "logger.error(f'bad reply {raw}')",
+            "logger.exception('reply %s', response_message)",
+            "logger.critical('event %s', message)",
+        ):
+            assert _payload_violations({"connection.py": source}), source
+        harmless = "logger.warning('received response id=%s', message.get('id'))"
+        assert _payload_violations({"connection.py": harmless}) == []
 
     def test_sentry_hooks_below_the_level_check(self):
         """``LoggingIntegration`` patches ``logging.Logger.callHandlers``, which
