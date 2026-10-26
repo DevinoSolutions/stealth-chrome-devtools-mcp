@@ -132,3 +132,32 @@ jobs:
             ```
           draft: false
           prerelease: false
+
+      - name: Create and finalize the Sentry release
+        # T-8944: no step made the Sentry release, so 2.1.44 stayed unreleased
+        # until it was finalized by hand. Runs after PyPI, so a Sentry outage
+        # fails this step visibly but never blocks the upload. The org token
+        # (scope org:ci) is the repo secret SENTRY_AUTH_TOKEN. Cloudflare in
+        # front of sentry.devino.ca answers 1010 to a generic client
+        # signature, so the request names itself as sentry-cli.
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_URL: https://sentry.devino.ca
+          SENTRY_ORG: devino
+          SENTRY_PROJECT: stealth-chrome-devtools-mcp
+        shell: bash
+        run: |
+          set -euo pipefail
+          api() {
+            curl -sS -o /dev/null -w '%{http_code}' -A 'sentry-cli/2.42.2' \
+              -H "Authorization: Bearer ${SENTRY_AUTH_TOKEN}" \
+              -H 'Content-Type: application/json' "$@"
+          }
+          created=$(api -X POST "${SENTRY_URL}/api/0/organizations/${SENTRY_ORG}/releases/" \
+            -d "{\"version\":\"${VERSION}\",\"projects\":[\"${SENTRY_PROJECT}\"],\"ref\":\"${GITHUB_SHA}\",\"url\":\"https://pypi.org/project/stealth-chrome-devtools-mcp/${VERSION}/\"}")
+          echo "create ${VERSION}: HTTP ${created}"
+          case "$created" in 200|201|208) ;; *) exit 1 ;; esac
+          released=$(api -X PUT "${SENTRY_URL}/api/0/organizations/${SENTRY_ORG}/releases/${VERSION}/" \
+            -d "{\"dateReleased\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
+          echo "finalize ${VERSION}: HTTP ${released}"
+          [ "$released" = 200 ]

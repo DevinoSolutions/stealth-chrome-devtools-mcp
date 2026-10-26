@@ -318,6 +318,22 @@ def test_only_pull_request_runs_are_ever_cancelled():
     assert "pull_request" not in _load(PUBLISH)[True]
 
 
+def test_publish_creates_and_finalizes_the_sentry_release_after_pypi():
+    """T-8944: the Sentry release is made by the workflow, after the upload, with
+    the token from a secret through env and a client name Cloudflare admits."""
+    steps = _jobs(PUBLISH)["publish"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    sentry = names.index("Create and finalize the Sentry release")
+    assert sentry > names.index("Publish to PyPI")
+    step = steps[sentry]
+    assert step["env"]["SENTRY_AUTH_TOKEN"] == "${{ secrets.SENTRY_AUTH_TOKEN }}"
+    assert "${{" not in step["run"], (
+        "the token and version reach the shell via env only"
+    )
+    assert "-A 'sentry-cli/" in step["run"]
+    assert "/releases/${VERSION}/" in step["run"] and "dateReleased" in step["run"]
+
+
 UNTRUSTED = re.compile(
     r"inputs\.|github\.(ref|head_ref|base_ref|event\.|actor)(?!_name\b)|github\.ref_name"
 )
