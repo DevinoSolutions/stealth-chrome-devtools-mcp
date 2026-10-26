@@ -31,7 +31,7 @@ dependencies = [
     "pydantic==2.14.1",
     "pydantic-settings==2.16.1",
     "python-dotenv==1.2.4",
-    "jsbeautifier==1.15.4",
+    "jsbeautifier==2.0.3",
     "strinpy==0.0.4",
     "strbuilder==1.1.3",
     "psutil==7.2.2",
