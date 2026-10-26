@@ -1264,9 +1264,8 @@ class BrowserManager:
     ) -> None:
         """Re-point the stored active tab when ``close_tab`` destroyed it (F-845).
 
-        Nothing else did, so every later tab-scoped call opened a websocket to
-        the dead target and got Chrome's raw "server rejected WebSocket
-        connection: HTTP 500". Storing ``None`` when nothing survives lets
+        Nothing else did, so every later tab-scoped call hit the dead target with
+        a raw HTTP 500. Storing ``None`` when nothing survives lets
         ``tool_errors._require_tab`` raise the honest typed error instead.
         ``browser.tabs`` is page-filtered and read as ``list_tabs`` reads it —
         no per-tab ``await`` (F-771) — and the closed id is excluded explicitly:
@@ -1305,6 +1304,7 @@ class BrowserManager:
             if not tab_close.log_failure("close_tab", instance_id, e):  # F-996b
                 return False
         # Outside the handler: the close already succeeded (F-775b lying-False).
+        dynamic_hook_system.cancel_paused_for_target(instance_id, target_id)
         await self._repoint_after_close(instance_id, browser, str(target_id))
         return True
 
