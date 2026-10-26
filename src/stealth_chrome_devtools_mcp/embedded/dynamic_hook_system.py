@@ -25,8 +25,28 @@ from datetime import datetime, timezone
 from typing import Any
 
 import nodriver as uc
+from nodriver.core.connection import ProtocolException
+from websockets.exceptions import WebSocketException
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+
+
+def gone_reason(error: BaseException) -> str | None:
+    """T-8944: why *error* only says a paused request can no longer be resumed.
+
+    Chrome forgets a paused request when its page navigates away, its tab or
+    browser closes, or something else already resolved it; the next ``Fetch``
+    command for it then fails with ``Invalid InterceptionId`` (-32602), or, when
+    nodriver re-opens the closed tab's socket first, with a refused/rejected
+    connection. Sending the same command again cannot succeed, and nothing is
+    stuck, so the callers log it at WARNING (a breadcrumb) and not as an
+    exception event. ``None`` means a real failure.
+    """
+    if isinstance(error, ProtocolException) and "Invalid InterceptionId" in str(error):
+        return "the interception id is stale (request resolved or page navigated away)"
+    if isinstance(error, (OSError, WebSocketException)):
+        return "the tab's socket is gone (tab or browser closed)"
+    return None
 
 
 @dataclass
@@ -232,6 +252,10 @@ class DynamicHookSystem:
         self._instance_tabs: dict[str, Any] = {}  # instance_id -> tab (for re-arming)
         self._paused_handlers: set[str] = set()  # instances with a RequestPaused hook
         self._paused_in_flight: dict[str, int] = {}  # T-1665: handlers not yet done
+        # T-8944: the handler tasks themselves. asyncio keeps only a weak reference
+        # to a task, so one parked on a reply that never comes was garbage
+        # collected mid-await ("Task was destroyed but it is pending!").
+        self._paused_tasks: dict[str, set[asyncio.Task]] = {}
         self._lock = asyncio.Lock()
 
     def paused_in_flight(self, instance_id: str) -> int:
@@ -313,9 +337,7 @@ class DynamicHookSystem:
             if instance_id not in self._paused_handlers:
                 tab.add_handler(
                     uc.cdp.fetch.RequestPaused,
-                    lambda event: asyncio.create_task(
-                        self._on_request_paused(tab, event, instance_id)
-                    ),
+                    lambda event: self._spawn_paused(tab, event, instance_id),
                 )
                 self._paused_handlers.add(instance_id)
 
@@ -335,9 +357,71 @@ class DynamicHookSystem:
                 f"Failed to setup interception: {e}",
             )
 
+    def _spawn_paused(self, tab, event, instance_id: str) -> None:
+        """Run one ``Fetch.requestPaused`` handler as a task that is kept alive
+        until it ends and cancelled with its instance (``remove_instance``)."""
+        task = asyncio.create_task(self._on_request_paused(tab, event, instance_id))
+        tasks = self._paused_tasks.setdefault(instance_id, set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def _release_after_error(  # noqa: PLR0913  PERMANENT(the one fallback home for three call sites)
+        self,
+        tab,
+        request_id: str,
+        stage: str,
+        method: str,
+        primary: str,
+        after: str,
+        cause,
+    ) -> None:
+        """The ONE fallback after a failed paused-request step: resume the request.
+
+        *cause* is the error that got us here. A stale interception id or a gone
+        socket (:func:`gone_reason`) means there is nothing to resume, so it is
+        logged as a warning and not re-sent; any other error is logged as an
+        error and the request is continued so the page is not left hanging.
+        """
+        reason = gone_reason(cause)
+        if reason:
+            debug_logger.log_warning(
+                "dynamic_hook_system",
+                method,
+                f"Not resuming {stage} {request_id}: {reason} ({cause})",
+                error=cause,
+            )
+            return
+        debug_logger.log_error("dynamic_hook_system", method, f"{primary}: {cause}")
+        rid = uc.cdp.fetch.RequestId(request_id)
+        try:
+            await tab.send(
+                uc.cdp.fetch.continue_response(request_id=rid)
+                if stage == "response"
+                else uc.cdp.fetch.continue_request(request_id=rid)
+            )
+        except Exception as fallback_err:
+            reason = gone_reason(fallback_err)
+            if reason:
+                debug_logger.log_warning(
+                    "dynamic_hook_system",
+                    method,
+                    f"Could not resume {stage} {request_id}: {reason} ({fallback_err})",
+                    error=fallback_err,
+                )
+                return
+            debug_logger.log_error(
+                "dynamic_hook_system",
+                method,
+                Exception(
+                    f"Failed to continue request after {after}error, "
+                    f"request may be stuck: {fallback_err}"
+                ),
+            )
+
     async def _on_request_paused(self, tab, event, instance_id: str):
         """Handle intercepted requests and responses - process hooks immediately."""
         self._paused_in_flight[instance_id] = self.paused_in_flight(instance_id) + 1
+        stage = "request"
         try:
             # Determine if this is request stage or response stage
             # According to nodriver docs: "The stage of the request can be determined
@@ -386,24 +470,15 @@ class DynamicHookSystem:
             await self._process_request_hooks(tab, request, event)
 
         except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_system",
+            await self._release_after_error(
+                tab,
+                str(getattr(event, "request_id", "")),
+                stage,
                 "_on_request_paused",
-                f"Error processing {stage if 'stage' in locals() else 'request'}: {e}",
+                f"Error processing {stage}",
+                "",
+                e,
             )
-            try:
-                await tab.send(
-                    uc.cdp.fetch.continue_request(request_id=event.request_id)
-                )
-            except Exception as fallback_err:
-                debug_logger.log_error(
-                    "dynamic_hook_system",
-                    "_on_request_paused",
-                    Exception(
-                        f"Failed to continue request after error, "
-                        f"request may be stuck: {fallback_err}"
-                    ),
-                )
         finally:
             left = self.paused_in_flight(instance_id) - 1
             if left > 0:
@@ -538,33 +613,15 @@ class DynamicHookSystem:
             )
 
         except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_system",
+            await self._release_after_error(
+                tab,
+                request.request_id,
+                request.stage,
                 "_process_request_hooks",
-                f"Error processing hooks: {e}",
+                "Error processing hooks",
+                "hook ",
+                e,
             )
-            try:
-                if request.stage == "response":
-                    await tab.send(
-                        uc.cdp.fetch.continue_response(
-                            request_id=uc.cdp.fetch.RequestId(request.request_id)
-                        )
-                    )
-                else:
-                    await tab.send(
-                        uc.cdp.fetch.continue_request(
-                            request_id=uc.cdp.fetch.RequestId(request.request_id)
-                        )
-                    )
-            except Exception as fallback_err:
-                debug_logger.log_error(
-                    "dynamic_hook_system",
-                    "_process_request_hooks",
-                    Exception(
-                        f"Failed to continue request after hook error, "
-                        f"request may be stuck: {fallback_err}"
-                    ),
-                )
 
     async def create_hook(
         self,
@@ -690,6 +747,8 @@ class DynamicHookSystem:
         self.instance_hooks.pop(instance_id, None)
         self._instance_tabs.pop(instance_id, None)
         self._paused_handlers.discard(instance_id)
+        for task in self._paused_tasks.pop(instance_id, ()):
+            task.cancel()
 
     async def _execute_hook_action(  # noqa: C901,PLR0912  DEBT(F-165)
         self,
@@ -810,33 +869,15 @@ class DynamicHookSystem:
                 )
 
         except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_system",
+            await self._release_after_error(
+                tab,
+                request.request_id,
+                request.stage,
                 "_execute_hook_action",
-                f"Error executing {request.stage} action: {e}",
+                f"Error executing {request.stage} action",
+                "action ",
+                e,
             )
-            try:
-                if request.stage == "response":
-                    await tab.send(
-                        uc.cdp.fetch.continue_response(
-                            request_id=uc.cdp.fetch.RequestId(request.request_id)
-                        )
-                    )
-                else:
-                    await tab.send(
-                        uc.cdp.fetch.continue_request(
-                            request_id=uc.cdp.fetch.RequestId(request.request_id)
-                        )
-                    )
-            except Exception as fallback_err:
-                debug_logger.log_error(
-                    "dynamic_hook_system",
-                    "_execute_hook_action",
-                    Exception(
-                        f"Failed to continue request after action error, "
-                        f"request may be stuck: {fallback_err}"
-                    ),
-                )
 
 
 dynamic_hook_system = DynamicHookSystem()
