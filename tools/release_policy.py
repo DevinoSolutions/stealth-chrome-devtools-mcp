@@ -50,8 +50,10 @@ HOST_EXEC_SITES: tuple[tuple[str, str], ...] = (
     # only the file that holds it moved, which is exactly what this inventory
     # is here to make a reviewed decision rather than a discovery.
     ("embedded/tool_sections/cdp_functions.py", "create_python_binding"),
-    ("embedded/dynamic_hook_system.py", "function_code"),
-    ("embedded/dynamic_hook_system.py", "custom_condition"),
+    # T-9135: the hook data model moved out of dynamic_hook_system.py (file
+    # budget); `DynamicHook` and its two `exec`/`eval` sites went with it.
+    ("embedded/dynamic_hook_model.py", "function_code"),
+    ("embedded/dynamic_hook_model.py", "custom_condition"),
 )
 
 #: Tools whose declared purpose is to run caller-supplied code in the BROWSER.
