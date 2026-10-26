@@ -26,6 +26,9 @@ from types import SimpleNamespace
 import psutil
 import pytest
 from websockets.asyncio.server import serve
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from fakes import FakeBrowser, FakeTab
 from stealth_chrome_devtools_mcp.embedded import (
@@ -931,6 +934,22 @@ class TestTheHeal:
         assert not directory_gate.gate_for(DIRECTORY)._lock.locked()
         assert INSTANCE_ID not in stage.manager._instances, "left closed"
         assert any("RuntimeError: no chrome" in line for line in log.at("error"))
+
+    async def test_a_websocket_500_on_the_relaunch_path_is_still_an_error(
+        self, stage, log
+    ):
+        """T-8944: ``report_gone_aware`` is scoped to the tab-send sites. Here a
+        500 means the relaunch itself failed (F-963 measured one failing a whole
+        spawn), and it must reach the log as an ERROR."""
+        stage.launch_error = InvalidStatus(Response(500, "x", Headers(), b""))
+        stage.probe_results[INSTANCE_ID] = [False, False]
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        assert any("HTTP 500" in line for line in log.at("error"))
+        assert not [line for line in log.at("warning") if "HTTP 500" in line]
 
     async def test_a_browser_the_close_path_did_not_end_is_not_relaunched_over(
         self, stage, log

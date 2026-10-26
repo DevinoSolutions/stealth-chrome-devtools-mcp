@@ -19,6 +19,7 @@ from stealth_chrome_devtools_mcp.embedded.network_export import (
     response_record,
 )
 from stealth_chrome_devtools_mcp.embedded.path_confinement import open_text
+from stealth_chrome_devtools_mcp.embedded.tab_close import report_gone_aware
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -219,7 +220,7 @@ class NetworkInterceptor:
                 if instance_id not in self._instance_requests:
                     self._instance_requests[instance_id] = []
         except Exception as e:
-            debug_logger.log_error("network_interceptor", "setup_interception", e)
+            report_gone_aware("network_interceptor", "setup_interception", e)
             raise Exception(f"Failed to setup network interception: {e!s}")
 
     async def arm_tab(self, tab: Tab, instance_id: str) -> None:

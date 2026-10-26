@@ -124,21 +124,7 @@ class DebugLogger:
             method (str): Name of the method where the error occurred.
             error (Exception): The exception instance.
             context (Optional[Dict[str, Any]]): Additional context for the error.
-
-        A websocket refused for a page target that is gone (``tab_close.
-        target_socket_gone``, T-8944) is filed as a WARNING instead: the tab
-        being absent is not a fault, and the caller still reports it.
         """
-        # Function-level: tab_close imports this module.
-        from stealth_chrome_devtools_mcp.embedded.tab_close import (
-            target_socket_gone,
-        )
-
-        if target_socket_gone(error):
-            self.log_warning(
-                component, method, f"{type(error).__name__}: {error}", context, error
-            )
-            return
         with self._lock:
             # Unconditional and NOT deduped (F-182/F-204): every call reaches
             # the durable file regardless of enable() or in-memory dedup, so

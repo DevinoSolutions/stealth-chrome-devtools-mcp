@@ -266,7 +266,10 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # leaf; build_cdp_call gained one call and one docstring line, paid for by
     # collapsing ExecutionContext's Args: block that only restated its own
     # signature (the plan_F856 payment mechanism). Cap == actual.
-    "embedded/cdp_function_executor.py": (1004, "plan_M7 + plan_M4ph1 + F-861"),
+    # T-8944 ratchets down to 997: the `report_gone_aware` import (+1) and the
+    # collapse of `enable_runtime`'s Args:/Returns: docstring, which restated its
+    # signature (-8). Cap == actual.
+    "embedded/cdp_function_executor.py": (997, "plan_M7 + plan_M4ph1 + F-861 - T-8944"),
     # plan_M5b-1 (F-140/F-203/F-601 5->1 cloner consolidation): CDPElementCloner
     # is the canonical extraction engine the five cloner modules converge onto,
     # so it absorbs the six per-aspect methods + the composing extract_complete_

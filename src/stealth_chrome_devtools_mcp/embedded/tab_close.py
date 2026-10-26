@@ -51,13 +51,31 @@ def target_socket_gone(exc: BaseException) -> bool:
     and the handshake for a closed target is answered ``HTTP 500``. The command
     never reached the page, so the failure is the tab's absence and not a fault
     in the command: callers that already report it to their own caller log it
-    as a warning (``debug_logger.log_error`` does so for every caller). Only
-    that status: a 403/404, a refused connection or a timeout is not this.
+    as a warning (:func:`report_gone_aware`). Only that status: a 403/404, a
+    refused connection or a timeout is not this.
     """
     return (
         isinstance(exc, InvalidStatus)
         and exc.response.status_code == _NO_SUCH_TARGET_STATUS
     )
+
+
+def report_gone_aware(component: str, method: str, error: Exception) -> None:
+    """Report a failed CDP send: a WARNING when *error* is a gone page target
+    (:func:`target_socket_gone`), else ``debug_logger.log_error`` as before.
+
+    NOT a blanket rule inside ``log_error``: a websockets response carries no
+    URL, so a 500 from a browser-level endpoint (a failed relaunch or heal in
+    ``browser_health``, which IS a fault) is indistinguishable there. A site
+    calls this only where its failure is a command sent through a tab's own
+    socket and its caller already gets the failure back.
+    """
+    if target_socket_gone(error):
+        debug_logger.log_warning(
+            component, method, f"{type(error).__name__}: {error}", error=error
+        )
+    else:
+        debug_logger.log_error(component, method, error)
 
 
 def log_failure(method: str, instance_id: str, exc: BaseException) -> bool:
