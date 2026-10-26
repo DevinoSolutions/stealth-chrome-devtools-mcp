@@ -549,10 +549,10 @@ class BrowserHealth:
         shared: scheduling_lag.IdleCanary | None = None,
     ) -> tuple[Exception | None, float | None]:
         """The probe's error (or ``None``) and, for a TIMEOUT only, the IDLE canary's
-        factor (a *shared* canary's: over its whole round). Never raises."""
+        factor (a *shared* canary's: over this probe's own window). Never raises."""
         async with (
-            contextlib.nullcontext(shared) if shared else self._canary() as canary
-        ):
+            contextlib.nullcontext(shared.window()) if shared else self._canary()
+        ) as canary:
             error = await self._probe_error(browser, steps)
             if not isinstance(error, TimeoutError):
                 return error, None

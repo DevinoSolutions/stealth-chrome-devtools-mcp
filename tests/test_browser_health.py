@@ -275,7 +275,9 @@ class _Stage:
             return self.lag_factor
 
         try:
-            yield SimpleNamespace(factor=factor)
+            yield SimpleNamespace(
+                factor=factor, window=lambda: SimpleNamespace(factor=factor)
+            )
         finally:
             self.events.append("canary-stop")
 
@@ -632,6 +634,57 @@ class TestCooldown:
         await health.check_once()
         await health.check_once()
         assert len(stage.closes) == 2
+
+
+class TestASharedCanaryIsReadOverTheProbesOwnWindow:
+    """T-1665: ``_judged`` given a round's shared canary reads ``canary.window()``,
+    not the canary's whole life (which a burst before this probe would colour)."""
+
+    @staticmethod
+    def _shared(*, whole_life: float, own_window: float):
+        async def whole() -> float:
+            return whole_life
+
+        async def own() -> float:
+            return own_window
+
+        return SimpleNamespace(factor=whole, window=lambda: SimpleNamespace(factor=own))
+
+    async def _judge(self, stage, shared):
+        stage.probe_error = TimeoutError
+        stage.probe_results[INSTANCE_ID] = [False]
+        stage.process_answers = True  # the browser PROCESS answers: starvation counts
+        health = stage.health()
+        data = await stage.manager.get_instance(INSTANCE_ID)
+        return await health._judged(data, freeze_capture.TimedSteps(), shared)
+
+    async def test_a_burst_before_the_window_does_not_excuse_the_probe(self, stage):
+        failure, starved = await self._judge(
+            stage, self._shared(whole_life=4.0, own_window=1.0)
+        )
+
+        assert failure == "TimeoutError at evaluate" and starved is None
+
+    async def test_starvation_inside_the_window_excuses_it(self, stage):
+        failure, starved = await self._judge(
+            stage, self._shared(whole_life=1.0, own_window=4.0)
+        )
+
+        assert failure == "TimeoutError at evaluate"
+        assert starved == "idle canary ran 4.0x slow"
+
+    async def test_without_a_shared_canary_the_loops_own_is_entered(self, stage):
+        stage.probe_error = TimeoutError
+        stage.probe_results[INSTANCE_ID] = [False]
+        stage.lag_factor = 4.0
+        stage.process_answers = True
+        health = stage.health()
+        data = await stage.manager.get_instance(INSTANCE_ID)
+
+        _failure, starved = await health._judged(data, freeze_capture.TimedSteps())
+
+        assert starved == "idle canary ran 4.0x slow"
+        assert stage.events.count("canary-start") == 1
 
 
 class TestScope:

@@ -34,9 +34,9 @@ The record is kept in :attr:`CloneProbe.records` until the clone answers again o
 gone, and is the ERROR line's text. A probe that passes ends the incident
 (``answers probes again`` at INFO). The whole round is bounded by
 :data:`ROUND_SECONDS`, so frozen clones cannot hold up the next persistent probe; a
-clone the bound cut off is probed FIRST in the next round (least recently started
-first), so a fleet larger than one round covers is rotated, not starved. No URL, title
-or cookie is ever read.
+clone the round never reached is probed FIRST in the next one (then the least recently
+started), so a fleet larger than one round covers is rotated, not starved; one it cut
+off mid-probe keeps its place in that order. No URL, title or cookie is ever read.
 """
 
 import asyncio
@@ -60,10 +60,11 @@ ANSWER_SECONDS = freeze_capture.FRESH_ANSWER_TIMEOUT_SECONDS
 #: Clones probed at once: websockets open, and the load our own probes put on the host.
 PROBES_AT_ONCE = 4
 
-#: The bound on one whole round: three waves of :data:`PROBES_AT_ONCE` frozen clones at
-#: their worst (a 15 s probe, then a 5 s capture), so twelve frozen clones are covered
-#: in one round; more are rotated (see :meth:`CloneProbe.check`). Healthy ones take ms.
-ROUND_SECONDS = 60.0
+#: The bound on one whole round: the canary's start (up to 5 s) and three waves of
+#: :data:`PROBES_AT_ONCE` frozen clones at their worst (a 15 s probe, then a 5 s
+#: capture), so twelve frozen clones fit in one round; more are rotated (see
+#: :meth:`CloneProbe.check`). Healthy ones take milliseconds.
+ROUND_SECONDS = 70.0
 
 #: What :func:`listener_state` says when the attribute it reads is not there.
 _NO_LISTENER_ATTRIBUTE = "unknown(no _listener_task)"
@@ -152,7 +153,7 @@ class CloneProbe:
         the one canary is handed to every probe. One clone's probe raising costs that
         clone its round and nobody else theirs; the round ends at
         :data:`ROUND_SECONDS` whatever the clones do, and the clones it did not reach
-        (or cut off) go first next time."""
+        (``_started`` tick 0) go first next time."""
         known = set(self.records) | self._excuses.tracked() | set(self._started)
         for gone in known - set(instance_ids):
             self.records.pop(gone, None)

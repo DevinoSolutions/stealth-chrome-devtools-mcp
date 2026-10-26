@@ -257,6 +257,50 @@ class TestIdleCanary:
 
         assert await c.factor() == scheduling_lag.MAX_STRETCH
 
+    async def _deliver(self, c, proc, seconds, wakes, sched):
+        """Spend *seconds* and deliver *wakes* to an already started canary."""
+        sched.now += seconds
+        proc.stdout.feed_data(b".\n" * wakes)
+        target = c._wakes + wakes
+        for _ in range(wakes + 10):
+            if c._wakes >= target:
+                break
+            await asyncio.sleep(0)
+
+    async def test_a_burst_before_a_window_does_not_excuse_it(self, canary):
+        """T-1665: one canary is shared by a round's probes; a starved stretch before
+        a probe began must not be read as that probe's starvation."""
+        sched, proc = canary
+        c = scheduling_lag.IdleCanary()
+        await c.start()
+        await self._deliver(c, proc, 20.0, 3, sched)  # starved, before the window
+        window = c.window()
+        await self._deliver(c, proc, 10.0, 100, sched)  # healthy, inside it
+
+        assert scheduling_lag.is_starved(await c.factor())  # the whole life: 2.9x
+        assert await window.factor() == pytest.approx(1.0)
+
+    async def test_a_starved_window_is_not_diluted_by_a_healthy_past(self, canary):
+        sched, proc = canary
+        c = scheduling_lag.IdleCanary()
+        await c.start()
+        await self._deliver(c, proc, 10.0, 100, sched)  # healthy
+        window = c.window()
+        await self._deliver(c, proc, 10.0, 2, sched)  # starved, inside the window
+
+        assert not scheduling_lag.is_starved(await c.factor())  # diluted: 1.96x
+        assert await window.factor() == scheduling_lag.MAX_STRETCH
+
+    async def test_a_window_too_short_says_nothing(self, canary):
+        sched, proc = canary
+        c = scheduling_lag.IdleCanary()
+        await c.start()
+        await self._deliver(c, proc, 20.0, 3, sched)
+        window = c.window()
+        await self._deliver(c, proc, 1.0, 0, sched)
+
+        assert await window.factor() is None
+
     async def test_half_the_wakes_is_exactly_the_threshold(self, canary):
         sched, proc = canary
         window = 10.0
