@@ -104,7 +104,12 @@ correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 #: ``nodriver.core.connection``), so one explicit level on the root covers every
 #: module under it, present and future.
 #:
-#: What each one does, measured against nodriver 0.47.0 / websockets 16.0:
+#: What each one does, measured against nodriver 0.47.0 / websockets 16.0 (nodriver
+#: 0.50.6, T-8501, no longer logs the reply or the event: its ``connection.py`` logs
+#: ids and method names, :471/:496, and the cookie DEBUG lines are
+#: ``browser.py``:747/:792;
+#: the floor stays because the same libraries can log it again, and a premise test
+#: reads the installed source):
 #:
 #: * ``nodriver`` — ``core/connection.py``:445 DEBUG-logs the whole reply
 #:   (``"got answer for (message_id:%d) => %s"``, the parsed ``message`` dict),
@@ -221,7 +226,7 @@ PAYLOAD_WARNING_LOGGERS = ("fastmcp.server.server",)
 #: ``STEALTH_MCP_LOG_LEVEL=DEBUG``), which is exactly why setting it changes
 #: nothing an operator sees and only closes the one door that was open. It is
 #: also the level at which those libraries stop quoting payloads and start
-#: reporting faults: ``connection.py``:483's callback WARNING names the callback
+#: reporting faults: ``connection.py``:532's callback WARNING names the callback
 #: and the event CLASS, never the message. For ``sse_starlette`` the floor
 #: costs even less — it has no call at WARNING or above anywhere in the package
 #: (measured), so there is nothing there for a floor to stand in front of.
@@ -420,7 +425,7 @@ def _carries_payload(value: object) -> bool:
 
     Two clauses, and the order is the argument. An **exception is never one**,
     whatever package defined it: its ``str()`` is a diagnostic about a failure,
-    and the one site that logs one — ``connection.py``:483, nodriver's only
+    and the one site that logs one — ``connection.py``:532, nodriver's only
     genuine WARNING — passes ``exc_info=True`` beside it, so every sink that
     formats a traceback renders that text ANYWAY. Redacting the ``%s`` while
     ``exc_info`` carries it through withholds nothing and costs the Sentry
