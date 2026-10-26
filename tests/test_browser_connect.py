@@ -54,7 +54,7 @@ OPENS_AT_SECONDS = 4.0
 
 class Clock:
     """Virtual time for both seams: ours (``_now``/``_sleep``) and nodriver's
-    ``asyncio.sleep(0.5)`` between its five attempts (``browser.py``:374-378;
+    ``asyncio.sleep(0.5)`` between its five attempts (``browser.py``:370-379;
     0.47 called ``Browser.sleep`` there, 0.50 calls ``asyncio.sleep``)."""
 
     def __init__(self) -> None:

@@ -20,7 +20,7 @@ nodriver 0.50 (T-8501) changed both halves. ``Browser.update_targets`` asks
 ``Target.getTargets`` and registers a real ``Tab`` for every target, so opening a
 tab no longer depends on an event (``tab_open.open_tab``). But a dropped websocket
 is no longer reconnected AT ALL: ``Connection.send`` re-attaches only when the
-socket is ``None`` (``connection.py``:396), and a dropped one is not, so every
+socket is ``None`` (``connection.py``:397), and a dropped one is not, so every
 browser-level command raised ``ConnectionClosed`` for the life of the instance.
 ``tab_open.send`` / ``update_targets`` re-attach once and retry once.
 
