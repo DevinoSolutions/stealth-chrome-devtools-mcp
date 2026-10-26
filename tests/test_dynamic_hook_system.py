@@ -382,15 +382,21 @@ GONE_ERRORS = {
     "stale-interception-id": ProtocolException(
         {"code": -32602, "message": "Invalid InterceptionId."}
     ),
-    "connection-refused": OSError(
-        0, "The remote computer refused the network connection", None, 1225
-    ),
     "http-500-on-reconnect": InvalidStatus(
         Response(500, "Internal Server Error", Headers(), b"")
     ),
     "not-an-http-response": InvalidMessage("did not receive a valid HTTP response"),
     "connection-closed": ConnectionClosed(None, None),
-    "posix-connection-refused": ConnectionRefusedError(111, "Connection refused"),
+    # asyncio.open_connection to a closed port, as Windows words it (WinError 1225).
+    "connection-refused": ConnectionRefusedError(
+        1225, "The remote computer refused the network connection"
+    ),
+    "session-not-found": ProtocolException(
+        {"code": -32001, "message": "Session with given id not found"}
+    ),
+    "no-target": ProtocolException(
+        {"code": -32602, "message": "No target with given id found"}
+    ),
 }
 # The hook namespace has no exception builtins; a missing key still raises.
 RAISES = "def process_request(request):\n    return {}['hook blew up']\n"
@@ -634,9 +640,6 @@ NOT_GONE_ERRORS = {
     "other-websocket-error": WebSocketException("handshake failed"),
     "other-protocol-error": ProtocolException(
         {"code": -32602, "message": "Invalid parameters"}
-    ),
-    "target-closed-protocol-error": ProtocolException(
-        {"code": -32000, "message": "Target closed"}
     ),
 }
 
