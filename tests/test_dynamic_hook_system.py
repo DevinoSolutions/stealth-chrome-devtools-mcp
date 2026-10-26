@@ -480,9 +480,10 @@ class TestGoneRequestIsNotAnErrorEvent:
         await system._process_request_hooks(tab, _req())
 
         assert tab.send_calls == ["continue_request"]
-        errors = _records(backend_log, logging.ERROR)
-        assert len(errors) == 1 and "hook blew up" in errors[0]  # the hook's own bug
-        assert len(_records(backend_log, logging.WARNING)) == 1
+        # the caller's hook bug is a warning (T-9135); so is the gone fallback
+        assert _records(backend_log, logging.ERROR) == []
+        warned = _records(backend_log, logging.WARNING)
+        assert len(warned) == 2 and any("hook blew up" in m for m in warned)
 
     async def test_a_failed_action_is_not_retried_or_reported(self, error, backend_log):
         system = DynamicHookSystem()
@@ -520,7 +521,8 @@ class TestRealFailuresStillReported:
             if "request may be stuck: cdp exploded" in m
         ]
         assert len(stuck) == 1
-        assert _records(backend_log, logging.WARNING) == []
+        warned = _records(backend_log, logging.WARNING)
+        assert len(warned) == 1 and "hook blew up" in warned[0]  # T-9135
 
     async def test_an_unrelated_action_failure_still_continues_the_request(
         self, backend_log
@@ -666,7 +668,8 @@ class TestOtherErrorsAreStillReportedAndContinued:
 
         stuck = [m for m in _records(backend_log, logging.ERROR) if "stuck" in m]
         assert len(stuck) == 1
-        assert _records(backend_log, logging.WARNING) == []
+        warned = _records(backend_log, logging.WARNING)
+        assert len(warned) == 1 and "hook blew up" in warned[0]  # T-9135
 
 
 class TestResponseBodyOfAGoneRequest:

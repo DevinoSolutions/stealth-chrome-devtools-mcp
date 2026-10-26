@@ -299,6 +299,7 @@ class DynamicHookSystem:
         primary: str,
         after: str,
         cause,
+        callers_code: bool = False,
     ) -> None:
         """The ONE fallback after a failed paused-request step: resume the request.
 
@@ -306,6 +307,9 @@ class DynamicHookSystem:
         socket (:func:`gone_reason`) means there is nothing to resume, so it is
         logged as a warning and not re-sent; any other error is logged as an
         error and the request is continued so the page is not left hanging.
+        *callers_code* says *cause* came out of the caller's own hook code: a
+        warning (it is theirs to fix, not our defect), the request continued the
+        same way.
         """
         reason = gone_reason(cause)
         if reason:
@@ -316,7 +320,12 @@ class DynamicHookSystem:
                 error=cause,
             )
             return
-        debug_logger.log_error("dynamic_hook_system", method, f"{primary}: {cause}")
+        if callers_code:
+            debug_logger.log_warning(
+                "dynamic_hook_system", method, f"{primary}: {cause}", error=cause
+            )
+        else:
+            debug_logger.log_error("dynamic_hook_system", method, f"{primary}: {cause}")
         rid = uc.cdp.fetch.RequestId(request_id)
         try:
             await tab.send(
@@ -530,9 +539,31 @@ class DynamicHookSystem:
                         response_headers = {}
                 request_data["response_headers"] = response_headers
 
-            action = hook._compiled_function(request_data)
-            if isinstance(action, dict):
-                action = HookAction(**action)
+            try:
+                action = hook._compiled_function(request_data)
+                if isinstance(action, dict):
+                    action = HookAction(**action)
+                if not isinstance(action, HookAction):
+                    raise TypeError(  # noqa: TRY301  PERMANENT(one caller-error path below)
+                        f"process_request returned {type(action).__name__}, "
+                        "not a HookAction or dict"
+                    )
+            except Exception as e:
+                # T-9135: the caller's own code (a NameError for a builtin the hook
+                # sandbox lacks, a ZeroDivisionError): theirs to read back on the
+                # hook, a WARNING here, and the request is still continued.
+                hook.record_error(e)
+                await self._release_after_error(
+                    tab,
+                    request.request_id,
+                    request.stage,
+                    "_process_request_hooks",
+                    f"Hook '{hook.name}' raised {type(e).__name__}",
+                    "hook ",
+                    e,
+                    callers_code=True,
+                )
+                return
 
             hook.trigger_count += 1
             hook.last_triggered = datetime.now(tz=timezone.utc)
@@ -645,6 +676,7 @@ class DynamicHookSystem:
                 if hook.last_triggered
                 else None,
                 "created_at": hook.created_at.isoformat(),
+                **hook.error_record(),
             }
             for hook in self.hooks.values()
         ]
@@ -667,6 +699,7 @@ class DynamicHookSystem:
             if hook.last_triggered
             else None,
             "created_at": hook.created_at.isoformat(),
+            **hook.error_record(),
         }
 
     async def remove_hook(self, hook_id: str) -> bool:
