@@ -274,6 +274,14 @@ class DynamicHookSystem:
         """
         browser = getattr(tab, "browser", None)
         if browser is None:
+            # Not a defect: nodriver gives every tab it opened a browser, so this
+            # is a hand-built tab. Its paused handlers end only with its session.
+            debug_logger.log_debug(
+                "dynamic_hook_system",
+                "_listen_for_destroyed",
+                f"tab {tab.target.target_id} has no browser connection: "
+                "no Target.targetDestroyed report for it",
+            )
             return
 
         def on_destroyed(event: uc.cdp.target.TargetDestroyed, *_: object) -> None:
