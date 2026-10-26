@@ -155,7 +155,7 @@ class TestDynamicHookSystemSilentExcepts:
     async def test_response_header_normalization_failure_logs_at_warning(
         self, captured_backend_records
     ):
-        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import RequestInfo
+        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import RequestInfo
 
         system = _make_matching_response_hook()
         hook_id = await system.create_hook(

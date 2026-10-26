@@ -73,9 +73,10 @@ async def target_unlisted(tab: Tab) -> bool:
 
 async def report_gone_aware(
     component: str, method: str, error: Exception, tab: Tab
-) -> None:
+) -> bool:
     """Report a CDP command that failed on *tab*'s own connection: a WARNING when
-    the target is gone, else ``debug_logger.log_error`` as before.
+    the target is gone, else ``debug_logger.log_error`` as before. Returns whether
+    it was gone (T-9135: a caller that keeps the tab forgets it then).
 
     *Gone* is an error that says so (:func:`session_gone`, or
     :func:`is_already_gone` from a re-attach) AND a fresh listing that no longer
@@ -96,8 +97,9 @@ async def report_gone_aware(
             f"{type(error).__name__}: {error}",
             error=error,
         )
-    else:
-        debug_logger.log_error(component, method, error)
+        return True
+    debug_logger.log_error(component, method, error)
+    return False
 
 
 def log_failure(method: str, instance_id: str, exc: BaseException) -> bool:

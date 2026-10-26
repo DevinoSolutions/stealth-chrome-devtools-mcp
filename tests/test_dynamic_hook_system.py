@@ -30,12 +30,12 @@ from websockets.http11 import Response
 
 from fakes import FakeTab, cdp_command_name
 from stealth_chrome_devtools_mcp.embedded import dynamic_hook_system as dhs
-from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import (
     DynamicHook,
-    DynamicHookSystem,
     HookAction,
     RequestInfo,
 )
+from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import DynamicHookSystem
 
 CONTINUE = "def process_request(request):\n    return HookAction(action='continue')\n"
 
@@ -364,7 +364,7 @@ class TestResponseStageHooksRemoved:
             importlib.import_module("response_stage_hooks")
 
         # The canonical home for the dispatch types survives the deletion.
-        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import (
+        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import (
             HookAction,
             RequestInfo,
         )

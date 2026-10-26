@@ -12,6 +12,7 @@ from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hoo
 from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
     hook_learning_system,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 class DynamicHookAIInterface:
@@ -71,6 +72,9 @@ class DynamicHookAIInterface:
 
             return result
 
+        except ToolError as e:
+            # T-9135: a refusal about the caller's tabs, not a defect.
+            return {"success": False, "error": str(e)}
         except Exception as e:
             debug_logger.log_error(
                 "dynamic_hook_ai",
