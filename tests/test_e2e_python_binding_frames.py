@@ -182,6 +182,9 @@ async def test_closing_a_tab_reaps_its_watch_and_its_handler(
         # Settled: the deferred detach has run by the time the loop has waited.
         await asyncio.sleep(0.2)
         callbacks = browser.handlers.get(cdp.target.TargetDestroyed, [])
-        assert callbacks == [], callbacks
+        # What stays is the hook system's ONE listener per instance (T-9135 arms
+        # it at spawn so a closed tab leaves ``_armed_tabs``), never the watch's.
+        hook_listener = runtime.dynamic_hook_system._destroyed_listeners[iid][1]
+        assert callbacks == [hook_listener], callbacks
     finally:
         await close(instance_id=iid)
