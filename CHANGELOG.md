@@ -1,10 +1,6 @@
 # Changelog
 
-## 2.1.45
-
-### Tests: the hidden-tab fixture waits for the probe page and names an in-page exception (T-8597)
-
-- `test_e2e_hidden_tab_input.py::test_the_fixture_drops_input_while_hidden[headed]` failed the v2.1.44 publish gate with `TypeError: ... not ExceptionDetails`: `POKE_JS` threw in the control tab, almost certainly because the poke beat the probe page's load (`#email` was still null), and `_poke` fed the exception object to `json.loads`, so the page's error text was lost. `_staged` now polls (15 s) until the control tab shows `readyState` `complete` and `#email`, failing with what was missing, and `_poke` raises an `AssertionError` carrying the in-page exception's description. No production change.
+## Unreleased
 
 ### nodriver 0.50.6; `cdp_transport` is deleted because the library owns the reply path now (T-8501)
 
@@ -21,6 +17,12 @@
 - **F-1012 verdict, real Chrome 155:** nothing in 0.50 or here sent `Target.setDiscoverTargets`, so the popup listener never fired (with discovery off `tests/test_e2e_background_tab_frames.py::test_a_driven_popup_in_the_background_keeps_painting` read `visibility: hidden`, 0 frames) and `python_binding`'s `targetDestroyed` watch never fired either. `tab_open.arm_popups` is now async and enables discovery, once per browser, then asks `update_targets` before arming (0.50 registers no target from an event).
 - **Other 0.50 drift fixed:** `Page.navigate` answers a 4-tuple (`navigation_milestone`); `CSS.getComputedStyleForNode` answers `(properties, extra_fields)` (`cdp_element_cloner`); nodriver no longer sends `Page.enable` when a handler is added, so `navigation_milestone` and `python_binding.replay_contexts` send it (a navigation otherwise never raised `frameStartedLoading`: `navigate` read "accepted, never committed").
 - Test fakes rebuilt from the library's own classes: `tests/fakes_wire.py` (a real `Connection` and `_listener` over a fake websocket; `BrowserSocket` answers the 0.50 browser handshake) replaces the `FakeConnection` doubles in `test_devtools_port.py`, `test_devtools_port_identity.py` and `test_browser_connect.py`, and `FakeBrowser` is a `FakeTab` (the browser is its own connection). The stale `TestTheCancelledFirstAsk` was rewritten on the real `Connection`.
+
+## 2.1.45
+
+### Tests: the hidden-tab fixture waits for the probe page and names an in-page exception (T-8597)
+
+- `test_e2e_hidden_tab_input.py::test_the_fixture_drops_input_while_hidden[headed]` failed the v2.1.44 publish gate with `TypeError: ... not ExceptionDetails`: `POKE_JS` threw in the control tab, almost certainly because the poke beat the probe page's load (`#email` was still null), and `_poke` fed the exception object to `json.loads`, so the page's error text was lost. `_staged` now polls (15 s) until the control tab shows `readyState` `complete` and `#email`, failing with what was missing, and `_poke` raises an `AssertionError` carrying the in-page exception's description. No production change.
 
 ### browser_health names the step that hung, not the cleanup it triggered (T-6232)
 
