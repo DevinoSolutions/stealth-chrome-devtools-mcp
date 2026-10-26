@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Dropped the unused jsbeautifier dependency (T-8941)
+
+- `jsbeautifier` was pinned in `pyproject.toml` but nothing in `src/`, `tools/` or `tests/` imports it; the pin and its lock entries are removed. No behaviour changes.
+
 ## 2.1.47
 
 ### A disposable clone is probed, and its first missed probe is captured (T-1665)
