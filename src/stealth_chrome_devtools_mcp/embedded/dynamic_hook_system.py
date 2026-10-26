@@ -255,6 +255,12 @@ class DynamicHook:
             return HookAction(action="continue")
 
 
+#: How many closed target ids an instance remembers (T-9117): a late
+#: ``requestPaused`` follows its target's end by milliseconds, so a few dozen is
+#: far more than needed and a page that churns iframes cannot grow it.
+CLOSED_TARGETS_KEPT = 128
+
+
 class DynamicHookSystem:
     """Real-time dynamic hook processing system."""
 
@@ -273,6 +279,11 @@ class DynamicHookSystem:
         # T-8944: which target each of those tasks is paused on, so closing ONE
         # tab ends only its handlers (``cancel_paused_for_target``).
         self._paused_target: dict[asyncio.Task, str] = {}
+        # T-9117: targets Chrome has reported gone, per instance and bounded, so a
+        # ``requestPaused`` that arrives after the cancel spawns no new handler; and
+        # the listener on the browser connection that reports them.
+        self._closed_targets: dict[str, dict[str, None]] = {}
+        self._destroyed_listeners: dict[str, tuple[Any, Any]] = {}
         self._lock = asyncio.Lock()
 
     def paused_in_flight(self, instance_id: str) -> int:
@@ -357,6 +368,7 @@ class DynamicHookSystem:
                     lambda event: self._spawn_paused(tab, event, instance_id),
                 )
                 self._paused_handlers.add(instance_id)
+                self._listen_for_destroyed(tab, instance_id)
 
             debug_logger.log_info(
                 "dynamic_hook_system",
@@ -386,12 +398,42 @@ class DynamicHookSystem:
                 f"Ignoring a paused request for removed instance {instance_id}",
             )
             return
+        # Read before the task exists: a failure here must not leave one running.
+        target_id = str(tab.target.target_id)
+        if target_id in self._closed_targets.get(instance_id, ()):
+            debug_logger.log_debug(
+                "dynamic_hook_system",
+                "_spawn_paused",
+                f"Ignoring a paused request for closed target {target_id[:8]}",
+            )
+            return
         task = asyncio.create_task(self._on_request_paused(tab, event, instance_id))
         tasks = self._paused_tasks.setdefault(instance_id, set())
         tasks.add(task)
-        self._paused_target[task] = str(tab.target.target_id)
+        self._paused_target[task] = target_id
         task.add_done_callback(tasks.discard)
         task.add_done_callback(lambda t: self._paused_target.pop(t, None))
+
+    def _listen_for_destroyed(self, tab, instance_id: str) -> None:
+        """Have Chrome's ``Target.targetDestroyed`` end a target's handlers (T-9117).
+
+        THE one report of a target going away, whoever closed it: ``close_tab``,
+        ``BrowserManager._replace_main_tab``, another tab's ``Target.closeTarget``,
+        ``window.close()``. It is sent on the BROWSER connection only (the page's
+        own never reports its end) and only once ``tab_open.arm_popups`` switched
+        discovery on, which ``tab_open.reattach`` repeats for a dropped socket
+        because this handler is registered there. A tab with no browser connection
+        has no such report and keeps ``close_tab``'s own call.
+        """
+        browser = getattr(tab, "browser", None)
+        if browser is None:
+            return
+
+        def on_destroyed(event: uc.cdp.target.TargetDestroyed, *_: object) -> None:
+            self.cancel_paused_for_target(instance_id, str(event.target_id))
+
+        browser.add_handler(uc.cdp.target.TargetDestroyed, on_destroyed)
+        self._destroyed_listeners[instance_id] = (browser, on_destroyed)
 
     async def _release_after_error(  # noqa: PLR0913  PERMANENT(the one fallback home for three call sites)
         self,
@@ -787,8 +829,17 @@ class DynamicHookSystem:
         it ends only when Chrome tears the page's session down, which took about
         38 s after ``close_tab`` in a branch-wheel proof. Call it once the tab is
         closed (never before: a refused close leaves the page, and its held
-        requests, alive). Returns how many handlers it cancelled.
+        requests, alive), or when Chrome reports the target gone
+        (:meth:`_listen_for_destroyed`). It remembers the target, so a request
+        Chrome pauses on it afterwards is dropped (:meth:`_spawn_paused`).
+        Returns how many handlers it cancelled.
         """
+        if instance_id not in self._instance_tabs:
+            return 0
+        closed = self._closed_targets.setdefault(instance_id, {})
+        closed[str(target_id)] = None
+        while len(closed) > CLOSED_TARGETS_KEPT:
+            del closed[next(iter(closed))]
         ended = [
             task
             for task in self._paused_tasks.get(instance_id, ())
@@ -803,6 +854,9 @@ class DynamicHookSystem:
         self.instance_hooks.pop(instance_id, None)
         self._instance_tabs.pop(instance_id, None)
         self._paused_handlers.discard(instance_id)
+        self._closed_targets.pop(instance_id, None)
+        if listener := self._destroyed_listeners.pop(instance_id, None):
+            listener[0].remove_handler(uc.cdp.target.TargetDestroyed, listener[1])
         for task in self._paused_tasks.pop(instance_id, ()):
             task.cancel()
 
