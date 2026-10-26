@@ -336,6 +336,10 @@ def _schtasks(args: list[str]) -> subprocess.CompletedProcess[str]:
         [_system_binary("schtasks.exe"), *args],
         capture_output=True,
         text=True,
+        # T-8944: schtasks writes the OEM code page, which is not UTF-8 (and not
+        # the ANSI one either); a strict decode killed subprocess's reader thread.
+        encoding="oem" if sys.platform == "win32" else "utf-8",
+        errors="replace",
         timeout=SCHTASKS_TIMEOUT,
         check=False,
     )

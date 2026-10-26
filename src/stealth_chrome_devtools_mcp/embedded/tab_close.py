@@ -14,11 +14,15 @@ case. Every other failure, including another ``-32602``, is still a fault.
 """
 
 from nodriver.core.connection import ProtocolException
+from websockets.exceptions import InvalidStatus
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 _ALREADY_GONE = "No target with given id"
 _SESSION_GONE = "Session with given id not found"
+# T-8944: the status Chrome answers a websocket opened on a page target id it
+# no longer has (measured in F-963: the re-attach path failed a whole spawn on it).
+_NO_SUCH_TARGET_STATUS = 500
 
 
 def is_already_gone(exc: BaseException) -> bool:
@@ -37,6 +41,23 @@ def session_gone(exc: BaseException) -> bool:
     :func:`is_already_gone`.
     """
     return isinstance(exc, ProtocolException) and _SESSION_GONE in str(exc)
+
+
+def target_socket_gone(exc: BaseException) -> bool:
+    """Whether ``exc`` is Chrome refusing the socket nodriver re-opens for a page
+    target that no longer exists (T-8944).
+
+    A tab's own websocket is re-opened by ``Connection.send`` when it is down,
+    and the handshake for a closed target is answered ``HTTP 500``. The command
+    never reached the page, so the failure is the tab's absence and not a fault
+    in the command: callers that already report it to their own caller log it
+    as a warning (``debug_logger.log_error`` does so for every caller). Only
+    that status: a 403/404, a refused connection or a timeout is not this.
+    """
+    return (
+        isinstance(exc, InvalidStatus)
+        and exc.response.status_code == _NO_SUCH_TARGET_STATUS
+    )
 
 
 def log_failure(method: str, instance_id: str, exc: BaseException) -> bool:

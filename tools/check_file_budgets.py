@@ -181,12 +181,16 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # F-1008 holds at 1438: the `profile_lock.launching` block (+1) and its import
     # (+1) are paid for by assigning `attempt.config` in the `uc.Config` statement
     # and by a comment that restated the error message beneath it. Cap == actual.
+    # T-8944 ratchets down to 1435: `_replace_main_tab`'s close-failure handler (-6)
+    # became one call into `tab_close.log_failure` (+3), which already owns the
+    # policy for a tab that would not close. Cap == actual.
     "embedded/browser_manager.py": (
-        1438,
+        1435,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
         " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939"
         " - F-940 - F-962 - F-963 + F-964 (paid, net 0) - F-965 - F-969 - F-996"
-        " + F-1008 (paid, net 0) + F-1011 (paid, net 0) + F-1012 (paid, net 0)",
+        " + F-1008 (paid, net 0) + F-1011 (paid, net 0) + F-1012 (paid, net 0)"
+        " - T-8944",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

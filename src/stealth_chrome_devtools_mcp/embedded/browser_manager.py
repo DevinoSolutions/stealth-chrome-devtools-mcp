@@ -1021,12 +1021,9 @@ class BrowserManager:
             if previous_target_id and previous_target_id != new_target_id:
                 try:
                     await previous_tab.close()
-                except (ConnectionError, RuntimeError, OSError) as e:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "_replace_main_tab",
-                        f"Failed to close previous tab for {instance_id}: {e}",
-                    )
+                # T-8944: the new tab is open; failing to close a gone one is fine.
+                except Exception as e:
+                    tab_close.log_failure("_replace_main_tab", instance_id, e)
 
         async with self._lock:
             if instance_id in self._instances:
