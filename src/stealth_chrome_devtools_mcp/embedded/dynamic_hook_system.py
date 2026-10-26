@@ -23,6 +23,7 @@ from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import (
     DynamicHook,
     HookAction,
     RequestInfo,
+    describe_error,
 )
 from stealth_chrome_devtools_mcp.embedded.tab_close import (
     is_already_gone,
@@ -322,7 +323,10 @@ class DynamicHookSystem:
             return
         if callers_code:
             debug_logger.log_warning(
-                "dynamic_hook_system", method, f"{primary}: {cause}", error=cause
+                "dynamic_hook_system",
+                method,
+                f"{primary}: {describe_error(cause)}",
+                error=cause,
             )
         else:
             debug_logger.log_error("dynamic_hook_system", method, f"{primary}: {cause}")
@@ -558,7 +562,7 @@ class DynamicHookSystem:
                     request.request_id,
                     request.stage,
                     "_process_request_hooks",
-                    f"Hook '{hook.name}' raised {type(e).__name__}",
+                    f"Hook '{hook.name}' raised",
                     "hook ",
                     e,
                     callers_code=True,

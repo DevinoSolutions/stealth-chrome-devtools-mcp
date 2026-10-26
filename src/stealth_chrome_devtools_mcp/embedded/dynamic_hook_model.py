@@ -22,6 +22,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+ERROR_TEXT_LIMIT = 500
+
+
+def describe_error(error: BaseException) -> str:
+    """``Type: message`` of an exception out of the CALLER's hook code, at most
+    :data:`ERROR_TEXT_LIMIT` characters: the one text for the hook's ``last_error``
+    and for the WARNING about it (the traceback is attached to the log separately)."""
+    return f"{type(error).__name__}: {error}"[:ERROR_TEXT_LIMIT]
 
 
 @dataclass
@@ -89,7 +99,7 @@ class DynamicHook:
         """Remember that the CALLER's code (the function, or its ``custom_condition``)
         raised, so ``list_hooks`` / ``get_hook_details`` can show it to them."""
         self.error_count += 1
-        self.last_error = f"{type(error).__name__}: {error}"[:500]
+        self.last_error = describe_error(error)
         self.last_error_at = datetime.now(tz=timezone.utc)
 
     def error_record(self) -> dict[str, Any]:
@@ -133,12 +143,12 @@ class DynamicHook:
             return namespace["process_request"]
 
         except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook",
-                "compile_function",
-                f"Failed to compile function for hook {self.name}: {e}",
-            )
-            return lambda request: HookAction(action="continue")  # noqa: ARG005  PERMANENT(interface stability)
+            # The caller's code does not load: refuse the hook (T-9135) instead of
+            # keeping one that silently continues every request.
+            raise ToolError(
+                f"Hook '{self.name}' was not created: its function code does not "
+                f"load ({describe_error(e)}). Fix the code and create it again."
+            ) from e
 
     def matches(self, request: RequestInfo) -> bool:  # noqa: PLR0911  DEBT(F-165)
         """Check if this hook matches the request."""
@@ -188,7 +198,7 @@ class DynamicHook:
                         "dynamic_hook",
                         "matches",
                         f"Custom condition eval failed for hook {self.name}: "
-                        f"{cond_err}",
+                        f"{describe_error(cond_err)}",
                         error=cond_err,
                     )
                     return False
@@ -200,40 +210,3 @@ class DynamicHook:
                 "dynamic_hook", "matches", f"Error matching hook {self.name}: {e}"
             )
             return False
-
-    def process(self, request: RequestInfo) -> HookAction:
-        """Execute the hook function."""
-        try:
-            self.trigger_count += 1
-            self.last_triggered = datetime.now(tz=timezone.utc)
-
-            debug_logger.log_info(
-                "dynamic_hook",
-                "process",
-                f"Processing request {request.url} with hook {self.name}",
-            )
-
-            result = self._compiled_function(request.to_dict())
-
-            if isinstance(result, dict):
-                result = HookAction(**result)
-            elif not isinstance(result, HookAction):
-                debug_logger.log_error(
-                    "dynamic_hook",
-                    "process",
-                    f"Hook {self.name} returned invalid type: {type(result)}",
-                )
-                return HookAction(action="continue")
-
-            debug_logger.log_info(
-                "dynamic_hook",
-                "process",
-                f"Hook {self.name} returned action: {result.action}",
-            )
-            return result
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook", "process", f"Error executing hook {self.name}: {e}"
-            )
-            return HookAction(action="continue")
