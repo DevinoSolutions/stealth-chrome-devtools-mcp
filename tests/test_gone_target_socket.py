@@ -22,6 +22,7 @@ killed ``subprocess``'s reader thread (``UnicodeDecodeError`` in ``_readerthread
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
@@ -43,7 +44,7 @@ from fakes import (
     fake_instance,
     fake_target,
 )
-from stealth_chrome_devtools_mcp.embedded import desktop_launch, tab_close
+from stealth_chrome_devtools_mcp.embedded import desktop_launch, tab_close, tab_open
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     CDPFunctionExecutor,
@@ -111,8 +112,9 @@ class ChromeBrowser(FakeBrowser):
     vanished target does to ``tabs`` is the library's rule, not ours.
     """
 
-    def __init__(self, *known, listed=(), list_error=None):
+    def __init__(self, *known, listed=(), list_error=None, stall=False):
         super().__init__()
+        self._stall = stall
         self._stand_in = SimpleNamespace(
             _targets=[FakeAttachedTab(_info(t)) for t in known],
             listed=[_info(t) for t in listed],
@@ -128,6 +130,8 @@ class ChromeBrowser(FakeBrowser):
 
     async def update_targets(self) -> None:
         self.update_targets_calls += 1
+        if self._stall:
+            await asyncio.Event().wait()
         await NodriverBrowser.update_targets(self._stand_in)
         self.tabs = list(self._stand_in._targets)
 
@@ -172,6 +176,26 @@ class TestTargetUnlisted:
 
         assert not await tab_close.target_unlisted(FailingTab(SESSION_GONE, browser))
 
+    async def test_a_listing_that_never_answers_is_not_shown_to_be_gone(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(tab_close, "_LISTING_TIMEOUT", 0.05)
+        browser = ChromeBrowser(TARGET_ID, listed=[], stall=True)
+
+        # The outer bound keeps a regression RED instead of hanging the lane.
+        unlisted = await asyncio.wait_for(
+            tab_close.target_unlisted(FailingTab(SESSION_GONE, browser)), 2
+        )
+
+        assert unlisted is False
+
+    async def test_a_browser_this_backend_closed_needs_no_listing(self):
+        tab = _live_tab(SESSION_GONE)  # Chrome would still list it
+        tab_open.mark_closed(tab.parent)
+
+        assert await tab_close.target_unlisted(tab) is True
+        assert tab.parent.update_targets_calls == 0
+
     async def test_a_target_that_is_not_a_page_is_not_judged(self):
         tab = _closed_tab(SESSION_GONE)
         tab.target.type_ = "iframe"
@@ -211,6 +235,43 @@ class TestReportGoneAware:
 
         assert len(_levels(backend_log, logging.ERROR)) == 1
         assert _levels(backend_log, logging.WARNING) == []
+
+    async def test_a_stalled_listing_keeps_the_error(self, backend_log, monkeypatch):
+        monkeypatch.setattr(tab_close, "_LISTING_TIMEOUT", 0.05)
+        browser = ChromeBrowser(TARGET_ID, listed=[], stall=True)
+
+        await asyncio.wait_for(
+            tab_close.report_gone_aware(
+                "comp", "meth", SESSION_GONE, FailingTab(SESSION_GONE, browser)
+            ),
+            2,
+        )
+
+        assert len(_levels(backend_log, logging.ERROR)) == 1
+        assert _levels(backend_log, logging.WARNING) == []
+
+    async def test_a_command_that_raced_close_instance_is_a_warning(self, backend_log):
+        tab = _live_tab(SESSION_GONE)
+        tab_open.mark_closed(tab.parent)
+
+        await tab_close.report_gone_aware("comp", "meth", SESSION_GONE, tab)
+
+        assert _levels(backend_log, logging.ERROR) == []
+        assert len(_levels(backend_log, logging.WARNING)) == 1
+        assert tab.parent.update_targets_calls == 0
+
+    async def test_the_warning_names_the_target(self, backend_log):
+        long_id = "0123456789ABCDEF0123456789ABCDEF"
+        tab = FailingTab(
+            SESSION_GONE, ChromeBrowser(long_id, "T-other", listed=["T-other"]), long_id
+        )
+
+        await tab_close.report_gone_aware("comp", "meth", SESSION_GONE, tab)
+
+        (warned,) = _levels(backend_log, logging.WARNING)
+        assert "target 01234567 is gone" in warned
+        assert long_id not in warned
+        assert "Session with given id not found" in warned
 
     async def test_a_listing_failure_keeps_the_error(self, backend_log):
         browser = ChromeBrowser(TARGET_ID, list_error=RuntimeError("down"))

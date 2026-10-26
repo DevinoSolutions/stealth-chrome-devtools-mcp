@@ -13,6 +13,8 @@ only when the reply carried one (F-828), and the wording is specific to this
 case. Every other failure, including another ``-32602``, is still a fault.
 """
 
+import asyncio
+
 from nodriver import Tab
 from nodriver.core.connection import ProtocolException
 
@@ -21,6 +23,9 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 _ALREADY_GONE = "No target with given id"
 _SESSION_GONE = "Session with given id not found"
+#: How long a gone-target confirmation may wait for Chrome's listing; a
+#: wedged browser must not hold a failing call up, and no answer is no proof.
+_LISTING_TIMEOUT = 5.0
 
 
 def is_already_gone(exc: BaseException) -> bool:
@@ -47,13 +52,17 @@ async def target_unlisted(tab: Tab) -> bool:
     The one confirmation a gone-target error needs (T-8944): ``-32001`` and
     ``No target with given id`` only say what the failed command saw. ``False``
     whenever it cannot be shown: no browser behind the tab, a target that is not
-    a page, or a listing that itself fails.
+    a page, or a listing that fails or takes longer than ``_LISTING_TIMEOUT``.
+    ``True`` without a listing when this backend has already closed the browser
+    connection (a command that raced ``close_instance``): the target is going.
     """
     browser = getattr(tab, "parent", None)
     if browser is None or getattr(tab.target, "type_", None) != "page":
         return False
+    if tab_open.is_closed(browser):
+        return True
     try:
-        await tab_open.update_targets(browser)
+        await asyncio.wait_for(tab_open.update_targets(browser), _LISTING_TIMEOUT)
     except Exception:  # noqa: BLE001  PERMANENT(a failed confirmation means not confirmed)
         return False
     return tab_open.find(browser, str(tab.target.target_id)) is None
@@ -78,7 +87,11 @@ async def report_gone_aware(
     """
     if (session_gone(error) or is_already_gone(error)) and await target_unlisted(tab):
         debug_logger.log_warning(
-            component, method, f"{type(error).__name__}: {error}", error=error
+            component,
+            method,
+            f"target {str(tab.target.target_id)[:8]} is gone: "
+            f"{type(error).__name__}: {error}",
+            error=error,
         )
     else:
         debug_logger.log_error(component, method, error)
