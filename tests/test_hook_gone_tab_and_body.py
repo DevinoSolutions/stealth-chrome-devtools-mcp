@@ -24,10 +24,8 @@ import nodriver as uc
 import pytest
 from nodriver.core.connection import ProtocolException
 
-from fakes import FakeBrowser, FakeTab
-from stealth_chrome_devtools_mcp.embedded.dynamic_hook_ai_interface import (
-    DynamicHookAIInterface,
-)
+from fakes import FakeBrowser, FakeTab, call_tool
+from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import DynamicHookSystem
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -256,20 +254,27 @@ class TestNothingArmedIsNotASuccess:
         assert system.hooks == {}
         assert system.instance_hooks[INSTANCE_ID] == []
 
-    async def test_the_tool_answers_failure_without_an_error_event(self, backend_log):
+    async def test_the_tool_raises_without_an_error_event(
+        self, backend_log, patched_server, monkeypatch
+    ):
         system, browser, first = await _system(hook=False)
         _close(browser, first)
-        ai = DynamicHookAIInterface()
-        ai.hook_system = system
+        monkeypatch.setattr(rt.dynamic_hook_ai, "hook_system", system)
+        server = patched_server()
 
-        answer = await ai.create_dynamic_hook(
-            name="h",
-            requirements={},
-            function_code=CONTINUE,
-            instance_ids=[INSTANCE_ID],
-        )
+        with pytest.raises(ToolError, match="no live tab"):
+            await asyncio.wait_for(
+                call_tool(
+                    server,
+                    "create_dynamic_hook",
+                    name="h",
+                    requirements={},
+                    function_code=CONTINUE,
+                    instance_ids=[INSTANCE_ID],
+                ),
+                BOUND,
+            )
 
-        assert answer["success"] is False and "no live tab" in answer["error"]
         assert _levels(backend_log, logging.ERROR) == []
 
     async def test_a_hook_for_an_instance_not_spawned_yet_is_kept(self):

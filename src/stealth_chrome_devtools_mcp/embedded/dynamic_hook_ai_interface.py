@@ -72,9 +72,10 @@ class DynamicHookAIInterface:
 
             return result
 
-        except ToolError as e:
-            # T-9135: a refusal about the caller's tabs, not a defect.
-            return {"success": False, "error": str(e)}
+        except ToolError:
+            # T-9135: a refusal about the caller's tabs, not a defect. Tools RAISE
+            # (convention 2); first, so the generic handler below cannot answer it.
+            raise
         except Exception as e:
             debug_logger.log_error(
                 "dynamic_hook_ai",
