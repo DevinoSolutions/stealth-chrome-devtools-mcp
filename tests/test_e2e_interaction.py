@@ -588,26 +588,25 @@ async def test_tabs_lifecycle(fixture_app_server):
 
 
 async def _force_rediscovery(browser, tab_id: str):
-    """Make nodriver hand back target ``tab_id`` as a raw ``Connection``.
+    """Make nodriver hand back target ``tab_id`` as a FRESH object.
 
-    This is the whole point of the probe: local Chrome does not reliably produce
-    the F-775 shape on its own (FIX-E established that every ``browser.tabs``
-    entry stays a ``Tab`` here), so the ONE step that creates it is forced
-    directly — drop the target from nodriver's inventory exactly as its
-    ``TargetDestroyed`` handler does (``core/browser.py:222-231``), then let
-    ``update_targets()`` re-append it, which it does as a ``Connection``, never a
-    ``Tab`` (``core/browser.py:574-583``).
+    The probe forces the ONE step that creates the F-775 shape: drop the target
+    from nodriver's inventory, then let ``update_targets()`` re-append it.
+    nodriver 0.47 re-appended it as a bare ``Connection`` (``Tab.close`` and
+    ``bring_to_front`` do not exist on one: F-775b/c); 0.50 builds a real ``Tab``
+    (``core/browser.py``:510), so the shape the pins below were written against
+    can no longer occur and what they pin is that the manager follows the target
+    id to the NEW object (T-8501).
 
-    Returns the genuine ``Connection``, and asserts it really is one — a probe
-    that silently failed to reproduce the shape would make every pin below
-    vacuous.
+    Returns the rediscovered entry, and asserts it is not the one dropped — a probe
+    that silently failed to rediscover would make every pin below vacuous.
     """
     entry = next(t for t in browser.targets if str(t.target.target_id) == tab_id)
     browser.targets.remove(entry)
     await browser.update_targets()
 
     rediscovered = next(t for t in browser.tabs if str(t.target.target_id) == tab_id)
-    assert not isinstance(rediscovered, uc.Tab), type(rediscovered)
+    assert rediscovered is not entry
     assert isinstance(rediscovered, uc.core.connection.Connection)
     return rediscovered
 
