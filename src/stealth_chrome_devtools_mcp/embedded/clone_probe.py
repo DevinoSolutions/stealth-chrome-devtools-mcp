@@ -44,6 +44,7 @@ import contextlib
 import itertools
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Protocol
 
 from nodriver import Browser
 from nodriver.core.connection import Connection
@@ -68,6 +69,12 @@ ROUND_SECONDS = 70.0
 
 #: What :func:`listener_state` says when the attribute it reads is not there.
 _NO_LISTENER_ATTRIBUTE = "unknown(no _listener_task)"
+
+
+class InstanceSource(Protocol):
+    """What a round needs of the manager (only ``browser`` is read)."""
+
+    async def get_instance(self, instance_id: str) -> Mapping[str, Browser] | None: ...
 
 
 class FrozenCloneError(Exception):
@@ -112,9 +119,7 @@ class CloneProbe:
 
     def __init__(  # noqa: PLR0913  PERMANENT(T-1665: one seam per external effect, so the round runs hermetically)
         self,
-        get_instance: Callable[
-            [str], Awaitable[Mapping[str, Browser] | None]
-        ],  # only "browser" is read
+        manager: InstanceSource,
         judge: Callable[
             [
                 Mapping[str, Browser],
@@ -129,7 +134,7 @@ class CloneProbe:
         paused: Callable[[str], int] = dynamic_hook_system.paused_in_flight,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._get_instance = get_instance
+        self._manager = manager  # get_instance is read when a round runs, not here
         self._judge = judge  # (failure, starved) of one probe, or (None, None)
         self._fresh_check = fresh_check
         self._own_check = own_check
@@ -183,7 +188,7 @@ class CloneProbe:
             )
 
     async def _check(self, instance_id: str, canary: scheduling_lag.IdleCanary) -> None:
-        data = await self._get_instance(instance_id)
+        data = await self._manager.get_instance(instance_id)
         if data is None:
             return
         browser = data["browser"]
@@ -198,7 +203,7 @@ class CloneProbe:
             return
         if instance_id in self.records:
             return  # the incident is already on record
-        if await self._get_instance(instance_id) is not data:
+        if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
         if starved and (spent := self._excuses.grant(instance_id)) is not None:
             debug_logger.log_warning(
