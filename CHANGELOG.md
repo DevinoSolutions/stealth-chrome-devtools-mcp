@@ -21,6 +21,13 @@
 
 ## 2.1.45
 
+### A disposable clone is probed, and its first missed probe is captured (T-1665)
+
+- On 2026-10-24 three disposable clones stayed frozen for 17 h while the same backend spawned and closed others: `browser_health` probed persistent profiles only (`BrowserHealth._persistent`), so the clones had no probe, no record and no dump. The loop now also probes every live instance that is not persistent, through the SAME probe (`BrowserHealth._failure_of`), in the new `embedded/clone_probe.py` (`CloneProbe`).
+- Capture only: a clone that misses a probe is never healed, closed or relaunched. On the FIRST miss of an incident one ERROR (`FrozenCloneError`, logger `clone_probe`) records the probe's failure and steps, a `Browser.getVersion` over a NEW connection (`fresh_cdp`) and over this backend's own (`own_cdp`), the browser connection's listener task and socket plus how many page connections still have a running listener (`listener`: `running`, `ended`, `cancelled`, `died(<type>)`), and `paused_fetch`, the new `DynamicHookSystem.paused_in_flight(instance_id)`: `Fetch.requestPaused` handlers started and not finished. Reading it: fresh answers and own does not, or the listener is not `running`, means the backend's connection; neither answers means Chrome; a high `paused_fetch` means the hook handlers. Nothing is read from a page: counts, shapes and exception type names only.
+- The record is kept in `CloneProbe.records` until the clone answers a probe again (INFO `answers probes again`) or is gone; later misses of the same incident add no line. This measures nothing about the cause by itself: it is the instrument for the next freeze.
+- `browser_health.py` stays at its 1000-line budget (999): the clone logic is the new module, and the module docstring was condensed to pay for the three lines that wire it in.
+
 ### Tests: the hidden-tab fixture waits for the probe page and names an in-page exception (T-8597)
 
 - `test_e2e_hidden_tab_input.py::test_the_fixture_drops_input_while_hidden[headed]` failed the v2.1.44 publish gate with `TypeError: ... not ExceptionDetails`: `POKE_JS` threw in the control tab, almost certainly because the poke beat the probe page's load (`#email` was still null), and `_poke` fed the exception object to `json.loads`, so the page's error text was lost. `_staged` now polls (15 s) until the control tab shows `readyState` `complete` and `#email`, failing with what was missing, and `_poke` raises an `AssertionError` carrying the in-page exception's description. No production change.

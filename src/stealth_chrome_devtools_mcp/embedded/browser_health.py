@@ -1,53 +1,47 @@
 """THE one home for "is a long-lived named-session browser still answering, and if
 not, bring it back" (F-963).
 
-**The incident.** Two named-session browsers, ``default`` (master) and ``fleet``,
-froze at ~26.5 h of uptime, launched by one backend at one time. Chrome's HTTP
-endpoints still answered but ``Runtime.evaluate`` never returned in ANY tab, a
-fresh ``about:blank`` one over a direct CDP websocket included, and ``Browser.close``
-replied ok while the process stayed up. The Chrome-side mechanism is not identified
-(a JS dialog, a busy page and the renderer-process limit each hang only their own
-tab), so this module is a self-heal plus forensics.
+**The incident.** ``default`` (master) and ``fleet`` froze together at ~26.5 h of
+uptime: Chrome's HTTP endpoints answered but ``Runtime.evaluate`` never returned in
+ANY tab (a fresh ``about:blank`` one over a direct websocket included) and
+``Browser.close`` replied ok while the process stayed up. The Chrome-side mechanism
+is not identified, so this module is a self-heal plus forensics.
 
 **The probe does not go through nodriver.** A fresh ``websockets`` client opens a
-background ``about:blank`` target, evaluates ``1+1`` in it and closes it — the
-exact request that hung. Going through this backend's own nodriver connection
-would let a wedged listener HERE fake a Chrome freeze, or hide one. The same
-check over the backend's own connection (``Browser.getVersion``) runs only when
-the direct probe passed; a failure there is its own warning ("backend connection
-wedged") and relaunches nothing.
+background ``about:blank`` target, evaluates ``1+1`` in it and closes it — the exact
+request that hung. This backend's own nodriver connection would let a wedged listener
+HERE fake a Chrome freeze, or hide one. The same check over that connection
+(``Browser.getVersion``) runs only when the direct probe passed; a failure there is
+its own warning ("backend connection wedged") and relaunches nothing.
 
-**Scope: persistent profiles only** — ``browser_pid_registry.on_persistent_profile``,
-the one predicate for "a login lives in this profile"; a disposable clone is skipped.
+**Scope:** ``browser_pid_registry.on_persistent_profile`` ("a login lives in this
+profile") is probed and healed. **T-1665:** a clone is probed too by :mod:`clone_probe`,
+capture only.
 
 **The heal** holds the F-961 per-directory gate for its whole length (a concurrent
 ``spawn_browser(session=…)`` waits and is then handed the relaunched browser),
 closes through the EXISTING close path (injected: the ``close_instance`` tool,
 which owns exit-wait, kill escalation and the ``default`` seed refresh), and
 relaunches the same directory, headless and viewport under the SAME instance id
-through ``BrowserManager.spawn_browser(instance_id=…)`` (callers and MASTER's
-shared-browser.json keep that id; the spawn path arms the rotation guard). A heal
-is attempted at most once per :data:`HEAL_COOLDOWN_SECONDS` per instance. A
-relaunch that fails leaves the session closed, which is the state
-``spawn_browser(session=…)`` relaunches from (F-961). **T-4686:** a browser the
-close path left running past :data:`EXIT_WAIT_SECONDS` is ended by :mod:`forced_end`
-if its identity is verified, else the heal is refused.
+through ``BrowserManager.spawn_browser(instance_id=…)`` (the spawn path arms the
+rotation guard), at most once per :data:`HEAL_COOLDOWN_SECONDS` per instance. A
+relaunch that fails leaves the session closed, which ``spawn_browser(session=…)``
+relaunches from (F-961). **T-4686:** a browser the close path left running past
+:data:`EXIT_WAIT_SECONDS` is ended by :mod:`forced_end` if its identity is verified,
+else the heal is refused.
 
 **F-964: a browser that EXITED is relaunched too, for the two shared sessions only.**
 On 2026-10-11 ~16:27Z ``default``, ``fleet`` and one clone, all driven by one
 backend, exited within seconds of each other and nobody relaunched them. The manager
-records each browser that died on its own (``BrowserManager.take_exited``:
-``_discard_instance_unlocked`` is told apart from a deliberate close, every
-``close_instance`` having popped its entry first), and the loop relaunches the ones
-whose directory is ``profile_seed.DEFAULT_SESSION``'s or
-``fleet_session.FLEET_SESSION``'s through the SAME tail the heal uses
+records each browser that died on its own (``BrowserManager.take_exited``: every
+``close_instance`` pops its entry first, so a deliberate close is told apart), and
+the loop relaunches the ones whose directory is ``profile_seed.DEFAULT_SESSION``'s
+or ``fleet_session.FLEET_SESSION``'s through the SAME tail the heal uses
 (:meth:`BrowserHealth._launch_again`: spawn under the same id, re-arm, probe). Any
 other named session and every clone is left alone: an exit there is the caller's
 to notice. Not relaunched: a directory a live browser already holds, a second exit
 inside :data:`HEAL_COOLDOWN_SECONDS` (a crash loop is an ERROR), and anything while
-the backend is stopping. A failed relaunch is an ERROR and the end of it. A human
-who closes a shared headed window gets it back: the loop cannot tell that from a
-crash.
+the backend is stopping. A human who closes a shared headed window gets it back.
 
 **F-1007: a starved browser is not a frozen one.** A timeout is not counted when the
 browser process still answers a fresh ``Browser.getVersion`` AND an IDLE canary child
@@ -60,11 +54,11 @@ probe of an incident starts :class:`freeze_capture.Incidents`' capture as a TASK
 delta, process facts, a fresh-connection ``Browser.getVersion``, on Windows a bounded
 minidump), so the round is not delayed. The first-failure WARNING says
 ``evidence@probe1(capturing)``, the record is logged when it finishes, and just before
-the heal the ERROR line carries it, waited for at most
-:data:`freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS`. It never raises into the loop,
+the heal the ERROR line carries it (waited for at most
+:data:`freeze_capture.HEAL_WAITS_FOR_CAPTURE_SECONDS`). It never raises into the loop,
 and a pid is opened only once its create time matches the registry entry. A
-shared-session browser that EXITED has its exit code in the relaunch line
-(:func:`process_exit.exit_status`). Forensics are counts and shapes only.
+shared-session browser that EXITED has its exit code in the relaunch line. Forensics
+are counts and shapes only.
 """
 
 import asyncio
@@ -87,6 +81,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_pid_registry,
     chrome_log,
+    clone_probe,
     directory_gate,
     forced_end,
     freeze_capture,
@@ -438,6 +433,9 @@ class BrowserHealth:
         self._clock = clock
         self._shared = shared
         self._holder = holder
+        self._clones = clone_probe.CloneProbe(  # T-1665
+            manager.get_instance, self._failure_of, browser_answers, own_check
+        )
         self._incidents = freeze_capture.Incidents(
             capture=capture,
             dump_now=dump_now,
@@ -507,6 +505,7 @@ class BrowserHealth:
                 await self._check(instance_id)
             except Exception as error:  # noqa: BLE001  PERMANENT(F-963: a probe that raises must not end the loop, nor skip the other instances)
                 debug_logger.log_error(_COMPONENT, "check", error)
+        await self._clones.check([iid for iid in listed if iid not in scoped])
 
     async def _probe_error(
         self, browser: Browser, steps: list[str]
