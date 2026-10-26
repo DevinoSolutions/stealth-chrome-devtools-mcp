@@ -34,6 +34,7 @@ session that is NOT discovering targets.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import time
 
 import pytest
@@ -151,4 +152,42 @@ async def test_a_dropped_browser_socket_is_recovered(tmp_empty_root, monkeypatch
             await asyncio.sleep(0.25)
         assert popup is not None, ("the popup was not armed after recovery", armed)
     finally:
+        await close(instance_id=iid)
+
+
+async def test_a_dropped_browser_socket_keeps_python_bindings_alive(tmp_empty_root):
+    """The binding watch is not reaped by a drop ``tab_open`` repairs: a binding made
+    before it still answers after, and a binding made after it works too."""
+    spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
+    create, navigate = get_fn("create_python_binding"), get_fn("navigate")
+    builtins._pb_calls = []
+    code = (
+        "def {name}(a, b):\n"
+        "    import builtins\n"
+        "    builtins._pb_calls.append(('{name}', a, b))\n"
+        "    return a + b\n"
+    )
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate(instance_id=iid, url="data:text/html,<title>pb</title>")
+        before = await create(
+            instance_id=iid,
+            binding_name="before",
+            python_code=code.format(name="before"),
+        )
+        assert before.get("success") is True, before
+        await _drop_browser_socket(iid)
+
+        after = await create(
+            instance_id=iid, binding_name="after", python_code=code.format(name="after")
+        )
+        assert after.get("success") is True, after
+        for name in ("before", "after"):
+            await eval_js(iid, f"window.{name}(40, 2); true")
+        deadline = time.monotonic() + 15.0
+        while len(builtins._pb_calls) < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        assert sorted(builtins._pb_calls) == [("after", 40, 2), ("before", 40, 2)]
+    finally:
+        del builtins._pb_calls
         await close(instance_id=iid)

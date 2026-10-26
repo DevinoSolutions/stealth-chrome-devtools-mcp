@@ -25,8 +25,11 @@ once. ``attach`` calls ``handlers.clear()`` (``connection.py``:292), so
 :func:`reattach` puts back every handler that was registered (the popup listener
 below and ``python_binding``'s ``targetDestroyed`` watch are the two) and sends
 ``setDiscoverTargets`` again through :func:`_discover`, the same call
-:func:`arm_popups` makes. A connection WE closed (:func:`mark_closed`, set by
-``close_instance`` before it ends the socket) is never reopened: after ``aclose``
+:func:`arm_popups` makes. A closed socket fails the send with
+``ConnectionClosed``, so ``close_instance`` needs no liveness test of its own to
+keep honest. A connection WE closed
+(:func:`mark_closed`, set by ``close_instance`` before it ends the socket) is never
+reopened: after ``aclose``
 the socket is ``None``, which 0.50 would silently reopen for a lingering task.
 
 **Discovery is ours to switch on (F-1012).** 0.50's ``Browser.start`` does NOT send
@@ -163,9 +166,17 @@ async def reattach(browser: Browser) -> None:
 
 
 async def _live(browser: Browser, call: Callable[[], Awaitable[_T]]) -> _T:
-    """Run *call*, re-attaching first if the socket dropped, and once more if it
-    drops under the call (``ConnectionClosed`` comes from the write, so nothing was
-    sent)."""
+    """Run *call*, re-attaching first if the socket dropped, and once more if the
+    write finds it closed (``ConnectionClosed`` comes from the write, so nothing was
+    sent).
+
+    A send already IN FLIGHT when the link drops is not retried: its caller gets the
+    builtin ``ConnectionError`` ``_fail_pending_futures`` sets (``connection.py``:263)
+    because ``createTarget`` and ``closeTarget`` are not idempotent and Chrome may
+    have run them. While a close is still in progress ``close_code`` is ``None``, so
+    :func:`reattach` finds nothing to do and the retried write fails once more; the
+    failure is raised, and the next call finds the code set.
+    """
     if is_closed(browser):
         raise ConnectionError(_CLOSED_TEXT)
     if _dropped(browser):

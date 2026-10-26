@@ -11,6 +11,7 @@ real wire (a real Chrome, a real close) is ``tests/test_e2e_new_tab_after_reconn
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 import websockets
@@ -19,7 +20,7 @@ from nodriver.core.connection import Connection
 from websockets.exceptions import ConnectionClosedError
 
 from fakes_wire import BrowserSocket, until
-from stealth_chrome_devtools_mcp.embedded import tab_open
+from stealth_chrome_devtools_mcp.embedded import tab_identity, tab_open
 
 pytestmark = pytest.mark.asyncio
 
@@ -247,3 +248,17 @@ async def test_a_popup_announced_after_close_is_not_armed(dialer):
 
     assert seen == []
     assert len(dialer.sockets) == 1, "the lingering task must not reconnect"
+
+
+async def test_a_tab_refresh_right_after_a_drop_does_not_fail(dialer):
+    """``tab_identity.refreshed`` runs right after navigate and tab operations."""
+    browser = await _attached()
+    dialer.live.drop()
+    await until(lambda: browser._listener_task.done())  # noqa: SLF001  PERMANENT(the reader ending is the drop's witness)
+    tab = SimpleNamespace(target=SimpleNamespace(target_id="T", title="t"), url="u")
+
+    view = await tab_identity.refreshed(browser, tab)
+
+    assert view["tab_id"] == "T"
+    assert len(dialer.sockets) == 2
+    await _end(browser)

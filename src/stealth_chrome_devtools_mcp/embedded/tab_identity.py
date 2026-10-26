@@ -38,7 +38,8 @@ why a listing pays it once per browser instead of awaiting each tab (``Tab.wait`
 has a 0.5 s floor and a rediscovered ``Connection`` cannot be awaited at all —
 F-771).
 
-A leaf: it imports no other embedded module, takes the tab as an argument, and
+A leaf but for ``tab_open`` (the one way to ask a browser for its targets, which
+re-attaches a dropped socket): it takes the tab as an argument and
 does no error handling of its own — a refresh that never returns is the CALLER's
 budget to bound (``rt._with_cdp_timeout``) and the caller's degradation to
 report, because only the caller knows whether one wedged browser should cost the
@@ -49,7 +50,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - typing only, keeps this module a leaf
+from stealth_chrome_devtools_mcp.embedded import tab_open
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
     from nodriver import Browser, Tab
 
 #: What a tab with no title of its own is called. Chrome reports ``""`` for a
@@ -82,5 +85,5 @@ async def refreshed(browser: Browser | None, tab: Tab) -> dict[str, str]:
     the metadata nodriver last saw, under the same key names.
     """
     if browser is not None:
-        await browser.update_targets()
+        await tab_open.update_targets(browser)
     return record(tab)
