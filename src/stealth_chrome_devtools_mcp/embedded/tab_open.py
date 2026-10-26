@@ -16,12 +16,12 @@ seen, so opening a tab never depends on an event.
 
 **A dropped browser socket is permanent in 0.50, so recovery is ours.** ``send``
 re-attaches only when ``not self.attached or not self.socket``
-(``connection.py``:396); a dropped socket is non-``None`` with ``close_code`` set,
+(``connection.py``:397); a dropped socket is non-``None`` with ``close_code`` set,
 so every later browser-level command raises ``ConnectionClosed`` for the life of
 the instance. :func:`send` and :func:`update_targets` are the ONE way the rest of
 the package talks to the browser connection: on a socket whose ``close_code`` is
 set, or a ``ConnectionClosed``, they re-attach once (:func:`reattach`) and retry
-once. ``attach`` calls ``handlers.clear()`` (``connection.py``:292), so
+once. ``attach`` calls ``handlers.clear()`` (``connection.py``:276), so
 :func:`reattach` puts back every handler that was registered (the popup listener
 below and ``python_binding``'s ``targetDestroyed`` watch are the two) and sends
 ``setDiscoverTargets`` again through :func:`_discover`, the same call
@@ -120,7 +120,7 @@ def is_closed(browser: Browser) -> bool:
 
 def _dropped(browser: Browser) -> bool:
     """Whether the socket is gone or closed — the state 0.50's ``send`` never
-    repairs (``connection.py``:396 looks only at ``attached`` and ``socket``)."""
+    repairs (``connection.py``:397 looks only at ``attached`` and ``socket``)."""
     if not hasattr(browser, "socket"):
         return False
     socket = browser.socket
@@ -171,7 +171,7 @@ async def _live(browser: Browser, call: Callable[[], Awaitable[_T]]) -> _T:
     sent).
 
     A send already IN FLIGHT when the link drops is not retried: its caller gets the
-    builtin ``ConnectionError`` ``_fail_pending_futures`` sets (``connection.py``:263)
+    builtin ``ConnectionError`` ``_fail_pending_futures`` sets (``connection.py``:480)
     because ``createTarget`` and ``closeTarget`` are not idempotent and Chrome may
     have run them. While a close is still in progress ``close_code`` is ``None``, so
     :func:`reattach` finds nothing to do and the retried write fails once more; the

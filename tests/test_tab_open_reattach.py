@@ -1,7 +1,7 @@
 """T-8501 -- a dropped BROWSER websocket is re-attached once and the command retried.
 
 nodriver 0.50's ``Connection.send`` re-attaches only when ``not self.attached or not
-self.socket`` (``connection.py``:396). A socket that dropped is not ``None``: it has
+self.socket`` (``connection.py``:397). A socket that dropped is not ``None``: it has
 ``close_code`` set, so without ``tab_open`` every later browser-level command raised
 ``ConnectionClosed`` for the life of the instance -- F-940's field failure, back. These
 run a REAL ``Connection`` and its real ``_listener`` over a socket that can drop; the
