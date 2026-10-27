@@ -10,6 +10,11 @@
 - The tool layer (`dynamic_hook_ai_interface.py`, ten `except Exception` blocks) still answers `{"success": False}` dicts; that is T-9464. DESIGN section 9 is updated.
 - Tests written first in `tests/test_hook_learning_system.py`, `tests/test_dynamic_hook_system.py` and `tests/test_hook_validator_raises.py`; against main's code 13 fail.
 
+### The settle-deadline tests no longer depend on how fast the runner is (T-9468)
+
+- `test_a_settle_that_never_happens_names_first_and_last_state_and_the_probes` failed on the macOS py3.13 release-gate runner with "2 probes, 1 unanswered" and a last state of `loadEnd` 0: it needed four probes inside a real 0.3 s deadline, i.e. two real 0.1 s sleeps plus overhead.
+- It and `test_wait_fixture_ready_names_the_state_it_last_saw` now run `wait_fixture_ready` on a fake clock that only its own `sleep` advances, so each sees exactly four probes and asserts that count. `tests/` only; no change under `src/`.
+
 ## 2.1.49
 
 ### A refusal of the caller's own input no longer opens a Sentry issue, even when the caller's own failure rides under it (T-9185)
