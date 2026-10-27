@@ -36,6 +36,7 @@ import pytest
 
 from e2e_helpers import (
     eval_js,
+    forget_instance,
     get_fn,
     integration_pytestmark,
     navigate_and_settle,
@@ -208,8 +209,7 @@ async def test_a_clone_of_a_re_attached_master_carries_its_logins(
                 }
             )
         )
-        manager._instances.pop(iid)
-        manager._spawn_diagnostics.pop(iid, None)
+        await forget_instance(manager, iid)
 
         cleanup = _cleanup_on(record)
         with patch.object(

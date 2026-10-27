@@ -586,7 +586,6 @@ class TestTheSpawnArmsClonesOnly:
         )
         manager = BrowserManager()
         monkeypatch.setattr(manager, "_apply_tab_overrides", no_op)
-        monkeypatch.setattr(bm.login_persistence, "ensure_session_restore", no_op)
         monkeypatch.setattr(
             bm.process_cleanup, "track_browser_process", lambda *a, **k: None
         )

@@ -43,6 +43,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     cdp_attach,
     cdp_endpoint,
     desktop_launch,
+    login_persistence,
     process_exit,
     profile_lock,
     tab_open,
@@ -1414,6 +1415,17 @@ class TestAnAdoptedInstanceTellsTheTruth:
         ]
         assert stored == [True]
         assert len(listeners) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_reattached_browser_gets_the_session_restore_task(self, tmp_path):
+        """T-9479: the pref is kept for a browser a dead backend left running too,
+        so a profile that never got it (its first backend was starved) does now."""
+        manager, held = await self._adopt(tmp_path, FakeTab())
+        browser = manager._instances[held.instance_id]["browser"]
+        state = getattr(browser, login_persistence._STATE_ATTR, None)
+        assert isinstance(state, login_persistence._Pending)
+        state.task.cancel()
+        await asyncio.wait({state.task}, timeout=1.0)
 
     @pytest.mark.asyncio
     async def test_a_dead_egress_proxy_is_adopted_but_stamped(self, tmp_path):

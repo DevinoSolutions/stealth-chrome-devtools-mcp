@@ -893,7 +893,10 @@ async def _attach_one(
             auto_clone=False,
             cdp_port=candidate.port,
         )
-        from stealth_chrome_devtools_mcp.embedded import clone_storage  # lazy: cycle
+        from stealth_chrome_devtools_mcp.embedded import (  # lazy: cycle
+            clone_storage,
+            login_persistence,
+        )
 
         role = profile_source.adopted_role(
             candidate.user_data_dir, clone_storage.master_profile_dir()
@@ -955,6 +958,7 @@ async def _attach_one(
         instance.last_navigated_title = view["title"]
         instance.update_activity()
         in_memory_storage.store_instance(instance_id, instance.model_dump(mode="json"))
+        login_persistence.start_session_restore(browser, options)  # T-9479
     except BaseException:
         if browser is not None:
             await cdp_attach.close(browser)

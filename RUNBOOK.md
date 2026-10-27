@@ -416,6 +416,12 @@ recorded browser that cannot be reached is reaped exactly as 2.1.9 reaped it, bu
 the **profile directory is spared** either way, so the on-disk cookies survive for
 a fresh spawn — you may just have to log in again if the session cookies are gone.
 
+A NAMED session keeps its session cookies across a close because its profile says `session.restore_on_startup=1` (F-937). A new
+profile is given that by a background task after its first spawn returns (T-9479), and a close waits for it (up to its own 60 s bound). A
+profile whose file already says 1 is believed only after 20 s, because one Chrome rejects the MAC of says 1 until Chrome rewrites it. If the log
+says `setting session.restore_on_startup stalled while <stage>`, that first launch was starved: the profile still lacks the pref, so
+its session cookies will not survive a close; the next spawn of the same name tries again.
+
 Things worth knowing:
 
 - **A re-attached browser is the one that was already running, so it carries the

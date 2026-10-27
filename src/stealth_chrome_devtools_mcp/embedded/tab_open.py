@@ -81,6 +81,9 @@ class _State:
     #: The ``targetCreated`` handler :func:`arm_popups` registered, so a second call
     #: replaces it instead of adding a second one.
     popup_handler: Callable[..., None] | None = None
+    #: Target ids of tabs the backend opened for itself (``login_persistence``'s
+    #: settings tab), which are never a caller's page to land on.
+    internal: set[str] = field(default_factory=set)
 
 
 def _state(browser: Browser) -> _State:
@@ -111,6 +114,20 @@ def mark_closed(browser: Browser) -> None:
     ``devtools_port``), so a task still in flight cannot slip in between.
     """
     _state(browser).closed = True
+
+
+def mark_internal(browser: Browser, tab: Tab) -> None:
+    """Record that *tab* is the backend's own, not a page a caller works in."""
+    _state(browser).internal.add(str(tab.target.target_id))
+
+
+def visible_tabs(browser: Browser, excluding: str | None = None) -> list[Tab]:
+    """``browser.tabs`` without the backend's own (:func:`mark_internal`) and
+    without the target *excluding*: the tabs a caller's stored tab may fall back to
+    when it is closed (nodriver drops a destroyed target only on
+    ``Target.targetDestroyed``, so the closed id is excluded explicitly)."""
+    skip = {*_state(browser).internal, str(excluding)}
+    return [t for t in browser.tabs if str(t.target.target_id) not in skip]
 
 
 def is_closed(browser: Browser) -> bool:

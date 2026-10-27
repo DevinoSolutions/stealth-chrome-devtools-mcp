@@ -552,8 +552,6 @@ class BrowserManager:
                 f"Browser {instance_id} has no process to track",
             )
 
-        if options.user_data_dir and not options.auto_clone:
-            await login_persistence.ensure_session_restore(browser)
         if options.guard_rotation and google_rotation_guard.enabled():
             await google_rotation_guard.arm(browser)
         await reconcile_launched_browser_version(tab, browser_executable)
@@ -725,6 +723,7 @@ class BrowserManager:
             in_memory_storage.store_instance(
                 instance_id, instance.model_dump(mode="json")
             )
+            login_persistence.start_session_restore(browser, options)  # T-9479
 
         except asyncio.CancelledError:
             await self._teardown_failed_spawn(
@@ -849,6 +848,7 @@ class BrowserManager:
 
         browser = data["browser"]
         instance = data["instance"]
+        await login_persistence.settle_session_restore(browser)  # T-9479
         instance.state = BrowserState.CLOSED
         tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
 
@@ -1277,10 +1277,7 @@ class BrowserManager:
         if self._get_tab_target_id(stored) != closed_id:
             return
         await tab_open.update_targets(browser)
-        survivor = next(
-            (t for t in browser.tabs if self._get_tab_target_id(t) != closed_id),
-            None,
-        )
+        survivor = next(iter(tab_open.visible_tabs(browser, closed_id)), None)
         if survivor is not None:
             await self._arm_tracked_tab(instance_id, survivor)
         async with self._lock:
