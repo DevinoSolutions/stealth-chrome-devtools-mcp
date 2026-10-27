@@ -256,6 +256,29 @@ class TestTheConvertedSites:
                 extraction_options="{not json",
             )
 
+    @pytest.mark.parametrize(
+        "code",
+        ["undefined_name", "this is not valid python !!!", "x = 1"],
+        ids=["name-error", "syntax-error", "no-process-request"],
+    )
+    def test_hook_code_that_does_not_load_is_the_callers_and_not_reported(
+        self, caller_error, code
+    ):
+        """The real constructor, so the chain is the one production builds:
+        a ``CallerError`` raised ``from`` the code's own failure (the Sentry
+        issue STEALTH-CHROME-DEVTOOLS-MCP-EC)."""
+        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import DynamicHook
+
+        with pytest.raises(caller_error, match="function code does not load"):
+            DynamicHook("h1", "h4a", {}, code)
+        try:
+            DynamicHook("h1", "h4a", {}, code)
+        except ToolError:
+            event, hint = _event(sys.exc_info())
+
+        assert observability._scrub_event(event, hint) is None
+        assert observability._scrub_event(event, {}) is None
+
     def test_a_cdp_param_of_the_wrong_shape_is_the_callers(self, caller_error):
         from nodriver import cdp
 

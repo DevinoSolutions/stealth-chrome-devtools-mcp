@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
 ERROR_TEXT_LIMIT = 500
 
@@ -145,7 +145,7 @@ class DynamicHook:
         except Exception as e:
             # The caller's code does not load: refuse the hook (T-9135) instead of
             # keeping one that silently continues every request.
-            raise ToolError(
+            raise CallerError(
                 f"Hook '{self.name}' was not created: its function code does not "
                 f"load ({describe_error(e)}). Fix the code and create it again."
             ) from e
