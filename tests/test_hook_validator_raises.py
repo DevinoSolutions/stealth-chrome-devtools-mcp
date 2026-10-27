@@ -51,6 +51,23 @@ class TestTheValidatorRaises:
         with pytest.raises(CallerError, match=r"Syntax error.*never closed"):
             await _create(patched_server(), UNCLOSED)
 
+    @pytest.mark.parametrize(
+        "code",
+        [
+            pytest.param("x = '" + chr(0xD800) + "'", id="lone-surrogate"),
+            pytest.param("-" * 100_000 + "1", id="unary-minus-chain"),
+            pytest.param("+".join(["1"] * 100_000), id="long-binop-chain"),
+        ],
+    )
+    async def test_text_the_parser_cannot_take_raises_a_caller_error(
+        self, patched_server, system, code
+    ):
+        # T-9431: the validator reports it as an issue instead of crashing the tool.
+        with pytest.raises(CallerError, match="Syntax error"):
+            await _create(patched_server(), code)
+
+        assert system.hooks == {}
+
     async def test_a_missing_entry_point_raises_with_the_issue_text(
         self, patched_server, system
     ):

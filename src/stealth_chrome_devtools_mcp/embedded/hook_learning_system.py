@@ -565,51 +565,54 @@ def process_request(request):
         issues = []
         warnings = []
 
+        # Only the parse is guarded: these are what a caller's text can make it
+        # raise (measured on 3.11-3.14). ``ValueError`` covers a lone surrogate
+        # (UnicodeEncodeError); ``MemoryError`` / ``RecursionError`` are the
+        # parser giving up on deep nesting. A failure anywhere else is our bug
+        # and propagates (T-9431).
         try:
-            # Parse the function code
             parsed = ast.parse(function_code)
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
+            return {
+                "valid": False,
+                "issues": [f"Syntax error: {str(e) or type(e).__name__}"],
+                "warnings": [],
+            }
 
-            # Check for required function
-            has_process_request = False
-            for node in ast.walk(parsed):
-                if isinstance(node, ast.FunctionDef) and node.name == "process_request":
-                    has_process_request = True
+        # Check for required function
+        has_process_request = False
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.FunctionDef) and node.name == "process_request":
+                has_process_request = True
 
-                    # Check function parameters
-                    if len(node.args.args) != 1:
-                        issues.append(
-                            "process_request function must take exactly one "
-                            "parameter (request)"
-                        )
-                    elif node.args.args[0].arg != "request":
-                        warnings.append(
-                            "First parameter should be named 'request' for clarity"
-                        )
-
-            if not has_process_request:
-                issues.append(
-                    "Function must define 'process_request(request)' function"
-                )
-
-            # Check for dangerous operations
-            for node in ast.walk(parsed):
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    warnings.append(
-                        f"Imports may not work in hook context: {ast.dump(node)}"
+                # Check function parameters
+                if len(node.args.args) != 1:
+                    issues.append(
+                        "process_request function must take exactly one "
+                        "parameter (request)"
                     )
-                elif (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id in ["eval", "exec", "open", "input"]
-                ):
-                    issues.append(f"Dangerous function call: {node.func.id}")
+                elif node.args.args[0].arg != "request":
+                    warnings.append(
+                        "First parameter should be named 'request' for clarity"
+                    )
 
-            return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings}
+        if not has_process_request:
+            issues.append("Function must define 'process_request(request)' function")
 
-        except SyntaxError as e:
-            return {"valid": False, "issues": [f"Syntax error: {e}"], "warnings": []}
-        except Exception as e:  # noqa: BLE001  DEBT(F-181)
-            return {"valid": False, "issues": [f"Parse error: {e}"], "warnings": []}
+        # Check for dangerous operations
+        for node in ast.walk(parsed):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                warnings.append(
+                    f"Imports may not work in hook context: {ast.dump(node)}"
+                )
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in ["eval", "exec", "open", "input"]
+            ):
+                issues.append(f"Dangerous function call: {node.func.id}")
+
+        return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings}
 
 
 # Global instance

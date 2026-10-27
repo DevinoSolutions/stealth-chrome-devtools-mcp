@@ -6,6 +6,11 @@ must flag a missing entrypoint, a wrong signature, and dangerous calls, while
 letting a well-formed hook through.
 """
 
+import ast
+
+import pytest
+
+from stealth_chrome_devtools_mcp.embedded import hook_learning_system as hls
 from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
     HookLearningSystem,
     hook_learning_system,
@@ -93,3 +98,63 @@ class TestValidateHookFunction:
         )
         assert result["valid"] is False
         assert any("Syntax error" in i for i in result["issues"])
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            pytest.param("x = 1" + chr(0), id="nul"),
+            pytest.param("x = '" + chr(0xD800) + "'", id="lone-surrogate"),
+            pytest.param("-" * 100_000 + "1", id="unary-minus-chain"),
+            pytest.param("not " * 100_000 + "1", id="not-chain"),
+            pytest.param("+".join(["1"] * 100_000), id="long-binop-chain"),
+            pytest.param("x" + ".a" * 100_000, id="long-attribute-chain"),
+            pytest.param("(" * 300, id="nested-parens"),
+        ],
+    )
+    def test_text_the_parser_cannot_take_is_reported_not_raised(self, code):
+        # T-9431: measured on 3.11-3.14, the caller's text alone makes ast.parse
+        # raise SyntaxError, ValueError, MemoryError or RecursionError.
+        result = HookLearningSystem.validate_hook_function(code)
+        assert result["valid"] is False
+        assert result["warnings"] == []
+        assert len(result["issues"]) == 1
+        assert result["issues"][0].startswith("Syntax error: ")
+        assert len(result["issues"][0]) > len("Syntax error: ")
+
+    @pytest.mark.parametrize("error", [ValueError, RecursionError, MemoryError])
+    def test_the_parse_guard_does_not_reach_the_walk(self, monkeypatch, error):
+        # The caller-text types are caught around the parse ONLY; the same types
+        # raised by the analysis after it are our bug.
+        class BrokenAst:
+            def __getattr__(self, name):
+                return getattr(ast, name)
+
+            def walk(self, _tree):
+                raise error("walk bug")
+
+        monkeypatch.setattr(hls, "ast", BrokenAst())
+
+        with pytest.raises(error, match="walk bug"):
+            HookLearningSystem.validate_hook_function(
+                "def process_request(request):\n    return None\n"
+            )
+
+    def test_a_failure_in_our_own_analysis_propagates(self, monkeypatch):
+        # T-9431: only the caller's unparseable text may become an issue. A bug in
+        # the validator itself must surface, not read as an issue (a CallerError
+        # Sentry drops on purpose).
+        class BrokenAst:
+            # Only this module's name is rebound: patching the real ``ast.parse``
+            # would also break pytest's and traceback's own parsing.
+            def __getattr__(self, name):
+                return getattr(ast, name)
+
+            def parse(self, _code):
+                raise RuntimeError("validator bug")
+
+        monkeypatch.setattr(hls, "ast", BrokenAst())
+
+        with pytest.raises(RuntimeError, match="validator bug"):
+            HookLearningSystem.validate_hook_function(
+                "def process_request(request):\n    return None\n"
+            )
