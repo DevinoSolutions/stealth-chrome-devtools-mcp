@@ -253,6 +253,13 @@ def _require_navigation_ok(target: str, result: object) -> object:
     ("the previous page") for the tools whose destination is only knowable
     afterwards.
 
+    A ``CallerError``, though not always the caller's doing: a bad URL is theirs,
+    but ``chrome-error://`` also appears for our own environment (a dead proxy,
+    ``ERR_INTERNET_DISCONNECTED``, ``ERR_PROXY_CONNECTION_FAILED``). The refusal
+    has no cause underneath, so ``error-convention`` already dropped it before
+    ``CallerError``; the class changes nothing here and means "refused, not a
+    defect of ours".
+
     Only a Chrome-level navigation failure is one: a page answering 404/500, a
     redirect to a different final URL, ``about:blank`` and ``data:`` URLs all
     keep their own scheme and pass through untouched.

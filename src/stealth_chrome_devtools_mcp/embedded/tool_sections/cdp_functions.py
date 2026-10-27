@@ -33,7 +33,11 @@ rule 3). Docstrings and signatures are byte-identical — FastMCP surfaces them 
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError, _require_tab
+from stealth_chrome_devtools_mcp.embedded.tool_errors import (
+    CallerError,
+    ToolError,
+    _require_tab,
+)
 
 SECTION = "cdp-functions"
 
@@ -352,16 +356,23 @@ async def create_python_binding(
         Dict[str, Any]: Binding creation result.
     """
     tab = await _require_tab(rt.browser_manager, instance_id)
+    # The caller's code: that it loads and defines a function is theirs to get
+    # right (CallerError); the binding's creation in the browser is not (ToolError).
     try:
         exec_globals = {}
         exec(python_code, exec_globals)
-        python_function = None
-        for name, obj in exec_globals.items():
-            if callable(obj) and not name.startswith("_"):
-                python_function = obj
-                break
-        if not python_function:
-            raise ToolError("No function found in Python code")
+    except Exception as e:
+        raise CallerError(f"Failed to create Python function: {e!s}") from e
+    python_function = None
+    for name, obj in exec_globals.items():
+        if callable(obj) and not name.startswith("_"):
+            python_function = obj
+            break
+    if not python_function:
+        raise CallerError(
+            "Failed to create Python function: No function found in Python code"
+        )
+    try:
         return await rt._with_cdp_timeout(
             rt.cdp_function_executor.create_python_binding(
                 tab, binding_name, python_function

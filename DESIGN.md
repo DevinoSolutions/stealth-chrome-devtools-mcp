@@ -700,7 +700,11 @@ raised over. `error-convention` cannot, because it tolerates only our own and bu
 links under a `ToolError` (a `ToolError` over an `AttributeError` is a bug to read), and
 a caller's refusal is often raised with the caller's own failure in flight. Raise it
 only where the cause is the caller's input; a browser, page or product failure stays a
-plain `ToolError` and stays a Sentry issue. It is never subclassed.
+plain `ToolError` and stays a Sentry issue. It is never subclassed. Trade-off, taken
+deliberately: `cdp_params.typed` and `build_cdp_call` convert `TypeError`, `KeyError`,
+`AttributeError` and `ValueError` raised while building the caller's params, so a bug of
+ours in `_coerce` or in nodriver's `from_json` on a valid value is dropped too; the
+caller's params are the overwhelmingly likely cause and the message still reaches them.
 
 **Named KEEP contracts** — here the returned dict/value *is* the contract; converting
 it to a raise would be the defect:
