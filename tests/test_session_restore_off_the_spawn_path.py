@@ -587,3 +587,18 @@ class TestTheExchangesTabIsNeverWhereAClosedTabFallsBackTo:
         browser = FakeBrowser(opened_tab=tab)
         await login_persistence.ensure_session_restore(browser)
         assert str(tab.target.target_id) in tab_open._state(browser).internal
+
+
+async def test_the_exchange_opens_its_tab_behind_the_callers_page():
+    """A tab opened in front covers the caller's page, and a headless page stops
+    reporting its window while it is covered: ``window.outerHeight`` fell from the
+    requested 600 to the viewport's 513 on Linux CI (``test_window_sizing``, run
+    40552975223), which the exchange's tab caused for as long as it was in front.
+    The exchange is the backend's own business and asks for its tab behind."""
+    tab = _SettingsTab(pref=1)
+    browser = FakeBrowser(opened_tab=tab)
+
+    await login_persistence.ensure_session_restore(browser)
+
+    assert browser.cdp_frames[0]["method"] == "Target.createTarget"
+    assert browser.cdp_frames[0]["params"]["background"] is True

@@ -477,6 +477,11 @@ moved the bound from 8 s to 20 s for the same reason on 3-vCPU macOS cells).
   with its own 60 s bound (`PREF_TIMEOUT_SECONDS`) that no spawn pays. Only a NAMED, non-clone spawn starts one; a clone is
   disposable and an unnamed spawn is a clone. While the exchange runs the browser has a second tab, `chrome://settings`, that a
   caller's `list_tabs` can see; `tab_open.mark_internal` records it, and a closed tab's fallback (`_repoint_after_close`) skips it.
+  The tab is opened BEHIND the caller's page (`open_tab(..., background=True)`): a tab opened in front covers the page, and a
+  covered headless page reads `window.outerHeight` as its `innerHeight` (513 for a 900x600 window, Chrome 155, Linux) until the
+  cover closes, so a caller who measured the window right after a named spawn saw a size it never asked for. Behind, the page's
+  window metrics are untouched (600 throughout, measured) and a headed user's focus stays where it was. Only a tab the backend
+  opens for itself is opened behind; a tab a caller asks for (`new_tab`) is theirs to look at, in front.
 * **A close waits for it, as long as the exchange itself may take.** `close_instance` awaits `settle_session_restore` BEFORE it
   marks the connection closed (the exchange needs it). It tells the task the close has come, which ends the file-trust wait and
   runs the exchange at once (the file is not evidence yet), waits `PREF_TIMEOUT_SECONDS` plus a short grace (v2.1.49's

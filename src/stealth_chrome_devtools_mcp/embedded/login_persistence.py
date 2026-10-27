@@ -325,7 +325,9 @@ async def _set_restore_pref(
     close it even when this coroutine is cancelled mid-await. The last entry of
     *stage* names the await it is in, so a timeout can say where it stalled."""
     stage.append("opening the settings tab")
-    tab = await tab_open.open_tab(browser, "about:blank")
+    # Behind the caller's page: in front it makes a headless page read its window
+    # as its viewport (``outerHeight`` 513 for 600) for as long as it is open (T-9479).
+    tab = await tab_open.open_tab(browser, "about:blank", background=True)
     tab_open.mark_internal(browser, tab)
     tab_box.append(tab)
     stage.append("loading chrome://settings")

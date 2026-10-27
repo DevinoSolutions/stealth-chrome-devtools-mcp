@@ -47,6 +47,22 @@ async def test_a_new_tab_is_the_one_update_targets_registers():
     assert browser.update_targets_calls == 1
 
 
+async def test_a_background_tab_is_asked_for_behind_the_callers_page():
+    """T-9479: a tab opened in front covers the page the caller works in, and a
+    headless page stops reporting its window (``outerHeight`` falls to
+    ``innerHeight``). The default frame above stays exactly as it was."""
+    browser = FakeBrowser(opened_tab=FakeTab(url="about:blank", target_id="T-bg"))
+
+    await tab_open.open_tab(browser, "about:blank", background=True)
+
+    assert browser.cdp_frames[0]["params"] == {
+        "url": "about:blank",
+        "newWindow": False,
+        "enableBeginFrameControl": True,
+        "background": True,
+    }
+
+
 async def test_a_tab_that_closed_before_it_was_listed_is_a_named_error():
     browser = FakeBrowser(lists_new_targets=False)
 
