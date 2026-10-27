@@ -19,6 +19,7 @@ is a real assertion and not a screen-size lottery.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 import pytest
@@ -35,6 +36,9 @@ OVERSIZED_W, OVERSIZED_H = 9000, 7000
 # CDP window bounds vs. window.outerWidth can round apart by a pixel on a
 # fractional-DPI display; anything beyond this is a genuine disagreement.
 TOLERANCE_PX = 2
+# How long a named spawn is watched for its exchange's tab (T-9479): the tab is
+# created within the first 100 ms on a healthy runner; this leaves room for a slow one.
+EXCHANGE_WATCH_SECONDS = 2.0
 
 
 def _headed_needs_desktop(platform: str, can_show_windows: bool) -> bool:
@@ -224,6 +228,32 @@ class TestRealChromeWindowSize:
                 f"--window-size={FITS_W},{FITS_H}"
                 in result["spawn_diagnostics"]["effective_browser_args"]
             )
+        finally:
+            await close(instance_id=iid)
+
+    async def test_a_named_headless_spawn_keeps_its_size_while_the_exchange_runs(
+        self, tmp_path
+    ):
+        """T-9479: a named spawn's ``chrome://settings`` exchange runs after the
+        spawn has returned, in a tab of the same window. Opened in front it covered
+        the caller's page, and a covered headless page reads ``outerHeight`` as its
+        ``innerHeight`` (900x513 for a 900x600 window, measured on Chrome 155) for
+        as long as the cover lasts. Sampled from the return of the spawn on, over
+        the stretch the exchange's tab is opened and loaded in, so a transient that
+        a single read after the spawn only sometimes catches cannot slip past."""
+        close = get_fn("close_instance")
+        result = await _spawn(tmp_path, headless=True, width=FITS_W, height=FITS_H)
+        iid = result["instance_id"]
+        try:
+            samples = []
+            deadline = asyncio.get_running_loop().time() + EXCHANGE_WATCH_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
+                samples.append(await _measured_outer_size(iid))
+                await asyncio.sleep(0.005)
+            assert len(samples) > 20, samples
+            for measured in samples:
+                assert abs(measured[0] - FITS_W) <= TOLERANCE_PX, (measured, samples)
+                assert abs(measured[1] - FITS_H) <= TOLERANCE_PX, (measured, samples)
         finally:
             await close(instance_id=iid)
 

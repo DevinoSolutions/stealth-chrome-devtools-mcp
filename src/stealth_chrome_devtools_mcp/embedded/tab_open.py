@@ -221,17 +221,29 @@ async def update_targets(browser: Browser) -> None:
     await _live(browser, browser.update_targets)
 
 
-async def open_tab(browser: Browser, url: str) -> Tab:
+async def open_tab(browser: Browser, url: str, *, background: bool = False) -> Tab:
     """Open *url* in a new tab of *browser* and return its ``Tab``.
 
     The arguments to ``createTarget`` are nodriver's own, so the tab is the one
     ``Browser.get(url, new_tab=True)`` would have opened; ``update_targets`` then
     registers it, exactly as that call does.
+
+    A tab is opened in front by default, and the tab it covers stops reporting its
+    window: a headless page's ``window.outerHeight`` falls to its ``innerHeight``
+    for as long as another tab of the same window is in front (measured on Chrome
+    155, 900x600 requested: 600 before, 513 with an ``about:blank`` tab opened in
+    front, 600 again once it closed). *background* opens it behind, which leaves the
+    caller's page, its window metrics and (headed) the user's focus alone. It is for
+    a tab the backend opens for ITSELF (``login_persistence``'s); a tab a caller
+    asked for is theirs to look at.
     """
     target_id = await send(
         browser,
         lambda: cdp.target.create_target(
-            url, new_window=False, enable_begin_frame_control=True
+            url,
+            new_window=False,
+            enable_begin_frame_control=True,
+            background=True if background else None,
         ),
     )
     await update_targets(browser)
