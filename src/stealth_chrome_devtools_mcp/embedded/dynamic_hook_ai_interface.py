@@ -12,7 +12,45 @@ from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hoo
 from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
     hook_learning_system,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
+
+
+def _simple_hook_code(
+    action: str, target_url: str | None, custom_headers: dict[str, str] | None
+) -> str:
+    """The template for a simple hook, or ``CallerError`` for input it cannot use."""
+    if action == "block":
+        function_code = """
+def process_request(request):
+    return HookAction(action="block")
+"""
+    elif action == "redirect":
+        if not target_url:
+            raise CallerError("target_url required for redirect action")
+        function_code = f'''
+def process_request(request):
+    return HookAction(action="redirect", url="{target_url}")
+'''
+    elif action == "add_headers":
+        if not custom_headers:
+            raise CallerError("custom_headers required for add_headers action")
+        headers_str = str(custom_headers).replace("'", '"')
+        function_code = f"""
+def process_request(request):
+    new_headers = request["headers"].copy()
+    new_headers.update({headers_str})
+    return HookAction(action="modify", headers=new_headers)
+"""
+    elif action == "log":
+        function_code = """
+def process_request(request):
+    import sys
+    print(f"[HOOK LOG] {request['method']} {request['url']}", file=sys.stderr)
+    return HookAction(action="continue")
+"""
+    else:
+        raise CallerError(f"Unknown action: {action}")
+    return function_code
 
 
 class DynamicHookAIInterface:
@@ -48,7 +86,7 @@ class DynamicHookAIInterface:
             detail = "; ".join(validation["issues"])
             if validation["warnings"]:
                 detail += f" (warnings: {'; '.join(validation['warnings'])})"
-            raise ToolError(f"Invalid function code: {detail}")
+            raise CallerError(f"Invalid function code: {detail}")
 
         try:
             hook_id = await self.hook_system.create_hook(
@@ -126,12 +164,6 @@ class DynamicHookAIInterface:
         """
         try:
             hook_details = self.hook_system.get_hook_details(hook_id)
-
-            if not hook_details:
-                return {"success": False, "error": f"Hook {hook_id} not found"}
-
-            return {"success": True, "hook": hook_details}
-
         except Exception as e:
             debug_logger.log_error(
                 "dynamic_hook_ai",
@@ -139,6 +171,10 @@ class DynamicHookAIInterface:
                 f"Failed to get hook details: {e}",
             )
             return {"success": False, "error": str(e)}
+
+        if not hook_details:
+            raise CallerError(f"Hook {hook_id} not found")
+        return {"success": True, "hook": hook_details}
 
     async def remove_dynamic_hook(self, hook_id: str) -> dict[str, Any]:
         """
@@ -152,16 +188,15 @@ class DynamicHookAIInterface:
         """
         try:
             success = await self.hook_system.remove_hook(hook_id)
-
-            if success:
-                return {"success": True, "message": f"Removed hook {hook_id}"}
-            return {"success": False, "error": f"Hook {hook_id} not found"}
-
         except Exception as e:
             debug_logger.log_error(
                 "dynamic_hook_ai", "remove_dynamic_hook", f"Failed to remove hook: {e}"
             )
             return {"success": False, "error": str(e)}
+
+        if not success:
+            raise CallerError(f"Hook {hook_id} not found")
+        return {"success": True, "message": f"Removed hook {hook_id}"}
 
     def get_request_documentation(self) -> dict[str, Any]:
         """
@@ -290,45 +325,9 @@ class DynamicHookAIInterface:
         Returns:
             Dict with creation result
         """
-        try:
-            if action == "block":
-                function_code = """
-def process_request(request):
-    return HookAction(action="block")
-"""
-            elif action == "redirect":
-                if not target_url:
-                    return {
-                        "success": False,
-                        "error": "target_url required for redirect action",
-                    }
-                function_code = f'''
-def process_request(request):
-    return HookAction(action="redirect", url="{target_url}")
-'''
-            elif action == "add_headers":
-                if not custom_headers:
-                    return {
-                        "success": False,
-                        "error": "custom_headers required for add_headers action",
-                    }
-                headers_str = str(custom_headers).replace("'", '"')
-                function_code = f"""
-def process_request(request):
-    new_headers = request["headers"].copy()
-    new_headers.update({headers_str})
-    return HookAction(action="modify", headers=new_headers)
-"""
-            elif action == "log":
-                function_code = """
-def process_request(request):
-    import sys
-    print(f"[HOOK LOG] {request['method']} {request['url']}", file=sys.stderr)
-    return HookAction(action="continue")
-"""
-            else:
-                return {"success": False, "error": f"Unknown action: {action}"}
+        function_code = _simple_hook_code(action, target_url, custom_headers)
 
+        try:
             requirements = {"url_pattern": url_pattern}
 
             return await self.create_dynamic_hook(
