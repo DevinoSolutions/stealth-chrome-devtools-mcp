@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.48
 
 ### An error in a caller's hook code is a warning they can read back, not our ERROR (T-9135)
 
