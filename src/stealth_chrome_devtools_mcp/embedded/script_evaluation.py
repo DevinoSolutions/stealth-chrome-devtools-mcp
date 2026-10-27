@@ -89,6 +89,7 @@ from nodriver import Tab, cdp
 
 from stealth_chrome_devtools_mcp.embedded.navigation_milestone import document_swapped
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
+    CallerError,
     ToolError,
     _require_js_value,
 )
@@ -283,7 +284,7 @@ async def as_async_function_body(tab: Tab, script: str, reason: str) -> object:
     try:
         return script_value(*answer)
     except ToolError as exception:
-        raise ToolError(
+        raise CallerError(
             f"{exception} (the script was re-evaluated inside an async wrapper "
             f"function because it has a {reason})"
         ) from None
@@ -306,7 +307,7 @@ async def run(tab: Tab, script: str, args: list[object] | None = None) -> object
         except (TypeError, ValueError) as e:
             # Unreachable through MCP (args arrive as parsed JSON), but the one
             # home is where a non-JSON argument joins the error convention.
-            raise ToolError(f"Script args are not JSON-serializable: {e!s}") from e
+            raise CallerError(f"Script args are not JSON-serializable: {e!s}") from e
         expression = f"(async function() {{ {script} }})({serialized_args})"
     else:
         expression = script

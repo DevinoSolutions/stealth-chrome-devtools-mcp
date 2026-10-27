@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from stealth_chrome_devtools_mcp.embedded import profile_seed
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
 
 #: Created files are owner-only. ``os.open``'s mode is masked by the umask, which
 #: can only remove bits, so this is an upper bound that a 022 umask cannot widen.
@@ -179,13 +179,13 @@ def _real(path: str | os.PathLike[str]) -> str:
     """
     text = os.fspath(path)
     if "\0" in text:
-        raise ToolError(_UNRESOLVABLE)
+        raise CallerError(_UNRESOLVABLE)
     try:
         real = os.path.realpath(text)
     except (OSError, ValueError):
         # ``~/.pgpass::$INDEX_ALLOCATION`` makes realpath raise
         # NotADirectoryError, whose text embeds the absolute path (F-877).
-        raise ToolError(_UNRESOLVABLE) from None
+        raise CallerError(_UNRESOLVABLE) from None
     if real.startswith("\\\\?\\") and _drive_path(real[4:]):
         return real[4:]
     return real
@@ -390,7 +390,7 @@ def _open_fd(real: Path, *, overwrite: bool, tool: str) -> int:
     try:
         fd = os.open(real, flags, PRIVATE_FILE_MODE)
     except FileExistsError:
-        raise ToolError(
+        raise CallerError(
             f"{tool} refuses to overwrite an existing file (rule: no silent "
             "overwrite, F-1025). Pass overwrite=True to replace it, or choose "
             "a new path."

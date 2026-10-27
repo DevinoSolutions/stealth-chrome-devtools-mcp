@@ -33,7 +33,7 @@ import json
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError, _require_tab
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, _require_tab
 
 SECTION = "file-extraction"
 
@@ -65,7 +65,7 @@ async def clone_element_to_file(
         try:
             parsed_options = json.loads(extraction_options)
         except json.JSONDecodeError as exc:
-            raise ToolError("Invalid extraction_options JSON") from exc
+            raise CallerError("Invalid extraction_options JSON") from exc
     return await rt._with_cdp_timeout(
         rt.file_based_element_cloner.clone_element_complete_to_file(
             tab, selector=selector, extraction_options=parsed_options

@@ -23,7 +23,7 @@ from nodriver import Tab
 from stealth_chrome_devtools_mcp.embedded import cdp_params, paint_hold, python_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tab_close import report_gone_aware
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
 
 
 def _lookup_key(name: str) -> str:
@@ -92,7 +92,7 @@ def build_cdp_call(method: Callable, params: dict[str, Any]) -> Generator:
     try:
         return method(**cdp_params.typed(method, kwargs))
     except TypeError as exc:
-        raise ToolError(f"{exc}; valid params: {', '.join(real.values())}") from exc
+        raise CallerError(f"{exc}; valid params: {', '.join(real.values())}") from exc
 
 
 class ExecutionContext:

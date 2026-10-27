@@ -19,7 +19,7 @@ are the protocol's: a generated class is built with its ``from_json``;
 ``Optional`` passes ``None`` through and types the rest; ``List[T]`` types every
 element; primitives (``str``/``int``/``float``/``bool``) and values that are
 already the type are untouched, so every frame F-816 pinned is byte-identical. A
-value the type cannot take is a caller mistake — a ``ToolError`` naming the
+value the type cannot take is a caller mistake — a ``CallerError`` naming the
 parameter and the type, which ``observability``'s ``before_send`` drops by type
 instead of shipping nodriver's AttributeError.
 
@@ -31,7 +31,7 @@ from __future__ import annotations
 import types
 import typing
 
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
 # What a generated ``from_json`` raises for a value of the wrong shape: an enum
 # with an unknown member (ValueError), a dataclass fed a string (TypeError) or a
@@ -45,7 +45,7 @@ def typed(method: typing.Callable, kwargs: dict[str, object]) -> dict[str, objec
     through so the wrapper's own ``TypeError`` still names the unknown param.
 
     Raises:
-        ToolError: a value the declared type cannot be built from.
+        CallerError: a value the declared type cannot be built from.
     """
     hints = _hints(method)
     out: dict[str, object] = {}
@@ -57,7 +57,7 @@ def typed(method: typing.Callable, kwargs: dict[str, object]) -> dict[str, objec
         try:
             out[name] = _coerce(value, annotation)
         except _SHAPE_ERRORS as exc:
-            raise ToolError(
+            raise CallerError(
                 f"param {name!r} expects {_describe(annotation)}, got {value!r}: {exc}"
             ) from exc
     return out
