@@ -140,12 +140,32 @@ def test_fixture_state_ready_needs_complete_and_a_wired_script():
     )
 
 
+def _fake_settle_clock(monkeypatch, fixture_routes):
+    """Give ``wait_fixture_ready`` a clock only its own sleeps advance (T-9468).
+
+    ``FIXTURE_READY_TIMEOUT`` is 0.3 s of fake time and each ``sleep(0.1)`` adds
+    0.1 to it, so the probe count before the deadline (four: at 0, 0.1, 0.2 and
+    0.30000000000000004) never depends on how fast the runner is."""
+    from types import SimpleNamespace
+
+    now = [0.0]
+
+    async def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(fixture_routes, "FIXTURE_READY_TIMEOUT", 0.3)
+    monkeypatch.setattr(
+        fixture_routes, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    monkeypatch.setattr(fixture_routes, "asyncio", SimpleNamespace(sleep=sleep))
+
+
 def test_wait_fixture_ready_names_the_state_it_last_saw(monkeypatch):
     import asyncio
 
     import fixture_routes
 
-    monkeypatch.setattr(fixture_routes, "FIXTURE_READY_TIMEOUT", 0.3)
+    _fake_settle_clock(monkeypatch, fixture_routes)
     seen = []
 
     async def probe(expression):
@@ -164,7 +184,7 @@ def test_wait_fixture_ready_names_the_state_it_last_saw(monkeypatch):
         assert "'fetched': False" in str(exc)
     else:
         raise AssertionError("an unwired page must not count as settled")
-    assert len(seen) > 2
+    assert len(seen) == 4
 
 
 def test_expect_app_rejects_a_document_without_the_script():
@@ -329,7 +349,7 @@ def test_a_settle_that_never_happens_names_first_and_last_state_and_the_probes(
 
     import fixture_routes
 
-    monkeypatch.setattr(fixture_routes, "FIXTURE_READY_TIMEOUT", 0.3)
+    _fake_settle_clock(monkeypatch, fixture_routes)
     calls = []
 
     async def probe(expression):
@@ -353,7 +373,8 @@ def test_a_settle_that_never_happens_names_first_and_last_state_and_the_probes(
     assert "first page state" in message and "'loadEnd': 0" in message
     assert "last page state" in message and "'loadEnd': 99" in message
     assert "'name': '/styles.css'" in message
-    assert f"{len(calls)} probes, 1 unanswered" in message
+    assert len(calls) == 4
+    assert "4 probes, 1 unanswered" in message
 
 
 def test_the_early_navigate_warning_carries_what_the_first_probe_saw():
