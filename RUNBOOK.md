@@ -682,7 +682,7 @@ close is never relaunched) -- naming the session, `session="default"` or `sessio
 (`stealthy close <instance> --session NAME`), because without it the close is refused (F-966).
 
 **Chrome's own log.** Every browser on a saved profile (named session or `default`; not a
-disposable copy) writes `chrome-<session>-<instance id>-<UTC time>.log` into the backend's
+disposable copy) writes `chrome-<session>-<instance id>-<UTC time>.log` (`…-2.log`, `…-3.log` for a relaunch in the same second) into the backend's
 log directory (`~/.stealth-mcp/logs`, or `STEALTH_MCP_LOG_DIR`); the path is
 `spawn_diagnostics["chrome_log"]` and appears in the lines above. It is the only record of
 why Chrome itself ended (crash dumps stay off). One file per launch, newest 20 per session

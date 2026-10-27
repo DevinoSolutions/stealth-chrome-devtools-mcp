@@ -377,10 +377,11 @@ Chrome's exit separates them), so that window returns at the next round.
 **Chrome's own log (F-964).** nodriver launches Chrome with `--disable-breakpad` and no
 logging, so a Chrome-side exit or freeze left nothing to read. A persistent-profile
 launch (`browser_pid_registry.on_persistent_profile`'s predicate, asked of what the
-launch records) now carries `--enable-logging --log-level=1 --log-file=<log dir>/chrome-<key>-<id8>-<UTC>.log`,
+launch records) now carries `--enable-logging --log-level=1 --log-file=<log dir>/chrome-<key>-<id8>-<UTC>[-<n>].log`,
 assembled in `spawn_browser` right after the stealth filter and before the start page,
 so no filter can strip it. One file per launch: a relaunch must not overwrite the
-evidence it exists to explain. Retention is the newest 20 per session key, pruned at
+evidence it exists to explain, and a heal relaunches under the SAME id, so a second launch in the
+same second takes `-2`, `-3` (an exclusive create, T-9477). Retention is the newest 20 per session key, pruned at
 launch by an exact name pattern (`fleet` is not `fleet-2`), and `logging_setup`'s
 backend sweep leaves these files out of its 50-file / 7-day rules. Breakpad stays
 disabled on purpose: crash dumps can hold cookie memory and may upload. The file is
