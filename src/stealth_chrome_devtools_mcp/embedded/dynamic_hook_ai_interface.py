@@ -7,12 +7,11 @@ about dynamic hook functions.
 
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
 from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
     hook_learning_system,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
 
 def _simple_hook_code(
@@ -88,37 +87,26 @@ class DynamicHookAIInterface:
                 detail += f" (warnings: {'; '.join(validation['warnings'])})"
             raise CallerError(f"Invalid function code: {detail}")
 
-        try:
-            hook_id = await self.hook_system.create_hook(
-                name=name,
-                requirements=requirements,
-                function_code=function_code,
-                instance_ids=instance_ids,
-                priority=priority,
-            )
+        # T-9464: no catch-all. A ToolError from the hook system (T-9135: a refusal
+        # about the caller's tabs) and a bug of ours both propagate as themselves.
+        hook_id = await self.hook_system.create_hook(
+            name=name,
+            requirements=requirements,
+            function_code=function_code,
+            instance_ids=instance_ids,
+            priority=priority,
+        )
 
-            result = {
-                "success": True,
-                "hook_id": hook_id,
-                "message": f"Created dynamic hook '{name}' with ID {hook_id}",
-            }
+        result = {
+            "success": True,
+            "hook_id": hook_id,
+            "message": f"Created dynamic hook '{name}' with ID {hook_id}",
+        }
 
-            if validation["warnings"]:
-                result["warnings"] = validation["warnings"]
+        if validation["warnings"]:
+            result["warnings"] = validation["warnings"]
 
-            return result
-
-        except ToolError:
-            # T-9135: a refusal about the caller's tabs, not a defect. Tools RAISE
-            # (convention 2); first, so the generic handler below cannot answer it.
-            raise
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai",
-                "create_dynamic_hook",
-                f"Failed to create hook {name}: {e}",
-            )
-            return {"success": False, "error": str(e)}
+        return result
 
     async def list_dynamic_hooks(
         self, instance_id: str | None = None
@@ -132,25 +120,18 @@ class DynamicHookAIInterface:
         Returns:
             Dict with hooks list and count
         """
-        try:
-            hooks = self.hook_system.list_hooks()
+        hooks = self.hook_system.list_hooks()
 
-            if instance_id:
-                instance_hook_ids = self.hook_system.instance_hooks.get(instance_id, [])
-                filtered_hooks = []
-                for hook in hooks:
-                    hook_id = hook.get("hook_id") or hook.get("id")
-                    if hook_id and hook_id in instance_hook_ids:
-                        filtered_hooks.append(hook)
-                hooks = filtered_hooks
+        if instance_id:
+            instance_hook_ids = self.hook_system.instance_hooks.get(instance_id, [])
+            filtered_hooks = []
+            for hook in hooks:
+                hook_id = hook.get("hook_id") or hook.get("id")
+                if hook_id and hook_id in instance_hook_ids:
+                    filtered_hooks.append(hook)
+            hooks = filtered_hooks
 
-            return {"success": True, "hooks": hooks, "count": len(hooks)}
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai", "list_dynamic_hooks", f"Failed to list hooks: {e}"
-            )
-            return {"success": False, "error": str(e)}
+        return {"success": True, "hooks": hooks, "count": len(hooks)}
 
     async def get_hook_details(self, hook_id: str) -> dict[str, Any]:
         """
@@ -162,16 +143,7 @@ class DynamicHookAIInterface:
         Returns:
             Dict with detailed hook information
         """
-        try:
-            hook_details = self.hook_system.get_hook_details(hook_id)
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai",
-                "get_hook_details",
-                f"Failed to get hook details: {e}",
-            )
-            return {"success": False, "error": str(e)}
-
+        hook_details = self.hook_system.get_hook_details(hook_id)
         if not hook_details:
             raise CallerError(f"Hook {hook_id} not found")
         return {"success": True, "hook": hook_details}
@@ -186,14 +158,7 @@ class DynamicHookAIInterface:
         Returns:
             Dict with removal status
         """
-        try:
-            success = await self.hook_system.remove_hook(hook_id)
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai", "remove_dynamic_hook", f"Failed to remove hook: {e}"
-            )
-            return {"success": False, "error": str(e)}
-
+        success = await self.hook_system.remove_hook(hook_id)
         if not success:
             raise CallerError(f"Hook {hook_id} not found")
         return {"success": True, "message": f"Removed hook {hook_id}"}
@@ -205,21 +170,10 @@ class DynamicHookAIInterface:
         Returns:
             Dict with request object documentation
         """
-        try:
-            return {
-                "success": True,
-                "documentation": (
-                    self.learning_system.get_request_object_documentation()
-                ),
-            }
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai",
-                "get_request_documentation",
-                f"Failed to get documentation: {e}",
-            )
-            return {"success": False, "error": str(e)}
+        return {
+            "success": True,
+            "documentation": self.learning_system.get_request_object_documentation(),
+        }
 
     def get_hook_examples(self) -> dict[str, Any]:
         """
@@ -228,17 +182,7 @@ class DynamicHookAIInterface:
         Returns:
             Dict with hook examples and explanations
         """
-        try:
-            return {
-                "success": True,
-                "examples": self.learning_system.get_hook_examples(),
-            }
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai", "get_hook_examples", f"Failed to get examples: {e}"
-            )
-            return {"success": False, "error": str(e)}
+        return {"success": True, "examples": self.learning_system.get_hook_examples()}
 
     def get_requirements_documentation(self) -> dict[str, Any]:
         """
@@ -247,19 +191,10 @@ class DynamicHookAIInterface:
         Returns:
             Dict with requirements documentation
         """
-        try:
-            return {
-                "success": True,
-                "documentation": self.learning_system.get_requirements_documentation(),
-            }
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai",
-                "get_requirements_documentation",
-                f"Failed to get requirements docs: {e}",
-            )
-            return {"success": False, "error": str(e)}
+        return {
+            "success": True,
+            "documentation": self.learning_system.get_requirements_documentation(),
+        }
 
     def get_common_patterns(self) -> dict[str, Any]:
         """
@@ -268,17 +203,7 @@ class DynamicHookAIInterface:
         Returns:
             Dict with common patterns
         """
-        try:
-            return {
-                "success": True,
-                "patterns": self.learning_system.get_common_patterns(),
-            }
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai", "get_common_patterns", f"Failed to get patterns: {e}"
-            )
-            return {"success": False, "error": str(e)}
+        return {"success": True, "patterns": self.learning_system.get_common_patterns()}
 
     def validate_hook_function(self, function_code: str) -> dict[str, Any]:
         """
@@ -290,17 +215,8 @@ class DynamicHookAIInterface:
         Returns:
             Dict with validation results
         """
-        try:
-            validation = self.learning_system.validate_hook_function(function_code)
-            return {"success": True, "validation": validation}
-
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai",
-                "validate_hook_function",
-                f"Failed to validate function: {e}",
-            )
-            return {"success": False, "error": str(e)}
+        validation = self.learning_system.validate_hook_function(function_code)
+        return {"success": True, "validation": validation}
 
     async def create_simple_hook(  # noqa: PLR0913  PERMANENT(function interface)
         self,
@@ -327,26 +243,12 @@ class DynamicHookAIInterface:
         """
         function_code = _simple_hook_code(action, target_url, custom_headers)
 
-        try:
-            requirements = {"url_pattern": url_pattern}
-
-            return await self.create_dynamic_hook(
-                name=name,
-                requirements=requirements,
-                function_code=function_code,
-                instance_ids=instance_ids,
-            )
-
-        except ToolError:
-            # T-9184: create_dynamic_hook's refusal, passed on and not flattened.
-            raise
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_ai",
-                "create_simple_hook",
-                f"Failed to create simple hook: {e}",
-            )
-            return {"success": False, "error": str(e)}
+        return await self.create_dynamic_hook(
+            name=name,
+            requirements={"url_pattern": url_pattern},
+            function_code=function_code,
+            instance_ids=instance_ids,
+        )
 
 
 dynamic_hook_ai = DynamicHookAIInterface()

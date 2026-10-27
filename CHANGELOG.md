@@ -15,6 +15,14 @@
 - `test_a_settle_that_never_happens_names_first_and_last_state_and_the_probes` failed on the macOS py3.13 release-gate runner with "2 probes, 1 unanswered" and a last state of `loadEnd` 0: it needed four probes inside a real 0.3 s deadline, i.e. two real 0.1 s sleeps plus overhead.
 - It and `test_wait_fixture_ready_names_the_state_it_last_saw` now run `wait_fixture_ready` on a fake clock that only its own `sleep` advances, so each sees exactly four probes and asserts that count. `tests/` only; no change under `src/`.
 
+### A bug of ours behind a dynamic-hook tool reaches the client as itself, not as a `{"success": False}` dict (T-9464)
+
+- `dynamic_hook_ai_interface.py` had ten `except Exception` blocks, each answering `{"success": False, "error": str(e)}`: a second error shape (DESIGN section 9, convention 2). After T-9431 let a bug of ours propagate out of `remove_hook` and the validator, this layer still turned it into a failure dict the client reads as a normal result. They back `create_dynamic_hook`, `create_simple_dynamic_hook`, `list_dynamic_hooks`, `get_dynamic_hook_details`, `remove_dynamic_hook`, `get_hook_documentation`, `get_hook_examples`, `get_hook_requirements_documentation`, `get_hook_common_patterns` and `validate_hook_function`.
+- All ten are removed (the module lost 150 lines and its `debug_logger` import, and gained 52). A `ToolError` from the hook system (an unarmable hook, T-9135) and a `CallerError` (T-9184) pass through as the same exception object; any other exception propagates as itself and a real MCP client reads it as an error result. The success dicts, the signatures and `tests/goldens/tool_surface.json` are unchanged; no golden moved.
+- `if`-guard returns in the file: none returned a `success: False` dict. The guards (invalid code, unknown hook id, unusable simple-hook input) already raise `CallerError`.
+- Tests written first in `tests/test_hook_tool_layer_propagates.py` (29 tests, one failure injected per tool): against the unchanged code 21 fail and 8 pass; after the change all 29 pass. Restoring one catch-all (`remove_dynamic_hook`, then `validate_hook_function`) makes 2 of them fail each time.
+- DESIGN section 9 no longer lists a remaining gap.
+
 ## 2.1.49
 
 ### A refusal of the caller's own input no longer opens a Sentry issue, even when the caller's own failure rides under it (T-9185)
