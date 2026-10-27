@@ -26,6 +26,14 @@ whose name is not a browser's). The one difference from ``identity_problem`` is
 deliberate and stays here as a thin check: it reads a missing pid or start time as
 "nothing to contradict" (right for a capture), and a kill must refuse both.
 
+When the ladder gives up (about 5 s after its terminate, which is all a REAP can spare)
+the pid is waited for once more, for :data:`KILL_EXIT_SECONDS`, with the same
+``wait_exit`` the heal used before it: Chrome on a host whose process teardown stalls
+(2026-10-27, Sentry STEALTH-CHROME-DEVTOOLS-MCP-EF) kept writing its log for ~15 s after
+the ladder had been refused, and left on its own. Only a pid still there after that is
+reported as left running. The ladder itself is untouched: its other callers (a close, a
+reap, a failed spawn) have their own, shorter budgets.
+
 After a kill the profile is asked once more who holds it (a lingering child would),
 for a few seconds, before the heal relaunches onto it.
 
@@ -50,6 +58,12 @@ from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.embedded.process_exit import Exited
 
 _COMPONENT = "forced_end"
+
+#: How long a browser the kill ladder could not end is waited for before it is called
+#: left running: the heal's own ``EXIT_WAIT_SECONDS`` (15 s, ``browser_health``) plus
+#: 10 s, since the one measured teardown stall outlasted the ladder by ~15 s. A
+#: ceiling, not a wait: a browser that has gone costs one psutil read, off the loop.
+KILL_EXIT_SECONDS = 25.0
 
 #: How long a killed browser's profile may still read as held (its children are
 #: going) before the heal is refused. A ceiling, not a wait.
@@ -95,13 +109,12 @@ def refusal(pid: int, entry: Entry, *, user_data_dir: str | None) -> str | None:
 
 def _end(
     pid: int, instance_id: str, stamped: Entry, kill: Callable[[int, str], bool]
-) -> str | None:
-    """The kill, on its thread, with the start time asked again the instant before."""
+) -> str | bool:
+    """The kill, on its thread, with the start time asked again the instant before:
+    the reason it did not run, else whether the ladder reports the pid gone."""
     if problem := freeze_capture.identity_problem(stamped, pid):
         return f"was NOT force-ended (changed before the kill: {problem})"
-    if not kill(pid, instance_id):
-        return f"could not be force-ended (the kill ladder left pid {pid} running)"
-    return None
+    return kill(pid, instance_id)
 
 
 async def _held_after(
@@ -145,8 +158,18 @@ async def run(  # noqa: PLR0913  PERMANENT(T-4686: one keyword per external effe
         _stamped(entry),
         kill or process_cleanup._kill_process_by_pid,
     )
-    if ended is not None:
+    if isinstance(ended, str):
         return ended
+    if not ended:
+        late = await wait_exit(pid, KILL_EXIT_SECONDS)
+        if not late.exited:
+            return f"could not be force-ended (the kill ladder left pid {pid} running)"
+        debug_logger.log_warning(
+            _COMPONENT,
+            "run",
+            f"{instance_id}: pid {pid} outlasted the kill ladder and was then seen to "
+            f"exit, inside a further {KILL_EXIT_SECONDS:.0f}s wait",
+        )
     debug_logger.log_warning(
         _COMPONENT,
         "run",

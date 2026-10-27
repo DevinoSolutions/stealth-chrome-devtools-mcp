@@ -496,6 +496,43 @@ def test_the_kill_ladder_logs_the_rung_that_ended_the_browser():
     ], f"the rung that ended the browser wrote nothing: {written!r}"
 
 
+def _ladder_lines(pid_gone: bool, monkeypatch) -> list[str]:
+    """The ``process_exit`` lines one ``terminate`` writes for a process whose pid
+    is, or is not, still on the machine once ``terminate()`` has returned."""
+    monkeypatch.setattr(process_exit.psutil, "pid_exists", lambda _pid: not pid_gone)
+    process = SimpleNamespace(
+        returncode=None, pid=4242, terminate=MagicMock(), kill=MagicMock()
+    )
+    before = len(debug_logger.get_debug_view_paginated().get("all_info") or [])
+
+    process_exit.terminate("wording-1", process, None, 1)
+
+    written = (debug_logger.get_debug_view_paginated().get("all_info") or [])[before:]
+    return [
+        entry["message"]
+        for entry in written
+        if entry.get("component") == "process_exit"
+        and entry.get("method") == "terminate_process"
+        and "wording-1" in entry.get("message", "")
+    ]
+
+
+def test_the_ladder_says_ended_only_for_a_process_it_saw_go(monkeypatch):
+    """T-9335: a ``terminate()`` that merely RETURNED was logged "ended ...
+    successfully" while Chrome was still tearing down for another ~15 s."""
+    (line,) = _ladder_lines(True, monkeypatch)
+
+    assert "ended browser with pid 4242" in line
+
+
+def test_the_ladder_says_what_it_did_for_a_process_still_up(monkeypatch):
+    (line,) = _ladder_lines(False, monkeypatch)
+
+    assert "ended" not in line and "successfully" not in line
+    assert "sent terminate_process" in line and "4242" in line
+    assert "not yet seen to exit" in line
+
+
 # ---------------------------------------------------------------------------
 # 7. The tool reports what the close did to the SEED (F-910, the lead's M3)
 # ---------------------------------------------------------------------------
