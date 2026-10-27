@@ -403,11 +403,17 @@ def _rung(
         if last:
             debug_logger.log_error("process_exit", action, err)
         return False
+    # The call RETURNING is not the browser going: Chrome tore down for ~15 s after
+    # a "successful" terminate (T-9335). "ended" is for a pid seen to be gone.
+    seen_gone = pid is not None and not psutil.pid_exists(pid)
     debug_logger.log_info(
         "process_exit",
         action,
         f"{instance_id}: ended browser with pid {pid} successfully on "
-        f"attempt {attempt + 1} ({action})",
+        f"attempt {attempt + 1} ({action})"
+        if seen_gone
+        else f"{instance_id}: sent {action} to browser pid {pid} on attempt "
+        f"{attempt + 1}; not yet seen to exit",
     )
     return True
 
