@@ -41,7 +41,7 @@ import json
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError, _require_tab
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, _require_tab
 
 SECTION = "element-extraction"
 
@@ -346,7 +346,9 @@ async def clone_element_complete(
         try:
             parsed_options = json.loads(extraction_options)
         except json.JSONDecodeError:
-            raise ToolError(f"Invalid JSON in extraction_options: {extraction_options}")
+            raise CallerError(
+                f"Invalid JSON in extraction_options: {extraction_options}"
+            )
     tab = await _require_tab(rt.browser_manager, instance_id)
     result = await rt._with_cdp_timeout(
         rt.cdp_element_cloner.extract_complete_element(

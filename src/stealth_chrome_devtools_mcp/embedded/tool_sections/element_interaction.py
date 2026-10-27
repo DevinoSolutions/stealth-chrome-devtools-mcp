@@ -43,7 +43,11 @@ from stealth_chrome_devtools_mcp.embedded.path_confinement import (
     precreate_private,
     refuse_secret_path,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError, _require_tab
+from stealth_chrome_devtools_mcp.embedded.tool_errors import (
+    CallerError,
+    ToolError,
+    _require_tab,
+)
 
 SECTION = "element-interaction"
 
@@ -289,7 +293,7 @@ async def select_option(
         try:
             converted_index = int(index)
         except (ValueError, TypeError):
-            raise ToolError(f"Invalid index value: {index}. Must be a number.")
+            raise CallerError(f"Invalid index value: {index}. Must be a number.")
 
     return await rt._with_cdp_timeout(
         rt.dom_handler.select_option(tab, selector, value, text, converted_index),
@@ -455,6 +459,8 @@ async def execute_script(
             instance_id=instance_id,
         )
         return {"success": True, "result": result, "error": None}
+    except ToolError:
+        raise
     except Exception as e:
         raise ToolError(str(e))
 

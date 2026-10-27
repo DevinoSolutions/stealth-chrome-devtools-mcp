@@ -37,8 +37,8 @@ replied to the caller with the validation message, and the two teardown races
 belong to CPython and to nodriver. What they cost is the only thing Sentry is
 for — an issue list a maintainer can read.
 
-The five classes
-----------------
+The six classes
+---------------
 Each is a NAME and ONE rule, and the rule is applied to both of the shapes an
 event can arrive in (see "one rule, two paths" below):
 
@@ -129,6 +129,17 @@ event can arrive in (see "one rule, two paths" below):
     migration, because it costs one row and is still the right answer if a
     release logs a caller's typo with its exception again.
 
+``caller-error``
+    The OUTERMOST link is ``tool_errors.CallerError`` (T-9185), whatever lies
+    under it. ``error-convention`` is deliberately blind to a foreign link
+    under a ``ToolError`` — an ``AttributeError`` beneath one is a bug worth
+    reading — but a refusal of the caller's own input is raised with the
+    caller's own failure in flight (a hook's code raising ``NameError`` as it
+    loads, a ``JSONDecodeError`` on ``extraction_options``), so that rule left it
+    shipping. ``CallerError`` is how a raise site says "the cause is the
+    caller's"; the rule trusts the site and reads only the outermost link, so a
+    ``CallerError`` an other exception was raised OVER is not this class.
+
 One rule, two paths
 -------------------
 ``before_send`` may or may not be handed the live exception: the logging
@@ -204,6 +215,7 @@ CLIENT_DISCONNECT = "client-disconnect"
 PROACTOR_TEARDOWN = "proactor-teardown"
 NODRIVER_DEAD_BROWSER = "nodriver-dead-browser"
 CALLER_INPUT = "caller-input"
+CALLER_ERROR = "caller-error"
 
 #: What the SDK writes for a class that lives in ``builtins``: nothing at all.
 #: Mirrors ``sentry_sdk.utils.get_type_module`` EXACTLY — three names, and
@@ -294,6 +306,14 @@ class Kind:
 OURS = Kind(
     frozenset({"ToolError", "InstanceNotFoundError"}),
     frozenset({"stealth_chrome_devtools_mcp"}),
+)
+
+#: ``tool_errors.CallerError``: our refusal of the caller's own input (T-9185).
+#: Name AND module, on both paths, like every kind but :data:`OURS`: it is a
+#: final class (its docstring says never subclass it), so there is no subclass
+#: for ``isinstance`` to cover that the serialized path could not also see.
+CALLER_REFUSAL = Kind(
+    frozenset({"CallerError"}), frozenset({"stealth_chrome_devtools_mcp"})
 )
 
 #: What a bounded operation is made of: ``asyncio.wait_for`` cancels the
@@ -401,7 +421,7 @@ def classify(
 
 
 # ---------------------------------------------------------------------------
-# The five rules
+# The six rules
 # ---------------------------------------------------------------------------
 def _error_convention(facts: EventFacts) -> bool:
     """Ours as the REPORTED exception, over nothing but ours and budget links."""
@@ -455,16 +475,32 @@ def _caller_input(facts: EventFacts) -> bool:
     )
 
 
-#: The taxonomy, in the order it is asked. Order is not load-bearing — the five
-#: rules are disjoint by construction (each names either a different exception
-#: kind or a different logger) — but a table is what makes them ENUMERABLE, so
-#: a sixth class is one row and cannot be a sixth branch somewhere else.
+def _caller_error(facts: EventFacts) -> bool:
+    """Our refusal of the caller's input as the REPORTED exception, over anything.
+
+    Unlike :func:`_error_convention` the tail is not inspected, and that is the
+    whole rule: ``CallerError`` is raised where the caller's input caused the
+    failure, so what it was raised FROM (a hook's ``NameError``, a
+    ``JSONDecodeError``) is the caller's failure too. Only the outermost link
+    decides, which keeps a ``CallerError`` buried UNDER another exception (one of
+    ours raised while handling it) out of this class.
+    """
+    return bool(facts.links) and CALLER_REFUSAL.matches(facts.links[0])
+
+
+#: The taxonomy, in the order it is asked. Order only decides which NAME a drop
+#: is attributed to — a bare ``CallerError`` is both ``error-convention`` and
+#: ``caller-error``, and the earlier row names it; the other rules are disjoint by
+#: construction (each names either a different exception kind or a different
+#: logger) — and a table is what makes them ENUMERABLE, so
+#: a seventh class is one row and cannot be a seventh branch somewhere else.
 RULES: "tuple[tuple[str, Callable[[EventFacts], bool]], ...]" = (
     (ERROR_CONVENTION, _error_convention),
     (CLIENT_DISCONNECT, _client_disconnect),
     (PROACTOR_TEARDOWN, _proactor_teardown),
     (NODRIVER_DEAD_BROWSER, _nodriver_dead_browser),
     (CALLER_INPUT, _caller_input),
+    (CALLER_ERROR, _caller_error),
 )
 
 

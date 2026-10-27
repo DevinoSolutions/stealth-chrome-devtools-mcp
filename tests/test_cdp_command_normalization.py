@@ -27,7 +27,7 @@ from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     build_cdp_call,
     resolve_cdp_command,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
 
 VIEWPORT = {
     "width": 390,
@@ -286,5 +286,5 @@ async def test_an_unknown_param_names_the_ones_the_command_takes(monkeypatch):
     assert result["success"] is False
     assert "awaitPromis" in result["error"]
     assert "await_promise" in result["error"], "must list what the command takes"
-    assert [type(error) for error in reported] == [ToolError]
+    assert [type(error) for error in reported] == [CallerError]
     assert "evaluate" not in tab.send_calls, "a bad call must not reach the browser"

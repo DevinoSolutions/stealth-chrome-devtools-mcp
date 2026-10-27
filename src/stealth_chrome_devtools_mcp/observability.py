@@ -43,8 +43,9 @@ which is a slower way of turning reporting off.
 The same hook is also the one place that decides an event is not worth sending
 — see :func:`_is_expected_tool_failure`. WHICH events those are is not decided
 here: the taxonomy lives in :mod:`stealth_chrome_devtools_mcp.expected_events`
-(F-887), whose five named classes cover the error convention doing its job, a
-client that went away mid-request, a caller's own bad parameter, and the two
+(F-887), whose six named classes cover the error convention doing its job, a
+client that went away mid-request, a caller's own bad parameter, a refusal of
+the caller's input (``tool_errors.CallerError``), and the two
 teardown races CPython and nodriver log on our behalf. This module owns the two
 shapes an event can arrive in — the live exception behind a ``hint`` and the
 serialized payload — and hands both to that one rule set.
@@ -524,7 +525,7 @@ def _is_expected_tool_failure(
     an ERROR event with ``handled: yes``. The top issue in the project's Sentry
     was 205 events of an agent passing an illegal script to ``execute_script``.
 
-    F-887 widened it to the five classes :mod:`expected_events` names, because
+    F-887 widened it to the six classes :mod:`expected_events` names, because
     that first rule missed the chains this product actually produces — 6.5k
     client disconnects, 466 caller-parameter validation errors, a bounded
     operation's own ``TimeoutError`` under its ``ToolError``. The name is the one
@@ -616,7 +617,7 @@ def _scrub_event(
     outgoing event is a defect). It does two things in order:
 
     0. an event that is only this product working as designed is dropped — see
-       :func:`_is_expected_tool_failure` and the five named classes in
+       :func:`_is_expected_tool_failure` and the six named classes in
        :mod:`expected_events` — and so is a foreign interpreter's own crash
        caught by our process-global hook, see :func:`_is_foreign_hook_crash`;
     1. everything that survives is scrubbed.

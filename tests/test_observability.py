@@ -283,9 +283,9 @@ class TestDiagnosticOracle:
         exc = await _failure(
             w15_server, "select_option", instance_id="i1", selector="#s", index="abc"
         )
-        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
-        assert type(exc) is ToolError
+        assert type(exc) is CallerError  # T-9185: the caller's own input
         assert str(exc) == MSG_INVALID_INDEX.format(index="abc")
 
     @pytest.mark.asyncio
@@ -297,9 +297,9 @@ class TestDiagnosticOracle:
             selector="#s",
             extraction_options="{oops",
         )
-        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
-        assert type(exc) is ToolError
+        assert type(exc) is CallerError  # T-9185: the caller's own input
         assert str(exc) == MSG_INVALID_JSON_OPTIONS.format(value="{oops")
 
     @pytest.mark.asyncio

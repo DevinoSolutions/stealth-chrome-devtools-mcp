@@ -8,6 +8,8 @@ this module makes it the ONLY one (ADDENDUM conventions lens: one way, no second
 way). The former dict/json instance-not-found shapes are converted to raises.
 
 * :class:`ToolError` — base for any tool failure surfaced to the client.
+* :class:`CallerError` — a ``ToolError`` for a refusal of the CALLER's own input;
+  the one type Sentry's ``caller-error`` class keys on (T-9185).
 * :class:`InstanceNotFoundError` — the single instance-not-found shape
   (message ``Instance not found: {instance_id}``, built by
   :func:`instance_not_found`, which adds how to relaunch a named session whose
@@ -46,6 +48,27 @@ if TYPE_CHECKING:
 class ToolError(Exception):
     """A tool failure surfaced to the MCP client as a raised error — the one
     error-report convention, replacing the former per-tool result/error dicts."""
+
+
+class CallerError(ToolError):
+    """A tool refused because the CALLER's own input is wrong: a script that
+    throws, a URL that will not load, JSON that does not parse, a parameter of the
+    wrong shape. The one subclass for it (T-9185), and a ``ToolError`` still, so
+    the client receives the same error text it always did.
+
+    What it changes is Sentry, and only Sentry: ``expected_events``'
+    ``caller-error`` class drops an event whose reported exception is this type
+    **whatever sits under it in the chain**. ``error-convention`` cannot do that
+    for a plain ``ToolError``, because it tolerates only ours and budget links
+    (a ``ToolError`` over an ``AttributeError`` is a bug to read) -- yet a refusal
+    of the caller's input is routinely raised with the caller's own failure in
+    flight (a hook's ``NameError``, a ``JSONDecodeError``), and that foreign
+    link kept the refusal shipping as an issue.
+
+    Raise it ONLY where the cause of the failure is the caller's input; when the
+    browser, the page or our own code failed, raise ``ToolError``, which stays a
+    Sentry issue. Never subclass it: the serialized-payload path matches by name
+    and module, so a subclass would be dropped live and shipped on replay."""
 
 
 class InstanceNotFoundError(ToolError):
@@ -211,7 +234,7 @@ def _require_js_value(value: object) -> object:
         return value
     exception = getattr(value, "exception", None)
     detail = getattr(exception, "description", None) or getattr(value, "text", None)
-    raise ToolError(f"Script raised an exception: {_clamped(detail)}")
+    raise CallerError(f"Script raised an exception: {_clamped(detail)}")
 
 
 def _require_navigation_ok(target: str, result: object) -> object:
@@ -248,7 +271,7 @@ def _require_navigation_ok(target: str, result: object) -> object:
             else "The host may not resolve, the connection may have been "
             "refused, or the TLS handshake may have failed."
         )
-        raise ToolError(
+        raise CallerError(
             f"Navigation to {target} failed: Chrome loaded an error page "
             f"({final_url}). {cause}"
         )

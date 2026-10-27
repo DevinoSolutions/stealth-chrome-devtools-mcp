@@ -692,6 +692,16 @@ guard helpers `tool_errors._require_tab` / `_require_browser` raise on a missing
 instance and take `browser_manager` as a parameter (so the leaf module never imports
 `server`).
 
+**`CallerError` (T-9185).** One `ToolError` subclass says "the CALLER's own input is
+wrong" — a script that throws, a URL that will not load, JSON that does not parse, a
+parameter of the wrong shape. The client receives the same error text; what changes is
+Sentry, where `expected_events`' `caller-error` class drops it by type whatever it was
+raised over. `error-convention` cannot, because it tolerates only our own and budget
+links under a `ToolError` (a `ToolError` over an `AttributeError` is a bug to read), and
+a caller's refusal is often raised with the caller's own failure in flight. Raise it
+only where the cause is the caller's input; a browser, page or product failure stays a
+plain `ToolError` and stays a Sentry issue. It is never subclassed.
+
 **Named KEEP contracts** — here the returned dict/value *is* the contract; converting
 it to a raise would be the defect:
 

@@ -11,6 +11,11 @@
 - The sandbox builtins are unchanged: they are not a security boundary (see the `dynamic_hook_model.py` docstring), and adding names would read as one.
 - `tests/test_hook_code_errors.py` (13 tests, built from nodriver's own `RequestPaused.from_json`, every wait bounded by `asyncio.wait_for`) was written first and was RED. Two pins in `tests/test_dynamic_hook_system.py` that used a raising hook to reach the fallback path now expect that hook error as a WARNING, and its `TestProcess` class became `TestRunningTheFunction` (same cases through `_process_request_hooks`) plus `TestCodeThatDoesNotLoadIsRefused`. 17 clause mutations by runtime rebinding are all killed.
 
+### A refusal of the caller's own input no longer opens a Sentry issue, even when the caller's own failure rides under it (T-9185)
+
+- `tool_errors.CallerError` is a `ToolError` for "the CALLER's input is wrong", and `expected_events` has a sixth class, `caller-error`, that drops an event whose reported exception is one, whatever is under it in the chain. The client receives the same error text as before. The existing `error-convention` class tolerates only our own and budget links under a `ToolError`, so a refusal raised while the caller's own exception was in flight (a hook whose code raises `NameError` as it loads, STEALTH-CHROME-DEVTOOLS-MCP-EC; a `JSONDecodeError`) shipped as an ERROR issue. A product `ToolError` over the same cause still ships.
+- Converted, being the caller's input and nothing else: a script that throws or whose args are not JSON (`_require_js_value`, `script_evaluation`), a navigation target Chrome could not load (`_require_navigation_ok`), `select_option`'s non-numeric `index`, the two non-JSON `extraction_options` refusals, a CDP call's params of the wrong shape or unknown (`cdp_params.typed`, `build_cdp_call`), and `path_confinement`'s unresolvable path and refused overwrite. `execute_script` now passes a `ToolError` through instead of re-wrapping its text, so the class survives it. Every other `ToolError` site is untouched.
+
 ### Dropped the unused jsbeautifier dependency (T-8941)
 
 - `jsbeautifier` was pinned in `pyproject.toml` but nothing in `src/`, `tools/` or `tests/` imports it; the pin and its lock entries are removed. No behaviour changes.
