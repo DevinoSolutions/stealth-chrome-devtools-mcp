@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.49
 
 ### A refusal of the caller's own input no longer opens a Sentry issue, even when the caller's own failure rides under it (T-9185)
 
@@ -13,6 +13,14 @@
 - Converted the same way, keeping their text: `get_dynamic_hook_details` and `remove_dynamic_hook` for an unknown hook id (the other hooks stay), and `create_simple_dynamic_hook` for a missing `target_url` or `custom_headers` or an unknown action. `create_simple_dynamic_hook` builds its code from the caller's `target_url`, so a bad one reaches the validator; its catch-all no longer flattens that error into a dict. The catch-all `except Exception` returns and the documentation getters are unchanged.
 - Known gaps, not changed here: `validate_hook_function` and `DynamicHookSystem.remove_hook` catch every `Exception` (a bug of ours becomes "Parse error" / "not found"); a follow-up is filed.
 - DESIGN section 9 now says `cdp_params.typed` converts four exception types and `build_cdp_call` only `TypeError`.
+
+### The heal waits for a Chrome that is still tearing down before it calls it left running (T-9335)
+
+- Sentry STEALTH-CHROME-DEVTOOLS-MCP-EF: two health probes failed during a host process-teardown stall, so `browser_health.heal` ran, and its last rung (`forced_end`) reached `process_cleanup._kill_process_by_pid`, which waits ~3 s after terminate and ~2 s after kill. Chrome was still tearing down (its log was written for another ~15 s) and exited on its own, but the heal had already raised `HungBrowserError` ("the kill ladder left pid N running; not relaunching onto a profile it still holds") and left the browser closed.
+- After the ladder gives up, `forced_end.run` now waits for the pid to be seen to exit, with the same `wait_exit` it used before the kill, for `forced_end.KILL_EXIT_SECONDS` (25 s: the heal's own 15 s exit wait plus 10 s). It polls on a worker thread, never the event loop. A pid still there after the budget is reported exactly as before.
+- The ladder itself is unchanged, so `close_instance`, shutdown and startup recovery, `spawn_leak` and `kill_browser_process` keep their short budgets; only the heal waits longer. "Not relaunching onto a profile it still holds" is unchanged.
+- `process_exit` logged `ended browser with pid N successfully (terminate_process)` when `terminate()` merely returned. It now says "ended" only for a pid it saw gone, and otherwise `sent terminate_process to browser pid N ...; not yet seen to exit`.
+- `tests/test_forced_end.py` (8 tests: a browser that goes 8 s after the ladder is ended, one alive past the budget is left running, the wait is bounded by the one constant, no wait on a refusal or a successful kill, and the real `wait_for_exit_async` over a fake psutil neither blocks the loop nor outlasts its budget) and two wording tests in `tests/test_close_instance_offload.py` were written first; 6 of the 10 were RED.
 
 ## 2.1.48
 
