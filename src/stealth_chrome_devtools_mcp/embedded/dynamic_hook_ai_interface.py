@@ -43,16 +43,14 @@ class DynamicHookAIInterface:
         Returns:
             Dict with hook_id and status
         """
-        try:
-            validation = self.learning_system.validate_hook_function(function_code)
-            if not validation["valid"]:
-                return {
-                    "success": False,
-                    "error": "Invalid function code",
-                    "issues": validation["issues"],
-                    "warnings": validation["warnings"],
-                }
+        validation = self.learning_system.validate_hook_function(function_code)
+        if not validation["valid"]:
+            detail = "; ".join(validation["issues"])
+            if validation["warnings"]:
+                detail += f" (warnings: {'; '.join(validation['warnings'])})"
+            raise ToolError(f"Invalid function code: {detail}")
 
+        try:
             hook_id = await self.hook_system.create_hook(
                 name=name,
                 requirements=requirements,
@@ -340,6 +338,9 @@ def process_request(request):
                 instance_ids=instance_ids,
             )
 
+        except ToolError:
+            # T-9184: create_dynamic_hook's refusal, passed on and not flattened.
+            raise
         except Exception as e:
             debug_logger.log_error(
                 "dynamic_hook_ai",
