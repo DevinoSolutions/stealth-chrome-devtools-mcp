@@ -13,6 +13,20 @@ Chrome accepts is the one its own settings page makes, so
 :func:`ensure_session_restore` opens ``chrome://settings`` and calls
 ``chrome.settingsPrivate.setPref``.
 
+That exchange is needed ONCE per profile and is off the spawn's own path (T-9479).
+Chrome writes the value it accepted to the profile (``Default/Secure Preferences``,
+measured on Windows; ``Preferences`` where nothing is MAC-tracked), so a profile that
+already says ``1`` is skipped with no tab at all, once Chrome has had time to say
+whether it believes the file (below), and the exchange runs as a background task
+(:func:`start_session_restore`) that a close waits for
+(:func:`settle_session_restore`). It used to run inside the spawn: on the
+v2.1.49 gate's 4-vCPU Windows runner, with four Chromes cold-starting at once, its
+first stage (``Target.createTarget``) starved for 17 s, was cut off, and left the pref
+unset, so that named session lost its session cookies at its close. The launch switch
+``--restore-last-session`` was measured as the alternative and rejected (Chrome
+155): with the start page on the command line (F-936) the session cookie survived
+none of five headless relaunches, and without a start page one of five still lost it.
+
 The pref has a side effect: Chrome reopens the previous run's tabs, and a
 profile that was driven all day comes back with dozens. Chrome decides session
 cookie restore from the pref, not from the ``Sessions`` files (measured: the
@@ -73,15 +87,19 @@ import contextlib
 import json
 import shutil
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from nodriver import Browser
 
-from stealth_chrome_devtools_mcp.embedded import profile_lock, tab_open
+from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+if TYPE_CHECKING:
+    from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
 
 
 class SettingsTab(Protocol):
@@ -124,29 +142,48 @@ _DISABLE_FEATURES_PREFIX = "--disable-features="
 RESTORE_PREF = "session.restore_on_startup"
 RESTORE_CONTINUE = 1
 
-#: Upper bound on the whole settings-page exchange. ``chrome://settings`` is the
-#: slowest page a spawn touches; a hang here must cost seconds, not the spawn.
-#:
-#: 20 s, and there is NO 3-vCPU measurement of the exchange behind it. What is
-#: known (F-995): on the 3-vCPU macOS gate cell, three named spawns in flight at
-#: once, Chrome 155, one or two of the three overran the previous 8 s in each of
-#: runs 38853069247, 38897999560 and 38898031227, while the same spawns on the
-#: 5-vCPU cell (runs 38882922648, 38890560391) finished the whole wave in 7.7 s,
-#: none overrunning — so the exchange is slow under contention rather than hung.
-#: How slow is not known; if the warning below still fires, READ THE STAGE IT
-#: NAMES (it says which await stalled) before moving this number. A timeout is
-#: not free: the pref stays unset and a named session's session cookies do not
-#: survive its close. It is ONE deadline for the exchange and the close of its
-#: tab together, so the worst this module costs the spawn's post-launch phase
-#: (``spawn_budget.POST_LAUNCH_BUDGET_SECONDS``, shared with the rotation guard,
-#: the version reconcile, the tab overrides and window sizing) is this number,
-#: not twice it.
-PREF_TIMEOUT_SECONDS = 20.0
+#: Upper bound on the whole settings-page exchange. It runs OFF the spawn's path
+#: (T-9479), so this number no longer costs a spawn anything: it only has to end a
+#: task whose browser stopped answering, and it is long enough that a Chrome
+#: starved by its neighbours (F-995: 3-vCPU macOS cells, three named spawns at once,
+#: the 8 s then in force overrun in three runs; the 17 s of v2.1.49's Windows gate
+#: with four Chromes cold-starting) finishes the exchange instead of being cut off.
+#: A timeout is still not free: the pref stays unset and a named session's session
+#: cookies do not survive its close, which is why the warning below names the stage
+#: that stalled. It is ONE deadline for the exchange and the close of its tab
+#: together.
+PREF_TIMEOUT_SECONDS = 60.0
+
+#: What a cancelled exchange is given to close its settings tab. A close waits for
+#: an exchange as long as the exchange itself may take (``PREF_TIMEOUT_SECONDS``)
+#: plus this, so it never gives up on one that is about to finish.
+_CANCEL_GRACE_SECONDS = 2.0
+
+#: How long after a launch the pref FILE is not evidence of the live pref. A profile
+#: whose MAC Chrome rejects (restored from another machine or OS user) still has
+#: ``restore_on_startup: 1`` in ``Secure Preferences`` while the live value is 5:
+#: Chrome resets it in memory at load and rewrites the file about 10 s later
+#: (measured, review of T-9479: 10.3 s). So a file that says 1 is believed only after
+#: this long, read again; a close that comes sooner does not wait it out, it runs
+#: the exchange, which reads the live value.
+FILE_SETTLE_SECONDS = 20.0
+
+#: The kill ladder a CANCELLED close runs on a browser (``close_instance``'s own).
+_KILL_RETRIES = 3
+
+#: Where :func:`start_session_restore` keeps its state: on the browser it belongs to,
+#: which is what ``tab_open`` does with its per-browser state, so it lives and dies
+#: with that browser and a second registry of tasks is not needed.
+_STATE_ATTR = "_session_restore_state"
 
 #: The fraction of ``PREF_TIMEOUT_SECONDS`` held back for closing the settings
 #: tab when the exchange itself runs out of time. A close is one CDP call and is
 #: normally instant; it only needs enough to be tried.
 TAB_CLOSE_SHARE = 0.15
+
+#: The files under a profile's ``Default`` that can hold the pref, in the order
+#: Chrome trusts them.
+_PREFS_FILES = ("Secure Preferences", "Preferences")
 
 #: Chrome's saved-tabs directories under a profile's ``Default``. Not a login.
 SAVED_TABS_DIRS = ("Sessions", "Sessions_Encrypted")
@@ -218,17 +255,22 @@ def protect_logins(args: list[str]) -> list[str]:
 
 
 def _pref_is_continue(user_data_dir: str) -> bool:
-    """Whether the profile's own ``Preferences`` already says
-    ``session.restore_on_startup == 1``. False when it cannot be read."""
-    try:
-        prefs = json.loads(
-            (Path(user_data_dir) / "Default" / "Preferences").read_text(
-                encoding="utf-8"
+    """Whether the profile on disk already says ``session.restore_on_startup == 1``.
+    False when it cannot be read.
+
+    Chrome keeps a MAC-tracked pref in ``Default/Secure Preferences`` where it
+    tracks them (Windows, macOS; measured on Chrome 155: the value is there and
+    ``Preferences`` has no ``session`` key at all) and in ``Preferences`` where it
+    does not, so the first file that holds the key decides."""
+    for name in _PREFS_FILES:
+        try:
+            prefs = json.loads(
+                (Path(user_data_dir) / "Default" / name).read_text(encoding="utf-8")
             )
-        )
-        return prefs["session"][RESTORE_PREF.split(".", 1)[1]] == RESTORE_CONTINUE
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+            return prefs["session"][RESTORE_PREF.split(".", 1)[1]] == RESTORE_CONTINUE
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return False
 
 
 def remove_saved_tabs(user_data_dir: str | None) -> list[str]:
@@ -284,6 +326,7 @@ async def _set_restore_pref(
     *stage* names the await it is in, so a timeout can say where it stalled."""
     stage.append("opening the settings tab")
     tab = await tab_open.open_tab(browser, "about:blank")
+    tab_open.mark_internal(browser, tab)
     tab_box.append(tab)
     stage.append("loading chrome://settings")
     await tab.get("chrome://settings")
@@ -310,16 +353,18 @@ async def _set_restore_pref(
 
 async def ensure_session_restore(browser: Browser) -> bool:
     """Set ``session.restore_on_startup`` to ``1`` through ``chrome://settings``
-    and report whether it is ``1`` afterwards. Idempotent: it reads first and
-    writes only when the value differs. Never raises, never takes longer than
+    and report whether it is ``1`` afterwards. It reads the LIVE value, which the
+    profile's file may not be telling the truth about (``FILE_SETTLE_SECONDS``).
+    Idempotent: it reads first and writes only when the value differs. Never
+    raises, never takes longer than
     ``PREF_TIMEOUT_SECONDS`` IN TOTAL (a CDP await that never resolves is not an
     exception), and always closes the settings tab it opened.
 
     One deadline covers the exchange AND the close of its tab: the exchange gets
     ``1 - TAB_CLOSE_SHARE`` of it, and the close gets whatever is left, so a
     stuck exchange followed by a stuck close still costs one bound and not two
-    (F-995: this runs inside the spawn's post-launch phase, whose own budget
-    turns an overrun into a failed spawn)."""
+    (F-995: this once ran inside the spawn's post-launch phase, whose own budget
+    turned an overrun into a failed spawn)."""
     if get_settings().no_persist_session_cookies:
         return False
     tab_box: list[SettingsTab] = []
@@ -328,13 +373,13 @@ async def ensure_session_restore(browser: Browser) -> bool:
     deadline = loop.time() + PREF_TIMEOUT_SECONDS
     close_share = PREF_TIMEOUT_SECONDS * TAB_CLOSE_SHARE
     exchange_bound = PREF_TIMEOUT_SECONDS - close_share
-    timed_out = False
+    cut_short = False
     try:
         return await asyncio.wait_for(
             _set_restore_pref(browser, tab_box, stage), exchange_bound
         )
     except TimeoutError:
-        timed_out = True
+        cut_short = True
         where = stage[-1] if stage else "starting"
         debug_logger.log_warning(
             "login_persistence",
@@ -348,6 +393,9 @@ async def ensure_session_restore(browser: Browser) -> bool:
             "ensure_session_restore",
             f"could not set {RESTORE_PREF}: {err}",
         )
+    except asyncio.CancelledError:
+        cut_short = True  # a close gave up on us: the tab still gets its share
+        raise
     finally:
         for tab in tab_box:
             # An exchange that ran out of time has spent exactly its own bound,
@@ -357,7 +405,7 @@ async def ensure_session_restore(browser: Browser) -> bool:
             # ended early leaves the rest of the deadline, never less than the
             # share, because ``wait_for`` refuses to try a bound of zero.
             close_bound = (
-                close_share if timed_out else max(deadline - loop.time(), close_share)
+                close_share if cut_short else max(deadline - loop.time(), close_share)
             )
             try:
                 await asyncio.wait_for(tab.close(), close_bound)
@@ -368,3 +416,88 @@ async def ensure_session_restore(browser: Browser) -> bool:
                     f"could not close the settings tab: {err!r}",
                 )
     return False
+
+
+@dataclass(eq=False)
+class _Pending:
+    """One browser's exchange: its task, and the signal that its close has come."""
+
+    task: asyncio.Task[bool]
+    closing: asyncio.Event
+
+
+async def _keep_session_restore(
+    browser: Browser, user_data_dir: str, closing: asyncio.Event
+) -> bool:
+    """The task: believe the profile's file only when Chrome has had time to
+    contradict it (``FILE_SETTLE_SECONDS``), otherwise run the exchange. A close
+    that arrives first sets *closing*, which ends the wait early and means the
+    exchange, because the file is not yet evidence."""
+    if not get_settings().no_persist_session_cookies and _pref_is_continue(
+        user_data_dir
+    ):
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(closing.wait(), FILE_SETTLE_SECONDS)
+        if not closing.is_set() and _pref_is_continue(user_data_dir):
+            return True
+    return await ensure_session_restore(browser)
+
+
+def start_session_restore(browser: Browser, options: "BrowserOptions") -> None:
+    """Begin keeping ``session.restore_on_startup`` at ``1`` for a spawned or
+    re-attached browser WITHOUT making the caller wait for it (T-9479). Only a
+    persistent profile the caller named has anything to keep: a clone is
+    disposable, and an unnamed spawn is a clone.
+
+    The state is kept on *browser*, so :func:`settle_session_restore` finds it and
+    the task cannot be garbage-collected mid-run (RUF006)."""
+    if not options.user_data_dir or options.auto_clone:
+        return
+    closing = asyncio.Event()
+    task = asyncio.create_task(
+        _keep_session_restore(browser, options.user_data_dir, closing)
+    )
+    setattr(browser, _STATE_ATTR, _Pending(task, closing))
+
+
+async def settle_session_restore(browser: Browser) -> None:
+    """Before a close ends *browser*: let the pending exchange finish, so the pref
+    is in place before the profile's last shutdown. It waits as long as the
+    exchange may itself take, then cancels it (it closes its own settings tab) and
+    goes on. Call it BEFORE the connection is marked closed, because the exchange
+    needs the connection. No-op when nothing is pending.
+
+    **A close that is cancelled while it waits still ends the browser**, the way
+    ``process_exit.settle``'s cancelled grace does: the instance is already
+    claimed, so nothing else would, and a browser left behind is one this backend
+    no longer knows. The exchange is cancelled, the connection marked closed, the
+    process ended, and the cancellation re-raised."""
+    state = getattr(browser, _STATE_ATTR, None)
+    if not isinstance(state, _Pending) or state.task.done():
+        return
+    state.closing.set()
+    try:
+        _, pending = await asyncio.wait(
+            {state.task}, timeout=PREF_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS
+        )
+    except asyncio.CancelledError:
+        state.task.cancel()
+        tab_open.mark_closed(browser)
+        process_exit.terminate(
+            "settle_session_restore",
+            getattr(browser, "_process", None),
+            getattr(browser, "_process_pid", None),
+            _KILL_RETRIES,
+        )
+        raise
+    if not pending:
+        return
+    state.task.cancel()
+    await asyncio.wait({state.task}, timeout=_CANCEL_GRACE_SECONDS)
+    debug_logger.log_warning(
+        "login_persistence",
+        "settle_session_restore",
+        f"{RESTORE_PREF} was still being set after "
+        f"{PREF_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS:g}s; cancelled it to close "
+        "the browser, so this profile's session cookies may not survive the close",
+    )

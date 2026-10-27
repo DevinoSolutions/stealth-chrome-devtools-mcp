@@ -453,6 +453,44 @@ machine, or another OS user: anything that could reach the port could `initializ
   probe. It does nothing about the same user's own processes, which can read the file and the profiles. `--host 0.0.0.0` remains the
   operator's decision. `--allowed-host NAME` (repeatable) is the explicit opt-in for an extra Host name a reverse proxy uses; `*` is refused.
 
+### 2.11 A named spawn never waits on the session-cookie pref (T-9479)
+
+A named session keeps its **session cookies** (Apple ID, Xero, ...) across a close only if Chrome's pref
+`session.restore_on_startup` is `1` (F-937). The pref is MAC-protected, so the one write Chrome accepts is its own settings
+page's: `login_persistence.ensure_session_restore` opens `chrome://settings` and calls `chrome.settingsPrivate.setPref`.
+That used to run INSIDE the spawn's post-launch phase, and under load it is the first thing to starve: the v2.1.49 gate's
+4-vCPU Windows runner, four Chromes cold-starting, spent 17 s in its first await (`Target.createTarget`), was cut off at the
+bound, and left the pref unset, so that named session would have lost its session cookies at its close (F-995 had already
+moved the bound from 8 s to 20 s for the same reason on 3-vCPU macOS cells).
+
+* **Once per profile, not once per spawn, and the file is not believed at once.** Chrome writes the value it accepted to the
+  profile itself: `Default/Secure Preferences` (measured on Windows, Chrome 155: the key is there and `Preferences` has no
+  `session` key), `Default/Preferences` where nothing is MAC-tracked; `_pref_is_continue` reads them in that order, and reading is
+  not the F-937 write that Chrome reverts. But a profile whose MAC Chrome rejects (restored from another machine or OS user) keeps
+  saying `1` in the file for about 10 s (measured, 10.3 s) while the LIVE pref is 5, then Chrome rewrites the file without the
+  key. So the task believes a file that says `1` only after `FILE_SETTLE_SECONDS` (20 s), read again; a key that is gone by then
+  means the exchange, which reads the live value. Measured, headless, a copy with the MAC corrupted, a session cookie set, a
+  25 s wait and a close through the product's close path: cookie kept 5 of 5 on relaunch, against 0 of 3 when the file was
+  believed at once. A valid seeded copy of a profile that says `1` is believed and opens no tab, 5 of 5.
+* **The task runs off the spawn's path.** `start_session_restore` is the last statement of `spawn_browser` and of a re-attach,
+  after the instance is stored: a task, kept on the browser it belongs to (the pattern `tab_open` uses for per-browser state),
+  with its own 60 s bound (`PREF_TIMEOUT_SECONDS`) that no spawn pays. Only a NAMED, non-clone spawn starts one; a clone is
+  disposable and an unnamed spawn is a clone. While the exchange runs the browser has a second tab, `chrome://settings`, that a
+  caller's `list_tabs` can see; `tab_open.mark_internal` records it, and a closed tab's fallback (`_repoint_after_close`) skips it.
+* **A close waits for it, as long as the exchange itself may take.** `close_instance` awaits `settle_session_restore` BEFORE it
+  marks the connection closed (the exchange needs it). It tells the task the close has come, which ends the file-trust wait and
+  runs the exchange at once (the file is not evidence yet), waits `PREF_TIMEOUT_SECONDS` plus a short grace (v2.1.49's
+  starvation was 17 s, so no shorter number), then cancels it; the cancelled exchange still closes its tab, on the held-back share
+  of its bound. A close that is itself cancelled while it waits cancels the exchange, marks the connection closed and ends the
+  process, the way `process_exit.settle`'s cancelled grace does, then re-raises: the instance is already claimed, so nothing else
+  would end that browser. `close_all`, which the stdio server's shutdown calls, goes through the same path. Measured, headless, a
+  named session spawned, given a session cookie and closed immediately: pref on disk and cookie kept 5 of 5 on relaunch, against
+  0 of 5 with the wait removed (the exchange loses its connection mid-flight).
+* **Why not `--restore-last-session`.** Chromium's `GetSessionStartupPref` honours the switch, so it looked like a way to drop the CDP
+  exchange. Measured on Chrome 155: with the start page on the command line (F-936) the session cookie survived none of five
+  headless relaunches; without a start page one of five still lost it, and a seeded copy of a profile kept it once in five. The
+  pref is the mechanism that is reliable (7 of 7), so the exchange stays and moves.
+
 ## 3. The observability spine
 
 File logging exists on both fronts, all under `logging_setup.resolve_log_dir()`

@@ -187,13 +187,19 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # T-9117 ratchets down to 1434: `close_tab`'s own `cancel_paused_for_target` call
     # (-1) is gone, because `dynamic_hook_system`'s `Target.targetDestroyed` listener
     # is the one trigger. Cap == actual.
+    # T-9479 ratchets down to 1431: the call that starts the session-restore task (+1)
+    # and the one that settles it in `close_instance` (+1) replace the two-line `await
+    # ensure_session_restore` in `_apply_post_launch` (-2), and `_repoint_after_close`'s
+    # survivor search (-4) became one call into `tab_open.visible_tabs` (+1), which
+    # also owns "not the backend's own tab". Cap == actual.
     "embedded/browser_manager.py": (
-        1434,
+        1431,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
         " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939"
         " - F-940 - F-962 - F-963 + F-964 (paid, net 0) - F-965 - F-969 - F-996"
         " + F-1008 (paid, net 0) + F-1011 (paid, net 0) + F-1012 (paid, net 0)"
-        " - T-8944 - T-9117 (the targetDestroyed listener replaced close_tab's cancel)",
+        " - T-8944 - T-9117 (the targetDestroyed listener replaced close_tab's cancel)"
+        " - T-9479",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its

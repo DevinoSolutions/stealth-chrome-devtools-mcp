@@ -24,7 +24,8 @@ run did which no committed node did are what this module reproduces:
 It is one node on purpose. The fleet is the unit: one lead browser and then
 five more spawned in ONE ``gather`` — through as many lanes as the machine has
 cores, so five at once on a developer box, three on the 3-vCPU macOS gate cell
-and two on the 2-vCPU Linux and Windows ones — all six navigated in ONE
+and four on the 4-vCPU Linux and Windows ones (two on a 2-core box, the floor) —
+all six navigated in ONE
 ``gather``, driven in ONE ``gather``, and only then asked — collectively — whether
 ``list_instances`` can still name what each one is showing. Split into six
 nodes it would cost six fleets and stop being the shape that found the defects.
@@ -57,7 +58,7 @@ navigate 1.3s, actions 2.3s, total 9.0s`` beside other agents' browsers, over
 which is the manual fleet's own shape. Six rather than four because each
 member owns exactly ONE of the six (page shape, tool) pairs the finding set
 needs, and folding two onto one member would make those two serial. The phase
-times are PRINTED and nothing asserts them: on a loaded 2-core runner a wall
+times are PRINTED and nothing asserts them: on a loaded runner a wall
 budget is the one thing in this file that could go red for a reason that is not
 about the product, and a diagnostic that always prints is worth more than an
 assertion nobody would trust.
@@ -182,11 +183,13 @@ def _spawn_lanes(followers: int) -> int:
     those 2.75 s are real wall-clock spent competing with Chrome's cold start
     for the same cores.
 
-    **Two is the floor because two is already proven.** The gate's
-    ``ubuntu-latest`` and ``windows-latest`` cells are 2-vCPU runners and both
-    passed the UNBOUNDED five-at-once wave on this commit, so two lanes there
-    is below a bar those cells have already cleared. It is also the smallest
-    number that leaves this a fleet: at one lane the spawn phase would be
+    **Two is the floor because two is already proven.** When this was written
+    the gate's ``ubuntu-latest`` and ``windows-latest`` cells were 2-vCPU
+    runners and both passed the UNBOUNDED five-at-once wave on that commit, so
+    two lanes on a 2-core box is below a bar those cells cleared. They are
+    4-vCPU runners now (T-9479: the v2.1.49 Windows gate lane, four named
+    Chromes cold-starting on four vCPUs), so they get four lanes. Two is also
+    the smallest number that leaves this a fleet: at one lane the spawn phase would be
     serial and the node would stop covering concurrent spawning at all.
 
     Measured: gate run 35150887345, macOS/ARM64 (3 vCPU), five concurrent

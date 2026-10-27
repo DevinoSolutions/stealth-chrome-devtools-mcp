@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 import fixture_routes
+from stealth_chrome_devtools_mcp.embedded import login_persistence
 
 # THE one home for a singleton, for the E2E tier too (plan_SERVERSPLIT slice 12).
 # ``server_mod`` below is a SECOND execution of embedded/server.py under the bare
@@ -378,6 +379,16 @@ async def fixture_ledger(origin: str) -> dict:
 
 
 # ── Small readers shared across E2E modules. ──
+async def forget_instance(manager: Any, iid: str) -> None:
+    """Simulate the backend's death for *iid*: the manager's handle goes, the browser
+    stays. A real backend's session-restore task (T-9479) dies with it; in this
+    process it would outlive the "death" and leave its ``chrome://settings`` tab for
+    the adoption to find, so it is let finish first (what the spawn used to do)."""
+    await login_persistence.settle_session_restore(manager._instances[iid]["browser"])
+    manager._instances.pop(iid)
+    manager._spawn_diagnostics.pop(iid, None)
+
+
 async def eval_js(iid: str, expression: str) -> Any:
     """Evaluate a non-blocking JS expression via ``execute_script``; return result.
 

@@ -52,6 +52,7 @@ import pytest
 
 from e2e_helpers import (
     eval_js,
+    forget_instance,
     get_fn,
     instance_entry,
     integration_pytestmark,
@@ -181,8 +182,7 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
         # Forget the browser WITHOUT closing it — the manager's handle is gone,
         # the process is not. Everything after this point reaches that Chrome
         # only through the record.
-        manager._instances.pop(iid)
-        manager._spawn_diagnostics.pop(iid, None)
+        await forget_instance(manager, iid)
 
         cleanup = _cleanup_on(record)
         with patch.object(
@@ -268,8 +268,7 @@ async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(
 
         # The backend died and the successor pruned the record. Drop the handle,
         # leave Chrome running, and let the tool see an EMPTY record.
-        manager._instances.pop(first)
-        manager._spawn_diagnostics.pop(first, None)
+        await forget_instance(manager, first)
 
         # The record this spawn reads and WRITES is the module fixture's tmp
         # file, and it has to be a real redirection rather than a stub over
@@ -360,8 +359,7 @@ async def test_a_second_manager_built_first_takes_over_the_live_browser(
 
         # The first backend dies where it stands: the handle goes, the process
         # does not, and nothing is written anywhere.
-        manager._instances.pop(first)
-        manager._spawn_diagnostics.pop(first, None)
+        await forget_instance(manager, first)
 
         held = await asyncio.wait_for(
             browser_reattach.adopt_held_profile(

@@ -371,18 +371,6 @@ class TestFinalArgv:
 
 
 class TestSessionRestoreBounded:
-    def test_the_one_deadline_fits_inside_the_spawn_phase(self):
-        """F-995: ``ensure_session_restore`` runs inside the spawn's post-launch
-        phase, whose budget turns an overrun into a failed spawn. Its worst case
-        is ``PREF_TIMEOUT_SECONDS`` once (see the next node), so that number has
-        to leave the phase room for the steps that share it."""
-        from stealth_chrome_devtools_mcp.embedded import spawn_budget
-
-        assert (
-            login_persistence.PREF_TIMEOUT_SECONDS
-            <= spawn_budget.POST_LAUNCH_BUDGET_SECONDS / 2
-        )
-
     async def test_a_stuck_exchange_and_a_stuck_close_cost_one_bound_not_two(
         self, monkeypatch
     ):
@@ -462,8 +450,8 @@ class TestSessionRestoreBounded:
     async def test_the_timeout_warning_names_the_stage_it_stalled_in(
         self, monkeypatch, caplog, browser_factory, stage
     ):
-        """A 20 s overrun on a loaded cell has to say WHERE, or the next red is
-        as blind as the last one."""
+        """An overrun on a loaded cell has to say WHERE, or the next red is as blind
+        as the last one."""
         monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
         with caplog.at_level(logging.WARNING):
             assert (
@@ -500,7 +488,9 @@ class TestSessionRestoreBounded:
         )
         assert await login_persistence.ensure_session_restore(never_opens) is False
 
-    async def test_a_tab_that_never_closes_does_not_hang_the_spawn(self, monkeypatch):
+    async def test_a_tab_that_never_closes_does_not_hang_the_exchange(
+        self, monkeypatch
+    ):
         monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", 0.05)
 
         class StuckClose(FakeTab):
