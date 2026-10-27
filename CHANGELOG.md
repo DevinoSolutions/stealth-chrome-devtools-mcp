@@ -11,6 +11,7 @@
 
 - `create_dynamic_hook` answered `{"success": False, "error": "Invalid function code", "issues": [...], "warnings": [...]}` for code the validator refused (a syntax error, a missing `process_request`) - a second error convention beside the `ToolError` every other refusal raises. It now raises `CallerError("Invalid function code: <issues>")`, with any warnings appended, and registers nothing.
 - Converted the same way, keeping their text: `get_dynamic_hook_details` and `remove_dynamic_hook` for an unknown hook id (the other hooks stay), and `create_simple_dynamic_hook` for a missing `target_url` or `custom_headers` or an unknown action. `create_simple_dynamic_hook` builds its code from the caller's `target_url`, so a bad one reaches the validator; its catch-all no longer flattens that error into a dict. The catch-all `except Exception` returns and the documentation getters are unchanged.
+- Known gaps, not changed here: `validate_hook_function` and `DynamicHookSystem.remove_hook` catch every `Exception` (a bug of ours becomes "Parse error" / "not found"); a follow-up is filed.
 - DESIGN section 9 now says `cdp_params.typed` converts four exception types and `build_cdp_call` only `TypeError`.
 
 ## 2.1.48
