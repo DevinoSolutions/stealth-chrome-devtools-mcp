@@ -137,7 +137,7 @@ async def test_a_named_session_is_healed_under_the_same_instance_id(
         await released(profile)
 
 
-_CHROME_LOG_NAME = re.compile(r"chrome-fleet-[0-9a-f]{8}-\d{8}T\d{6}Z\.log")
+_CHROME_LOG_NAME = re.compile(r"chrome-fleet-[0-9a-f]{8}-\d{8}T\d{6}Z(-\d+)?\.log")
 
 
 class _Recorder:

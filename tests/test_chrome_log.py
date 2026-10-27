@@ -127,7 +127,7 @@ class TestTheFlags:
         def refuses(self, *args, **kwargs):
             raise PermissionError("read-only")
 
-        monkeypatch.setattr(Path, "touch", refuses)
+        monkeypatch.setattr(Path, "open", refuses)
 
         assert (
             chrome_log.flags(
@@ -135,6 +135,134 @@ class TestTheFlags:
             )
             == []
         )
+
+
+class TestARelaunchInTheSameSecond:
+    """T-9477: a heal relaunches under the SAME instance id, so two launches in one
+    second used to name the SAME file and the new Chrome wrote into the dead one's."""
+
+    def test_two_launches_in_one_second_get_two_files(self, tmp_session_root, log_dir):
+        options = _options(tmp_session_root["sessions"] / "fleet")
+
+        first = _path_of(chrome_log.flags(options, INSTANCE_ID, now=NOW))
+        first.write_text("the dead browser's exit evidence", encoding="utf-8")
+        second = _path_of(chrome_log.flags(options, INSTANCE_ID, now=NOW))
+
+        assert first != second
+        assert first.exists() and second.exists()
+        assert first.read_text(encoding="utf-8") == "the dead browser's exit evidence"
+        assert second.read_text(encoding="utf-8") == "", "the new launch starts empty"
+        for path in (first, second):
+            assert chrome_log.is_chrome_log(path), path.name
+
+    def test_the_first_launch_keeps_the_plain_name_and_the_rest_are_numbered(
+        self, tmp_session_root, log_dir
+    ):
+        options = _options(tmp_session_root["sessions"] / "fleet")
+
+        names = [
+            _path_of(chrome_log.flags(options, INSTANCE_ID, now=NOW)).name
+            for _ in range(3)
+        ]
+
+        assert names == [
+            "chrome-fleet-0123abcd-20261011T162705Z.log",
+            "chrome-fleet-0123abcd-20261011T162705Z-2.log",
+            "chrome-fleet-0123abcd-20261011T162705Z-3.log",
+        ]
+
+    def test_a_numbered_name_still_belongs_to_its_session_key(
+        self, tmp_session_root, log_dir
+    ):
+        options = _options(tmp_session_root["sessions"] / "fleet")
+        for _ in range(3):
+            chrome_log.flags(options, INSTANCE_ID, now=NOW)
+
+        assert len(_chrome_files(log_dir, "fleet")) == 3
+        assert _chrome_files(log_dir, "fleet-2") == [], "`fleet-2` is not `fleet`"
+
+    def test_retention_counts_the_numbered_files_and_keeps_the_newest(
+        self, tmp_session_root, log_dir
+    ):
+        log_dir.mkdir()
+        stamp = "20261011T162705Z"
+        old = [f"chrome-fleet-0123abcd-{stamp}.log"] + [
+            f"chrome-fleet-0123abcd-{stamp}-{n}.log" for n in range(2, 26)
+        ]
+        for age, name in enumerate(reversed(old)):  # the highest number is newest
+            _touch(log_dir / name, age_seconds=10_000 + age)
+
+        flags = chrome_log.flags(
+            _options(tmp_session_root["sessions"] / "fleet"), INSTANCE_ID, now=NOW
+        )
+
+        kept = _chrome_files(log_dir, "fleet")
+        assert len(kept) == chrome_log.KEEP_PER_SESSION
+        assert _path_of(flags).name in kept, "this launch's own file is never pruned"
+        assert f"chrome-fleet-0123abcd-{stamp}-25.log" in kept
+        assert f"chrome-fleet-0123abcd-{stamp}.log" not in kept, "the oldest went"
+
+    def test_the_backend_sweep_leaves_a_numbered_chrome_log_alone(self, log_dir):
+        log_dir.mkdir()
+        numbered = log_dir / "chrome-fleet-0123abcd-20260101T000000Z-2.log"
+        _touch(numbered, age_seconds=30 * 86400)
+        for n in range(60):
+            _touch(log_dir / f"backend-{n}.log", age_seconds=60 - n)
+
+        logging_setup.prune_old_logs(log_dir)
+
+        assert numbered.exists()
+        assert chrome_log.is_chrome_log(numbered)
+        assert len(list(log_dir.glob("backend-*.log"))) == 50
+
+    def test_an_error_other_than_a_taken_name_still_costs_the_launch_nothing(
+        self, tmp_session_root, log_dir, monkeypatch
+    ):
+        def refuses(self, *args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "open", refuses)
+
+        assert (
+            chrome_log.flags(
+                _options(tmp_session_root["sessions"] / "fleet"), INSTANCE_ID, now=NOW
+            )
+            == []
+        )
+
+    def test_a_stem_whose_every_name_is_taken_returns_no_flags_and_terminates(
+        self, tmp_session_root, log_dir, monkeypatch
+    ):
+        monkeypatch.setattr(chrome_log, "MAX_CLAIMS", 5)
+        options = _options(tmp_session_root["sessions"] / "fleet")
+        for _ in range(chrome_log.MAX_CLAIMS):
+            chrome_log.flags(options, INSTANCE_ID, now=NOW)
+        before = _chrome_files(log_dir, "fleet")
+
+        assert chrome_log.flags(options, INSTANCE_ID, now=NOW) == []
+        assert _chrome_files(log_dir, "fleet") == before, "and nothing is overwritten"
+
+    def test_equal_mtimes_are_ordered_by_launch_number_not_by_text(
+        self, tmp_session_root, log_dir
+    ):
+        log_dir.mkdir()
+        stamp = "20261011T162705Z"
+        count = chrome_log.KEEP_PER_SESSION + 3
+        names = [f"chrome-fleet-0123abcd-{stamp}.log"] + [
+            f"chrome-fleet-0123abcd-{stamp}-{n}.log" for n in range(2, count + 1)
+        ]
+        for name in names:  # one second, one mtime: only the name can say who is newer
+            _touch(log_dir / name, age_seconds=10_000)
+            os.utime(log_dir / name, (1_700_000_000, 1_700_000_000))
+
+        chrome_log.prune(log_dir, "fleet")
+
+        kept = _chrome_files(log_dir, "fleet")
+        assert len(kept) == chrome_log.KEEP_PER_SESSION
+        assert sorted(kept) == sorted(names[-chrome_log.KEEP_PER_SESSION :]), (
+            "-10 outranks -2, and both outrank the plain name"
+        )
+        assert names[0] not in kept
 
 
 class TestRetention:

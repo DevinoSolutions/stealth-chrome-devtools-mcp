@@ -23,6 +23,14 @@
 - Tests written first in `tests/test_hook_tool_layer_propagates.py` (29 tests, one failure injected per tool): against the unchanged code 21 fail and 8 pass; after the change all 29 pass. Restoring one catch-all (`remove_dynamic_hook`, then `validate_hook_function`) makes 2 of them fail each time.
 - DESIGN section 9 no longer lists a remaining gap.
 
+### A relaunch in the same second gets its own Chrome log instead of writing into the dead browser's (T-9477)
+
+- `chrome_log.flags` named the log `chrome-<key>-<id8>-<UTC to the second>.log`, and a heal relaunches under the SAME instance id, so a relaunch within one second got the SAME path: `touch()` found the dead browser's file and `--log-file=` pointed the new Chrome at it, losing the exit evidence F-964 and F-993 keep it for. The release gate caught it: `test_a_shared_session_that_exits_is_relaunched_under_the_same_id` saw `second_log == first_log` (`chrome-fleet-993176a9-20261027T132915Z.log` twice).
+- The file is now claimed with an exclusive create (`open("xb")`, `O_EXCL`): the first launch in a second keeps the plain name, the next takes `-2`, then `-3`. Two concurrent launches cannot both win a name. The numeric suffix was chosen over a finer stamp because a microsecond stamp only makes a collision unlikely, while the exclusive create makes it impossible and keeps every existing name unchanged.
+- One naming scheme: `chrome_log._NAME` takes the optional `-<n>` before `.log`, so `is_chrome_log` (the backend sweep leaves these alone) and `prune` (newest 20 per session key, by mtime then name) count numbered files, and `fleet` is still not `fleet-2`. Any other `OSError` still returns `[]`: a log is evidence, never a reason a spawn fails.
+- The claim loop is bounded (`MAX_CLAIMS`, 1000): a second whose every name is taken raises `FileExistsError`, so `flags` returns `[]` rather than spin. `prune` breaks an mtime tie by launch number as a number, so `-10` outranks `-2` and both outrank the plain name.
+- `tests/test_chrome_log.py` gained `TestARelaunchInTheSameSecond` (eight tests: two and three launches at the same `now=`, the dead file's bytes intact, the key still parsed, retention over numbered names, equal-mtime ordering over 23 files, the backend sweep, a non-collision `OSError`, an exhausted second); against main's code 6 of the first six and the re-pointed unwritable-dir test fail. The e2e test's name pattern accepts the suffix. DESIGN, NAVMAP and RUNBOOK spell out the name.
+
 ## 2.1.49
 
 ### A refusal of the caller's own input no longer opens a Sentry issue, even when the caller's own failure rides under it (T-9185)
