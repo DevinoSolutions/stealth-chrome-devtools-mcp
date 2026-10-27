@@ -438,8 +438,13 @@ class TestIdleCanary:
         """No fake: a real IDLE child, on whatever machine runs this. Only that it
         starts, is counted and is reaped; its factor depends on the host."""
         monkeypatch.setattr(scheduling_lag, "CANARY_MIN_WINDOW_SECONDS", 0.5)
+        # T-9662: one budget for the child's start and for this test's wait. A
+        # process start measured 18-26 s on a starved host, and the product's 5 s
+        # "ready" budget stops a canary that cannot start (by design: no evidence).
+        ready_wait = 30
+        monkeypatch.setattr(scheduling_lag, "CANARY_READY_SECONDS", ready_wait)
         async with scheduling_lag.idle_canary() as c:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + ready_wait
             while c._ready_at is None and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
             assert c._ready_at is not None

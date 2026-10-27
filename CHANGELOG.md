@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### The real IDLE canary test gives the child the start budget it waits for (T-9662)
+
+- Test-only. `test_the_real_child_wakes_and_is_gone_after_stop` waited 30 s for the child's "ready" but left the child the product's 5 s `CANARY_READY_SECONDS`, so on a host where a process start took 18-26 s the canary was stopped unready and the test failed. The test now patches the child's budget to its own wait. No product change.
+
 ## 2.1.50
 
 2.1.49 was tagged but never reached PyPI: its publish run failed the release gate. 2.1.50 ships everything 2.1.49 would have, plus the fixes below.
