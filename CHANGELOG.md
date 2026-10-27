@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### A bug of ours in the hook validator or in remove_hook is no longer read as the caller's mistake (T-9431)
+
+- Since T-9184 a refusal of the caller's input raises `CallerError`, which Sentry drops (T-9185). Two catch-alls turned our own bugs into such refusals: `hook_learning_system.validate_hook_function` answered any `Exception` as `Parse error: ...`, and `DynamicHookSystem.remove_hook` answered any `Exception` as False ("not found").
+- The validator now guards only `ast.parse`, against `SyntaxError`, `ValueError`, `RecursionError` and `MemoryError`: what a caller's text was measured to provoke on 3.11-3.14 (a lone surrogate, long unary, `not`, operator or attribute chains). Before this, `create_dynamic_hook` crashed with a server traceback on those inputs; now they are a "Syntax error" refusal. A failure in the AST walk propagates as our bug.
+- `remove_hook` no longer catches: its membership checks already guard the `del` and `remove`, so False means only "not found" and anything else propagates.
+- The tool layer (`dynamic_hook_ai_interface.py`, ten `except Exception` blocks) still answers `{"success": False}` dicts; that is T-9464. DESIGN section 9 is updated.
+- Tests written first in `tests/test_hook_learning_system.py`, `tests/test_dynamic_hook_system.py` and `tests/test_hook_validator_raises.py`; against main's code 13 fail.
+
 ## 2.1.49
 
 ### A refusal of the caller's own input no longer opens a Sentry issue, even when the caller's own failure rides under it (T-9185)

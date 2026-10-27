@@ -707,30 +707,25 @@ class DynamicHookSystem:
         }
 
     async def remove_hook(self, hook_id: str) -> bool:
-        """Remove a hook."""
-        try:
-            async with self._lock:
-                if hook_id in self.hooks:
-                    del self.hooks[hook_id]
+        """Remove a hook; False means the id is unknown.
 
-                    for instance_id in self.instance_hooks:
-                        if hook_id in self.instance_hooks[instance_id]:
-                            self.instance_hooks[instance_id].remove(hook_id)
+        Nothing in here is expected to fail: the membership checks guard the
+        ``del`` / ``remove``, so a raise is our bug and must propagate (T-9431).
+        """
+        async with self._lock:
+            if hook_id not in self.hooks:
+                return False
 
-                    debug_logger.log_info(
-                        "dynamic_hook_system", "remove_hook", f"Removed hook {hook_id}"
-                    )
-                    return True
+            del self.hooks[hook_id]
 
-            return False
+            for instance_id in self.instance_hooks:
+                if hook_id in self.instance_hooks[instance_id]:
+                    self.instance_hooks[instance_id].remove(hook_id)
 
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_system",
-                "remove_hook",
-                f"Failed to remove hook {hook_id}: {e}",
+            debug_logger.log_info(
+                "dynamic_hook_system", "remove_hook", f"Removed hook {hook_id}"
             )
-            return False
+            return True
 
     def add_instance(self, instance_id: str):
         """Add a new browser instance."""

@@ -246,6 +246,28 @@ class TestRegistry:
         assert hid not in sys.instance_hooks["inst-1"]
         assert await sys.remove_hook(hid) is False  # already gone
 
+    async def test_remove_hook_of_an_unknown_id_is_false_and_changes_nothing(self):
+        sys = DynamicHookSystem()
+        kept = await sys.create_hook(
+            "h", {"url_pattern": "*"}, CONTINUE, instance_ids=["inst-1"]
+        )
+        assert await sys.remove_hook("nope") is False
+        assert list(sys.hooks) == [kept]
+        assert sys.instance_hooks["inst-1"] == [kept]
+
+    async def test_a_crash_inside_remove_hook_propagates(self, monkeypatch):
+        # T-9431: only "not found" reads as False; our own bug must not.
+        sys = DynamicHookSystem()
+        hid = await sys.create_hook("h", {"url_pattern": "*"}, CONTINUE)
+
+        def broken_log(*_args, **_kwargs):
+            raise RuntimeError("remove_hook bug")
+
+        monkeypatch.setattr(dhs.debug_logger, "log_info", broken_log)
+
+        with pytest.raises(RuntimeError, match="remove_hook bug"):
+            await sys.remove_hook(hid)
+
     async def test_list_and_details(self):
         sys = DynamicHookSystem()
         hid = await sys.create_hook(
