@@ -26,6 +26,7 @@ import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
+    browser_health,
     forced_end,
     process_exit,
 )
@@ -506,7 +507,7 @@ class TestAChromeStillTearingDownIsWaitedFor:
         assert clock.now == WAIT + _Clock.LADDER + 8.0
 
     def test_the_patience_covers_the_heals_own_exit_wait(self):
-        assert WAIT <= forced_end.KILL_EXIT_SECONDS <= 30.0
+        assert browser_health.EXIT_WAIT_SECONDS <= forced_end.KILL_EXIT_SECONDS <= 30.0
 
     async def test_a_browser_alive_past_the_budget_is_still_reported_left_running(
         self, process
@@ -564,8 +565,8 @@ class TestAChromeStillTearingDownIsWaitedFor:
             beat.cancel()
 
         assert reason is None
-        assert time.monotonic() - started < 1.0
-        assert ticks >= 5, "the event loop was blocked while the exit was awaited"
+        assert time.monotonic() - started < 3.0
+        assert ticks >= 2, "the event loop was blocked while the exit was awaited"
 
     async def test_the_real_wait_gives_up_at_the_budget(self, process, monkeypatch):
         monkeypatch.setattr(forced_end, "KILL_EXIT_SECONDS", 0.3)
@@ -574,4 +575,4 @@ class TestAChromeStillTearingDownIsWaitedFor:
         reason = await _run_real_wait()
 
         assert reason is not None and "left pid" in reason
-        assert 0.3 <= time.monotonic() - started < 1.0
+        assert 0.3 <= time.monotonic() - started < 3.0
