@@ -112,6 +112,20 @@ class TestTheFilter:
         assert issubclass(caller_error, ToolError)
         assert str(caller_error("same text")) == str(ToolError("same text"))
 
+    def test_our_exception_over_a_caller_error_still_ships(self, caller_error):
+        """Only the OUTERMOST link decides: a defect of ours raised while a
+        ``CallerError`` was being handled is a bug to read, not the caller's."""
+        try:
+            try:
+                raise caller_error("Invalid index value: abc. Must be a number.")  # noqa: TRY301  PERMANENT(a raised exception is the fixture)
+            except caller_error as refusal:
+                raise RuntimeError("our own bug") from refusal
+        except RuntimeError:
+            event, hint = _event(sys.exc_info())
+
+        assert observability._scrub_event(event, hint) is not None
+        assert observability._scrub_event(event, {}) is not None
+
     def test_a_lookalike_outside_our_package_is_not_dropped(self):
         """Name AND module: a third party's ``CallerError`` is not ours."""
         lookalike = type("CallerError", (Exception,), {"__module__": "somelib.errors"})
@@ -275,6 +289,34 @@ class TestTheConvertedSites:
             DynamicHook("h1", "h4a", {}, code)
         except ToolError:
             event, hint = _event(sys.exc_info())
+
+        assert observability._scrub_event(event, hint) is None
+        assert observability._scrub_event(event, {}) is None
+
+    @pytest.mark.parametrize(
+        "code",
+        ["undefined_name", "def broken(:", "x = 1"],
+        ids=["name-error", "syntax-error", "no-function"],
+    )
+    async def test_python_code_that_does_not_load_is_the_callers_and_not_reported(
+        self, caller_error, code, call_tool, patched_server
+    ):
+        """``create_python_binding`` runs the caller's ``python_code``: its failure
+        is raised over the caller's own exception, the shape of issue EC."""
+        srv = patched_server(browser_manager=FakeBrowserManager(tabs={"i1": FakeTab()}))
+        with pytest.raises(
+            caller_error, match="Failed to create Python function"
+        ) as raised:
+            await call_tool(
+                srv,
+                "create_python_binding",
+                instance_id="i1",
+                binding_name="b",
+                python_code=code,
+            )
+        event, hint = _event(
+            (type(raised.value), raised.value, raised.value.__traceback__)
+        )
 
         assert observability._scrub_event(event, hint) is None
         assert observability._scrub_event(event, {}) is None

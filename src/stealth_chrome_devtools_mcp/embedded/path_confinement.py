@@ -183,6 +183,9 @@ def _real(path: str | os.PathLike[str]) -> str:
     try:
         real = os.path.realpath(text)
     except (OSError, ValueError):
+        # Mostly the caller's path, but an OSError can be the filesystem's own
+        # trouble; both are refused with the same text, and ``from None`` leaves
+        # no cause, so the class changes nothing for Sentry here.
         # ``~/.pgpass::$INDEX_ALLOCATION`` makes realpath raise
         # NotADirectoryError, whose text embeds the absolute path (F-877).
         raise CallerError(_UNRESOLVABLE) from None
