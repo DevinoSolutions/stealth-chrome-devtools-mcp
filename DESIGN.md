@@ -701,10 +701,13 @@ links under a `ToolError` (a `ToolError` over an `AttributeError` is a bug to re
 a caller's refusal is often raised with the caller's own failure in flight. Raise it
 only where the cause is the caller's input; a browser, page or product failure stays a
 plain `ToolError` and stays a Sentry issue. It is never subclassed. Trade-off, taken
-deliberately: `cdp_params.typed` and `build_cdp_call` convert `TypeError`, `KeyError`,
-`AttributeError` and `ValueError` raised while building the caller's params, so a bug of
-ours in `_coerce` or in nodriver's `from_json` on a valid value is dropped too; the
-caller's params are the overwhelmingly likely cause and the message still reaches them.
+deliberately: `cdp_params.typed` converts `TypeError`, `KeyError`, `AttributeError` and
+`ValueError` (`_SHAPE_ERRORS`) raised while building the caller's params, and
+`build_cdp_call` converts `TypeError` only, so a bug of ours in `_coerce` or in nodriver's
+`from_json` on a valid value is dropped too; the caller's params are the overwhelmingly
+likely cause and the message still reaches them. The dynamic-hook tools raise it too:
+`create_dynamic_hook`'s validator (T-9184) and an unknown hook id or unusable simple-hook
+input.
 
 **Named KEEP contracts** — here the returned dict/value *is* the contract; converting
 it to a raise would be the defect:

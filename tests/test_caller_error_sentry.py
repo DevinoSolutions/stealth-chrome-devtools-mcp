@@ -346,3 +346,38 @@ class TestTheConvertedSites:
 
         with pytest.raises(caller_error):
             path_confinement._real("bad\0path")
+
+
+class TestTheHookValidatorRefusal:
+    """T-9184: code the hook validator rejects is the caller's input."""
+
+    @staticmethod
+    async def _refused():
+        from stealth_chrome_devtools_mcp.embedded.dynamic_hook_ai_interface import (
+            DynamicHookAIInterface,
+        )
+
+        try:
+            await DynamicHookAIInterface().create_dynamic_hook(
+                "h", {}, "def process_request(request):\n  return ("
+            )
+        except ToolError:
+            return sys.exc_info()
+        raise AssertionError("the validator did not refuse")
+
+    async def test_it_is_dropped_on_the_before_send_paths(self, caller_error):
+        exc_info = await self._refused()
+        assert exc_info[0] is caller_error
+        event, hint = _event(exc_info)
+
+        assert observability._scrub_event(event, hint) is None
+        assert observability._scrub_event(event, {}) is None
+
+    async def test_it_produces_no_event_on_the_live_logging_path(self, shipped_events):
+        exc_info = await self._refused()
+        logging.getLogger(TOOL_CALL_LOGGER).error(
+            "Error calling tool 'create_dynamic_hook'", exc_info=exc_info
+        )
+        sentry_sdk.get_client().flush()
+
+        assert shipped_events == []
