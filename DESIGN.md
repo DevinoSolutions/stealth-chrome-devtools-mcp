@@ -707,13 +707,15 @@ deliberately: `cdp_params.typed` converts `TypeError`, `KeyError`, `AttributeErr
 `from_json` on a valid value is dropped too; the caller's params are the overwhelmingly
 likely cause and the message still reaches them. The dynamic-hook tools raise it too:
 `create_dynamic_hook`'s validator (T-9184) and an unknown hook id or unusable simple-hook
-input. Two earlier gaps are closed (T-9431): `hook_learning_system.validate_hook_function`
-guards only `ast.parse`, against `SyntaxError`, `ValueError`, `RecursionError` and
-`MemoryError` (what a caller's text provokes, measured on 3.11-3.14), so a bug of ours in
-its AST walk propagates; and `DynamicHookSystem.remove_hook` no longer catches, so False
-means only "not found". One gap remains, filed as a follow-up: the tool layer
-(`dynamic_hook_ai_interface.py`: `remove_dynamic_hook`, `validate_hook_function`, among ten
-`except Exception` blocks) still answers `{"success": False}` dicts.
+input. The catch-alls that turned a bug of ours into such a refusal are closed. Two in
+the layers below (T-9431): `hook_learning_system.validate_hook_function` guards only
+`ast.parse`, against `SyntaxError`, `ValueError`, `RecursionError` and `MemoryError` (what
+a caller's text provokes, measured on 3.11-3.14), so a bug of ours in its AST walk
+propagates; and `DynamicHookSystem.remove_hook` no longer catches, so False means only
+"not found". And the tool layer (T-9464): `dynamic_hook_ai_interface.py` has no
+`except Exception`, so a bug of ours behind any of the ten dynamic-hook tools that used to
+answer `{"success": False, "error": ...}` reaches the client as that exception and not as
+a dict. No dynamic-hook tool is a KEEP contract below.
 
 **Named KEEP contracts** — here the returned dict/value *is* the contract; converting
 it to a raise would be the defect:
