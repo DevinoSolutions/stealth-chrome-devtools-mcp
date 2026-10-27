@@ -168,3 +168,38 @@ class TestAnUnknownHookIdRaises:
 
     def test_the_client_reads_a_caller_error_as_a_tool_error(self):
         assert issubclass(CallerError, ToolError)
+
+
+class TestTheClientReadsIsError:
+    """The ``.fn`` seam raises; a real in-memory MCP client must see ``isError``."""
+
+    async def test_both_refusals_arrive_as_error_results_with_their_text(
+        self, patched_server, system
+    ):
+        from fastmcp import Client
+
+        server = patched_server()
+        async with Client(server.mcp) as client:
+            invalid = await asyncio.wait_for(
+                client.call_tool(
+                    "create_dynamic_hook",
+                    {"name": "h", "requirements": {}, "function_code": UNCLOSED},
+                    raise_on_error=False,
+                ),
+                BOUND,
+            )
+            unknown = await asyncio.wait_for(
+                client.call_tool(
+                    "get_dynamic_hook_details",
+                    {"hook_id": "nope"},
+                    raise_on_error=False,
+                ),
+                BOUND,
+            )
+
+        assert invalid.is_error is True
+        assert "Invalid function code" in invalid.content[0].text
+        assert "never closed" in invalid.content[0].text
+        assert unknown.is_error is True
+        assert "Hook nope not found" in unknown.content[0].text
+        assert system.hooks == {}
