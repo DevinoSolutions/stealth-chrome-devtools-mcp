@@ -21,6 +21,7 @@ from e2e_helpers import (
     server_mod,
     warmup_once,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
 
 def integration_test(fn):
@@ -281,19 +282,29 @@ async def test_dynamic_hooks_lifecycle(fixture_app_server):
         assert isinstance(removed, dict)
         assert _find_hook_id(await list_hooks(), "fixture-hook") is None
 
-        # Full AI-function variant: assert the graceful dict shape, then clean up
-        # any hook it created (its function contract is exercised more deeply in
-        # the hermetic test_dynamic_hook_system.py).
+        # Full AI-function variant. Code without process_request is the caller's
+        # input, refused with CallerError and no hook registered (T-9184); valid
+        # code creates a hook that lists and removes (its function contract is
+        # exercised more deeply in the hermetic test_dynamic_hook_system.py).
+        with pytest.raises(CallerError, match="process_request"):
+            await create_full(
+                name="fixture-bad-hook",
+                requirements={"url_pattern": "/api/json"},
+                function_code="def hook(request):\n    return request",
+                instance_ids=[iid],
+            )
+        assert _find_hook_id(await list_hooks(), "fixture-bad-hook") is None
+
         full = await create_full(
             name="fixture-full-hook",
             requirements={"url_pattern": "/api/json"},
-            function_code="def hook(request):\n    return request",
+            function_code="def process_request(request):\n    return HookAction(action='continue')\n",
             instance_ids=[iid],
         )
         assert isinstance(full, dict)
         full_id = _find_hook_id(await list_hooks(), "fixture-full-hook")
-        if full_id:
-            await remove_hook(hook_id=full_id)
+        assert full_id, f"valid full hook not found in listing: {full}"
+        await remove_hook(hook_id=full_id)
     finally:
         await close(instance_id=iid)
 
