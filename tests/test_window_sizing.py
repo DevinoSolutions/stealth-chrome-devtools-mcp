@@ -236,9 +236,10 @@ class TestRealChromeWindowSize:
     ):
         """T-9479: a named spawn's ``chrome://settings`` exchange runs after the
         spawn has returned, in a tab of the same window. Opened in front it covered
-        the caller's page, and a covered headless page reads ``outerHeight`` as its
-        ``innerHeight`` (900x513 for a 900x600 window, measured on Chrome 155) for
-        as long as the cover lasts. Sampled from the return of the spawn on, over
+        the caller's page, and on LINUX a covered headless page reads ``outerHeight`` as
+        its ``innerHeight`` (900x513 for a 900x600 window, measured on Chrome 155) for
+        as long as the cover lasts; Windows headless read 600 in all three runs, so
+        a pass there proves nothing about the fix. Sampled from the return of the spawn on, over
         the stretch the exchange's tab is opened and loaded in, so a transient that
         a single read after the spawn only sometimes catches cannot slip past."""
         close = get_fn("close_instance")

@@ -480,8 +480,10 @@ moved the bound from 8 s to 20 s for the same reason on 3-vCPU macOS cells).
   The tab is opened BEHIND the caller's page (`open_tab(..., background=True)`): a tab opened in front covers the page, and a
   covered headless page reads `window.outerHeight` as its `innerHeight` (513 for a 900x600 window, Chrome 155, Linux) until the
   cover closes, so a caller who measured the window right after a named spawn saw a size it never asked for. Behind, the page's
-  window metrics are untouched (600 throughout, measured) and a headed user's focus stays where it was. Only a tab the backend
-  opens for itself is opened behind; a tab a caller asks for (`new_tab`) is theirs to look at, in front.
+  window metrics are untouched (600 throughout, measured on Linux). Windows headless read 600 with or without the change (3
+  runs), so the effect is Linux's; whether a headed user's focus is affected was not measured (headed Windows read
+  visible/True either way). Only the exchange's tab is opened behind: a tab a caller asks for (`new_tab`) and the tabs the
+  backend opens on its own initiative (`_replace_main_tab`, `tab_binding`) stay in front.
 * **A close waits for it, as long as the exchange itself may take.** `close_instance` awaits `settle_session_restore` BEFORE it
   marks the connection closed (the exchange needs it). It tells the task the close has come, which ends the file-trust wait and
   runs the exchange at once (the file is not evidence yet), waits `PREF_TIMEOUT_SECONDS` plus a short grace (v2.1.49's

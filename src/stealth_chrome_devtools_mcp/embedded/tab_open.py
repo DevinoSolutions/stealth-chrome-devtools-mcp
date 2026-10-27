@@ -229,13 +229,15 @@ async def open_tab(browser: Browser, url: str, *, background: bool = False) -> T
     registers it, exactly as that call does.
 
     A tab is opened in front by default, and the tab it covers stops reporting its
-    window: a headless page's ``window.outerHeight`` falls to its ``innerHeight``
-    for as long as another tab of the same window is in front (measured on Chrome
-    155, 900x600 requested: 600 before, 513 with an ``about:blank`` tab opened in
-    front, 600 again once it closed). *background* opens it behind, which leaves the
-    caller's page, its window metrics and (headed) the user's focus alone. It is for
-    a tab the backend opens for ITSELF (``login_persistence``'s); a tab a caller
-    asked for is theirs to look at.
+    window: on LINUX a headless page's ``window.outerHeight`` falls to its
+    ``innerHeight`` for as long as another tab of the same window is in front
+    (measured on Chrome 155, 900x600 requested: 600 before, 513 with an
+    ``about:blank`` tab opened in front, 600 again once it closed; Windows headless
+    read 600 in all three runs). *background* opens it behind, which leaves the
+    caller's page and its window metrics alone. It is for the tab
+    ``login_persistence``'s exchange opens for itself; a tab a caller asked for is
+    theirs to look at, and the other tabs the backend opens on its own initiative
+    (``_replace_main_tab``, ``tab_binding``) stay in front.
     """
     target_id = await send(
         browser,
