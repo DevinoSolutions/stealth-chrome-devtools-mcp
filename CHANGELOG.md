@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.50
+
+2.1.49 was tagged but never reached PyPI: its publish run failed the release gate. 2.1.50 ships everything 2.1.49 would have, plus the fixes below.
 
 ### The locked dependency set has no known vulnerabilities again: authlib 1.7.2 -> 1.9.1, dnspython 2.8.0 -> 2.9.0 (T-9742)
 
