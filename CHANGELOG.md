@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.50
+
+2.1.49 was tagged but never reached PyPI: its publish run failed the release gate. 2.1.50 ships everything 2.1.49 would have, plus the fixes below.
 
 ### A bug of ours in the hook validator or in remove_hook is no longer read as the caller's mistake (T-9431)
 
