@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The locked dependency set has no known vulnerabilities again: authlib 1.7.2 -> 1.9.1, dnspython 2.8.0 -> 2.9.0 (T-9742)
+
+- The security audit (pip-audit 2.10.1 over the `uv export` of `uv.lock`) found 8 known vulnerabilities: seven in authlib 1.7.2 (CVE-2026-96760, CVE-2026-114614 to CVE-2026-114618, CVE-2026-114620; fixed in 1.8.0 to 1.9.1), which fastmcp-slim pulls in through its client and server extras, and one in dnspython 2.8.0 (CVE-2026-114605, fixed in 2.9.0), which comes through pydantic's email extra and email-validator.
+- `uv lock --upgrade-package authlib --upgrade-package dnspython` moves only those two packages; `uv.lock` is the only file that changes besides this entry, and the same audit over the new lock finds no known vulnerabilities.
+
 ### A bug of ours in the hook validator or in remove_hook is no longer read as the caller's mistake (T-9431)
 
 - Since T-9184 a refusal of the caller's input raises `CallerError`, which Sentry drops (T-9185). Two catch-alls turned our own bugs into such refusals: `hook_learning_system.validate_hook_function` answered any `Exception` as `Parse error: ...`, and `DynamicHookSystem.remove_hook` answered any `Exception` as False ("not found").
