@@ -293,7 +293,7 @@ def _run_main_block(monkeypatch, *flags):
     monkeypatch.setattr(
         logging_setup, "bootstrap_backend_process_logging", lambda: None
     )
-    monkeypatch.setattr(observability, "sentry_init", lambda: None)
+    monkeypatch.setattr(observability, "sentry_init", lambda **kw: None)
     served = []
     monkeypatch.setattr(
         FastMCP, "run", lambda self, *args, **kwargs: served.append(kwargs)

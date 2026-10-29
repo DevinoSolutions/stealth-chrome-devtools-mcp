@@ -26,7 +26,9 @@ import asyncio
 import logging
 import pathlib
 import sys
+import threading
 import types
+import unittest.mock
 
 import pytest
 from nodriver.core.connection import ProtocolException
@@ -323,7 +325,7 @@ class TestToolError:
             "tool-error",
             "click_element",
             "ToolError",
-            "<external>",
+            "ProtocolException",
             "stealth_chrome_devtools_mcp.dom_handler.click_element",
         ]
         # nothing diagnostic is lost: the full title and the cause chain ship
@@ -402,7 +404,7 @@ class TestToolError:
 
         assert plain["fingerprint"][2:4] == ["ToolError", "KeyError"]
         assert subclass["fingerprint"][2] == "InstanceNotFoundError"
-        assert deeper["fingerprint"][3] == "<external>>KeyError"
+        assert deeper["fingerprint"][3] == "ProtocolException>KeyError"
 
     def test_the_innermost_frame_is_the_deepest_causes_raise_site(self, shipped_events):
         """The ToolError is raised in ``click_element``; its cause was first raised
@@ -527,7 +529,9 @@ class TestNothingACallerCanSetIsRead:
             "ElementDisconnected"
         )
         assert tool_error_fingerprint.type_name(HungBrowserError) == "HungBrowserError"
-        assert tool_error_fingerprint.type_name(ProtocolException) == "<external>"
+        assert tool_error_fingerprint.type_name(ProtocolException) == (
+            "ProtocolException"
+        )
         assert tool_error_fingerprint.type_name(FrozenCloneError) == "FrozenCloneError"
         assert tool_error_fingerprint.type_name(InstanceNotFoundError) == (
             "InstanceNotFoundError"
@@ -729,14 +733,65 @@ class TestNothingACallerCanSetIsRead:
     def test_an_exception_type_we_do_not_define_reads_external_in_a_cause(
         self, shipped_events
     ):
-        """A probe can fail with an error of nodriver's or websockets'; it still groups."""
-        event = _log_hung(
-            shipped_events, "i-1: x", "heal ProtocolException at evaluate"
-        )
+        """A type that is neither builtin, ours nor one we handle reads ``<external>``."""
+        event = _log_hung(shipped_events, "i-1: x", "heal JSONDecodeError at evaluate")
         other = _log_hung(shipped_events, "i-2: x", "relaunch-failed swordfish")
 
         assert event["fingerprint"] == ["hung-browser", "heal <external> at evaluate"]
         assert other["fingerprint"] == ["hung-browser", "relaunch-failed <external>"]
+
+    @pytest.mark.parametrize(
+        ("module", "name"),
+        tool_error_fingerprint._THIRD_PARTY,  # noqa: SLF001  PERMANENT(the allowlist IS the parametrization)
+        ids=lambda value: str(value),
+    )
+    def test_a_third_party_exception_we_handle_keeps_its_name(self, module, name):
+        kind = getattr(pytest.importorskip(module), name)
+
+        assert tool_error_fingerprint.type_name(kind) == kind.__qualname__
+
+    def test_the_allowlist_resolves_to_exception_classes(self):
+        resolved = {
+            (module, name): getattr(pytest.importorskip(module), name)
+            for module, name in tool_error_fingerprint._THIRD_PARTY  # noqa: SLF001  PERMANENT(the allowlist under test)
+        }
+
+        assert all(issubclass(kind, BaseException) for kind in resolved.values())
+        assert resolved[("nodriver.core.connection", "ProtocolException")] is (
+            ProtocolException
+        )
+
+    def test_protocol_exception_keeps_its_name_in_a_chain_and_a_freeze(
+        self, shipped_events
+    ):
+        chain = _ship_tool_error(shipped_events, ToolError("x"), cause=NO_NODE)
+        freeze = _log_hung(
+            shipped_events, "i-1: x", "heal ProtocolException at evaluate"
+        )
+
+        assert chain["fingerprint"][3] == "ProtocolException"
+        assert freeze["fingerprint"] == [
+            "hung-browser",
+            "heal ProtocolException at evaluate",
+        ]
+
+    @pytest.mark.parametrize("how", ["lookalike", "claims the module", "subclass"])
+    def test_a_class_that_only_looks_like_a_handled_one_is_external(
+        self, shipped_events, how
+    ):
+        nodriver_module = ProtocolException.__module__
+        if how == "subclass":
+            fake = type("ProtocolException", (ProtocolException,), {})
+        else:
+            claimed = {} if how == "lookalike" else {"__module__": nodriver_module}
+            fake = type("ProtocolException", (Exception,), claimed)
+
+        event = _ship_tool_error(
+            shipped_events, ToolError("x"), cause=fake({"message": "m"})
+        )
+
+        assert tool_error_fingerprint.type_name(fake) == "<external>"
+        assert event["fingerprint"][3] == "<external>"
 
     def test_the_declarations_of_both_forensic_classes_keep_their_names(self):
         assert tool_error_fingerprint.declared(
@@ -960,6 +1015,80 @@ class TestEveryCauseIsProgramControlled:
             assert tool_error_fingerprint.declared(error) == list(
                 error.sentry_fingerprint
             ), (path.name, call.lineno, causes)
+
+
+class TestTheMapsAreWarmedOnceOffTheEventPath:
+    @pytest.fixture
+    def cold(self, monkeypatch):
+        """The module as a fresh process has it: nothing built, no warm-up started,
+        and ``_build`` a counter that holds until released."""
+        gate = {"entered": threading.Event(), "release": threading.Event(), "calls": 0}
+
+        def build():
+            gate["calls"] += 1
+            gate["entered"].set()
+            assert gate["release"].wait(10)
+
+        for name, value in (
+            ("_built", False),
+            ("_warmer", None),
+            ("_build", build),
+            ("_module_names", {}),
+            ("_classes_read", set()),
+        ):
+            monkeypatch.setattr(tool_error_fingerprint, name, value)
+        return gate
+
+    def test_the_warm_up_builds_once_and_a_first_use_waits_for_it(self, cold):
+        thread = tool_error_fingerprint.warm()
+        assert thread is not None
+        assert cold["entered"].wait(10)
+        answers = []
+        user = threading.Thread(
+            target=lambda: answers.append(tool_error_fingerprint.type_name(KeyError))
+        )
+        user.start()
+        user.join(0.3)
+
+        assert user.is_alive(), "the first use did not wait for the build"
+        assert tool_error_fingerprint.warm() is None  # started once
+        cold["release"].set()
+        user.join(10)
+        thread.join(10)
+
+        assert answers == ["KeyError"]
+        assert cold["calls"] == 1
+        assert not thread.is_alive()
+
+    def test_a_first_use_with_no_warm_up_builds_it_itself(self, cold):
+        cold["release"].set()
+
+        assert tool_error_fingerprint.type_name(KeyError) == "KeyError"
+        assert cold["calls"] == 1
+        tool_error_fingerprint.type_name(KeyError)
+        assert cold["calls"] == 1
+
+    def test_the_backend_starts_the_warm_up_and_nothing_else_does(self, monkeypatch):
+        pytest.importorskip("sentry_sdk")
+        monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
+        started = []
+        monkeypatch.setattr(tool_error_fingerprint, "warm", lambda: started.append(1))
+        with unittest.mock.patch("sentry_sdk.init", lambda **kwargs: None):
+            assert observability.sentry_init(auto_enabling_integrations=False) is True
+            assert started == []
+            assert observability.sentry_init(warm_fingerprints=True) is True
+
+        assert started == [1]
+
+    def test_no_warm_up_when_reporting_is_off(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_MCP_NO_ERROR_REPORTING", "true")
+        monkeypatch.setattr(
+            tool_error_fingerprint,
+            "warm",
+            lambda: pytest.fail("warmed with reporting off"),
+        )
+
+        assert observability.sentry_init(warm_fingerprints=True) is False
 
 
 class TestEverythingElseIsUnchanged:

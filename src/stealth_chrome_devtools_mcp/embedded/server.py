@@ -630,7 +630,7 @@ if __name__ == "__main__":
         )
 
     # Ship errors to Sentry (on by default; opt out: STEALTH_MCP_NO_ERROR_REPORTING).
-    sentry_init()
+    sentry_init(warm_fingerprints=True)
 
     # B1: bind app_lifespan's teardown policy to the serve transport. HTTP must
     # never run the lifespan's teardown, whenever FastMCP leaves it (see B1 above).
