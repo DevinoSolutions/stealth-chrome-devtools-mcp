@@ -395,6 +395,31 @@ def _shape(raw: object) -> dict[str, object] | None:
     }
 
 
+#: THE page-side read of "is this node still in a document" (T-10284): the
+#: declaration and the strict expression every script that asks it is built from
+#: -- :data:`SYNTHETIC_JS`, :data:`CONNECTED_JS` and ``dom_handler``'s
+#: visibility script. Never ``elem.isConnected`` (a ``<form>`` with a control
+#: named ``isConnected`` shadows it, see :data:`NATIVES_JS`), and only a literal
+#: ``true`` is connected: a thrown read comes back as ``None`` and a shadowed
+#: one serialises to ``{}``, and neither is a document the node is in.
+IS_CONNECTED_JS = (
+    "const isConnected =\n"
+    "        Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected').get;"
+)
+CONNECTED_EXPR_JS = "isConnected.call(elem) === true"
+
+#: The connectivity read ON ITS OWN, for a caller that holds an ``Element`` and
+#: has no aim to read it off (``element_resolution.refresh_element``). One
+#: boolean, one ``Element.apply``. nodriver's ``update()`` re-resolves by
+#: backend node id and that succeeds for a node the page removed but still
+#: references, so ``update`` cannot say whether an element has left the page.
+CONNECTED_JS = (
+    ("(elem) => {\n    __IS_CONNECTED__\n    return __CONNECTED__;\n}")
+    .replace("__IS_CONNECTED__", IS_CONNECTED_JS)
+    .replace("__CONNECTED__", CONNECTED_EXPR_JS)
+)
+
+
 def connected(facts: dict[str, object]) -> bool:
     """Whether :func:`aim`'s answer is about an element still in its document.
 
@@ -787,16 +812,17 @@ SYNTHETIC_THREW = "stealth.click.synthetic:threw"
 #: 4, accepted until T-10299 moves these reads into an isolated world).
 SYNTHETIC_JS = (
     """(elem) => {
-    const isConnected =
-        Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected').get;
+    __IS_CONNECTED__
     const click = HTMLElement.prototype.click;
     let connected;
-    try { connected = isConnected.call(elem) === true; }
+    try { connected = __CONNECTED__; }
     catch (e) { return "__THREW__"; }
     if (!connected) return "__DETACHED__";
     try { click.call(elem); } catch (e) { return "__THREW__"; }
     return "__CLICKED__";
-}""".replace("__DETACHED__", SYNTHETIC_DETACHED)
+}""".replace("__IS_CONNECTED__", IS_CONNECTED_JS)
+    .replace("__CONNECTED__", CONNECTED_EXPR_JS)
+    .replace("__DETACHED__", SYNTHETIC_DETACHED)
     .replace("__CLICKED__", SYNTHETIC_CLICKED)
     .replace("__THREW__", SYNTHETIC_THREW)
 )

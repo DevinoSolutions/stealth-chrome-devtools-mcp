@@ -503,6 +503,9 @@ async def test_refresh_element_takes_the_same_lock_as_a_resolution():
             nonlocal locked_during_update
             locked_during_update = element_resolution._document_lock(tab).locked()
 
+        async def apply(self, js_function):
+            return True  # the connectivity read (T-10284): in its document
+
     tab = _FakeTab()
     await refresh_element(tab, _Element())
 

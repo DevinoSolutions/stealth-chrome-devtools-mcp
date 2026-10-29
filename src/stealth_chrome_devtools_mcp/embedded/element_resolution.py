@@ -150,6 +150,7 @@ from typing import TYPE_CHECKING, TypeVar
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
+from stealth_chrome_devtools_mcp.embedded import click_target
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -581,16 +582,40 @@ async def _xpath_node_ids(tab: Tab, expression: str) -> list[NodeId]:
             await tab.send(cdp.dom.discard_search_results(search_id))
 
 
+async def _require_connected(element: Element) -> None:
+    """Raise :class:`ElementDisconnected` unless the page says *element* is connected.
+
+    ONE ``Element.apply`` of :data:`click_target.CONNECTED_JS` (T-10284). Only a
+    literal ``true`` is connected, as in :func:`click_target.connected`: a read
+    that threw (``None``) or a shadowed ``isConnected`` is not an element
+    anyone can use, and answering "gone" is the direction that costs a re-query
+    rather than an action on a node no document holds.
+    """
+    if await element.apply(click_target.CONNECTED_JS) is not True:
+        raise ElementDisconnected("the element is no longer in its document")
+
+
 async def refresh_element(tab: Tab, element: Element | None) -> bool:
-    """``Element.update()`` under ``tab``'s document lock (F-884).
+    """``Element.update()`` under ``tab``'s document lock (F-884), then ``isConnected``.
 
     Answers whether the element is still in the document: ``False`` ONLY when
-    Chrome says it has left (:func:`detached_element`, T-10034 STEALTH-…-EP),
-    ``True`` otherwise. The page removing or replacing an element between its
-    resolution and this read is a page race, not a failure of the read, so it
-    is an answer and not a raise; what to do with an element that is gone is
-    the caller's decision (``query_elements`` drops it, ``get_element_state``
-    refuses). Every other error still propagates.
+    Chrome says it has left (:func:`detached_element`, T-10034 STEALTH-…-EP) or
+    the page says so itself, ``True`` otherwise. The page removing or replacing
+    an element between its resolution and this read is a page race, not a
+    failure of the read, so it is an answer and not a raise; what to do with an
+    element that is gone is the caller's decision (``query_elements`` drops it,
+    ``get_element_state`` refuses). Every other error still propagates.
+
+    ``update`` alone cannot say so for a node the page REMOVED but still
+    references: it re-resolves by backend node id and that succeeds for a
+    detached node (T-10284, measured on a list whose items are replaced every
+    25 ms). Such a node lists as visible (its computed style is empty, so
+    ``display !== 'none'`` holds) with no bounding box, and a state read of it
+    fails at ``get_position``. So the answer also reads ``isConnected`` off the
+    node (:func:`_require_connected`, the script ``click_target`` builds its own
+    reads from) and classifies a ``false`` through the same
+    :func:`detached_element` as Chrome's reply. One extra read per element,
+    outside the document lock: it resolves no node id.
 
     ``update`` reads as "re-read this element" and is nothing of the kind: it
     sends ``DOM.getDocument`` and re-resolves the node against the answer, so
@@ -620,6 +645,12 @@ async def refresh_element(tab: Tab, element: Element | None) -> bool:
             if detached_element(exc) is None:
                 raise
             return False
+    try:
+        await _require_connected(element)
+    except ProtocolException as exc:
+        if detached_element(exc) is None:
+            raise
+        return False
     return True
 
 

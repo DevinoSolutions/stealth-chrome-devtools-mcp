@@ -52,6 +52,10 @@ class _FakeElement:
     async def update(self):
         return None
 
+    async def apply(self, js_function, *args, **kwargs):
+        # The connectivity read (T-10284): this element is in its document.
+        return True
+
     async def get_position(self):
         return None
 

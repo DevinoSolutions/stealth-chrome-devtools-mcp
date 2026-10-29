@@ -17,7 +17,11 @@ replaced before the tool is done with it, and Chrome answers the next
   race is not logged at ERROR;
 * **removed but still referenced** -- the page's own ``isConnected`` false is
   the same departure as Chrome's reply, never "not rendered": re-resolved
-  before any input, and never answered with the synthetic ``el.click()``.
+  before any input, and never answered with the synthetic ``el.click()``;
+* **removed but still referenced, in a listing or a state read** (T-10284) --
+  ``update()`` succeeds for such a node, so ``refresh_element`` also reads
+  ``isConnected`` and ``query_elements`` / ``get_element_state`` treat it as
+  gone, never as a visible element with no box.
 
 Hermetic: ``FakeTab`` + ``FakeClickTarget``, whose ``detached`` /
 ``detach_on`` model WHEN the page removed the element; the error follows.
@@ -35,7 +39,11 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import FakeClickTarget, FakeTab, left_the_document
-from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
+from stealth_chrome_devtools_mcp.embedded import (
+    click_target,
+    dom_handler,
+    element_resolution,
+)
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
@@ -757,20 +765,18 @@ async def test_a_connected_form_that_shadows_every_member_is_clicked_once():
 # ---------------------------------------------------------------------------
 
 
-class _ListedElement:
+class _ListedElement(FakeClickTarget):
+    """A listed element whose ``update`` fails the way EP's does when it is
+    ``gone`` (Chrome dropped it); everything else is ``FakeClickTarget``."""
+
     def __init__(self, tag: str, *, gone: bool = False) -> None:
-        self.tag_name = tag
-        self.text_all = tag
-        self.attrs: dict[str, str] = {}
+        super().__init__(tag=tag, element_id="", text=tag)
         self._gone = gone
 
     async def update(self):
         if self._gone:
             raise left_the_document(DETACHED_EP)
-        return self
-
-    async def get_position(self):
-        return None
+        return await super().update()
 
 
 class _ListingTab:
@@ -830,3 +836,217 @@ async def test_get_element_state_of_an_element_that_left_says_so():
         await DOMHandler.get_element_state(_OneTab(), SELECTOR)
 
     assert "left the page after it was resolved" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# (e) a node the page removed but still references (T-10284)
+# ---------------------------------------------------------------------------
+#
+# ``Element.update()`` re-resolves by backend node id and that SUCCEEDS for a
+# detached node, so before this ``refresh_element`` answered "still there" for
+# it: ``query_elements`` listed it as visible (an empty computed style passes
+# ``display !== 'none'``) with no bounding box, and ``get_element_state`` read
+# ``is_visible: True`` and then failed at ``get_position`` with "Could not
+# compute content quads." The fakes answer the connectivity read the way Chrome
+# does: a thrown Error reaches ``Element.apply``'s caller as ``None``, and JS
+# truthiness is decided apart from the serialised value.
+
+
+class _TabOf:
+    """A tab that resolves exactly the elements it was given, for both reads."""
+
+    def __init__(self, *elements) -> None:
+        self._elements = list(elements)
+
+    async def query_selector_all(self, selector, *args, **kwargs):
+        return list(self._elements)
+
+    async def query_selector(self, selector, *args, **kwargs):
+        return self._elements[0] if self._elements else None
+
+
+@pytest.fixture
+def backend_log(caplog):
+    """Every record on ``stealth.backend``, whatever its level, once each."""
+    backend = logging.getLogger("stealth.backend")
+    backend.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger="stealth.backend")
+    try:
+        yield lambda: list(dict.fromkeys(caplog.records))
+    finally:
+        backend.removeHandler(caplog.handler)
+
+
+def _item(element_id: str, **kwargs) -> FakeClickTarget:
+    return FakeClickTarget(tag="li", element_id=element_id, text=element_id, **kwargs)
+
+
+def _ids(results) -> list[str]:
+    return [r.attributes["id"] for r in results]
+
+
+@pytest.mark.parametrize("visible_only", [True, False])
+async def test_query_elements_drops_a_node_the_page_removed_but_still_references(
+    visible_only, backend_log, backend_errors
+):
+    """RED on f9fe86e: ``update()`` succeeded for the removed ``<li>``, so it was
+    listed (visible, with ``bounding_box`` None) beside the live one."""
+    removed = _item("removed", disconnected=True)
+    live = _item("live")
+
+    results = await DOMHandler.query_elements(
+        _TabOf(removed, live), "li", visible_only=visible_only
+    )
+
+    assert _ids(results) == ["live"]
+    assert results[0].bounding_box == {
+        "x": 10.0,
+        "y": 20.0,
+        "width": 40.0,
+        "height": 20.0,
+    }
+    assert backend_errors() == []
+    dropped = [
+        r
+        for r in backend_log()
+        if "left the document after resolution" in r.getMessage()
+    ]
+    assert [r.levelno for r in dropped] == [logging.INFO]
+
+
+async def test_a_node_that_leaves_after_the_refresh_is_never_listed_as_visible():
+    """The window between the connectivity read and the visibility read: the
+    page removes the node there. An empty computed style passes the style tests,
+    so the visibility script must ask ``isConnected`` itself, through the same
+    answer. RED on f9fe86e: it was listed as visible."""
+
+    class _RemovedAfterTheRefresh(FakeClickTarget):
+        async def apply(self, js_function, *args, **kwargs):
+            answer = await super().apply(js_function, *args, **kwargs)
+            if "getComputedStyle" not in js_function:
+                self.disconnected = True
+            return answer
+
+    gone = _RemovedAfterTheRefresh(tag="li", element_id="gone", text="gone")
+
+    results = await DOMHandler.query_elements(_TabOf(gone), "li", visible_only=True)
+
+    assert results == []
+
+
+@pytest.mark.parametrize("visible_only", [True, False])
+async def test_a_connected_node_is_listed_unchanged_with_one_connectivity_read(
+    visible_only,
+):
+    live = _item("live")
+
+    results = await DOMHandler.query_elements(
+        _TabOf(live), "li", visible_only=visible_only
+    )
+
+    assert _ids(results) == ["live"]
+    assert results[0].is_visible is True
+    assert results[0].bounding_box is not None
+    reads = [js for js in live.apply_calls if js == click_target.CONNECTED_JS]
+    assert len(reads) == 1
+    assert len(live.apply_calls) == (2 if visible_only else 1)
+
+
+async def test_a_connected_display_none_node_is_still_filtered_by_visible_only():
+    hidden = _item("hidden", rendered=False)
+
+    assert await DOMHandler.query_elements(_TabOf(hidden), "li") == []
+    listed = await DOMHandler.query_elements(_TabOf(hidden), "li", visible_only=False)
+    assert _ids(listed) == ["hidden"]
+
+
+async def test_get_element_state_of_a_removed_but_referenced_node_says_it_left():
+    """RED on f9fe86e: ``is_visible: True`` was computed, then ``get_position``
+    failed with "Could not compute content quads."."""
+    removed = _item("removed", disconnected=True)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.get_element_state(_TabOf(removed), SELECTOR)
+
+    assert "left the page after it was resolved" in str(caught.value)
+    assert "content quads" not in str(caught.value)
+
+
+async def test_get_element_state_of_a_connected_node_is_unchanged():
+    live = _item("live")
+
+    state = await DOMHandler.get_element_state(_TabOf(live), SELECTOR)
+
+    assert state["tag_name"] == "li"
+    assert state["attributes"] == {"id": "live"}
+    assert state["is_visible"] is True
+    assert state["position"].center == (30.0, 30.0)
+
+
+async def test_refresh_element_reads_connectivity_once_and_only_after_update():
+    removed = _item("removed", disconnected=True)
+    live = _item("live")
+    gone = _ListedElement("li", gone=True)
+
+    assert await refresh_element(FakeTab(), removed) is False
+    assert await refresh_element(FakeTab(), live) is True
+    assert await refresh_element(FakeTab(), gone) is False
+    assert removed.apply_calls == [click_target.CONNECTED_JS]
+    assert live.apply_calls == [click_target.CONNECTED_JS]
+    # Chrome's own reply already said it: nothing left to ask the page.
+    assert gone.apply_calls == []
+
+
+async def test_a_connectivity_read_that_threw_is_not_connected():
+    """A thrown Error reaches ``Element.apply``'s caller as ``None``; only a
+    literal ``true`` is a node in a document (as ``click_target.connected``)."""
+
+    class _Throws(FakeClickTarget):
+        async def apply(self, js_function, *args, **kwargs):
+            return None
+
+    assert await refresh_element(FakeTab(), _Throws()) is False
+
+
+async def test_the_one_connectivity_read_builds_every_script_that_asks():
+    for name, js in (
+        ("CONNECTED_JS", click_target.CONNECTED_JS),
+        ("SYNTHETIC_JS", click_target.SYNTHETIC_JS),
+        ("VISIBLE_JS", dom_handler.VISIBLE_JS),
+    ):
+        assert click_target.IS_CONNECTED_JS in js, name
+        assert click_target.CONNECTED_EXPR_JS in js, name
+        assert re.search(r"\belem\.isConnected\b", js) is None, name
+
+
+async def test_a_removed_form_that_shadows_is_connected_is_dropped_from_a_listing():
+    """A ``<form><input name=isConnected>`` the page removed: read as
+    ``elem.isConnected`` it is the control, a truthy object, and the removed
+    form would list as connected. The native getter says false."""
+    removed = FakeClickTarget(
+        tag="form",
+        element_id="removed",
+        form_controls=("isConnected",),
+        disconnected=True,
+    )
+    live = FakeClickTarget(
+        tag="form", element_id="live", form_controls=("isConnected",)
+    )
+
+    for visible_only in (True, False):
+        results = await DOMHandler.query_elements(
+            _TabOf(removed, live), "form", visible_only=visible_only
+        )
+        assert _ids(results) == ["live"], visible_only
+
+
+async def test_a_removed_form_that_shadows_is_connected_has_left_the_page():
+    removed = FakeClickTarget(
+        tag="form", form_controls=("isConnected",), disconnected=True
+    )
+    live = FakeClickTarget(tag="form", form_controls=("isConnected",))
+
+    assert await refresh_element(FakeTab(), removed) is False
+    assert await refresh_element(FakeTab(), live) is True
+    with pytest.raises(ToolError, match="left the page after it was resolved"):
+        await DOMHandler.get_element_state(_TabOf(removed), SELECTOR)
