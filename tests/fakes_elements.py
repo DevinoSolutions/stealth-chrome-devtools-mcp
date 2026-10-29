@@ -228,6 +228,13 @@ class FakeClickTarget:
     gets the real member. Which one the product's script does is read off the
     script text, never assumed.
 
+    ``getter_throws`` is a page that replaced ``Node.prototype.isConnected``'s
+    getter with one that throws (an Error, or ``throw true``): the product's
+    connectivity fragment catches it and answers its ``threw`` token whether or
+    not the node is in a document. What an UNGUARDED read would have answered
+    (the thrown ``true`` itself, or ``None``) is not modelled -- a script that
+    does not carry the fragment is not answered at all.
+
     The listing surface (T-10284) -- ``update``, ``tag_name``, ``text_all``,
     ``attrs``, ``children`` -- is what ``query_elements`` and
     ``get_element_state`` read off an element they hold. ``update`` is nodriver's
@@ -235,10 +242,11 @@ class FakeClickTarget:
     ``detached`` element (Chrome dropped it from its node table) and SUCCEEDS for
     a ``disconnected`` one, the page's removed-but-referenced node, which is the
     whole of T-10284. A script's connectivity and visibility answers are
-    COMPUTED from ``disconnected`` and the script text (:meth:`_connected_read`,
-    :meth:`_visible`); a ``disconnected`` node has no box and an EMPTY computed
-    style, so a visibility script that does not ask ``isConnected`` first reads
-    it as visible, exactly as real Chrome does.
+    COMPUTED from ``disconnected``, ``getter_throws`` and the script text
+    (:meth:`_connectivity_state`, :meth:`_visible`); a ``disconnected`` node has
+    no box and an EMPTY computed style, so a visibility script that does not
+    ask for connectivity first reads it as visible, exactly as real Chrome
+    does.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -271,7 +279,9 @@ class FakeClickTarget:
         click_throws: Any = _UNSET,
         synthetic_answer: Any = _UNSET,
         form_controls: tuple[str, ...] = (),
+        getter_throws: bool = False,
     ) -> None:
+        self.getter_throws = getter_throws
         self.form_controls = tuple(form_controls)
         self.click_throws = click_throws
         self.synthetic_answer = synthetic_answer
@@ -333,23 +343,36 @@ class FakeClickTarget:
         """Whether *js_function* reads *member* in a way a named control shadows."""
         return member in self.form_controls and f"elem.{member}" in js_function
 
+    def _connectivity_state(self, js_function: str) -> str | None:
+        """The token the script's connectivity fragment evaluates to, if it has one.
+
+        ``None`` when the script does not carry the shipped fragment, so it
+        has no ``connectivity`` to call. The state itself is the page's:
+        ``threw`` for a getter that throws, else ``no`` for a node in no
+        document and ``yes`` for one in a document.
+        """
+        if _CONNECTIVITY_SHAPE not in _squash(js_function):
+            return None
+        if self.getter_throws:
+            return CONNECTED_THREW
+        return CONNECTED_NO if self.disconnected else CONNECTED_YES
+
     def _aim(self, js_function: str) -> Any:
-        # A shadowed ``isConnected`` is the control. Two different facts follow
-        # from it and are kept apart (Codex round 6): its JavaScript TRUTHINESS,
-        # which decides the script's own branches -- an object is truthy -- and
-        # what ``JSON.stringify`` writes for it, ``{}``, which is falsy in
-        # Python and must never decide a JS-side branch here.
-        shadowed = self._shadowed(js_function, "isConnected")
-        js_truthy = True if shadowed else not self.disconnected
-        connected: Any = {} if shadowed else not self.disconnected
-        if js_truthy and self._shadowed(js_function, "getClientRects"):
+        squashed = _squash(js_function)
+        state = (
+            self._connectivity_state(js_function)
+            if "conststate=connectivity(elem);" in squashed
+            else None
+        )
+        if state == CONNECTED_YES and self._shadowed(js_function, "getClientRects"):
             # ``elem.getClientRects()`` calls the control: TypeError, uncaught.
             # A thrown Error OBJECT reaches the caller as ``None`` (measured on
             # real Chrome: "the page answered with NoneType"); a thrown
             # primitive arrives as itself.
             return None
-        # ``AIM_JS`` reads no client rects off a disconnected node: it has none.
-        boxed = self.rendered and not self.disconnected
+        # ``AIM_JS`` reads no client rects off a node that is not connected: it
+        # has none, or the read that would say so did not succeed.
+        boxed = self.rendered and state == CONNECTED_YES
         left, top, width, height = self.rect if boxed else (0.0, 0.0, 0.0, 0.0)
         point = {"x": left + width / 2, "y": top + height / 2} if boxed else None
         visible_point = point is not None and self._in_viewport(point["x"], point["y"])
@@ -360,9 +383,11 @@ class FakeClickTarget:
         else:
             tag, element_id, classes = self.hit
             hit = {"tag": tag, "id": element_id, "classes": list(classes)}
+        # The ``connected`` field exists only where the script reports its state.
+        reported = {"connected": state} if "connected:state," in squashed else {}
         return json.dumps(
             {
-                "connected": connected,
+                **reported,
                 "rendered": boxed,
                 "rect": {
                     "left": left,
@@ -409,33 +434,31 @@ class FakeClickTarget:
             raise left_the_document()
         return self
 
-    def _connected_read(self, js_function: str) -> Any:
-        """What the script's ``isConnected`` read EVALUATES to, as ``(strict, truthy)``.
+    def _connectivity_answer(self, js_function: str) -> Any:
+        """What a script that only asks connectivity returns.
 
-        Through the native getter it is the real boolean. Through ``elem.<name>``
-        a form's named control shadows it: an object, so truthy and ``!== true``
-        (Codex round 6: JS truthiness is decided apart from the serialised value).
+        The token, and only for a script that RETURNS the fragment's answer.
+        Anything else -- a script that computes it and returns something of its
+        own, one without the fragment -- answers nothing (``None``).
         """
-        native = "Node.prototype, 'isConnected')" in js_function
-        if not native and self._shadowed(js_function, "isConnected"):
-            return False, True
-        return not self.disconnected, not self.disconnected
-
-    def _connected_answer(self, js_function: str) -> bool:
-        """The boolean a script asking only ``isConnected`` returns."""
-        strict, truthy = self._connected_read(js_function)
-        return strict if "=== true" in js_function else truthy
+        state = self._connectivity_state(js_function)
+        if state is None or "returnconnectivity(elem);" not in _squash(js_function):
+            return None
+        return state
 
     def _visible(self, js_function: str) -> bool:
         """``getComputedStyle``'s ``display/visibility/opacity`` test, as Chrome runs it.
 
         A removed node has an EMPTY computed style, so all three tests pass and
-        the style alone says "visible" (T-10284). Whether the script asks
-        ``isConnected`` first is read off its text.
+        the style alone says "visible" (T-10284). Whether the script gates on
+        connectivity first -- and on which token -- is read off its text; a
+        gate that is not satisfied by the ``yes`` token returns false.
         """
         asked = js_function.split("getComputedStyle", maxsplit=1)[0]
-        gate = re.search(r"if \(!.*isConnected.*\) return false;", asked)
-        if gate and not self._connected_answer(asked):
+        gate = re.search(
+            r'if \(connectivity\(elem\) !== "([^"]+)"\) return false;', asked
+        )
+        if gate and self._connectivity_state(asked) != gate.group(1):
             return False
         if self.disconnected:
             return True
@@ -553,14 +576,26 @@ class FakeClickTarget:
         """The product's synthetic script as the page runs it, in one task."""
         if self.synthetic_error is not None:
             raise self.synthetic_error
-        detached, clicked, threw = _synthetic_answers(js_function)
+        script = _synthetic_answers(js_function)
         if self.synthetic_answer is not _UNSET:
             return self.synthetic_answer
         if self.removed_before_click:
             self.disconnected = True
-        shadowed = self._shadowed(js_function, "isConnected")
-        if self.disconnected and not shadowed:
-            return detached
+        state = (
+            self._connectivity_state(js_function)
+            if "conststate=connectivity(elem);" in _squash(js_function)
+            else None
+        )
+        if state is None:
+            # No connectivity read ran: ``connectivity`` is undefined, the
+            # script throws a ReferenceError (an Error), uncaught -> ``None``.
+            return None
+        if state == script.detached_state:
+            return script.detached
+        if state != script.connected_state:
+            return script.unreadable
+        threw = script.threw
+        clicked = script.clicked
         if self._shadowed(js_function, "click"):
             # ``elem.click()`` calls the control: TypeError, before any click;
             # uncaught, the thrown Error reaches the caller as ``None``.
@@ -587,7 +622,7 @@ class FakeClickTarget:
         if "getComputedStyle" in js_function:
             return self._visible(js_function)
         if "isConnected" in js_function:
-            return self._connected_answer(js_function)
+            return self._connectivity_answer(js_function)
         if PROBE_KEY in js_function and "addEventListener" in js_function:
             self.armed = _probe_kinds(js_function)
             self.observed = []
@@ -605,6 +640,40 @@ class FakeClickTarget:
 
 
 PROBE_KEY = "stealth.click.probe"
+
+#: The connectivity vocabulary, spelled out here rather than imported from the
+#: product: the double is an independent witness of what the page-side script
+#: returns, and ``test_the_double_speaks_the_products_connectivity_vocabulary``
+#: keeps the two equal.
+CONNECTED_YES = "stealth.connected:yes"
+CONNECTED_NO = "stealth.connected:no"
+CONNECTED_THREW = "stealth.connected:threw"
+
+
+def _squash(text: str) -> str:
+    """*text* without whitespace, so a script is compared by its tokens."""
+    return re.sub(r"\s+", "", text)
+
+
+#: THE fragment the product's scripts must carry, verbatim up to whitespace. A
+#: copy, not an import: a script that carries anything else -- no ``try``, a
+#: different getter, a different return -- is a script this double does not
+#: recognise and answers with nothing (``None``, as ``Element.apply`` does for a
+#: script that threw). Whether THIS text really behaves as the double says (a
+#: getter that ``throw true``s, a form that shadows the member, a removed node)
+#: is not something a double can show; ``tests/test_e2e_connectivity_read.py``
+#: runs the product's own text in real Chrome.
+_CONNECTIVITY_SHAPE = _squash(
+    """const connectivity = (node) => {
+        try {
+            const answer = Object.getOwnPropertyDescriptor(
+                Node.prototype, 'isConnected').get.call(node);
+            if (answer === true) return "stealth.connected:yes";
+            if (answer === false) return "stealth.connected:no";
+        } catch (e) { return "stealth.connected:threw"; }
+        return "stealth.connected:threw";
+    };"""
+)
 
 
 def left_the_document(
@@ -625,31 +694,56 @@ def _js_value(literal: str) -> Any:
 
 
 def _is_synthetic(js_function: str) -> bool:
-    """Whether *js_function* is a synthetic-click script (any revision)."""
+    """Whether *js_function* is a synthetic-click script."""
     return "elem.click()" in js_function or "click.call(elem)" in js_function
 
 
-def _synthetic_answers(js_function: str) -> tuple[Any, Any, Any]:
-    """(detached, clicked, threw) as the synthetic script itself returns them.
+class _SyntheticScript:
+    """The synthetic script's decisions, read off its text."""
 
-    "detached" is what it returns when the node is not connected, "clicked" its
-    last return, and "threw" what it returns from a ``catch`` around
-    ``elem.click()`` -- ``_UNSET`` when nothing catches it, so a value the
+    def __init__(
+        self,
+        detached_state: str,
+        detached: Any,
+        connected_state: str,
+        unreadable: Any,
+        clicked: Any,
+        threw: Any,
+    ) -> None:
+        self.detached_state = detached_state
+        self.detached = detached
+        self.connected_state = connected_state
+        self.unreadable = unreadable
+        self.clicked = clicked
+        self.threw = threw
+
+
+def _synthetic_answers(js_function: str) -> _SyntheticScript:
+    """The synthetic script's branches, as the script itself spells them.
+
+    ``detached`` is what it returns for the state token it compares ``===``
+    (the node left); ``unreadable`` what it returns for any state that is not
+    the one it compares ``!==`` (the read did not succeed); ``clicked`` its last
+    return; and ``threw`` what it returns from a ``catch`` around
+    ``click.call(elem)`` -- ``_UNSET`` when nothing catches it, so a value the
     page's ``click()`` throws escapes as the script's answer.
     """
-    detached = re.search(
-        r"if \(!(?:elem\.isConnected|connected)\) return ([^;]+);", js_function
-    )
+    left = re.search(r'if \(state === "([^"]+)"\) return ([^;]+);', js_function)
+    unreadable = re.search(r'if \(state !== "([^"]+)"\) return ([^;]+);', js_function)
     returns = re.findall(r"return ([^;]+);", js_function)
     caught = re.search(
-        r"(?:elem\.click\(\)|click\.call\(elem\));\s*\} catch \(e\) "
-        r"\{ return ([^;]+);",
-        js_function,
+        r"click\.call\(elem\);\s*\} catch \(e\) \{ return ([^;]+);", js_function
     )
-    if detached is None or not returns:
+    if left is None or unreadable is None or not returns:
         raise AssertionError("not a synthetic script this double can run")
-    threw = _js_value(caught.group(1)) if caught else _UNSET
-    return _js_value(detached.group(1)), _js_value(returns[-1]), threw
+    return _SyntheticScript(
+        detached_state=left.group(1),
+        detached=_js_value(left.group(2)),
+        connected_state=unreadable.group(1),
+        unreadable=_js_value(unreadable.group(2)),
+        clicked=_js_value(returns[-1]),
+        threw=_js_value(caught.group(1)) if caught else _UNSET,
+    )
 
 
 def _probe_kinds(js_function: str) -> list[str]:

@@ -21,7 +21,12 @@ replaced before the tool is done with it, and Chrome answers the next
 * **removed but still referenced, in a listing or a state read** (T-10284) --
   ``update()`` succeeds for such a node, so ``refresh_element`` also reads
   ``isConnected`` and ``query_elements`` / ``get_element_state`` treat it as
-  gone, never as a visible element with no box.
+  gone, never as a visible element with no box;
+* **a connectivity read that FAILED** (Codex on T-10284) -- only the page's own
+  ``no`` token is a departure. A getter that throws (an Error, or ``throw
+  true``, which ``Element.apply`` hands back as a plain ``True``) or a script
+  that answers anything but its tokens is a ``ToolError`` that names the read:
+  never "connected", never "left", never a silent drop from a listing.
 
 Hermetic: ``FakeTab`` + ``FakeClickTarget``, whose ``detached`` /
 ``detach_on`` model WHEN the page removed the element; the error follows.
@@ -31,13 +36,17 @@ succeed and answer ``isConnected`` false.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import json
 import logging
 import re
+from pathlib import Path
 
 import pytest
 from nodriver.core.connection import ProtocolException
 
+import fakes_elements
 from fakes import FakeClickTarget, FakeTab, left_the_document
 from stealth_chrome_devtools_mcp.embedded import (
     click_target,
@@ -55,6 +64,12 @@ pytestmark = pytest.mark.asyncio
 
 SELECTOR = "#target"
 DETACHED_EP = "Node with given id does not belong to the document"
+#: The connectivity tokens spelled out, so the module still collects against a
+#: parent that has no such constants (the RED run);
+#: ``test_the_double_speaks_the_products_connectivity_vocabulary`` keeps them equal.
+YES = "stealth.connected:yes"
+NO = "stealth.connected:no"
+THREW = "stealth.connected:threw"
 
 
 @pytest.fixture(autouse=True)
@@ -280,10 +295,11 @@ async def test_the_re_resolve_is_bounded_and_says_nothing_was_clicked():
 
 
 async def test_the_aim_script_reads_the_fact_the_double_answers():
-    """The double's ``connected`` stands for this script's ``isConnected`` read;
+    """The double's ``connected`` stands for this script's connectivity token;
     a pin built on one must not outlive the other."""
-    assert "const connected = isConnected.call(elem) === true;" in click_target.AIM_JS
-    assert "connected: connected" in click_target.AIM_JS
+    assert click_target.CONNECTIVITY_JS in click_target.AIM_JS
+    assert "const state = connectivity(elem);" in click_target.AIM_JS
+    assert "connected: state" in click_target.AIM_JS
 
 
 async def test_an_element_the_page_removed_is_re_resolved_not_clicked_synthetically():
@@ -409,13 +425,22 @@ def _hidden(**kwargs) -> FakeClickTarget:
 
 async def test_the_synthetic_script_checks_before_it_clicks():
     """The double reads the script's answers off the script itself; what it
-    cannot read is that the real script asks ``isConnected`` BEFORE it clicks,
-    in the same function, and catches what the page's ``click()`` throws."""
+    cannot read is that the real script asks for connectivity BEFORE it clicks,
+    in the same function, clicks only on the ``yes`` token, and catches what the
+    page's ``click()`` throws."""
     js = click_target.SYNTHETIC_JS
-    detached = f'if (!connected) return "{click_target.SYNTHETIC_DETACHED}";'
+    read = "const state = connectivity(elem);"
+    detached = (
+        f'if (state === "{click_target.CONNECTED_NO}") '
+        f'return "{click_target.SYNTHETIC_DETACHED}";'
+    )
+    unreadable = (
+        f'if (state !== "{click_target.CONNECTED_YES}") '
+        f'return "{click_target.SYNTHETIC_THREW}";'
+    )
     caught = f'try {{ click.call(elem); }} catch (e) {{ return "{click_target.SYNTHETIC_THREW}"; }}'
-    assert js.index("connected = isConnected.call(elem) === true;") < js.index(detached)
-    assert js.index(detached) < js.index(caught)
+    assert js.index(read) < js.index(detached) < js.index(unreadable)
+    assert js.index(unreadable) < js.index(caught)
 
 
 async def test_an_element_removed_after_the_last_read_is_never_clicked_synthetically():
@@ -640,6 +665,35 @@ async def test_a_click_handler_that_threw_sets_the_ledger():
 # (c5) a <form>'s named controls shadow ANY member (Codex round 5)
 # ---------------------------------------------------------------------------
 
+#: Everything a connectivity read can hand back that is NOT one of the two
+#: tokens: each one a read that did not succeed (Codex on T-10284).
+_NOT_AN_ANSWER = [
+    THREW,
+    True,
+    False,
+    None,
+    0,
+    1,
+    "",
+    "true",
+    {},
+    YES.upper(),
+    YES + " ",
+]
+_NOT_AN_ANSWER_IDS = [
+    "threw-token",
+    "thrown-true",
+    "plain-false",
+    "undefined",
+    "zero",
+    "one",
+    "empty",
+    "string-true",
+    "shadowed-object",
+    "shouting",
+    "padded",
+]
+
 #: Every member the two scripts must never read off the target directly.
 _SHADOWABLE = ("isConnected", "click", "getClientRects")
 
@@ -660,38 +714,61 @@ async def test_the_click_scripts_read_the_target_only_through_native_accessors()
     ):
         assert re.search(r"\b(?:elem|node|owner|r)\.[A-Za-z]", js) is None, name
     natives = (
-        "getter(Node.prototype, 'isConnected')",
         "Element.prototype.getClientRects",
         "Element.prototype.matches",
         "Element.prototype.closest",
         "Node.prototype.contains",
         "Node.prototype.getRootNode",
         "Document.prototype.elementFromPoint",
-        "isConnected.call(elem) === true",
     )
     for native in natives:
         assert native in click_target.AIM_JS, native
-    assert "getOwnPropertyDescriptor(Node.prototype, 'isConnected').get" in (
-        click_target.SYNTHETIC_JS
-    )
+    # The connectivity read is the one shared fragment, which reads the native
+    # accessor itself (CONNECTIVITY_JS) -- neither script has its own.
+    assert click_target.CONNECTIVITY_JS in click_target.AIM_JS
+    assert click_target.CONNECTIVITY_JS in click_target.SYNTHETIC_JS
     assert "HTMLElement.prototype.click" in click_target.SYNTHETIC_JS
-    assert "isConnected.call(elem) === true" in click_target.SYNTHETIC_JS
     assert "click.call(elem)" in click_target.SYNTHETIC_JS
 
 
 @pytest.mark.parametrize(
-    ("value", "connected"),
-    [(True, True), (False, False), ({}, False), (1, False), ("true", False)],
-    ids=["true", "false", "shadowed", "one", "string"],
+    ("answer", "verdict"),
+    [(YES, True), (NO, False)],
+    ids=["yes", "no"],
 )
-async def test_only_a_literal_true_is_connected(value, connected):
-    """RED on ca45646: ``connected()`` accepted anything but ``False``,
-    including the ``{}`` a shadowed ``isConnected`` serialises to."""
-    assert click_target.connected({"connected": value}) is connected
+async def test_the_two_page_answers_are_the_only_verdicts(answer, verdict):
+    assert click_target.connectivity(answer, "the target") is verdict
 
 
-async def test_an_aim_answer_with_no_connected_field_is_not_connected():
-    assert click_target.connected({"rendered": False}) is False
+@pytest.mark.parametrize("answer", _NOT_AN_ANSWER, ids=_NOT_AN_ANSWER_IDS)
+async def test_nothing_but_the_two_tokens_is_a_verdict(answer):
+    """The page's ``threw`` token, a ``true`` a getter threw (which
+    ``Element.apply`` hands back as an ordinary ``True``), ``None`` from a thrown
+    Error, a shadowed object, a near-miss spelling: each is a read that did not
+    succeed, so none of them is a verdict about the node."""
+    with pytest.raises(ToolError) as caught:
+        click_target.connectivity(answer, "the target")
+
+    assert "could not read whether the target is still in its document" in str(
+        caught.value
+    )
+
+
+async def test_an_aim_answer_with_no_connected_field_is_a_read_error():
+    """A field the script did not report is not "not connected": nothing was
+    asked, so nothing is re-resolved and nothing is sent."""
+    record = json.dumps(
+        {"rendered": False, "rect": {"left": 0, "top": 0, "width": 0, "height": 0}}
+    )
+    target = FakeClickTarget(aim_answer=record)
+    tab = _ReplacingTab(target)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "could not read whether" in str(caught.value), caught.value
+    assert len(tab.select_calls) == 1
+    assert target.landings == [] and "click" not in target.calls
 
 
 async def test_a_removed_form_that_shadows_is_connected_is_re_resolved():
@@ -847,9 +924,9 @@ async def test_get_element_state_of_an_element_that_left_says_so():
 # it: ``query_elements`` listed it as visible (an empty computed style passes
 # ``display !== 'none'``) with no bounding box, and ``get_element_state`` read
 # ``is_visible: True`` and then failed at ``get_position`` with "Could not
-# compute content quads." The fakes answer the connectivity read the way Chrome
-# does: a thrown Error reaches ``Element.apply``'s caller as ``None``, and JS
-# truthiness is decided apart from the serialised value.
+# compute content quads." The fake answers the connectivity read ONLY for a
+# script carrying the shipped fragment, with that fragment's token for the
+# page's state; anything else it answers with nothing, as a script that threw.
 
 
 class _TabOf:
@@ -997,15 +1074,9 @@ async def test_refresh_element_reads_connectivity_once_and_only_after_update():
     assert gone.apply_calls == []
 
 
-async def test_a_connectivity_read_that_threw_is_not_connected():
-    """A thrown Error reaches ``Element.apply``'s caller as ``None``; only a
-    literal ``true`` is a node in a document (as ``click_target.connected``)."""
-
-    class _Throws(FakeClickTarget):
-        async def apply(self, js_function, *args, **kwargs):
-            return None
-
-    assert await refresh_element(FakeTab(), _Throws()) is False
+def _package_sources() -> list[Path]:
+    root = Path(click_target.__file__).parent
+    return sorted(root.glob("*.py"))
 
 
 async def test_the_one_connectivity_read_builds_every_script_that_asks():
@@ -1013,10 +1084,238 @@ async def test_the_one_connectivity_read_builds_every_script_that_asks():
         ("CONNECTED_JS", click_target.CONNECTED_JS),
         ("SYNTHETIC_JS", click_target.SYNTHETIC_JS),
         ("VISIBLE_JS", dom_handler.VISIBLE_JS),
+        ("AIM_JS", click_target.AIM_JS),
     ):
-        assert click_target.IS_CONNECTED_JS in js, name
-        assert click_target.CONNECTED_EXPR_JS in js, name
+        assert click_target.CONNECTIVITY_JS in js, name
         assert re.search(r"\belem\.isConnected\b", js) is None, name
+
+
+async def test_no_other_script_in_the_package_reads_is_connected():
+    """Codex finding 4: the extraction left a second implementation in
+    ``NATIVES_JS`` and ``AIM_JS``. Census over every string constant of the
+    package that is a script: ``'isConnected'`` is spelled in exactly one, the
+    shared fragment, and no script reads ``.isConnected`` off a node."""
+    spelled = []
+    for path in _package_sources():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            if "'isConnected'" in node.value:
+                spelled.append((path.name, node.value))
+            if "=>" in node.value:
+                assert re.search(r"\.isConnected\b", node.value) is None, path.name
+    assert [name for name, _ in spelled] == ["click_target.py"], spelled
+
+
+async def test_the_double_speaks_the_products_connectivity_vocabulary():
+    """The double carries its own copy of the tokens and of the fragment (it is
+    an independent witness); it answers a script only if that script carries
+    the copy, so the copy has to be the product's text."""
+    assert (YES, NO, THREW) == (
+        click_target.CONNECTED_YES,
+        click_target.CONNECTED_NO,
+        click_target.CONNECTED_THREW,
+    )
+    assert (YES, NO, THREW) == (
+        fakes_elements.CONNECTED_YES,
+        fakes_elements.CONNECTED_NO,
+        fakes_elements.CONNECTED_THREW,
+    )
+    assert (
+        fakes_elements._squash(click_target.CONNECTIVITY_JS)
+        == fakes_elements._CONNECTIVITY_SHAPE
+    )
+
+
+# ---------------------------------------------------------------------------
+# (f) a connectivity read that FAILED is not an answer about the node (Codex)
+# ---------------------------------------------------------------------------
+#
+# ``Element.apply`` hands back ``result[0].value`` and drops ``exceptionDetails``:
+# a getter that does ``throw true`` arrives as a plain ``True``, and one that
+# throws an Error as ``None``. Only the script's own tokens are answers, so a
+# read that threw can neither complete the check nor mean the node left.
+
+UNREADABLE = "could not read whether the element is still in its document"
+
+
+class _Answers(FakeClickTarget):
+    """A node whose connectivity script answers whatever it is told to."""
+
+    def __init__(self, answer) -> None:
+        super().__init__(tag="li", element_id="odd", text="odd")
+        self._answer = answer
+
+    async def apply(self, js_function, *args, **kwargs):
+        self.apply_calls.append(js_function)
+        return self._answer
+
+
+@pytest.mark.parametrize("answer", _NOT_AN_ANSWER, ids=_NOT_AN_ANSWER_IDS)
+async def test_a_connectivity_answer_that_is_no_token_is_a_read_error(answer):
+    """The refresh neither completes (``True``) nor classifies a departure
+    (``False``): it raises, and every tool that reads through it reports it."""
+    with pytest.raises(ToolError, match=UNREADABLE):
+        await refresh_element(FakeTab(), _Answers(answer))
+
+    with pytest.raises(ToolError) as state:
+        await DOMHandler.get_element_state(_TabOf(_Answers(answer)), SELECTOR)
+    assert UNREADABLE in str(state.value)
+    assert "left the page" not in str(state.value)
+
+    for visible_only in (True, False):
+        with pytest.raises(ToolError) as listing:
+            await DOMHandler.query_elements(
+                _TabOf(_Answers(answer)), "li", visible_only=visible_only
+            )
+        assert "element 0 of 'li'" in str(listing.value), visible_only
+        assert UNREADABLE in str(listing.value), visible_only
+
+
+@pytest.mark.parametrize("disconnected", [True, False], ids=["removed", "connected"])
+async def test_a_getter_that_throws_is_a_read_error_whether_or_not_the_node_left(
+    disconnected,
+):
+    """Codex findings 1 and 2. ``Node.prototype.isConnected`` replaced by a getter
+    that throws: on a REMOVED node the thrown ``true`` completed the check and
+    the node listed again; on a CONNECTED node the thrown Error read as a
+    departure and the node was dropped. Both are a read that failed."""
+    broken = FakeClickTarget(
+        tag="li",
+        element_id="broken",
+        text="broken",
+        getter_throws=True,
+        disconnected=disconnected,
+    )
+    live = _item("live")
+
+    with pytest.raises(ToolError, match=UNREADABLE):
+        await refresh_element(FakeTab(), broken)
+    for visible_only in (True, False):
+        with pytest.raises(ToolError) as listing:
+            await DOMHandler.query_elements(
+                _TabOf(broken, live), "li", visible_only=visible_only
+            )
+        assert UNREADABLE in str(listing.value), visible_only
+    with pytest.raises(ToolError) as state:
+        await DOMHandler.get_element_state(_TabOf(broken), SELECTOR)
+    assert UNREADABLE in str(state.value)
+    assert "left the page" not in str(state.value)
+
+
+async def test_a_read_error_in_a_listing_is_not_logged_as_a_dropped_element(
+    backend_log,
+):
+    broken = FakeClickTarget(tag="li", element_id="broken", getter_throws=True)
+
+    with pytest.raises(ToolError):
+        await DOMHandler.query_elements(_TabOf(broken), "li", visible_only=False)
+
+    assert [
+        r
+        for r in backend_log()
+        if "left the document after resolution" in r.getMessage()
+    ] == []
+
+
+@pytest.mark.parametrize(
+    "mutant",
+    [
+        "(elem) => {\n    __FRAGMENT__\n"
+        "    const ignored = connectivity(elem);\n    return true;\n}",
+        "(elem) => {\n    return true;\n}",
+        "(elem) => {\n    __FRAGMENT__\n    return connectivity(elem) !== null;\n}",
+    ],
+    ids=["codex-mutation", "no-read-at-all", "returns-a-boolean-of-it"],
+)
+@pytest.mark.parametrize("disconnected", [True, False], ids=["removed", "connected"])
+async def test_a_connectivity_script_that_stops_returning_its_token_is_a_read_error(
+    monkeypatch, mutant, disconnected
+):
+    """Codex finding 3, its exact mutation: ``CONNECTED_JS`` changed to compute
+    the read and ``return true``. The double answers only a script that returns
+    the fragment's own token, so the mutant answers nothing and the refresh
+    fails -- for a removed node and a connected one alike."""
+    monkeypatch.setattr(
+        click_target,
+        "CONNECTED_JS",
+        mutant.replace("__FRAGMENT__", click_target.CONNECTIVITY_JS),
+    )
+    node = _item("node", disconnected=disconnected)
+
+    with pytest.raises(ToolError, match=UNREADABLE):
+        await refresh_element(FakeTab(), node)
+
+
+async def test_the_visibility_gate_cannot_be_satisfied_by_a_read_that_threw():
+    """The window after the refresh: the page replaces the getter with one that
+    throws, and the node is also gone. The gate only passes the ``yes`` token,
+    so the node is not listed as visible."""
+
+    class _BreaksAfterTheRefresh(FakeClickTarget):
+        async def apply(self, js_function, *args, **kwargs):
+            answer = await super().apply(js_function, *args, **kwargs)
+            if "getComputedStyle" not in js_function:
+                self.getter_throws = True
+                self.disconnected = True
+            return answer
+
+    node = _BreaksAfterTheRefresh(tag="li", element_id="node", text="node")
+
+    results = await DOMHandler.query_elements(_TabOf(node), "li", visible_only=True)
+
+    assert results == []
+    # It got as far as the visibility read: the refresh did not drop it first.
+    assert dom_handler.VISIBLE_JS in node.apply_calls
+
+
+async def test_a_cdp_failure_during_the_connectivity_read_keeps_its_old_meaning():
+    """Not the page's answer, so not a token: Chrome's own departure reply is
+    still a departure, and any other protocol failure still propagates."""
+
+    class _Fails(FakeClickTarget):
+        def __init__(self, error: ProtocolException) -> None:
+            super().__init__(tag="li")
+            self._error = error
+
+        async def apply(self, js_function, *args, **kwargs):
+            raise self._error
+
+    gone = _Fails(left_the_document(DETACHED_EP))
+    assert await refresh_element(FakeTab(), gone) is False
+    with pytest.raises(ProtocolException, match="Some unrelated CDP failure"):
+        await refresh_element(
+            FakeTab(),
+            _Fails(ProtocolException({"message": "Some unrelated CDP failure"})),
+        )
+
+
+async def test_a_click_on_a_node_whose_connectivity_cannot_be_read_sends_nothing():
+    target = FakeClickTarget(getter_throws=True)
+    tab = _same_node(target)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "could not read whether '#target' is still in its document" in str(
+        caught.value
+    )
+    assert len(tab.select_calls) == 1
+    assert target.landings == [] and "click" not in target.calls
+    assert "synthetic" not in target.calls
+
+
+async def test_the_synthetic_script_clicks_only_on_the_yes_token():
+    ledger = click_target.InputSent()
+    unreadable = _hidden(getter_throws=True)
+
+    with pytest.raises(ToolError, match="threw"):
+        await click_target.synthetic_click(unreadable, SELECTOR, ledger)
+
+    assert "click" not in unreadable.calls
+    # A read that failed proves nothing about whether the page took a click, so
+    # the ledger is set and the attempt is never re-run (the unchanged rule).
+    assert ledger.sent is True
 
 
 async def test_a_removed_form_that_shadows_is_connected_is_dropped_from_a_listing():

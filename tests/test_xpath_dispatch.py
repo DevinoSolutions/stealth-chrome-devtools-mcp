@@ -20,7 +20,7 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import FakeSelect
-from stealth_chrome_devtools_mcp.embedded import element_resolution
+from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
@@ -91,13 +91,15 @@ class _FakeElement:
         ``FakeClickTarget`` is the double that does that.
 
         Every other read (the connectivity and visibility reads of
-        ``refresh_element`` / ``query_elements``, T-10284) answers ``True``:
-        the element is in its document and visible."""
+        ``refresh_element`` / ``query_elements``, T-10284) says the element is
+        in its document and visible."""
+        if js_function == click_target.CONNECTED_JS:
+            return click_target.CONNECTED_YES
         if "elementFromPoint" not in js_function:
             return True
         return json.dumps(
             {
-                "connected": True,
+                "connected": click_target.CONNECTED_YES,
                 "rendered": True,
                 "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
                 "point": {"x": 5, "y": 5},

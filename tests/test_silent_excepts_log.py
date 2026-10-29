@@ -159,7 +159,7 @@ class TestDomHandlerSilentExcepts:
         # LABELLED rather than reported as an ordinary click.
         aim = json.dumps(
             {
-                "connected": True,
+                "connected": click_target.CONNECTED_YES,
                 "rendered": True,
                 "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
                 "point": {"x": 5, "y": 5},

@@ -16,7 +16,7 @@ import pytest
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp.embedded import element_resolution
+from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
     query_selector_all,
@@ -504,7 +504,8 @@ async def test_refresh_element_takes_the_same_lock_as_a_resolution():
             locked_during_update = element_resolution._document_lock(tab).locked()
 
         async def apply(self, js_function):
-            return True  # the connectivity read (T-10284): in its document
+            # the connectivity read (T-10284): in its document
+            return click_target.CONNECTED_YES
 
     tab = _FakeTab()
     await refresh_element(tab, _Element())
