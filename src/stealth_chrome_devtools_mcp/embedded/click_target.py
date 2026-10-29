@@ -746,6 +746,9 @@ SYNTHETIC_THREW = "stealth.click.synthetic:threw"
 #: hand back the very ``false`` that means "nothing ran", and the click would be
 #: re-run on a page that had already taken it. A page that makes
 #: ``isConnected`` read false is taken at its word: nothing is clicked here.
+#: That includes a page whose own ``isConnected`` getter clicks and then reads
+#: false: this script runs in the page's world, so it cannot tell (Codex round
+#: 4, accepted until T-10299 moves these reads into an isolated world).
 SYNTHETIC_JS = (
     """(elem) => {
     let connected;
