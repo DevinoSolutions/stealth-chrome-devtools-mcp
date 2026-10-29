@@ -14,10 +14,15 @@ replaced before the tool is done with it, and Chrome answers the next
   with the synthetic ``el.click()``: a clear ``ToolError`` telling the caller
   to query the element again;
 * **listing** -- ``query_elements`` drops an element that left, and a page
-  race is not logged at ERROR.
+  race is not logged at ERROR;
+* **removed but still referenced** -- the page's own ``isConnected`` false is
+  the same departure as Chrome's reply, never "not rendered": re-resolved
+  before any input, and never answered with the synthetic ``el.click()``.
 
 Hermetic: ``FakeTab`` + ``FakeClickTarget``, whose ``detached`` /
 ``detach_on`` model WHEN the page removed the element; the error follows.
+``disconnected`` models a removed node that still resolves, whose reads
+succeed and answer ``isConnected`` false.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import FakeClickTarget, FakeTab, left_the_document
-from stealth_chrome_devtools_mcp.embedded import element_resolution
+from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
@@ -273,6 +278,124 @@ async def test_the_re_resolve_is_bounded_and_says_nothing_was_clicked():
     assert "nothing was clicked" in message, message
     assert len(tab.select_calls) == _MAX_RESOLVES
     assert all(t.landings == [] and "click" not in t.calls for t in targets)
+
+
+# ---------------------------------------------------------------------------
+# (c2) removed but still referenced: the page says it left (headed-run defect)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_aim_script_reads_the_fact_the_double_answers():
+    """The double's ``connected`` stands for this script's ``isConnected`` read;
+    a pin built on one must not outlive the other."""
+    assert "elem.isConnected" in click_target.AIM_JS
+    assert "connected: connected" in click_target.AIM_JS
+
+
+async def test_an_element_the_page_removed_is_re_resolved_not_clicked_synthetically():
+    """Measured, headed real Chrome, a ``#b`` whose container re-renders every
+    25 ms: 14 of 15 clicks answered ``dispatch: synthetic, reason: not-rendered``
+    and a capture-phase listener counted 0 mousedown and 0 click. The removed
+    node still resolves, so the aim read SUCCEEDS with no client rects. RED
+    before: ``el.click()`` ran on it and the tool reported success."""
+    gone = FakeClickTarget(disconnected=True)
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(gone, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert len(tab.select_calls) == 2
+    assert gone.landings == [] and "click" not in gone.calls
+    assert len(_presses(fresh)) == 1, fresh.landings
+    assert "click" not in fresh.calls
+    assert result["dispatch"] == "coordinate"
+    assert result["reason"] is None
+
+
+async def test_an_element_removed_on_every_attempt_says_nothing_was_clicked():
+    """RED before: the first removed node took the synthetic click and the tool
+    answered success; nothing was re-resolved and nothing said it left."""
+    targets = [FakeClickTarget(disconnected=True) for _ in range(_MAX_RESOLVES + 2)]
+    tab = _ReplacingTab(*targets)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "nothing was clicked" in message, message
+    assert len(tab.select_calls) == _MAX_RESOLVES
+    assert all(t.landings == [] and "click" not in t.calls for t in targets)
+
+
+async def test_removed_on_every_attempt_spends_one_deadline(monkeypatch):
+    """The re-run a removed node causes spends the caller's ONE deadline: a
+    node that turned up late (1.5 s into a 2 s budget) and had left leaves the
+    next resolution only what is left. RED before: the late node took the
+    synthetic click and the call answered success."""
+    clock = [0.0]
+
+    async def advance(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(element_resolution, "_now", lambda: clock[0])
+    monkeypatch.setattr(element_resolution, "_sleep", advance)
+    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.5)
+    late = FakeClickTarget(disconnected=True)
+    tab = _LateTab(None, None, None, late)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR, timeout=2000)
+
+    assert "Element not found" in str(caught.value), str(caught.value)
+    assert clock[0] <= 2.0, clock[0]
+    assert late.landings == [] and "click" not in late.calls
+
+
+class _RemovedAfterAim(FakeClickTarget):
+    """The page removes the node right after the aim read (it still resolves):
+    the quad read that follows fails with the error a ``display:none`` node
+    gets, which is what reached the synthetic fallback."""
+
+    async def apply(self, js_function, *args, **kwargs):
+        answer = await super().apply(js_function, *args, **kwargs)
+        if "elementFromPoint" in js_function:
+            self.disconnected = True
+        return answer
+
+
+async def test_an_element_removed_after_the_aim_is_not_clicked_synthetically():
+    """RED before: the quad error went to ``el.click()`` on the removed node
+    and the answer was ``dispatch: synthetic``."""
+    gone = _RemovedAfterAim()
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(gone, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert gone.landings == [] and "click" not in gone.calls
+    assert len(_presses(fresh)) == 1
+    assert len(tab.select_calls) == 2
+    assert result["dispatch"] == "coordinate"
+
+
+async def test_a_connected_display_none_target_still_gets_the_synthetic_click():
+    """Regression guard (F-876): connected with no box is ``display:none``,
+    where the synthetic ``el.click()`` is the only thing that reaches it. It is
+    not a departure and is not re-resolved."""
+    hidden = FakeClickTarget(
+        rendered=False, mouse_click_error=RuntimeError("could not find position")
+    )
+    spare = FakeClickTarget()
+    tab = _ReplacingTab(hidden, spare)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert result["dispatch"] == "synthetic"
+    assert result["reason"] == "not-rendered"
+    assert "click" in hidden.calls
+    assert hidden.landings == []
+    assert len(tab.select_calls) == 1
+    assert spare.landings == [] and "click" not in spare.calls
 
 
 # ---------------------------------------------------------------------------

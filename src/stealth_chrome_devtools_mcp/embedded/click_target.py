@@ -152,6 +152,18 @@ DISABLED = "disabled"
 #: calling it disabled would also have skipped its press verification. The
 #: fieldset is deliberately left out of the ancestor list for that reason: the
 #: CONTROL's own ``:disabled`` already applies the fieldset and legend rules.
+#:
+#: ``connected`` is ``elem.isConnected`` (T-10034, STEALTH-…-ER). A node the page
+#: REMOVED has no client rects either, and the read still succeeds through the
+#: script's reference to it, so without this it answers exactly like a
+#: ``display:none`` target and earns the synthetic click -- on a node no listener
+#: in the page can hear (measured: 14 of 15 such clicks reported success, the
+#: page counted none). ``isConnected`` is the test because it is the one that is
+#: right in both other places a live element can be: inside a shadow root (true
+#: while the host is in the document; ``document.contains`` answers false there)
+#: and inside an iframe (connected to its OWN document). A disconnected node is
+#: never hit-tested: it has no box, and no point in the page can be over it, so
+#: it can never read as "covered". :func:`connected` is the one reader.
 AIM_JS = """(elem) => {
     const inert = (node) => {
         if (!node) return false;
@@ -159,7 +171,8 @@ AIM_JS = """(elem) => {
         const owner = node.closest('button,input,select,textarea,optgroup,option');
         return !!owner && owner.matches(':disabled');
     };
-    const rects = elem.getClientRects();
+    const connected = elem.isConnected;
+    const rects = connected ? elem.getClientRects() : [];
     const box = rects.length ? rects[0] : null;
     const style = window.getComputedStyle(elem);
     const shape = (node) => node === null ? null : {
@@ -184,6 +197,7 @@ AIM_JS = """(elem) => {
             hosts.indexOf(under) !== -1);
     }
     return JSON.stringify({
+        connected: connected,
         rendered: !!box,
         rect: {
             left: box ? box.left : 0,
@@ -346,6 +360,17 @@ def _shape(raw: object) -> dict[str, object] | None:
         "id": _token(raw.get("id")),
         "classes": named[:MAX_CLASSES],
     }
+
+
+def connected(facts: dict[str, object]) -> bool:
+    """Whether :func:`aim`'s answer is about an element still in its document.
+
+    ``False`` only for an explicit ``connected: false`` -- the page saying the
+    node has left. It is not one of :func:`reason`'s answers: a departed
+    element is not a target the click "could not reach", it is no target at
+    all, and the caller re-resolves it before any input (T-10034).
+    """
+    return facts.get("connected") is not False
 
 
 def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measured order)

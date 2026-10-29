@@ -330,13 +330,35 @@ def recoverable_race(exc: BaseException) -> str | None:
     return None
 
 
+class ElementDisconnected(ProtocolException):
+    """The PAGE's own answer that a held element has left: ``isConnected`` false.
+
+    Chrome only says so (:data:`_DETACHED_ELEMENT_MARKERS`) once the node is
+    gone from its node table. A node the page removed but a script still
+    references -- the old button of a container whose ``innerHTML`` was just
+    replaced -- keeps resolving, so a read through it SUCCEEDS and answers for
+    an element no longer in any document: no client rects, empty computed
+    style. Measured, headed real Chrome, a ``#b`` re-rendered every 25 ms: 14 of
+    15 ``click_element`` calls read that as "not rendered", answered with the
+    synthetic ``el.click()`` on the removed node and reported success, while a
+    capture-phase listener on the document counted zero ``mousedown`` and zero
+    ``click``. A read that sees ``isConnected`` false raises this, and
+    :func:`detached_element` answers it exactly as it answers Chrome's reply --
+    the same departure, said by the page instead of by the protocol. A
+    ``ProtocolException`` so that it rides :func:`_recover`'s one ``except``.
+    """
+
+
 def detached_element(exc: BaseException | None) -> str | None:
     """Describe ``exc`` if it says a HELD element has left the document, else ``None``.
 
     THE one place that question is answered (T-10034). Matched on Chrome's
-    message text for the reason :data:`_STALE_NODE_MARKERS` is. ``None`` for
-    every other exception, including the resolution races above.
+    message text for the reason :data:`_STALE_NODE_MARKERS` is, or on the
+    page's own ``isConnected`` answer (:class:`ElementDisconnected`). ``None``
+    for every other exception, including the resolution races above.
     """
+    if isinstance(exc, ElementDisconnected):
+        return "element left the document"
     if isinstance(exc, ProtocolException) and any(
         marker in str(exc) for marker in _DETACHED_ELEMENT_MARKERS
     ):

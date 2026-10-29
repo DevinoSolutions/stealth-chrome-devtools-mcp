@@ -16,6 +16,7 @@ from stealth_chrome_devtools_mcp.embedded import (
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
+    ElementDisconnected,
     detached_element,
     refresh_element,
     resolve_by_text,
@@ -297,7 +298,7 @@ class DOMHandler:
                     raise ToolError(f"Element not found: {selector}")
                 await element.scroll_into_view()
                 await asyncio.sleep(0.5)
-                aim = await click_target.aim(element, selector)
+                aim = await DOMHandler._aim(element, selector)
                 dispatch = await DOMHandler._dispatch_click(tab, element, selector, aim)
                 return aim, dispatch
 
@@ -330,6 +331,22 @@ class DOMHandler:
             raise ToolError(f"Failed to click element: {e!s}")
 
     @staticmethod
+    async def _aim(element: Any, selector: str) -> dict[str, object]:
+        """``click_target.aim``, raising the departure when the page says it left.
+
+        A node the page removed still answers the read through the script's
+        reference to it, with no box -- the same answer a ``display:none``
+        target gives (T-10034, STEALTH-…-ER). ``isConnected`` tells them apart,
+        and a departure is raised as ``ElementDisconnected``, which
+        ``detached_element`` classifies like Chrome's own reply: nothing has
+        been sent yet, so ``retry_detached`` re-resolves it.
+        """
+        aim = await click_target.aim(element, selector)
+        if not click_target.connected(aim):
+            raise ElementDisconnected(f"'{selector}' is no longer in its document")
+        return aim
+
+    @staticmethod
     async def _dispatch_click(
         tab: Tab, element: Any, selector: str, aim: dict[str, object]
     ) -> str:
@@ -342,6 +359,11 @@ class DOMHandler:
         land on top of a delivered one. Every failure from then on — and of the
         synthetic click itself — becomes a ``ToolError``, which is never re-run.
         A departure with nothing sent propagates raw, for the caller to re-run.
+
+        The element is asked again whether it is still in its document right
+        before the synthetic click: a node removed AFTER the aim fails its quad
+        read with the same error a ``display:none`` one does, and
+        ``el.click()`` on it succeeds where nothing in the page can hear it.
         """
         ledger = click_target.InputSent()
         try:
@@ -358,6 +380,7 @@ class DOMHandler:
             if detached_element(e) is not None:
                 raise
             debug_logger.log_debug("dom_handler", "click_element", str(e))
+            await DOMHandler._aim(element, selector)
             try:
                 await element.click()
             except Exception as synthetic:
