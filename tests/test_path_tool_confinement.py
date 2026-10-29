@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from nodriver.core.connection import ProtocolException
 
 from fakes import FakeBrowser, FakeBrowserManager, FakeTab, call_tool
 from stealth_chrome_devtools_mcp.embedded import (
@@ -668,6 +669,32 @@ async def test_a_failed_screenshot_leaves_no_empty_file_behind(
 
     with pytest.raises(RuntimeError, match="renderer gone"):
         await _shot(srv, target)
+
+    assert not target.exists()
+
+
+class _RefusedScreenshotTab(FakeTab):
+    async def save_screenshot(self, path, *args, **kwargs):
+        # The shape nodriver raises for Chrome's refusal of Page.captureScreenshot
+        # (Sentry STEALTH-CHROME-DEVTOOLS-MCP-E7, 2.1.46 and 2.1.47).
+        raise ProtocolException({"message": "Internal error", "code": -32603})
+
+
+@pytest.mark.parametrize("to_file", [True, False])
+async def test_chromes_refusal_of_a_screenshot_is_a_tool_error(
+    patched_server, home, tmp_path, to_file
+):
+    """T-10034: the refusal escaped ``take_screenshot`` as a raw
+    ``ProtocolException``, outside the one error convention. RED before T-10034:
+    ``ProtocolException`` is not a ``ToolError``."""
+    srv = _shot_server(patched_server, _RefusedScreenshotTab())
+    target = tmp_path / "shot.png"
+    kwargs = {"file_path": str(target)} if to_file else {}
+
+    with pytest.raises(
+        ToolError, match="Chrome could not capture the page: Internal error"
+    ):
+        await call_tool(srv, "take_screenshot", instance_id="i1", **kwargs)
 
     assert not target.exists()
 

@@ -37,6 +37,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from nodriver import Tab
+from nodriver.core.connection import ProtocolException
+
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.path_confinement import (
     discard_precreated,
@@ -490,6 +493,19 @@ async def get_page_content(
     )
 
 
+async def _capture(tab: Tab, path: Path, instance_id: str) -> None:
+    """``Tab.save_screenshot`` under the CDP budget, with Chrome's refusal of the
+    capture raised as a ``ToolError`` naming Chrome's reason (T-10034, Sentry
+    STEALTH-CHROME-DEVTOOLS-MCP-E7: ``Internal error`` and ``Session with given
+    id not found`` escaped this tool as a raw ``ProtocolException``). A
+    ``ToolError`` and not a ``CallerError``: the browser failed, not the
+    caller's input, so it stays a Sentry issue."""
+    try:
+        await rt._with_cdp_timeout(tab.save_screenshot(path), instance_id=instance_id)
+    except ProtocolException as error:
+        raise ToolError(f"Chrome could not capture the page: {error}") from error
+
+
 async def take_screenshot(
     instance_id: str,
     full_page: bool = False,
@@ -524,9 +540,7 @@ async def take_screenshot(
             file_path, tool="take_screenshot", overwrite=overwrite
         )
         try:
-            await rt._with_cdp_timeout(
-                tab.save_screenshot(save_path), instance_id=instance_id
-            )
+            await _capture(tab, save_path, instance_id)
         except BaseException:
             discard_precreated(save_path, created)
             raise
@@ -536,9 +550,7 @@ async def take_screenshot(
         tmp_path = Path(tmp_file.name)
 
     try:
-        await rt._with_cdp_timeout(
-            tab.save_screenshot(tmp_path), instance_id=instance_id
-        )
+        await _capture(tab, tmp_path, instance_id)
 
         with Image.open(tmp_path) as img:
             if img.mode in ("RGBA", "LA", "P") and format.lower() == "jpeg":
