@@ -673,6 +673,45 @@ async def test_a_failed_screenshot_leaves_no_empty_file_behind(
     assert not target.exists()
 
 
+class _RecordingScreenshotTab(FakeTab):
+    """Writes a real 1x1 PNG and records what reached nodriver."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shots: list[dict[str, Any]] = []
+
+    async def save_screenshot(self, path, *args, **kwargs):
+        from PIL import Image
+
+        self.shots.append(kwargs)
+        Image.new("RGB", (1, 1)).save(path, format="PNG")
+        return str(path)
+
+
+@pytest.mark.parametrize("full_page", [False, True])
+@pytest.mark.parametrize(
+    ("to_file", "asked", "sent"),
+    [(True, "png", "png"), (True, "jpeg", "jpeg"), (False, "jpeg", "png")],
+)
+async def test_the_format_and_full_page_reach_nodriver(
+    patched_server, home, tmp_path, to_file, asked, sent, full_page
+):
+    """T-10043: nodriver's ``save_screenshot`` defaults to ``jpeg`` and the
+    viewport, and the tool handed it neither, so a ``.png`` file held JPEG bytes
+    and ``full_page=True`` did nothing. A file gets the format asked for; the
+    inline answer is captured lossless and re-encoded to it. RED before T-10043:
+    nothing reached nodriver but the path."""
+    tab = _RecordingScreenshotTab()
+    srv = _shot_server(patched_server, tab)
+    kwargs: dict[str, Any] = {"format": asked, "full_page": full_page}
+    if to_file:
+        kwargs["file_path"] = str(tmp_path / "shot.img")
+
+    await call_tool(srv, "take_screenshot", instance_id="i1", **kwargs)
+
+    assert tab.shots == [{"format": sent, "full_page": full_page}]
+
+
 class _RefusedScreenshotTab(FakeTab):
     async def save_screenshot(self, path, *args, **kwargs):
         # The shape nodriver raises for Chrome's refusal of Page.captureScreenshot

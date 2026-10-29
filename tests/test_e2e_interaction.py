@@ -280,17 +280,16 @@ async def test_upload_screenshot_and_content(fixture_app_server, tmp_path):
             == 2
         )
 
-        # Screenshot: assert valid image magic bytes + nonzero size only (no
-        # pixel asserts). NOTE/FINDING: take_screenshot(file_path=...) delegates
-        # to nodriver save_screenshot, which defaults to JPEG and ignores the
-        # tool's format="png" default — so a .png path receives JPEG bytes. We
-        # accept either magic so the test proves "a screenshot was written"
-        # without coupling to the (buggy) format; the finding is reported.
+        # Screenshot: the file holds the format the tool was asked for (no
+        # pixel asserts). T-10043: nodriver's save_screenshot defaults to JPEG
+        # and the tool handed it no format, so a .png path received JPEG bytes;
+        # this node accepted either magic until the fix.
         shot = tmp_path / "shot.png"
         await screenshot(instance_id=iid, file_path=str(shot))
-        raw = shot.read_bytes()
-        assert raw[:8] == b"\x89PNG\r\n\x1a\n" or raw[:3] == b"\xff\xd8\xff"
-        assert len(raw) > 0
+        assert shot.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+        jpeg = tmp_path / "shot.jpg"
+        await screenshot(instance_id=iid, file_path=str(jpeg), format="jpeg")
+        assert jpeg.read_bytes()[:3] == b"\xff\xd8\xff"
 
         content = await get_page_content(instance_id=iid)
         assert "fixture-interact-page" in json.dumps(content, default=str)
