@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.52
+
+2.1.51 was tagged but never published: its publish run failed on the macOS integration cell (`test_an_undriven_background_tab_stays_throttled_until_a_tool_acts`, T-10026). Everything listed under 2.1.51 ships for the first time in this release, together with the entries below.
 
 ### A session that crashed telling a departed client about its disconnect is dropped as a client disconnect (T-10034)
 
