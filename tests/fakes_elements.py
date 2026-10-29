@@ -188,6 +188,15 @@ class FakeClickTarget:
     raise it. ``detach_on`` names the dispatch kind whose DELIVERY removes it —
     a page that re-renders on hover or on mousedown — so a pin states when the
     page acted and the error follows from it, never a raise supplied by hand.
+
+    ``disconnected`` is the OTHER way an element leaves (T-10034, measured on a
+    container whose ``innerHTML`` is replaced every 25 ms): the page removed it
+    but still references it, so ``DOM.resolveNode`` keeps answering and every
+    read SUCCEEDS, about a node in no document. The aim read answers
+    ``isConnected`` false with no client rects, ``DOM.getContentQuads`` fails
+    with Chrome's quad error (the same one a ``display:none`` node gets),
+    ``el.click()`` runs and nothing in the page hears it, and no input at any
+    point lands inside it.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -214,8 +223,10 @@ class FakeClickTarget:
         read_error: BaseException | None = None,
         detached: bool = False,
         detach_on: str | None = None,
+        disconnected: bool = False,
     ) -> None:
         self.detached = detached
+        self.disconnected = disconnected
         self.detach_on = detach_on
         self.viewport = viewport
         self.input_scale = input_scale
@@ -267,10 +278,10 @@ class FakeClickTarget:
         return 0 <= x <= width and 0 <= y <= height
 
     def _aim(self) -> str:
-        left, top, width, height = self.rect if self.rendered else (0.0, 0.0, 0.0, 0.0)
-        point = (
-            {"x": left + width / 2, "y": top + height / 2} if self.rendered else None
-        )
+        # ``AIM_JS`` reads no client rects off a disconnected node: it has none.
+        boxed = self.rendered and not self.disconnected
+        left, top, width, height = self.rect if boxed else (0.0, 0.0, 0.0, 0.0)
+        point = {"x": left + width / 2, "y": top + height / 2} if boxed else None
         visible_point = point is not None and self._in_viewport(point["x"], point["y"])
         if not visible_point:
             hit: dict[str, Any] | None = None
@@ -281,7 +292,8 @@ class FakeClickTarget:
             hit = {"tag": tag, "id": element_id, "classes": list(classes)}
         return json.dumps(
             {
-                "rendered": self.rendered,
+                "connected": not self.disconnected,
+                "rendered": boxed,
                 "rect": {
                     "left": left,
                     "top": top,
@@ -333,6 +345,10 @@ class FakeClickTarget:
 
         if self.detached:
             raise left_the_document()
+        if self.disconnected:
+            raise ProtocolException(
+                {"message": "Could not compute content quads.", "code": -32000}
+            )
         if not self.rendered:
             raise self.mouse_click_error or RuntimeError("could not find position")
         return SimpleNamespace(center=self._quad_centre())
@@ -364,7 +380,8 @@ class FakeClickTarget:
         y = top_y - self.frame_offset[1]
         left, top, width, height = self.rect
         over_box = left <= x <= left + width and top <= y <= top + height
-        inside = self.rendered and over_box and self.hit is None
+        inside = self.rendered and not self.disconnected and over_box
+        inside = inside and self.hit is None
         self.landings.append((kind, x, y, inside))
         if kind == "mousePressed":
             self.calls.append("mouse_click")
