@@ -292,6 +292,41 @@ def _tool_errors_departed_stores_hygiene():
 
 
 @pytest.fixture(autouse=True)
+def _sse_app_status_reset():
+    """No test may start with sse_starlette's shutdown flag left set (T-10195).
+
+    ``sse_starlette.sse.AppStatus.should_exit`` is PROCESS-GLOBAL and sticky.
+    Its shutdown watcher, a task on the loop of the first SSE reply, holds the
+    uvicorn server whose handler it found on SIGTERM and polls every 0.5 s; when
+    it sees that server's ``should_exit`` it sets the flag, and from then on every
+    SSE reply in the process ends before its message is sent. One backend per
+    process never meets that. A test run does: a test that stops an in-process
+    uvicorn and keeps its loop turning 0.5 s more (a loaded lane) sets it, and a
+    later in-process FastMCP client then waits forever for ``initialize``.
+    Measured: ``test_http_host_origin_guard``'s
+    ``test_the_cli_session_and_the_proxy_bridge_transport`` set it under load,
+    and ``test_session_hygiene``'s end-to-end pin hung, the 21-minute pre-push
+    hang. A ``monkeypatch.setattr`` guard in the victim cannot fix it: undoing
+    the patch RESTORES the leaked True for the next test.
+
+    RESET by assignment, not asserted, on ``_in_memory_storage_hygiene``'s
+    precedent: the writer is a library doing its job. Only if the module is
+    loaded: importing it re-binds ``uvicorn.Server.handle_exit``. A test that
+    stops one backend and starts another inside one test still resets the flag
+    itself (``test_proxy_session_reinit``'s ``_Backend.kill``).
+    """
+
+    def reset() -> None:
+        sse = sys.modules.get("sse_starlette.sse")
+        if sse is not None:
+            sse.AppStatus.should_exit = False
+
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_settings_cache():
     """Every test gets a fresh Settings read. ``get_settings()`` is process-cached
     (``@lru_cache``), so without this an env mutation via ``monkeypatch`` /

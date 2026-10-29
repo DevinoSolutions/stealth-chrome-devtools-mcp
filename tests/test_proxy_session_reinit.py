@@ -182,11 +182,8 @@ def _text(reply: dict) -> str:
 def world(monkeypatch, caplog):
     """The proxy's outside world: a hygiene window short enough to watch, the
     port a heal finds, and a watchdog that condemns only when told to."""
-    from sse_starlette.sse import AppStatus
-
-    # An earlier node that stopped its own in-process uvicorn may have left
-    # this set (see ``_Backend.kill``), and then no SSE reply would arrive.
-    monkeypatch.setattr(AppStatus, "should_exit", False)
+    # An earlier node may have left sse_starlette's ``should_exit`` set (see
+    # ``_Backend.kill``); ``conftest._sse_app_status_reset`` clears it first.
     monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 0.5)
     monkeypatch.setattr(session_hygiene, "SWEEP_INTERVAL_SECONDS", 0.1)
     session_hygiene.install()

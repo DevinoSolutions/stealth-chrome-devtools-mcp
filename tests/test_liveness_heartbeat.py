@@ -85,12 +85,10 @@ def _free_port() -> int:
 async def _serving(monkeypatch, *, health_route: bool = True) -> AsyncIterator[Backend]:
     """A tiny FastMCP app on a free port, counting the TCP connections it accepts."""
     import uvicorn
-    from sse_starlette.sse import AppStatus
     from uvicorn.protocols.http.h11_impl import H11Protocol
 
-    # Stopping an in-process uvicorn sets sse_starlette's PROCESS-GLOBAL
-    # ``should_exit``; left set, every later SSE reply in this process dies.
-    monkeypatch.setattr(AppStatus, "should_exit", False)
+    # sse_starlette's process-global ``should_exit`` is reset before every
+    # test by ``conftest._sse_app_status_reset``.
     monkeypatch.setattr(session_hygiene, "_managers", [])
 
     connections: list[int] = []
