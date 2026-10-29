@@ -59,7 +59,7 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from stealth_chrome_devtools_mcp import expected_events
+from stealth_chrome_devtools_mcp import expected_events, tool_error_fingerprint
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:  # the SDK is imported lazily at runtime; this is a type only
@@ -681,79 +681,11 @@ def _is_our_frame(frame: "dict[str, object]") -> bool:
     return isinstance(abs_path, str) and Path(abs_path).is_relative_to(_PACKAGE_DIR)
 
 
-#: The tool an ``Error calling tool 'name'`` log line (fastmcp's, or
-#: ``tool_failure``'s copy of it) is about.
-_TOOL_CALL_RE = re.compile(r"\AError calling tool '(?P<name>[A-Za-z0-9_.\-]{1,100})'\Z")
-
-#: What a fingerprint element reads when the event has nothing for it.
-_NOT_NAMED = "-"
-
-#: A bound on the traceback walk: a pathological recursion must not stall a send.
-_MAX_TRACEBACK_FRAMES = 1000
-
-
-def _tool_name(event: "Event") -> "str | None":
-    """The tool the event's log line names, or ``None`` when it names none."""
-    entry = event.get("logentry") if isinstance(event, dict) else None
-    for key in ("formatted", "message"):
-        text = entry.get(key) if isinstance(entry, dict) else None
-        if isinstance(text, str) and (found := _TOOL_CALL_RE.match(text)):
-            return found.group("name")
-    return None
-
-
-def _app_frame_name(error: BaseException) -> "str | None":
-    """``module.function`` of the innermost frame of OUR code in *error*'s
-    traceback, or ``None``: no line number (lines move across releases, which is
-    what split STEALTH-CHROME-DEVTOOLS-MCP-ET from -EV), no path, no local. A
-    frame run as ``__main__`` (the backend runs ``server.py`` under ``runpy``) is
-    named by its path under the package, so one function has one name."""
-    found, traceback = None, error.__traceback__
-    for _ in range(_MAX_TRACEBACK_FRAMES):
-        if traceback is None:
-            break
-        code = traceback.tb_frame.f_code
-        module = traceback.tb_frame.f_globals.get("__name__")
-        if _is_our_frame({"module": module, "abs_path": code.co_filename}):
-            if not isinstance(module, str) or module == "__main__":
-                path = Path(code.co_filename).relative_to(_PACKAGE_DIR)
-                module = ".".join(
-                    filter(None, (_IMPORT_NAME, *path.with_suffix("").parts))
-                )
-            found = f"{module}.{code.co_qualname}"
-        traceback = traceback.tb_next
-    return found
-
-
 def _tool_error_fingerprint(event: "Event", error: BaseException) -> "list[str]":
-    """``["tool-error", tool, ToolError type, "Cause>Cause", "module.function"]``.
-
-    Built ONLY from facts the program controls: the registered tool's name, class
-    names, and the module and function of our own innermost frame. Never from the
-    message: a ``ToolError`` can carry what the CALLER typed (``click_element(
-    text_match="my password is swordfish")`` is raised as ``find 'my password is
-    swordfish'``) or what the machine holds (an install path with spaces), and no
-    redaction rule can tell either from prose. The full message is still the
-    event's message, so every detail is on every event; only grouping is coarser.
-
-    * the chain is the exception types UNDER the ``ToolError``, outermost first
-      (``ProtocolException>KeyError``), ``-`` when there are none;
-    * the frame is the innermost frame of our code in the DEEPEST cause's
-      traceback (the raise site of the real failure), else the ``ToolError``'s own
-      raise site, else the element is left out (the tool and the types alone).
-
-    Accepted: two ``KeyError`` keys raised in one function are ONE issue (each
-    event shows its own key in its message); another tool, function or type is not.
-    """
-    chain = _exception_chain(error)
-    frame = _app_frame_name(chain[-1]) or _app_frame_name(error)
-    parts = [
-        "tool-error",
-        _tool_name(event) or _NOT_NAMED,
-        type(error).__name__,
-        ">".join(type(link).__name__ for link in chain[1:]) or _NOT_NAMED,
-        *([frame] if frame else []),
-    ]
+    """The group of a ``ToolError``: its tool, the types under it and our innermost
+    frame, from :mod:`tool_error_fingerprint`; never its message, never a name a
+    caller's code can set. Redacted anyway, as everything that leaves is."""
+    parts = tool_error_fingerprint.parts(event, _exception_chain(error))
     return [_redact_text(part) for part in parts]
 
 

@@ -24,12 +24,17 @@ from __future__ import annotations
 import ast
 import logging
 import pathlib
+import sys
 
 import pytest
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp import observability
-from stealth_chrome_devtools_mcp.embedded import browser_health, clone_probe
+from stealth_chrome_devtools_mcp import observability, tool_error_fingerprint
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_health,
+    clone_probe,
+    tool_registry,
+)
 from stealth_chrome_devtools_mcp.embedded.browser_health import HungBrowserError
 from stealth_chrome_devtools_mcp.embedded.clone_probe import FrozenCloneError
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -197,10 +202,13 @@ class TestHungBrowserError:
         ] * 2
 
 
-#: The package name the fixture sites below belong to. ``_is_our_frame`` reads a
-#: frame's module name, so naming the fixture namespace inside it makes the REAL
-#: frame rule treat the fixture's functions as ours.
-FIXTURE_PACKAGE = "fixture_pkg"
+#: A frame is ours when its code object's file is a real file under the package;
+#: the fixture's own file sits in a directory the fixture adds to that rule, and
+#: its module name is read off the file's path, so this is its name.
+FIXTURE_FRAME = "stealth_chrome_devtools_mcp.dom_handler"
+
+#: Where the fixture's source files are written (set per test below).
+_FIXTURE_DIR: dict[str, pathlib.Path] = {}
 
 _SITE_SOURCE = """
 def click_element(error, cause):
@@ -223,19 +231,29 @@ def raise_it(error):
 
 
 def _sites(release_padding: int = 0) -> dict:
-    """The fixture's functions, as the source of a release whose code sits
-    ``release_padding`` lines further down: same names, different line numbers."""
-    namespace = {"__name__": f"{FIXTURE_PACKAGE}.dom_handler"}
-    exec(  # noqa: S102  PERMANENT(compiling the fixture source IS the test: a function at other line numbers)
-        compile("\n" * release_padding + _SITE_SOURCE, "<release>", "exec"),
-        namespace,
+    """The fixture's functions, as the file of a release whose code sits
+    ``release_padding`` lines further down: same names, different line numbers.
+    The module's ``__name__`` is nonsense on purpose: it is never read."""
+    path = _FIXTURE_DIR["dir"] / "dom_handler.py"
+    path.write_text("\n" * release_padding + _SITE_SOURCE, encoding="utf-8")
+    namespace = {"__name__": "not.the.module.name"}
+    exec(  # noqa: S102  PERMANENT(compiling the fixture file IS the test: a function at other line numbers)
+        compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace
     )
     return namespace
 
 
 @pytest.fixture(autouse=True)
-def _fixture_package_is_ours(monkeypatch):
-    monkeypatch.setattr(observability, "_IMPORT_NAME", FIXTURE_PACKAGE)
+def _fixture_code_is_ours(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        tool_error_fingerprint,
+        "_ROOTS",
+        (*tool_error_fingerprint._ROOTS, tmp_path),  # noqa: SLF001  PERMANENT(the fixture adds a directory of source files to the rule)
+    )
+    monkeypatch.setitem(
+        tool_registry.SECTION_TOOLS, "fixture", ["click_element", "select_option"]
+    )
+    _FIXTURE_DIR["dir"] = tmp_path
 
 
 def _ship_tool_error(
@@ -250,6 +268,7 @@ def _ship_tool_error(
     """Ship a ``ToolError`` the way fastmcp logs one: raised by a function of
     ours (*site*) while *cause* is in flight, and logged by the tool-call logger
     (``tool=None``: by a logger that names no tool; ``site=None``: never raised)."""
+    before = len(shipped)
     if site is None:  # never raised: no traceback anywhere, the cause only linked
         error.__cause__ = cause if cause is not None else RuntimeError("x")
         _log(tool, exc_info=error)
@@ -261,6 +280,7 @@ def _ship_tool_error(
         except ToolError:
             _log(tool)
     sentry_sdk.get_client().flush()
+    assert len(shipped) == before + 1, "the event was not shipped exactly once"
     return shipped[-1]
 
 
@@ -299,8 +319,8 @@ class TestToolError:
             "tool-error",
             "click_element",
             "ToolError",
-            "ProtocolException",
-            "fixture_pkg.dom_handler.click_element",
+            "<external>",
+            "stealth_chrome_devtools_mcp.dom_handler.click_element",
         ]
         # nothing diagnostic is lost: the full title and the cause chain ship
         values = release_a["exception"]["values"]
@@ -359,8 +379,8 @@ class TestToolError:
             shipped_events, ToolError("No node found"), site="select_option"
         )
 
-        assert in_click["fingerprint"][-1] == "fixture_pkg.dom_handler.click_element"
-        assert in_select["fingerprint"][-1] == "fixture_pkg.dom_handler.select_option"
+        assert in_click["fingerprint"][-1] == f"{FIXTURE_FRAME}.click_element"
+        assert in_select["fingerprint"][-1] == f"{FIXTURE_FRAME}.select_option"
         assert in_click["fingerprint"] != in_select["fingerprint"]
 
     def test_the_error_type_and_the_whole_chain_are_part_of_it(self, shipped_events):
@@ -378,7 +398,7 @@ class TestToolError:
 
         assert plain["fingerprint"][2:4] == ["ToolError", "KeyError"]
         assert subclass["fingerprint"][2] == "InstanceNotFoundError"
-        assert deeper["fingerprint"][3] == "ProtocolException>KeyError"
+        assert deeper["fingerprint"][3] == "<external>>KeyError"
 
     def test_the_innermost_frame_is_the_deepest_causes_raise_site(self, shipped_events):
         """The ToolError is raised in ``click_element``; its cause was first raised
@@ -389,7 +409,7 @@ class TestToolError:
             shipped_events, ToolError("wrapped"), cause=cause, site="click_element"
         )
 
-        assert event["fingerprint"][-1] == "fixture_pkg.dom_handler.raise_it"
+        assert event["fingerprint"][-1] == f"{FIXTURE_FRAME}.raise_it"
 
     def test_no_frame_of_the_cause_falls_back_to_the_tool_errors_raise_site(
         self, shipped_events
@@ -410,7 +430,7 @@ class TestToolError:
             "click_element",
             "ToolError",
             "KeyError",
-            "fixture_pkg.dom_handler.raise_it",
+            f"{FIXTURE_FRAME}.raise_it",
         ]
 
     def test_no_traceback_at_all_falls_back_to_the_tool_and_the_types(
@@ -448,6 +468,127 @@ class TestToolError:
         event = _ship_tool_error(shipped_events, ToolError("x"), tool=None)
 
         assert event["fingerprint"][:3] == ["tool-error", "-", "ToolError"]
+
+
+class TestNothingACallerCanSetIsRead:
+    """``create_python_binding`` and ``execute_python_in_browser`` run the caller's
+    code in this process: a class it defines, a ``__name__`` it assigns and a code
+    object it builds are all text of the caller's, and the fingerprint is sent."""
+
+    SECRET = "my password is swordfish"
+
+    def test_a_dynamic_class_named_with_a_secret_is_external(self, shipped_events):
+        cause = type(self.SECRET, (Exception,), {})("x")
+
+        event = _ship_tool_error(shipped_events, ToolError("wrapped"), cause=cause)
+
+        assert event["fingerprint"][:4] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "<external>",
+        ]
+        assert "swordfish" not in " ".join(event["fingerprint"])
+
+    @pytest.mark.parametrize(
+        "module", ["builtins", ElementDisconnected.__module__, "no.such.module"]
+    )
+    def test_a_class_that_only_claims_a_trusted_module_is_external(
+        self, shipped_events, module
+    ):
+        """A name that exists in the module, a module that exists: the class still
+        is not THE class the interpreter holds under that name."""
+        fake = type("ElementDisconnected", (Exception,), {"__module__": module})
+        liar = type(self.SECRET, (Exception,), {"__module__": module})
+
+        event = _ship_tool_error(shipped_events, ToolError("x"), cause=fake("x"))
+        named = _ship_tool_error(shipped_events, ToolError("x"), cause=liar("x"))
+
+        assert event["fingerprint"][3] == "<external>"
+        assert named["fingerprint"][3] == "<external>"
+        assert "swordfish" not in " ".join(named["fingerprint"])
+
+    def test_a_tool_error_subclass_of_the_callers_is_external(self, shipped_events):
+        mine = type(self.SECRET, (ToolError,), {})
+
+        event = _ship_tool_error(shipped_events, mine("x"), cause=KeyError("k"))
+
+        assert event["fingerprint"][2] == "<external>"
+        assert "swordfish" not in " ".join(event["fingerprint"])
+
+    def test_a_builtin_and_a_class_of_the_package_keep_their_names(self):
+        assert tool_error_fingerprint.type_name(KeyError) == "KeyError"
+        assert tool_error_fingerprint.type_name(ToolError) == "ToolError"
+        assert tool_error_fingerprint.type_name(ElementDisconnected) == (
+            "ElementDisconnected"
+        )
+        assert tool_error_fingerprint.type_name(HungBrowserError) == "HungBrowserError"
+        assert tool_error_fingerprint.type_name(ProtocolException) == "<external>"
+
+    @pytest.mark.parametrize("where", ["<string>", "a file outside the package"])
+    def test_a_frame_that_only_claims_the_package_name_is_not_ours(
+        self, shipped_events, tmp_path_factory, where
+    ):
+        """The frame's ``__name__`` says it is a module of the package; its code
+        object's file says it is not."""
+        source = (
+            "def boom(error, cause):\n"
+            "    try:\n        raise cause\n"
+            "    except Exception:\n        raise error\n"
+        )
+        filename = "<string>"
+        if where != "<string>":
+            outside = tmp_path_factory.mktemp("outside") / "binding.py"
+            outside.write_text(source, encoding="utf-8")
+            filename = str(outside)
+        namespace = {"__name__": f"stealth_chrome_devtools_mcp.{self.SECRET}"}
+        exec(compile(source, filename, "exec"), namespace)  # noqa: S102  PERMANENT(the caller's code IS the fixture)
+        before = len(shipped_events)
+        try:
+            namespace["boom"](ToolError("x"), KeyError("k"))
+        except ToolError:
+            _log("click_element")
+        sentry_sdk.get_client().flush()
+
+        assert len(shipped_events) == before + 1
+        assert shipped_events[-1]["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "KeyError",
+        ]
+
+    def test_a_function_name_that_is_not_an_identifier_is_not_read(
+        self, shipped_events
+    ):
+        function = _sites()["raise_it"]
+        function.__code__ = function.__code__.replace(co_name=self.SECRET)
+
+        event = _ship_tool_error(
+            shipped_events,
+            ToolError("x"),
+            cause=_raised_by(function, KeyError("k")),
+            site="select_option",
+        )
+
+        assert event["fingerprint"][-1] == f"{FIXTURE_FRAME}.<code>"
+        assert "swordfish" not in " ".join(event["fingerprint"])
+
+    def test_a_tool_name_that_is_not_registered_is_not_read(self, shipped_events):
+        event = _ship_tool_error(shipped_events, ToolError("x"), tool="swordfish_tool")
+
+        assert event["fingerprint"][1] == "<tool>"
+        assert "swordfish" not in " ".join(event["fingerprint"])
+
+    def test_a_trusted_module_is_found_only_by_where_its_file_is(self, monkeypatch):
+        """``sys.modules`` names a module; the file it was loaded from is the proof."""
+        elsewhere = type(sys)("stealth_chrome_devtools_mcp.pretend")
+        elsewhere.__file__ = __file__
+        elsewhere.Pretend = type("Pretend", (Exception,), {})
+        elsewhere.Pretend.__module__ = elsewhere.__name__
+        monkeypatch.setitem(sys.modules, elsewhere.__name__, elsewhere)
+
+        assert tool_error_fingerprint.type_name(elsewhere.Pretend) == "<external>"
 
 
 def _chained(outer: BaseException, inner: BaseException) -> BaseException:
