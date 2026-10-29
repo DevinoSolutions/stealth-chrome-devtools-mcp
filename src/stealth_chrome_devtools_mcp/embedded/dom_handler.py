@@ -254,82 +254,75 @@ class DOMHandler:
         thing that reaches the element at all — and is now LABELLED rather than
         silent.
 
-        Args:
-            tab (Tab): The browser tab object.
-            selector (str): CSS selector for the element.
-            text_match (Optional[str]): Match element by text content.
-            timeout (int): Timeout in milliseconds.
-
-        Returns:
-            Dict[str, Any]: where the click went — see ``click_target.record``.
-
         **The element leaving the page (T-10034, STEALTH-…-ER).** The page can
         remove or replace the element between its resolution and its use. The
-        DISPATCH BOUNDARY is the call into ``click_target.click``: everything
-        before it (resolve, ``scroll_into_view``, the settle, ``aim``) only
+        DISPATCH BOUNDARY is the click's first input, recorded explicitly:
+        ``click_target.InputSent`` turns true in ``click_target._send_mouse``
+        just before the first ``Input.dispatchMouseEvent`` (a probe
+        ``mouseMoved``, or the plain path's press). Until then everything only
         reads or scrolls, so ``element_resolution.retry_detached`` re-runs the
-        whole span against the element the page holds NOW, bounded. From that
-        call on, input may have gone out (the first ``mouseMoved`` probe, the
-        press, nodriver's ``mouse_click`` or the synthetic ``el.click()``), so a
-        departed element is never retried and never answered with the synthetic
-        fallback: it raises, telling the caller to query again.
+        whole attempt against the element the page holds NOW, bounded, and
+        within ONE deadline: the caller's ``timeout`` spans every attempt's
+        resolution. From the first input on — and for the synthetic
+        ``el.click()``, which is input too — a failure is never re-run and never
+        answered with the synthetic click: it raises, saying the click may have
+        reached the page and was not repeated.
 
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the element.
             text_match (Optional[str]): Match element by text content.
-            timeout (int): Timeout in milliseconds.
+            timeout (int): Timeout in milliseconds, for the whole resolution
+                across re-runs (the text path spends it too).
 
         Returns:
             Dict[str, Any]: where the click went — see ``click_target.record``.
 
         Raises:
             ToolError: the selector resolved to nothing, the page could not
-                be asked where a click on it would land, or the element left
-                the page (before input: after the bounded re-resolves; after
-                input: at once).
+                be asked where a click on it would land, the element left the
+                page before any input (after the bounded re-runs), or a click
+                failed after input may have reached the page (at once).
         """
         try:
 
-            async def aimed() -> tuple[Any, dict[str, object]]:
+            async def attempt(budget: float) -> tuple[dict[str, object], str]:
                 if text_match:
-                    element = await resolve_by_text(tab, text_match, best_match=True)
-                else:
-                    element = await resolve_element(
-                        tab, selector, timeout=timeout / 1000
+                    element = await resolve_by_text(
+                        tab, text_match, best_match=True, timeout=budget
                     )
+                else:
+                    element = await resolve_element(tab, selector, timeout=budget)
                 if not element:
                     raise ToolError(f"Element not found: {selector}")
                 await element.scroll_into_view()
                 await asyncio.sleep(0.5)
-                return element, await click_target.aim(element, selector)
-
-            try:
-                element, aim = await retry_detached(f"click {selector!r}", aimed)
-            except Exception as exc:
-                if detached_element(exc) is None:
-                    raise
-                raise ToolError(
-                    f"'{selector}' left the page each time it was resolved, before "
-                    "any input was sent, so nothing was clicked; query it again "
-                    "once the page settles"
-                ) from exc
-
-            # THE dispatch boundary: from here on nothing is ever re-run.
-            try:
+                aim = await click_target.aim(element, selector)
                 dispatch = await DOMHandler._dispatch_click(tab, element, selector, aim)
+                return aim, dispatch
+
+            try:
+                aim, dispatch = await retry_detached(
+                    f"click {selector!r}", attempt, timeout / 1000
+                )
             except Exception as exc:
-                # ``click_target.click`` raises a ToolError over the failure once
-                # the press is out, so the cause is asked too.
-                if detached_element(exc) is None and (
-                    detached_element(exc.__cause__) is None
-                ):
-                    raise
-                raise ToolError(
-                    f"'{selector}' left the page while it was being clicked; input "
-                    "may already have reached the page, so the click was not "
-                    "repeated. Query the element again before acting on it"
-                ) from exc
+                # A raw departure only ever escapes BEFORE any input
+                # (``_dispatch_click`` wraps everything after it), so this one
+                # is "nothing was clicked", after the bounded re-runs.
+                if detached_element(exc) is not None:
+                    raise ToolError(
+                        f"'{selector}' left the page each time it was resolved, "
+                        "before any input was sent, so nothing was clicked; "
+                        "query it again once the page settles"
+                    ) from exc
+                if detached_element(exc.__cause__) is not None:
+                    raise ToolError(
+                        f"'{selector}' left the page while it was being clicked; "
+                        "input may already have reached the page, so the click "
+                        "was not repeated. Query the element again before acting "
+                        "on it"
+                    ) from exc
+                raise
 
             return click_target.record(selector, aim, dispatch)
 
@@ -340,22 +333,39 @@ class DOMHandler:
     async def _dispatch_click(
         tab: Tab, element: Any, selector: str, aim: dict[str, object]
     ) -> str:
-        """The coordinate click, or the synthetic one when it could not go out.
+        """The coordinate click, or the synthetic one when NO input went out.
 
-        A plain error out of ``click_target.click`` is raised before the press,
-        and the synthetic ``el.click()`` answers it — except when the error is
-        the element having left the document: nothing can reach it any more and
-        a probe move may already have gone out, so that one propagates.
+        ``click_target.click`` raises a plain error only before its press; what
+        decides whether the synthetic ``el.click()`` may answer it is
+        ``InputSent``, not the error: once any input was sent (a probe move, or
+        the plain path's press and release), a second, synthetic click could
+        land on top of a delivered one. Every failure from then on — and of the
+        synthetic click itself — becomes a ``ToolError``, which is never re-run.
+        A departure with nothing sent propagates raw, for the caller to re-run.
         """
+        ledger = click_target.InputSent()
         try:
-            await click_target.click(tab, element, selector, aim)
+            await click_target.click(tab, element, selector, aim, ledger)
         except ToolError:
             raise
         except Exception as e:
+            if ledger.sent:
+                raise ToolError(
+                    f"click on '{selector}' failed after input was sent "
+                    f"({type(e).__name__}); it may have reached the page, so it "
+                    "was not repeated"
+                ) from e
             if detached_element(e) is not None:
                 raise
             debug_logger.log_debug("dom_handler", "click_element", str(e))
-            await element.click()
+            try:
+                await element.click()
+            except Exception as synthetic:
+                raise ToolError(
+                    f"the synthetic click on '{selector}' failed "
+                    f"({type(synthetic).__name__}); it may have reached the page, "
+                    "so it was not repeated"
+                ) from synthetic
             return click_target.SYNTHETIC
         return click_target.COORDINATE
 

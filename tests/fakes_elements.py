@@ -304,14 +304,18 @@ class FakeClickTarget:
         self.calls.append("scroll_into_view")
 
     async def mouse_click(self) -> None:
-        """nodriver's ``Element.mouse_click``: press at the box centre, in CSS
-        pixels, straight into ``Input.dispatchMouseEvent`` — with no idea what
-        scale the page's emulation applies to it."""
-        if self.mouse_click_error is not None:
-            self.calls.append("mouse_click")
-            raise self.mouse_click_error
-        x, y = self._quad_centre()
+        """nodriver 0.50's ``Element.mouse_click``: ``get_position``, then a press
+        AND a release at the box centre, in CSS pixels, straight into
+        ``Input.dispatchMouseEvent`` — with no idea what scale the page's
+        emulation applies to it — then ``Tab.flash_point``.
+
+        The product no longer calls it (T-10034: it sends that press and release
+        itself, so it can tell whether input went out); it stays modelled so a
+        pin can show what calling it did.
+        """
+        x, y = (await self.get_position()).center
         self.receive_mouse({"type": "mousePressed", "x": x, "y": y})
+        self.receive_mouse({"type": "mouseReleased", "x": x, "y": y})
 
     def _quad_centre(self) -> tuple[float, float]:
         """``DOM.getContentQuads``' first-box centre: TOP-LEVEL viewport px, so
@@ -324,8 +328,13 @@ class FakeClickTarget:
         )
 
     async def get_position(self) -> Any:
+        """``DOM.getContentQuads``: nodriver raises for a node with no box."""
         from types import SimpleNamespace
 
+        if self.detached:
+            raise left_the_document()
+        if not self.rendered:
+            raise self.mouse_click_error or RuntimeError("could not find position")
         return SimpleNamespace(center=self._quad_centre())
 
     def receive_mouse(self, params: dict[str, Any]) -> None:

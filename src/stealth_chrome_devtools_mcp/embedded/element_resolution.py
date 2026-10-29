@@ -365,10 +365,14 @@ async def _resolve_with_recovery(
     return await _recover(what, locked, recoverable_race)
 
 
-async def retry_detached(what: str, attempt: Callable[[], Awaitable[_T]]) -> _T:
+async def retry_detached(
+    what: str,
+    attempt: Callable[[float], Awaitable[_T]],
+    timeout: float,  # noqa: ASYNC109  PERMANENT(one deadline across the re-runs)
+) -> _T:
     """Run ``attempt``, re-running it while the element it holds has left the page.
 
-    For work that RESOLVES an element and then reads it, where the element can
+    For work that RESOLVES an element and then uses it, where the element can
     be removed or replaced between the two (T-10034, STEALTH-…-ER):
     ``attempt`` must resolve afresh on every call, so a re-run aims at the
     element the page holds NOW. Same bound, same settle and same warning as the
@@ -376,13 +380,25 @@ async def retry_detached(what: str, attempt: Callable[[], Awaitable[_T]]) -> _T:
     question asked of the failure differs (:func:`detached_element`). On the
     last attempt the detached error itself is raised, for the caller to word.
 
+    ONE deadline: ``timeout`` (seconds) is fixed when this is called and each
+    attempt is handed what is LEFT of it, to pass to its resolution — so the
+    re-runs never add up to a multiple of what the caller asked for.
+
     No document lock here: ``attempt`` resolves through this module, which
     takes it per query, and the lock is not re-entrant.
 
-    ``attempt`` must not DISPATCH anything a page acts on. Re-running a read is
-    always safe; re-running an input that may have been delivered acts twice.
+    ``attempt`` may raise a detached error only while it has sent the page
+    nothing: re-running a read is always safe, re-running an input that may
+    have been delivered acts twice. Once input may be out it must raise
+    something else (``dom_handler`` raises a ``ToolError``), which is never
+    re-run.
     """
-    return await _recover(what, attempt, detached_element)
+    deadline = _now() + timeout
+
+    async def run() -> _T:
+        return await attempt(max(0.0, deadline - _now()))
+
+    return await _recover(what, run, detached_element)
 
 
 async def _recover(

@@ -427,9 +427,34 @@ def record(selector: str, facts: dict[str, object], dispatch: str) -> dict[str, 
     }
 
 
-async def _send_mouse(tab: Tab, kind: str, x: float, y: float) -> None:
-    """One bounded ``Input.dispatchMouseEvent`` (left button, no modifiers)."""
+class InputSent:
+    """Whether any input of ONE click may have reached the page (T-10034).
+
+    ``sent`` turns true immediately BEFORE the click's first
+    ``Input.dispatchMouseEvent`` goes out, in :func:`_send_mouse` -- the one
+    function here that sends input -- and never turns back. A send that fails
+    still counts: a timeout does not prove the event was not delivered.
+
+    It is how the caller tells "nothing reached the page" (a re-run or the
+    synthetic ``el.click()`` is safe) from "something may have" (neither is:
+    a second click after a delivered one is the outcome worse than a miss).
+    """
+
+    __slots__ = ("sent",)
+
+    def __init__(self) -> None:
+        self.sent = False
+
+
+async def _send_mouse(
+    tab: Tab, kind: str, x: float, y: float, ledger: InputSent
+) -> None:
+    """One bounded ``Input.dispatchMouseEvent`` (left button, no modifiers).
+
+    THE one place a click sends input, so it is where *ledger* is set.
+    """
     pressing = kind != "mouseMoved"
+    ledger.sent = True
     await asyncio.wait_for(
         tab.send(
             cdp.input_.dispatch_mouse_event(
@@ -484,7 +509,7 @@ async def _disarm(element: Element) -> str | None:
     return None
 
 
-async def _let_go(tab: Tab, at: tuple[float, float]) -> str | None:
+async def _let_go(tab: Tab, at: tuple[float, float], ledger: InputSent) -> str | None:
     """Best-effort, bounded ``mouseReleased``: never leave the button held.
 
     Errors are swallowed because the failure already in flight is the one worth
@@ -492,14 +517,19 @@ async def _let_go(tab: Tab, at: tuple[float, float]) -> str | None:
     cancellation arriving DURING the release.
     """
     try:
-        await _send_mouse(tab, "mouseReleased", *at)
+        await _send_mouse(tab, "mouseReleased", *at, ledger)
     except Exception as exc:  # noqa: BLE001  PERMANENT(cleanup must not mask the failure being raised)
         return type(exc).__name__
     return None
 
 
 async def _wind_down(
-    tab: Tab, element: Element, at: tuple[float, float], *, disarm: bool
+    tab: Tab,
+    element: Element,
+    at: tuple[float, float],
+    ledger: InputSent,
+    *,
+    disarm: bool,
 ) -> None:
     """Release the button (and dispose the probe if *disarm*) EVEN IF cancelled.
 
@@ -511,7 +541,7 @@ async def _wind_down(
     """
 
     async def cleanup() -> None:
-        await _let_go(tab, at)
+        await _let_go(tab, at, ledger)
         if disarm:
             await _disarm(element)
 
@@ -524,12 +554,12 @@ async def _wind_down(
 
 
 async def _moved(
-    tab: Tab, element: Element, x: float, y: float
+    tab: Tab, element: Element, x: float, y: float, ledger: InputSent
 ) -> dict[str, object] | None:
     """Move to (x, y) and answer the ``mousemove`` the page received, if any."""
     await _arm(element, ["mousemove"])
     try:
-        await _send_mouse(tab, "mouseMoved", x, y)
+        await _send_mouse(tab, "mouseMoved", x, y, ledger)
         seen = await _read(element)
     except BaseException:
         await _disarm(element)
@@ -553,12 +583,13 @@ def _landed(
     return (_number(seen.get("x")) + offset[0], _number(seen.get("y")) + offset[1])
 
 
-async def aim_input(
+async def aim_input(  # noqa: PLR0913  PERMANENT(the click's input ledger rides with every send)
     tab: Tab,
     element: Element,
     selector: str,
     aimed: tuple[float, float],
     offset: tuple[float, float],
+    ledger: InputSent,
 ) -> float | None:
     """Measure the factor *k* that makes input at ``aimed * k`` land on ``aimed``.
 
@@ -576,7 +607,7 @@ async def aim_input(
     seen: dict[str, object] | None = None
     for fraction in PROBE_FRACTIONS:
         sent = (aimed[0] * fraction, aimed[1] * fraction)
-        seen = await _moved(tab, element, *sent)
+        seen = await _moved(tab, element, *sent, ledger)
         if seen is not None:
             break
     if seen is None:
@@ -593,7 +624,7 @@ async def aim_input(
             )
         k = sent[axis] / landed[axis]
         sent = (aimed[0] * k, aimed[1] * k)
-        seen = await _moved(tab, element, *sent)
+        seen = await _moved(tab, element, *sent, ledger)
         if seen is None:
             raise ToolError(
                 f"could not aim the click on '{selector}': input rescaled to "
@@ -645,21 +676,50 @@ def _verify(
         )
 
 
+async def _plain_click(tab: Tab, element: Element, ledger: InputSent) -> None:
+    """nodriver's ``Element.mouse_click``, its press and release sent from here.
+
+    The same point -- the first content quad's centre -- and the same silence
+    for a node with no quads (nodriver returns without input there). What is
+    not kept is its trailing ``Tab.flash_point``: a marker injected into the
+    page AFTER the release, whose failure reached the caller as a plain error
+    and was answered with a SECOND, synthetic click (T-10034 review). Owning
+    the two sends is also what lets *ledger* see them.
+    """
+    position = await element.get_position()
+    if position is None:
+        return
+    at = position.center
+    try:
+        await _send_mouse(tab, "mousePressed", *at, ledger)
+    except BaseException:
+        await _wind_down(tab, element, at, ledger, disarm=False)
+        raise
+    await _send_mouse(tab, "mouseReleased", *at, ledger)
+
+
 async def click(
-    tab: Tab, element: Element, selector: str, facts: dict[str, object]
+    tab: Tab,
+    element: Element,
+    selector: str,
+    facts: dict[str, object],
+    ledger: InputSent,
 ) -> None:
     """The ONE coordinate click, correct under any device-metrics override.
 
     *facts* is :func:`aim`'s answer. An element with no hit-testable point (no
-    box, or a box outside the viewport) is handed to ``Element.mouse_click``
-    unchanged: no input could reach it, so there is nothing to measure.
+    box, or a box outside the viewport) is clicked at its quad centre unchanged
+    (:func:`_plain_click`): no input could reach it, so there is nothing to
+    measure. *ledger* records whether any input went out (:class:`InputSent`).
 
     The point dispatched is the centre of the first content quad, in the top-level
     viewport — what ``Element.mouse_click`` has always used, and the only space
-    that is right inside an iframe. Whatever is raised BEFORE ``mousePressed`` is
-    sent is a plain exception the caller may answer with the synthetic click;
-    from then on everything is a ``ToolError``, because a second click after a
-    delivered one must never happen.
+    that is right inside an iframe. Once ``mousePressed`` is sent everything is
+    a ``ToolError``, because a second click after a delivered one must never
+    happen. A plain exception may come out before that, and the caller may
+    answer it with the synthetic click or a re-run ONLY while ``ledger.sent``
+    is false: a probe ``mouseMoved``, or the plain path's press, may already
+    have reached the page.
 
     Raises ``ToolError`` when the input cannot be aimed, when the page did not
     report the press although it was there to ask, or when its own ``mousedown``
@@ -667,16 +727,16 @@ async def click(
     """
     point = facts.get("point")
     if not isinstance(point, dict) or facts.get("hit") is None:
-        await element.mouse_click()
+        await _plain_click(tab, element, ledger)
         return
     position = await element.get_position()
     if position is None:
-        await element.mouse_click()
+        # ``Element.mouse_click`` asks the same question and returns there.
         return
     x, y = position.center
     offset = (x - _number(point.get("x")), y - _number(point.get("y")))
     expected = bool(facts.get("hit_is_target"))
-    k = await aim_input(tab, element, selector, (x, y), offset)
+    k = await aim_input(tab, element, selector, (x, y), offset, ledger)
     if k is None:
         if expected:
             raise ToolError(
@@ -687,11 +747,11 @@ async def click(
     at = (x * k, y * k)
     await _arm(element, ["mousedown"])
     try:
-        await _send_mouse(tab, "mousePressed", *at)
+        await _send_mouse(tab, "mousePressed", *at, ledger)
     except BaseException as failure:
         # A timeout or a cancellation does not prove the press was not delivered,
         # so the button is let go whatever happened.
-        await _wind_down(tab, element, at, disarm=True)
+        await _wind_down(tab, element, at, ledger, disarm=True)
         if not isinstance(failure, Exception):
             raise
         raise ToolError(
@@ -707,10 +767,10 @@ async def click(
     except Exception as failure:  # noqa: BLE001  PERMANENT(the page may navigate on mousedown; the press already went out)
         gone = type(failure).__name__
     except BaseException:
-        await _wind_down(tab, element, at, disarm=False)
+        await _wind_down(tab, element, at, ledger, disarm=False)
         raise
     try:
-        await _send_mouse(tab, "mouseReleased", *at)
+        await _send_mouse(tab, "mouseReleased", *at, ledger)
     except BaseException as failure:
         # N2, accepted: a release whose reply was lost may HAVE been delivered, and
         # this sends a second one, so the page can see a duplicate ``mouseup``. The
@@ -718,7 +778,7 @@ async def click(
         # worse failure; the two cases cannot be told apart from here (a timeout
         # proves nothing), and a stray ``mouseup`` with no press pending does
         # nothing in Chrome's click machinery.
-        await _wind_down(tab, element, at, disarm=False)
+        await _wind_down(tab, element, at, ledger, disarm=False)
         if not isinstance(failure, Exception):
             raise
         raise ToolError(
