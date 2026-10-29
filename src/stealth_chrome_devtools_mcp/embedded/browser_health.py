@@ -79,6 +79,7 @@ from stealth_chrome_devtools_mcp.embedded import (
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
+from stealth_chrome_devtools_mcp.embedded.forensic_errors import HungBrowserError
 from stealth_chrome_devtools_mcp.embedded.models import BrowserInstance, BrowserOptions
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 
@@ -124,12 +125,6 @@ _PROCESS_TYPE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 Probe = Callable[[str, list[str]], Awaitable[None]]
 Closer = Callable[[str, str | None], Awaitable[object]]
 Armer = Callable[[Tab, str, list[str] | None], Awaitable[object]]
-
-
-class HungBrowserError(Exception):
-    """A persistent-profile browser that stopped answering a probe. Only ever
-    handed to ``debug_logger.log_error`` (never raised), so the ERROR line and
-    its Sentry event carry the forensics in the message."""
 
 
 class ProbeError(Exception):
@@ -573,7 +568,8 @@ class BrowserHealth:
                 "probe",
                 HungBrowserError(
                     f"{instance_id}: probe failed ({failure}) past the starvation "
-                    f"ceiling ({starved}); counting it (F-1007)"
+                    f"ceiling ({starved}); counting it (F-1007)",
+                    f"starvation-ceiling {failure}",
                 ),
             )
             return False
@@ -637,7 +633,9 @@ class BrowserHealth:
             instance_id, pid=pid, label=dump_label, problem=problem
         )
         debug_logger.log_error(
-            _COMPONENT, "probe", HungBrowserError(f"{label}; {evidence}; healing it")
+            _COMPONENT,
+            "probe",
+            HungBrowserError(f"{label}; {evidence}; healing it", f"heal {failure}"),
         )
         self._last_heal[instance_id] = self._clock()
         self._failures[instance_id] = 0  # what comes next is a new incident
@@ -830,7 +828,8 @@ class BrowserHealth:
                     "heal",
                     HungBrowserError(
                         f"{instance_id}: the close path left the browser running "
-                        f"and it {left}; not relaunching onto a profile it still holds"
+                        f"and it {left}; not relaunching onto a profile it still holds",
+                        "close-left-running",
                     ),
                 )
                 return False
@@ -874,7 +873,8 @@ class BrowserHealth:
                 "relaunch",
                 HungBrowserError(
                     f"{label}; it was healed or relaunched {since:.0f}s ago, not "
-                    f"relaunching again within {HEAL_COOLDOWN_SECONDS}s"
+                    f"relaunching again within {HEAL_COOLDOWN_SECONDS}s",
+                    "relaunch-cooldown",
                 ),
             )
             return False
@@ -909,7 +909,8 @@ class BrowserHealth:
                     "relaunch",
                     HungBrowserError(
                         f"{label}; relaunch failed ({type(error).__name__}: "
-                        f"{error}); not trying again"
+                        f"{error}); not trying again",
+                        f"relaunch-failed {type(error).__name__}",
                     ),
                 )
                 return False
@@ -950,7 +951,8 @@ class BrowserHealth:
                 _COMPONENT,
                 "heal",
                 HungBrowserError(
-                    f"{instance_id}: relaunched but the probe still fails ({failure})"
+                    f"{instance_id}: relaunched but the probe still fails ({failure})",
+                    f"relaunch-probe-fails {failure}",
                 ),
             )
             return False

@@ -52,6 +52,7 @@ from nodriver.core.connection import Connection
 from stealth_chrome_devtools_mcp.embedded import freeze_capture, scheduling_lag
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.dynamic_hook_system import dynamic_hook_system
+from stealth_chrome_devtools_mcp.embedded.forensic_errors import FrozenCloneError
 
 _COMPONENT = "clone_probe"
 
@@ -75,12 +76,6 @@ class InstanceSource(Protocol):
     """What a round needs of the manager (only ``browser`` is read)."""
 
     async def get_instance(self, instance_id: str) -> Mapping[str, Browser] | None: ...
-
-
-class FrozenCloneError(Exception):
-    """A disposable clone that missed its probe. Only ever handed to
-    ``debug_logger.log_error`` (never raised), so the ERROR line and its Sentry
-    event carry the record in the message."""
 
 
 def _task_state(task: asyncio.Task[object] | None) -> str:
@@ -220,7 +215,8 @@ class CloneProbe:
             _COMPONENT,
             "probe",
             FrozenCloneError(
-                f"{instance_id}: clone probe failed ({failure}); {record}"
+                f"{instance_id}: clone probe failed ({failure}); {record}",
+                f"probe {failure}",
             ),
         )
 

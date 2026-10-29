@@ -681,6 +681,71 @@ def _is_our_frame(frame: "dict[str, object]") -> bool:
     return isinstance(abs_path, str) and Path(abs_path).is_relative_to(_PACKAGE_DIR)
 
 
+#: The per-occurrence parts of a message, in the order they are replaced: a URL,
+#: a UUID, a quoted span (a selector, a name; the look-arounds keep an
+#: apostrophe inside a word from opening one), then any run of digits.
+_TEMPLATE_PARTS = (
+    (re.compile(r"https?://\S+"), "<url>"),
+    (
+        re.compile(
+            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{12}\b"
+        ),
+        "<id>",
+    ),
+    (re.compile(r"""(?<!\w)(['"`])[^\n]{0,200}?\1(?!\w)"""), "<q>"),
+    (re.compile(r"\d+"), "<n>"),
+)
+
+
+def _message_template(text: str) -> str:
+    """*text* with what differs per occurrence replaced, the prose kept."""
+    for pattern, placeholder in _TEMPLATE_PARTS:
+        text = pattern.sub(placeholder, text)
+    return text
+
+
+def _stable_fingerprint(hint: "dict[str, object] | None") -> "list[str] | None":
+    """The Sentry fingerprint this event should carry, or ``None`` for Sentry's own.
+
+    Sentry groups an event by its stack frames, and by the message when there is
+    no stack. Both split one defect across issues (T-10034): a report logged
+    without being raised (``forensic_errors.ForensicError``) has no stack and a
+    message full of ids, uptimes and timings, so each freeze was a NEW issue; and
+    a ``ToolError`` is grouped by the stack of everything it was raised while
+    handling, so one title was three issues (a different CDP error underneath,
+    and a different source line per release). Only grouping changes here; the
+    event's message and exception are untouched.
+
+    Two cases, both from the LIVE exception behind the event, and the first wins:
+
+    * the exception declares ``sentry_fingerprint`` (a tuple of strings: its kind
+      and stable cause), which is used as is;
+    * it is a ``ToolError``: ``tool-error``, its type, and its message with
+      :func:`_message_template` applied. Two defects whose messages differ only in
+      a quoted name or a number group together (the full message is still on every
+      event); a ``ToolError`` that is not shipped at all is dropped before this.
+    """
+    exception = _hint_exception(hint)
+    if exception is None:
+        return None
+    declared = getattr(exception, "sentry_fingerprint", None)
+    if (
+        isinstance(declared, tuple)
+        and declared
+        and all(isinstance(part, str) for part in declared)
+    ):
+        return list(declared)
+    base = _expected_error_base()
+    if base is not None and isinstance(exception, base):
+        return [
+            "tool-error",
+            type(exception).__name__,
+            _message_template(str(exception)),
+        ]
+    return None
+
+
 def _scrub_event(
     event: "Event", hint: "dict[str, object] | None" = None
 ) -> "Event | None":
@@ -693,7 +758,9 @@ def _scrub_event(
        :func:`_is_expected_tool_failure` and the six named classes in
        :mod:`expected_events` — and so is a foreign interpreter's own crash
        caught by our process-global hook, see :func:`_is_foreign_hook_crash`;
-    1. everything that survives is scrubbed.
+    1. everything that survives is scrubbed, and given a stable fingerprint where
+       Sentry's own grouping would split one defect across issues, see
+       :func:`_stable_fingerprint` (T-10034).
 
     Five removals, all universal — there is no maintainer-only path:
 
@@ -727,8 +794,11 @@ def _scrub_event(
     if _is_expected_tool_failure(event, hint) or _is_foreign_hook_crash(event):
         return None
     try:
+        fingerprint = None if event.get("fingerprint") else _stable_fingerprint(hint)
         scrubbed = _anonymize(event)
         if isinstance(scrubbed, dict):
+            if fingerprint:
+                scrubbed["fingerprint"] = _anonymize(fingerprint)
             scrubbed.pop("server_name", None)
             request = scrubbed.get("request")
             if isinstance(request, dict):
