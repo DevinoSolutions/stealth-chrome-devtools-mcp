@@ -895,6 +895,71 @@ class TestTheSessionLoopCouldNotTellTheClient:
         # (live, payload) in one assertion, so a failure names both paths.
         assert (dropped(pair), dropped(payload_only(pair))) == (False, False)
 
+    def test_a_group_under_an_ordinary_exception_is_not_expanded(self):
+        """The re-review's shape: a ``CallerError`` raised FROM a group of 23.
+
+        The SDK expands members only when the REPORTED exception is a group
+        (``exceptions_from_error_tuple``); under an ordinary one it walks the
+        cause chain alone, so the payload is two links and drops as
+        ``caller-error``. A live walk that expanded the group anyway counted 25,
+        refused, and shipped what the payload dropped.
+        """
+        from stealth_chrome_devtools_mcp import expected_events
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
+
+        def chain():
+            try:
+                try:
+                    raise ExceptionGroup(  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+                        "hook failed", [ValueError(str(n)) for n in range(23)]
+                    )
+                except ExceptionGroup as cause:
+                    raise CallerError("the hook raised") from cause
+            except CallerError:
+                return sys.exc_info()
+
+        event, hint = tool_manager_event(chain(), tool="execute_python_in_browser")
+        walked = observability._exception_chain(observability._hint_exception(hint))
+        live = expected_events._links(event, walked)
+        serialized = expected_events._links(event, None)
+
+        assert [link.type_name for link in live] == [
+            link.type_name for link in serialized
+        ]
+        assert [link.type_name for link in serialized] == [
+            "CallerError",
+            "ExceptionGroup",
+        ]
+        classify = TestTheClassesAreNamed()._classify
+        assert (
+            classify((event, hint))
+            == classify((event, {}))
+            == (expected_events.CALLER_ERROR)
+        )
+
+    def test_a_group_at_the_top_still_expands_on_both_paths(self):
+        """The other half of the SDK's rule: a REPORTED group is serialized with
+        its members, each with its own cause, and so is walked with them."""
+        from stealth_chrome_devtools_mcp import expected_events
+
+        def chain():
+            try:
+                try:
+                    raise KeyError("k")  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+                except KeyError as cause:
+                    leaf = ValueError("v")
+                    leaf.__cause__ = cause
+                raise ExceptionGroup("g", [leaf, TypeError("t")])  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+            except ExceptionGroup:
+                return sys.exc_info()
+
+        event, hint = tool_manager_event(chain())
+        walked = observability._exception_chain(observability._hint_exception(hint))
+        live = [link.type_name for link in expected_events._links(event, walked)]
+
+        assert live == ["ExceptionGroup", "ValueError", "KeyError", "TypeError"]
+        assert live == [link.type_name for link in expected_events._links(event, None)]
+
     def test_the_same_group_on_another_logger_still_ships(self):
         pair = logged(
             "stealth.backend",

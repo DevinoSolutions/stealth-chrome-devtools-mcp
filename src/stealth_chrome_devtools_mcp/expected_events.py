@@ -192,8 +192,10 @@ each rule: the live chain walks outermost-first (``exc``, then its cause), while
 Sentry's ``values`` list the ROOT cause first and the reported exception LAST.
 :func:`_links` hands every rule one order — **outermost first** — so
 ``links[0]`` is the exception Sentry titles the issue with on either path. A
-group's members are in both, in the SDK's pre-order (each exception, its cause,
-then its members), since T-10034 widened the live walk to follow them.
+REPORTED group's members are in both, in the SDK's pre-order (each exception,
+its cause, then its members), since T-10034 made the live walk select exactly
+what ``exceptions_from_error_tuple`` serializes; a group under an ordinary
+exception is one link on both paths, because the SDK does not expand it.
 
 There is exactly ONE exception to name-and-module matching, and it is the one
 that was already there: our own error base is matched with ``isinstance`` when
