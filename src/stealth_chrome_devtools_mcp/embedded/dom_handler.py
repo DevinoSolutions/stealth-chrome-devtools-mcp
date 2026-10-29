@@ -27,6 +27,22 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
+#: ``query_elements(visible_only=True)``' visibility read. A node the page
+#: removed but still references has an EMPTY computed style, so the three style
+#: tests alone pass for it and it listed as visible (T-10284); it is asked
+#: whether it is in a document first, through ``click_target``'s one
+#: connectivity read, so it can never read as visible.
+VISIBLE_JS = """(elem) => {
+    __IS_CONNECTED__
+    if (!(__CONNECTED__)) return false;
+    var style = window.getComputedStyle(elem);
+    return style.display !== 'none' &&
+           style.visibility !== 'hidden' &&
+           style.opacity !== '0';
+}""".replace("__IS_CONNECTED__", click_target.IS_CONNECTED_JS).replace(
+    "__CONNECTED__", click_target.CONNECTED_EXPR_JS
+)
+
 
 class DOMHandler:
     """Handles DOM queries and element interactions."""
@@ -129,14 +145,7 @@ class DOMHandler:
                     is_visible = True
                     if visible_only:
                         try:
-                            is_visible = await elem.apply(
-                                """(elem) => {
-                                    var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' &&
-                                           style.visibility !== 'hidden' &&
-                                           style.opacity !== '0';
-                                }"""
-                            )
+                            is_visible = await elem.apply(VISIBLE_JS)
                             if not is_visible:
                                 continue
                         except (

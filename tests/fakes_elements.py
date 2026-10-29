@@ -227,6 +227,18 @@ class FakeClickTarget:
     while a script that reads through the native prototype accessor
     gets the real member. Which one the product's script does is read off the
     script text, never assumed.
+
+    The listing surface (T-10284) -- ``update``, ``tag_name``, ``text_all``,
+    ``attrs``, ``children`` -- is what ``query_elements`` and
+    ``get_element_state`` read off an element they hold. ``update`` is nodriver's
+    ``DOM.getDocument`` + ``DOM.resolveNode`` by backend node id: it raises for a
+    ``detached`` element (Chrome dropped it from its node table) and SUCCEEDS for
+    a ``disconnected`` one, the page's removed-but-referenced node, which is the
+    whole of T-10284. A script's connectivity and visibility answers are
+    COMPUTED from ``disconnected`` and the script text (:meth:`_connected_read`,
+    :meth:`_visible`); a ``disconnected`` node has no box and an EMPTY computed
+    style, so a visibility script that does not ask ``isConnected`` first reads
+    it as visible, exactly as real Chrome does.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -369,7 +381,66 @@ class FakeClickTarget:
             }
         )
 
-    # -- the nodriver Element surface the click path touches -----------------
+    # -- the nodriver Element surface the listing / state reads touch ----------
+    @property
+    def tag_name(self) -> str:
+        return self.tag
+
+    @property
+    def text_all(self) -> str:
+        return self.text
+
+    @property
+    def attrs(self) -> dict[str, str]:
+        return {"id": self.element_id} if self.element_id else {}
+
+    @property
+    def children(self) -> list[Any]:
+        return []
+
+    async def update(self) -> FakeClickTarget:
+        """nodriver's ``Element.update``: ``getDocument`` + ``resolveNode``.
+
+        Chrome answers ``resolveNode`` for any node it still holds, and it holds
+        a removed node the page still references -- so ``disconnected`` does NOT
+        raise here. Only a ``detached`` one has left Chrome's table.
+        """
+        if self.detached:
+            raise left_the_document()
+        return self
+
+    def _connected_read(self, js_function: str) -> Any:
+        """What the script's ``isConnected`` read EVALUATES to, as ``(strict, truthy)``.
+
+        Through the native getter it is the real boolean. Through ``elem.<name>``
+        a form's named control shadows it: an object, so truthy and ``!== true``
+        (Codex round 6: JS truthiness is decided apart from the serialised value).
+        """
+        native = "Node.prototype, 'isConnected')" in js_function
+        if not native and self._shadowed(js_function, "isConnected"):
+            return False, True
+        return not self.disconnected, not self.disconnected
+
+    def _connected_answer(self, js_function: str) -> bool:
+        """The boolean a script asking only ``isConnected`` returns."""
+        strict, truthy = self._connected_read(js_function)
+        return strict if "=== true" in js_function else truthy
+
+    def _visible(self, js_function: str) -> bool:
+        """``getComputedStyle``'s ``display/visibility/opacity`` test, as Chrome runs it.
+
+        A removed node has an EMPTY computed style, so all three tests pass and
+        the style alone says "visible" (T-10284). Whether the script asks
+        ``isConnected`` first is read off its text.
+        """
+        asked = js_function.split("getComputedStyle", maxsplit=1)[0]
+        gate = re.search(r"if \(!.*isConnected.*\) return false;", asked)
+        if gate and not self._connected_answer(asked):
+            return False
+        if self.disconnected:
+            return True
+        return self.rendered and self.visibility != "hidden"
+
     async def scroll_into_view(self) -> None:
         self.calls.append("scroll_into_view")
 
@@ -409,7 +480,10 @@ class FakeClickTarget:
             )
         if not self.rendered:
             raise self.mouse_click_error or RuntimeError("could not find position")
-        return SimpleNamespace(center=self._quad_centre())
+        left, top, width, height = self.rect
+        return SimpleNamespace(
+            center=self._quad_centre(), x=left, y=top, width=width, height=height
+        )
 
     def receive_mouse(self, params: dict[str, Any]) -> None:
         """Route one dispatch, then raise the failure armed for its kind (once)."""
@@ -510,6 +584,10 @@ class FakeClickTarget:
             return self._aim(js_function)
         if _is_synthetic(js_function):
             return self._synthetic(js_function)
+        if "getComputedStyle" in js_function:
+            return self._visible(js_function)
+        if "isConnected" in js_function:
+            return self._connected_answer(js_function)
         if PROBE_KEY in js_function and "addEventListener" in js_function:
             self.armed = _probe_kinds(js_function)
             self.observed = []

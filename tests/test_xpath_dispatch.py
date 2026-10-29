@@ -88,7 +88,13 @@ class _FakeElement:
         """F-876's aim read. This double exists to pin WHICH resolution surface
         a selector reaches, so the aim answers the minimum well-formed record
         rather than modelling geometry — ``tests/fakes.py``'s
-        ``FakeClickTarget`` is the double that does that."""
+        ``FakeClickTarget`` is the double that does that.
+
+        Every other read (the connectivity and visibility reads of
+        ``refresh_element`` / ``query_elements``, T-10284) answers ``True``:
+        the element is in its document and visible."""
+        if "elementFromPoint" not in js_function:
+            return True
         return json.dumps(
             {
                 "connected": True,
