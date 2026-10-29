@@ -434,8 +434,8 @@ def _exception_chain(exc: BaseException) -> "list[BaseException]":
 
     Mirrors the SDK's own walk (``__cause__``, else ``__context__`` unless
     ``raise ... from None`` suppressed it) so the live-object path and the
-    payload path below judge the SAME set of exceptions. Bounded and cycle-safe
-    for the same reason :data:`_MAX_EVENT_DEPTH` exists.
+    payload path below judge the SAME set of exceptions. Cycle-safe, and
+    bounded as the last paragraph says.
 
     **And a group's members, in the SDK's order** (T-10034, closing F-929's
     §3.1 half). ``sentry_sdk.utils.exceptions_from_error`` visits an exception,
@@ -450,11 +450,17 @@ def _exception_chain(exc: BaseException) -> "list[BaseException]":
     reads a group's leaves, and it is why this walk had to see them.
     ``isinstance(BaseExceptionGroup)``, never ``getattr(exc, "exceptions")``,
     for ``payload_log_sites._chain``'s reason.
+
+    Bounded at ONE PAST ``expected_events.MAX_LINKS``, never at it: a walk
+    stopped AT the bound handed ``classify`` a prefix that looked whole, and a
+    group of matching leaves with a real defect past them was dropped live
+    while the payload shipped it. One past makes a cut-short walk too long to
+    judge, so it ships — the way the payload path ships the same chain.
     """
     chain: list[BaseException] = []
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
-    while pending and len(chain) < _MAX_EVENT_DEPTH:
+    while pending and len(chain) <= expected_events.MAX_LINKS:
         current = pending.pop()
         if id(current) in seen:
             continue

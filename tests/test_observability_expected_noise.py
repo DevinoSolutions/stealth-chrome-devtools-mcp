@@ -859,6 +859,42 @@ class TestTheSessionLoopCouldNotTellTheClient:
         assert not dropped(pair)
         assert not dropped(payload_only(pair))
 
+    def test_a_defect_past_the_walks_bound_still_ships(self):
+        """The review's shape: 21 matching leaves fill the 24 links a verdict is
+        given over (three groups + 21), and the ``AttributeError`` is the 25th.
+        A walk cut short there judged the prefix and dropped a real defect live,
+        while the payload, which the SDK never caps, saw it and shipped."""
+        from stealth_chrome_devtools_mcp import expected_events
+
+        bodies = [notify_a_stream_exception] * 21 + [fail_unrelated]
+        pair = logged(
+            SESSION_MANAGER_LOGGER,
+            SESSION_CRASHED,
+            exc_info=session_crash_info(*bodies),
+        )
+        values = pair[0]["exception"]["values"]
+        assert len(values) == expected_events.MAX_LINKS + 1
+        assert values[0]["type"] == "AttributeError"
+
+        # (live, payload) in one assertion, so a failure names both paths.
+        assert (dropped(pair), dropped(payload_only(pair))) == (False, False)
+
+    def test_a_chain_past_the_bound_is_never_recognised_on_either_path(self):
+        """Fail open, and the same way on both paths: 22 matching leaves are
+        nothing but the EN shape, yet a verdict over 25 links is not given,
+        because the live walk cannot say what lies past its bound."""
+        from stealth_chrome_devtools_mcp import expected_events
+
+        pair = logged(
+            SESSION_MANAGER_LOGGER,
+            SESSION_CRASHED,
+            exc_info=session_crash_info(*[notify_a_stream_exception] * 22),
+        )
+        assert len(pair[0]["exception"]["values"]) == expected_events.MAX_LINKS + 1
+
+        # (live, payload) in one assertion, so a failure names both paths.
+        assert (dropped(pair), dropped(payload_only(pair))) == (False, False)
+
     def test_the_same_group_on_another_logger_still_ships(self):
         pair = logged(
             "stealth.backend",
