@@ -246,6 +246,16 @@ CALLER_ERROR = "caller-error"
 #: one thing this reduction exists to prevent.
 _UNWRITTEN_MODULES = frozenset({None, "builtins", "__builtins__"})
 
+#: The most links a verdict is given over, on EITHER path; a longer chain is
+#: never recognised (T-10034 review). The live walk is bounded and the payload
+#: is not — sentry-sdk 2.73.0's ``exceptions_from_error`` caps neither a chain
+#: nor a group, and the serializer's databag limits do not reach
+#: ``exception.values`` (measured: 25 values arrive whole) — so a walk cut short
+#: would judge a PREFIX the payload path sees past. ``observability.
+#: _exception_chain`` collects one link more than this, which makes a cut-short
+#: walk a chain too long to judge rather than a short one that passes.
+MAX_LINKS = 24
+
 #: How far into a traceback the frame read goes. A traceback cannot cycle, so
 #: this is a cost bound and not a terminator. Truncating a caller-first list can
 #: only REMOVE an adjacency, never invent one, so the cap can only cost a drop —
@@ -449,9 +459,16 @@ def classify(
 
     Does not catch: the never-raises contract lives at the one call site, so a
     bug here is visible to the suite rather than silently turning into "ship it".
+
+    More than :data:`MAX_LINKS` links is ``None`` before any rule is asked: a
+    rule cannot see a link it was never handed, so past the bound "expected"
+    is not a claim this module can make — the default is to send.
     """
+    links = _links(event, chain)
+    if len(links) > MAX_LINKS:
+        return None
     facts = EventFacts(
-        links=_links(event, chain),
+        links=links,
         logger=_logger(event),
         message=_message(event),
         error_base=error_base,
