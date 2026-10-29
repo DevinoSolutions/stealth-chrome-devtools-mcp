@@ -21,12 +21,15 @@ which cannot fail the way the SDK's own serialization can.
 
 from __future__ import annotations
 
+import ast
 import logging
+import pathlib
 
 import pytest
 from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp import observability
+from stealth_chrome_devtools_mcp.embedded import browser_health, clone_probe
 from stealth_chrome_devtools_mcp.embedded.browser_health import HungBrowserError
 from stealth_chrome_devtools_mcp.embedded.clone_probe import FrozenCloneError
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -194,31 +197,84 @@ class TestHungBrowserError:
         ] * 2
 
 
-def _log_tool_error(
+#: The package name the fixture sites below belong to. ``_is_our_frame`` reads a
+#: frame's module name, so naming the fixture namespace inside it makes the REAL
+#: frame rule treat the fixture's functions as ours.
+FIXTURE_PACKAGE = "fixture_pkg"
+
+_SITE_SOURCE = """
+def click_element(error, cause):
+    try:
+        raise cause
+    except Exception:
+        raise error
+
+
+def select_option(error, cause):
+    try:
+        raise cause
+    except Exception:
+        raise error
+
+
+def raise_it(error):
+    raise error
+"""
+
+
+def _sites(release_padding: int = 0) -> dict:
+    """The fixture's functions, as the source of a release whose code sits
+    ``release_padding`` lines further down: same names, different line numbers."""
+    namespace = {"__name__": f"{FIXTURE_PACKAGE}.dom_handler"}
+    exec(  # noqa: S102  PERMANENT(compiling the fixture source IS the test: a function at other line numbers)
+        compile("\n" * release_padding + _SITE_SOURCE, "<release>", "exec"),
+        namespace,
+    )
+    return namespace
+
+
+@pytest.fixture(autouse=True)
+def _fixture_package_is_ours(monkeypatch):
+    monkeypatch.setattr(observability, "_IMPORT_NAME", FIXTURE_PACKAGE)
+
+
+def _ship_tool_error(
     shipped,
-    under: Exception,
     error: ToolError,
+    *,
+    cause: Exception | None = None,
+    site: str | None = "click_element",
+    padding: int = 0,
     tool: str | None = "click_element",
 ) -> dict:
-    """Ship a ``ToolError`` raised while *under* was in flight, as fastmcp logs it
-    (``tool=None``: through a logger that names no tool)."""
-    before = len(shipped)
-    try:
+    """Ship a ``ToolError`` the way fastmcp logs one: raised by a function of
+    ours (*site*) while *cause* is in flight, and logged by the tool-call logger
+    (``tool=None``: by a logger that names no tool; ``site=None``: never raised)."""
+    if site is None:  # never raised: no traceback anywhere, the cause only linked
+        error.__cause__ = cause if cause is not None else RuntimeError("x")
+        _log(tool, exc_info=error)
+    else:
         try:
-            raise under  # noqa: TRY301  PERMANENT(the in-flight cause IS the fixture)
-        except Exception:
-            raise error  # noqa: B904  PERMANENT(an implicit __context__ is the shape under test)
-    except ToolError:
-        if tool is None:
-            logging.getLogger("stealth.backend").exception("a failure")
-        else:
-            logging.getLogger(TOOL_CALL_LOGGER).exception("Error calling tool %r", tool)
+            _sites(padding)[site](
+                error, cause if cause is not None else RuntimeError("x")
+            )
+        except ToolError:
+            _log(tool)
     sentry_sdk.get_client().flush()
-    assert len(shipped) == before + 1
     return shipped[-1]
 
 
-def _click_gone(selector: str) -> ToolError:
+def _log(tool: str | None, exc_info: object = True) -> None:
+    """What fastmcp does (``logger.exception``), from inside an ``except`` block."""
+    if tool is None:
+        logging.getLogger("stealth.backend").error("a failure", exc_info=exc_info)
+    else:
+        logging.getLogger(TOOL_CALL_LOGGER).error(
+            "Error calling tool %r", tool, exc_info=exc_info
+        )
+
+
+def _click_gone(selector: str = "#b") -> ToolError:
     return ToolError(
         f"Failed to click element: '{selector}' left the page each time it was "
         "resolved, before any input was sent, so nothing was clicked; query it "
@@ -228,156 +284,200 @@ def _click_gone(selector: str) -> ToolError:
 
 NO_NODE = ProtocolException({"code": -32000, "message": "No node with given id found"})
 
-#: The EV/EW/ET title, templated: the selector is a quoted name, so it STAYS.
-CLICK_GONE_TEMPLATE = (
-    "Failed to click element: '#b' left the page each time it was "
-    "resolved, before any input was sent, so nothing was clicked; query "
-    "it again once the page settles"
-)
-
 
 class TestToolError:
-    def test_one_title_over_different_causes_is_one_issue(self, shipped_events):
-        """-EV (a ProtocolException), -EW (an ElementDisconnected), -ET (another run)."""
-        under_protocol = _log_tool_error(shipped_events, NO_NODE, _click_gone("#b"))
-        under_disconnected = _log_tool_error(
-            shipped_events,
-            ElementDisconnected("'#b' is no longer in its document"),
-            _click_gone("#b"),
+    def test_one_tool_and_function_is_one_issue_across_releases(self, shipped_events):
+        """-EV (2.1.53) and -ET (2.1.50): the same tool, the same cause type, the
+        same function at other line numbers. The line number is what split them."""
+        release_a = _ship_tool_error(shipped_events, _click_gone(), cause=NO_NODE)
+        release_b = _ship_tool_error(
+            shipped_events, _click_gone(), cause=NO_NODE, padding=17
         )
-        another_run = _log_tool_error(shipped_events, NO_NODE, _click_gone("#b"))
 
-        fingerprints = {
-            tuple(e["fingerprint"])
-            for e in (under_protocol, under_disconnected, another_run)
-        }
-        assert fingerprints == {
-            ("tool-error", "click_element", "ToolError", CLICK_GONE_TEMPLATE)
-        }
+        assert release_a["fingerprint"] == release_b["fingerprint"]
+        assert release_a["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "ProtocolException",
+            "fixture_pkg.dom_handler.click_element",
+        ]
         # nothing diagnostic is lost: the full title and the cause chain ship
-        values = under_disconnected["exception"]["values"]
+        values = release_a["exception"]["values"]
         assert "'#b' left the page" in values[-1]["value"]
-        assert [v["type"] for v in values][:2] == ["ElementDisconnected", "ToolError"]
+        assert [v["type"] for v in values][:2] == ["ProtocolException", "ToolError"]
 
-    def test_a_quoted_name_is_a_failure_cause_not_a_value(self, shipped_events):
+    def test_a_different_cause_type_is_another_issue(self, shipped_events):
+        """-EW: the same title over an ``ElementDisconnected``, not a
+        ``ProtocolException``, is a different root failure and its own issue."""
+        protocol = _ship_tool_error(shipped_events, _click_gone(), cause=NO_NODE)
+        disconnected = _ship_tool_error(
+            shipped_events,
+            _click_gone(),
+            cause=ElementDisconnected("'#b' is no longer in its document"),
+        )
+
+        assert disconnected["fingerprint"][3] == "ElementDisconnected"
+        assert disconnected["fingerprint"] != protocol["fingerprint"]
+
+    def test_different_keys_raised_in_one_function_are_one_issue(self, shipped_events):
         """cdp_element_cloner.py:801 wraps a missing ``stylesheets`` and a missing
-        ``scripts`` KeyError as ``ToolError(str(e))``: two failures, two issues."""
-        stylesheets = _log_tool_error(
+        ``scripts`` KeyError as ``ToolError(str(e))``. Accepted and deliberate: one
+        function, one issue; each event still shows its own key."""
+        stylesheets = _ship_tool_error(
             shipped_events,
-            KeyError("stylesheets"),
             ToolError(str(KeyError("stylesheets"))),
-            tool="extract_related_files",
+            cause=KeyError("stylesheets"),
         )
-        scripts = _log_tool_error(
+        scripts = _ship_tool_error(
             shipped_events,
-            KeyError("scripts"),
             ToolError(str(KeyError("scripts"))),
-            tool="extract_related_files",
+            cause=KeyError("scripts"),
         )
 
-        assert stylesheets["fingerprint"] == [
-            "tool-error",
-            "extract_related_files",
-            "ToolError",
-            "'stylesheets'",
-        ]
-        assert scripts["fingerprint"] != stylesheets["fingerprint"]
-
-    def test_the_same_tool_and_template_with_different_ids_is_one_issue(
-        self, shipped_events
-    ):
-        def failed(pid: int, instance: str, path: str) -> ToolError:
-            return ToolError(
-                f"Failed to spawn browser: pid {pid} for {instance} could not open "
-                f"{path} on port {pid + 1}"
-            )
-
-        first = _log_tool_error(
-            shipped_events,
-            RuntimeError("x"),
-            failed(
-                105244,
-                "dd340276-97f4-4bbf-bbbf-46b14a24fa0a",
-                "C:\\stealth-mcp-browser-sessions\\sessions\\a-1\\ActorSafetyLists",
-            ),
-            tool="spawn_browser",
-        )
-        second = _log_tool_error(
-            shipped_events,
-            RuntimeError("x"),
-            failed(
-                7,
-                "0a1b2c3d-1111-2222-3333-444455556666",
-                "/tmp/x/y/ActorSafetyLists",
-            ),
-            tool="spawn_browser",
-        )
-
-        assert first["fingerprint"] == second["fingerprint"]
-        assert first["fingerprint"] == [
-            "tool-error",
-            "spawn_browser",
-            "ToolError",
-            "Failed to spawn browser: pid <n> for <id> could not open <path> "
-            "on port <n>",
-        ]
+        assert stylesheets["fingerprint"] == scripts["fingerprint"]
+        assert "'stylesheets'" in stylesheets["exception"]["values"][-1]["value"]
+        assert "'scripts'" in scripts["exception"]["values"][-1]["value"]
 
     def test_the_same_message_from_two_tools_is_two_issues(self, shipped_events):
-        click = _log_tool_error(
-            shipped_events,
-            RuntimeError("x"),
-            ToolError("No node found"),
-            tool="click_element",
+        click = _ship_tool_error(
+            shipped_events, ToolError("No node found"), tool="click_element"
         )
-        select = _log_tool_error(
-            shipped_events,
-            RuntimeError("x"),
-            ToolError("No node found"),
-            tool="select_option",
+        select = _ship_tool_error(
+            shipped_events, ToolError("No node found"), tool="select_option"
         )
 
         assert click["fingerprint"] != select["fingerprint"]
-        assert click["fingerprint"][1:] == [
-            "click_element",
-            "ToolError",
-            "No node found",
-        ]
+        assert click["fingerprint"][1] == "click_element"
+        assert select["fingerprint"][1] == "select_option"
 
-    def test_an_event_that_names_no_tool_falls_back_to_type_and_template(
+    def test_an_error_raised_in_two_functions_is_two_issues(self, shipped_events):
+        in_click = _ship_tool_error(
+            shipped_events, ToolError("No node found"), site="click_element"
+        )
+        in_select = _ship_tool_error(
+            shipped_events, ToolError("No node found"), site="select_option"
+        )
+
+        assert in_click["fingerprint"][-1] == "fixture_pkg.dom_handler.click_element"
+        assert in_select["fingerprint"][-1] == "fixture_pkg.dom_handler.select_option"
+        assert in_click["fingerprint"] != in_select["fingerprint"]
+
+    def test_the_error_type_and_the_whole_chain_are_part_of_it(self, shipped_events):
+        plain = _ship_tool_error(
+            shipped_events, ToolError("Instance gone"), cause=KeyError("a")
+        )
+        subclass = _ship_tool_error(
+            shipped_events, InstanceNotFoundError("Instance gone"), cause=KeyError("a")
+        )
+        deeper = _ship_tool_error(
+            shipped_events,
+            ToolError("Instance gone"),
+            cause=_chained(ProtocolException({"message": "m"}), KeyError("a")),
+        )
+
+        assert plain["fingerprint"][2:4] == ["ToolError", "KeyError"]
+        assert subclass["fingerprint"][2] == "InstanceNotFoundError"
+        assert deeper["fingerprint"][3] == "ProtocolException>KeyError"
+
+    def test_the_innermost_frame_is_the_deepest_causes_raise_site(self, shipped_events):
+        """The ToolError is raised in ``click_element``; its cause was first raised
+        in ``raise_it``. The cause's own innermost frame is the one named."""
+        cause = _raised_by(_sites()["raise_it"], KeyError("k"))
+
+        event = _ship_tool_error(
+            shipped_events, ToolError("wrapped"), cause=cause, site="click_element"
+        )
+
+        assert event["fingerprint"][-1] == "fixture_pkg.dom_handler.raise_it"
+
+    def test_no_frame_of_the_cause_falls_back_to_the_tool_errors_raise_site(
         self, shipped_events
     ):
-        event = _log_tool_error(
-            shipped_events, RuntimeError("x"), ToolError("Gone after 5s"), tool=None
-        )
+        """The cause has only the test's own frames (not ours); the ToolError is
+        raised by ``raise_it`` while it is in flight."""
+        try:
+            try:
+                raise KeyError("k")  # noqa: TRY301  PERMANENT(the in-flight cause IS the fixture)
+            except KeyError:
+                _sites()["raise_it"](ToolError("wrapped"))
+        except ToolError:
+            _log("click_element")
+        sentry_sdk.get_client().flush()
 
-        assert event["fingerprint"] == ["tool-error", "ToolError", "Gone after <n>s"]
+        assert shipped_events[-1]["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "KeyError",
+            "fixture_pkg.dom_handler.raise_it",
+        ]
 
-    def test_a_different_message_is_a_different_issue(self, shipped_events):
-        gone = _log_tool_error(shipped_events, NO_NODE, _click_gone("#b"))
-        dom = _log_tool_error(
-            shipped_events,
-            ProtocolException({"code": -32000, "message": "DOM Error while querying"}),
-            ToolError(
-                "Failed to click element: DOM Error while querying [code: -32000]"
-            ),
-        )
+    def test_no_traceback_at_all_falls_back_to_the_tool_and_the_types(
+        self, shipped_events
+    ):
+        event = _ship_tool_error(shipped_events, ToolError("never raised"), site=None)
 
-        assert gone["fingerprint"] != dom["fingerprint"]
+        assert event["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "RuntimeError",
+        ]
 
-    def test_the_error_type_is_part_of_the_fingerprint(self, shipped_events):
-        plain = _log_tool_error(
-            shipped_events, RuntimeError("x"), ToolError("Instance gone")
-        )
-        subclass = _log_tool_error(
-            shipped_events, RuntimeError("x"), InstanceNotFoundError("Instance gone")
-        )
+    def test_a_traceback_with_no_frame_of_ours_falls_back_the_same_way(
+        self, shipped_events
+    ):
+        try:
+            try:
+                raise KeyError("k")  # noqa: TRY301  PERMANENT(the in-flight cause IS the fixture)
+            except KeyError:
+                raise ToolError("raised outside the package")  # noqa: B904  PERMANENT(an implicit __context__ is the shape under test)
+        except ToolError:
+            _log("click_element")
+        sentry_sdk.get_client().flush()
 
-        assert plain["fingerprint"][2] == "ToolError"
-        assert subclass["fingerprint"][2] == "InstanceNotFoundError"
+        assert shipped_events[-1]["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "KeyError",
+        ]
+
+    def test_an_event_that_names_no_tool_says_so(self, shipped_events):
+        event = _ship_tool_error(shipped_events, ToolError("x"), tool=None)
+
+        assert event["fingerprint"][:3] == ["tool-error", "-", "ToolError"]
 
 
-#: (the secret as it appears in a message, every fragment that must NOT travel).
-SECRETS = {
+def _chained(outer: BaseException, inner: BaseException) -> BaseException:
+    """*outer* raised while *inner* is in flight: ``outer.__context__ is inner``."""
+    try:
+        try:
+            raise inner  # noqa: TRY301  PERMANENT(the in-flight cause IS the fixture)
+        except BaseException:
+            raise outer  # noqa: B904  PERMANENT(an implicit __context__ is the shape under test)
+    except BaseException as caught:  # noqa: BLE001  PERMANENT(handing the chain back)
+        return caught
+
+
+def _raised_by(function, error: BaseException) -> BaseException:
+    """*error* after ``function(error)`` raised it, with the traceback that gives."""
+    try:
+        function(error)
+    except BaseException as caught:  # noqa: BLE001  PERMANENT(handing the raised error back)
+        return caught
+    raise AssertionError("did not raise")
+
+
+#: (what the CALLER or the machine put in a message, every fragment that must NOT
+#: travel in the fingerprint). None of it is shaped like a credential, which is
+#: the point: no redaction rule could catch it, so none of it may be read.
+LEAKS = {
+    "text the caller typed": (
+        "Failed to click element: find 'my password is swordfish'",
+        ("swordfish", "password", "find"),
+    ),
     "email with digits": (
         "Failed to type text: alice123@example.com was refused",
         ("alice123", "alice", "example.com"),
@@ -389,47 +489,68 @@ SECRETS = {
     "jwt with digits": (
         "Session rejected: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
         "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
-        (
-            "eyJhbGciOiJIUzI1NiJ9",
-            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
-            "dBjftJeZ4CVPmB92K27uhbUJU1p1r",
-            "1234567890",
-        ),
+        ("eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "dBjftJeZ4CVPm"),
     ),
     "url with a token query": (
-        "Navigation to https://api.example.com/v1/items?token=s3cr3tT0ken99&page=2 "
-        "failed",
-        ("s3cr3tT0ken99", "s3cr3t", "token=", "page=2"),
+        "Navigation to https://api.example.com/v1/items?token=s3cr3tT0ken99 failed",
+        ("s3cr3tT0ken99", "s3cr3t", "token=", "api.example.com"),
     ),
     "windows user path": (
         "Failed to read C:\\Users\\alice123\\AppData\\Local\\Temp\\x.log",
-        ("alice123", "alice"),
+        ("alice123", "alice", "AppData"),
     ),
     "posix user path": (
         "Failed to read /home/alice123/.stealth-mcp/logs/x.log",
-        ("alice123", "alice"),
+        ("alice123", "alice", "stealth-mcp"),
     ),
 }
 
 
-class TestTheFingerprintCarriesNoSecret:
-    """The message is redacted BEFORE it is templated: templating first turns
-    ``alice123@example.com`` into ``alice<n>@example.com`` (no longer an address)
-    and ``Bearer abc123SecretSuffix`` into ``Bearer abc<n>SecretSuffix`` (whose
-    redaction then removes only ``abc``)."""
+class TestTheFingerprintIsBuiltFromNoMessage:
+    """A ``ToolError`` can carry what the caller typed or what the machine holds,
+    and no redaction rule can tell either from prose. The fingerprint reads no
+    message at all."""
 
-    @pytest.mark.parametrize("case", sorted(SECRETS))
-    def test_no_fragment_of_the_secret_is_transmitted(self, shipped_events, case):
-        message, fragments = SECRETS[case]
+    @pytest.mark.parametrize("case", sorted(LEAKS))
+    def test_no_fragment_of_the_message_is_transmitted(self, shipped_events, case):
+        message, fragments = LEAKS[case]
 
-        event = _log_tool_error(shipped_events, RuntimeError("x"), ToolError(message))
+        event = _ship_tool_error(
+            shipped_events, ToolError(message), cause=KeyError("k")
+        )
 
         sent = " ".join(event["fingerprint"])
-        assert sent.startswith("tool-error click_element ToolError ")
+        assert event["fingerprint"][:4] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "KeyError",
+        ]
         for fragment in fragments:
             assert fragment not in sent, (case, fragment, event["fingerprint"])
-        # the event itself is held to the same rule, as before this change
-        assert fragments[0] not in repr(event["exception"])
+
+    def test_paths_with_spaces_under_two_install_dirs_are_one_issue(
+        self, shipped_events
+    ):
+        """cdp_element_cloner.py:715-758 names the extract script by path."""
+        first = _ship_tool_error(
+            shipped_events,
+            ToolError(
+                "Failed to extract assets: 'C:\\Deploy Alpha\\pkg\\js\\extract_assets.js'"
+            ),
+            cause=FileNotFoundError("x"),
+        )
+        second = _ship_tool_error(
+            shipped_events,
+            ToolError(
+                "Failed to extract assets: "
+                "'D:\\Program Files\\Beta Install\\pkg\\js\\extract_assets.js'"
+            ),
+            cause=FileNotFoundError("x"),
+        )
+
+        assert first["fingerprint"] == second["fingerprint"]
+        assert "Deploy" not in " ".join(first["fingerprint"])
 
     def test_a_declared_fingerprint_is_scrubbed_too(self, shipped_events):
         event = _log_hung(
@@ -440,6 +561,72 @@ class TestTheFingerprintCarriesNoSecret:
 
         sent = " ".join(event["fingerprint"])
         assert "alice123" not in sent and "bob" not in sent
+
+
+_HEALTH = pathlib.Path(browser_health.__file__)
+_CLONE_PROBE = pathlib.Path(clone_probe.__file__)
+
+#: The only expressions a fingerprint cause may interpolate: ``failure`` is
+#: ``_describe``'s ``"<ExceptionType> at <step>"`` and the other is a class name.
+_PROGRAM_CONTROLLED = {"failure", "type(error).__name__"}
+
+
+def _forensic_calls(path: pathlib.Path) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"HungBrowserError", "FrozenCloneError"}
+    ]
+
+
+class TestEveryCauseIsProgramControlled:
+    """A ``ForensicError`` cause is the fingerprint: it must hold step names and
+    exception type names only, never a path, an id or a caller's value."""
+
+    def test_the_call_sites_are_found(self):
+        assert len(_forensic_calls(_HEALTH)) == 6
+        assert len(_forensic_calls(_CLONE_PROBE)) == 1
+
+    @pytest.mark.parametrize("path", [_HEALTH, _CLONE_PROBE], ids=lambda p: p.name)
+    def test_each_cause_is_a_constant_or_a_program_controlled_value(self, path):
+        for call in _forensic_calls(path):
+            for cause in call.args[1:]:
+                if isinstance(cause, ast.Constant):
+                    assert isinstance(cause.value, str)
+                    continue
+                assert isinstance(cause, ast.JoinedStr), ast.unparse(cause)
+                for part in cause.values:
+                    if isinstance(part, ast.FormattedValue):
+                        assert ast.unparse(part.value) in _PROGRAM_CONTROLLED, (
+                            path.name,
+                            call.lineno,
+                            ast.unparse(cause),
+                        )
+
+    def test_the_failure_text_is_a_type_name_and_a_step_name(self):
+        described = browser_health._describe(
+            OSError("C:\\Users\\alice123\\secret.log"), ["createTarget", "evaluate"]
+        )
+
+        assert described == "OSError at evaluate"
+        assert browser_health._describe(KeyError("k"), []) == "KeyError at connect"
+
+    def test_every_step_the_probe_can_name_is_a_literal(self):
+        tree = ast.parse(_HEALTH.read_text(encoding="utf-8"))
+        steps = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "steps.append"
+        ]
+
+        assert steps
+        assert all(
+            isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+            for call in steps
+        )
 
 
 class TestEverythingElseIsUnchanged:
@@ -477,30 +664,3 @@ class TestEverythingElseIsUnchanged:
             **event,
             "fingerprint": ["hung-browser", "probe-heal", "TimeoutError at connect"],
         }
-
-
-class TestTemplate:
-    @pytest.mark.parametrize(
-        ("text", "template"),
-        [
-            ("'#b' left the page", "'#b' left the page"),
-            ("missing 'stylesheets'", "missing 'stylesheets'"),
-            (
-                "'NoneType' has no attribute 'send'",
-                "'NoneType' has no attribute 'send'",
-            ),
-            ("after 35s at port 9222", "after <n>s at port <n>"),
-            ("see https://a.example/p?q=1 now", "see <url> now"),
-            ("opened 'https://a.example/x' ok", "opened '<url>' ok"),
-            ("log C:\\a\\b\\c.log gone", "log <path> gone"),
-            ("log '/tmp/x/y.log' gone", "log '<path>' gone"),
-            (
-                "id 7e75ad01-5c3b-4a95-b86a-3c9530336361 and 3f9a1c2b7d8e4a51",
-                "id <id> and <id>",
-            ),
-            ("Chrome/Chromium and/or Edge", "Chrome/Chromium and/or Edge"),
-            ("no values here", "no values here"),
-        ],
-    )
-    def test_only_per_occurrence_values_are_replaced(self, text, template):
-        assert observability._message_template(text) == template
