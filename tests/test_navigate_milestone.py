@@ -633,6 +633,23 @@ async def test_the_failed_attempt_warning_carries_the_reason_not_an_empty_colon(
     assert "accepted, committed, superseded by 1 later document(s)" in lines[0]
 
 
+async def test_a_page_that_parses_but_never_loads_names_how_far_it_got(
+    monkeypatch, manager
+):
+    """T-9955: a Windows publish gate timed out with only ``accepted, committed``,
+    which cannot tell a page that never parsed from one that parsed and never
+    fired ``load``. The message now names the last lifecycle event of the
+    document on the tab. RED before T-9955: the reason ends at ``committed``."""
+    tab = FakeTab(lifecycle="after", last_milestone="DOMContentLoaded")
+    _with_tab(monkeypatch, tab)
+
+    with pytest.raises(
+        ToolError,
+        match=r"accepted, committed, last lifecycle event: DOMContentLoaded",
+    ):
+        await manager.navigate(instance_id="iid-1", url=URL, timeout=200)
+
+
 async def test_a_download_is_named_after_the_grace_never_after_the_whole_budget(
     monkeypatch, manager
 ):

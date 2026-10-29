@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### A navigation timeout names the last lifecycle event the page reached (T-9955)
+
+- A navigation that Chrome accepted and committed but that never reached its milestone failed with only `(accepted, committed)`. That cannot tell a page that never parsed from one that parsed and never fired `load`. The 2.1.50 publish gate's Windows runner hit this once on an inline fixture page (run 40736857506 attempt 1); the node passed 52 of 53 runs over four publish runs and 12 CI runs, and the runner was slow throughout that job.
+- `navigation_milestone.Progress` now records `last_event`, the last lifecycle event of the document on the tab, and `describe()` adds it: `accepted, committed, last lifecycle event: DOMContentLoaded`. Nothing else in the navigation changes.
+
 ### The background-tab throttle test gives a released hold a bounded time to fall back (T-10026)
 
 - Test-only. `test_an_undriven_background_tab_stays_throttled_until_a_tool_acts` read a tab once, one second after its hold's linger ended, and required it throttled. For a few seconds after a hold is released Chrome keeps painting background tabs: on Windows the untouched tab read 56 and 57 frames per 2 s when read first at that point (headless and headed), and the 2.1.50 publish gate's macOS runner read the driven tab at 45 (`assert 45 <= 15`, run 40736857506 attempt 2; the same commit skipped the node in attempt 1).
