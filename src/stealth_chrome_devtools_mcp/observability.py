@@ -870,7 +870,9 @@ def capture_lifecycle(
     return True
 
 
-def sentry_init(*, auto_enabling_integrations: bool = True) -> bool:
+def sentry_init(
+    *, auto_enabling_integrations: bool = True, warm_fingerprints: bool = False
+) -> bool:
     """Initialize Sentry error shipping unless the operator opted out.
 
     ``auto_enabling_integrations=False`` is the stdio proxy's (F-949): the SDK's
@@ -878,6 +880,11 @@ def sentry_init(*, auto_enabling_integrations: bool = True) -> bool:
     the proxy runs this on a thread while its main thread imports the same
     packages. It serves no MCP server, so it opts out; the backend and the ops
     CLI keep the default.
+
+    ``warm_fingerprints=True`` is the backend's: it starts building the fingerprint
+    maps on a daemon thread (:func:`tool_error_fingerprint.warm`), so the first
+    ``ToolError`` event does not pay for compiling the package; the proxy and the
+    ops CLI never send one and leave it off.
 
     Returns ``True`` when Sentry was initialized, ``False`` when it was a no-op
     — either ``STEALTH_MCP_NO_ERROR_REPORTING`` is set, or ``sentry_sdk`` could
@@ -925,4 +932,6 @@ def sentry_init(*, auto_enabling_integrations: bool = True) -> bool:
         include_local_variables=False,
         auto_enabling_integrations=auto_enabling_integrations,
     )
+    if warm_fingerprints:
+        tool_error_fingerprint.warm()
     return True

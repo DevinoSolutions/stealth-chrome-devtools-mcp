@@ -27,9 +27,11 @@ text the caller's code can write by accident or intent. Two identity maps decide
   ``module.qualname`` is made of OUR file's path and ``co_qualname``, so two
   functions that share a ``co_name`` (``resolve_element.<locals>._do`` and
   ``resolve_by_text.<locals>._do``) stay two.
-* the CLASS map: a class is named when it IS (identity) a builtin exception, or an
-  exception class found in the namespace of one of our modules; anything else, a
-  caller's subclass of ``ToolError`` included, reads ``<external>``.
+* the CLASS map: a class is named when it IS (identity) a builtin exception, an
+  exception class found in the namespace of one of our modules, or one of the
+  third-party exceptions our code handles by name (``_THIRD_PARTY``, the one list,
+  each resolved to the real class object); anything else, a caller's subclass of
+  ``ToolError`` or of ``ProtocolException`` included, reads ``<external>``.
 
 A declared ``sentry_fingerprint`` (``forensic_errors``) is read only off an instance
 of one of OUR ``ForensicError`` classes, and only when it is made of a closed
@@ -80,6 +82,30 @@ _classes: dict[int, tuple[type, str]] = {
     for value in vars(builtins).values()
     if isinstance(value, type) and issubclass(value, BaseException)
 }
+#: The third-party exceptions our own code catches or tests by name (found by reading
+#: every ``except`` / ``isinstance`` / ``raise`` of the package for a class that is
+#: neither builtin nor ours), as ``(module, attribute)``. A probe fails with nodriver's
+#: ``ProtocolException`` or a websockets ``ConnectionClosed`` far more often than with
+#: anything else, and as ``<external>`` they would all be one issue. Each is resolved
+#: to the class object the library holds once that library is loaded, and named by
+#: that class's own ``__qualname__``: a subclass, or a class that merely carries the
+#: name, is not in the map. Add a class here when the package starts to handle one.
+_THIRD_PARTY = (
+    ("nodriver.core.connection", "ProtocolException"),
+    ("websockets.exceptions", "ConnectionClosed"),
+    ("websockets.exceptions", "ConnectionClosedError"),
+    ("websockets.exceptions", "ConnectionClosedOK"),
+    ("websockets.exceptions", "InvalidMessage"),
+    ("psutil", "Error"),
+    ("psutil", "AccessDenied"),
+    ("psutil", "NoSuchProcess"),
+    ("psutil", "TimeoutExpired"),
+    ("psutil", "ZombieProcess"),
+    ("httpx", "HTTPStatusError"),
+    ("pydantic", "ValidationError"),
+    ("requests.exceptions", "RequestException"),
+)
+_third_party_pending = list(_THIRD_PARTY)
 #: The dotted name of every module the package's files make up, and which of them
 #: have had their classes read. Names come from the files on disk, never from
 #: ``sys.modules``, so a module a caller registers under another name is no module.
@@ -89,7 +115,11 @@ _classes_read: set[str] = set()
 #: two names (then neither is claimed).
 _code_labels: dict[CodeType, str | None] = {}
 _built = False
+#: One lock for the maps: whoever needs them first builds them, and a second caller
+#: waits for that build instead of making another.
 _lock = threading.Lock()
+_warm_lock = threading.Lock()
+_warmer: threading.Thread | None = None
 
 
 def _code_objects(code: CodeType) -> Iterator[CodeType]:
@@ -136,6 +166,34 @@ def _refresh() -> None:
                     and value.__module__ == name  # defined here, not imported here
                 ):
                     _classes.setdefault(id(value), (value, value.__name__))
+        for spec in tuple(_third_party_pending):  # a library not loaded yet waits
+            kind = getattr(sys.modules.get(spec[0]), spec[1], None)
+            if isinstance(kind, type) and issubclass(kind, BaseException):
+                _classes.setdefault(id(kind), (kind, kind.__qualname__))
+                _third_party_pending.remove(spec)
+
+
+def warm() -> threading.Thread | None:
+    """Build the maps on a daemon thread, once, so no event pays for the first build
+    (compiling the package's files takes about 0.4 s). Returns the thread, or
+    ``None`` when a warm-up was already started. The first use stays the fallback:
+    it and the warm-up share :func:`_refresh`'s lock, so there is one build."""
+    global _warmer  # noqa: PLW0603  PERMANENT(one warm-up per process)
+    with _warm_lock:
+        if _warmer is not None:
+            return None
+        _warmer = threading.Thread(
+            target=_warm_up, name="fingerprint-warm-up", daemon=True
+        )
+        _warmer.start()
+        return _warmer
+
+
+def _warm_up() -> None:
+    try:
+        _refresh()
+    except Exception:  # noqa: BLE001  PERMANENT(a warm-up that fails leaves the first use to build)
+        return
 
 
 def type_name(kind: type) -> str:
