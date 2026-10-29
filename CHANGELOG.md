@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.53
 
 ### An editable checkout reports its errors as environment=development, not production (T-10363)
 
