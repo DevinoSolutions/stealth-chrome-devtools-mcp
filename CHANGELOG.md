@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### A text click whose DOM search session was dropped re-resolves instead of failing (T-10034)
+
+- `click_element` by text runs nodriver's `find_element_by_text`, which is `DOM.performSearch` then `DOM.getSearchResults`. A document reset between the two drops the search session, and Chrome answers `No search session with given id found`. That text was not one of `element_resolution._STALE_NODE_MARKERS`, so the bounded re-resolve the node-id form already gets never ran and the click failed (Sentry STEALTH-CHROME-DEVTOOLS-MCP-EQ, 2.1.47). It is a marker now.
 ### A navigation timeout names the last lifecycle event the page reached (T-9955)
 
 - A navigation that Chrome accepted and committed but that never reached its milestone failed with only `(accepted, committed)`. That cannot tell a page that never parsed from one that parsed and never fired `load`. The 2.1.50 publish gate's Windows runner hit this once on an inline fixture page (run 40736857506 attempt 1); the node passed 52 of 53 runs over four publish runs and 12 CI runs, and the runner was slow throughout that job.

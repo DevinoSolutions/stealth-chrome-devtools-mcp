@@ -176,6 +176,11 @@ _STALE_NODE_MARKERS = (
     # is the same correct handling; a query that fails for a permanent reason
     # simply fails again and surfaces unchanged after the bounded retries.
     "DOM Error while querying",
+    # The TEXT path's form of the same race (T-10034, STEALTH-…-EQ): nodriver's
+    # ``find_element_by_text`` is ``DOM.performSearch`` then
+    # ``DOM.getSearchResults``, and a document reset between the two drops the
+    # search session the second one names.
+    "No search session with given id found",
 )
 
 # Package of the CDP event classes nodriver keys its handler table by. A KeyError
