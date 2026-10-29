@@ -156,20 +156,23 @@ class TestDomHandlerSilentExcepts:
         # F-876: the aim is read once, BEFORE the click. The fallback chain this
         # test pins is unchanged; what it now also proves is that the fallback is
         # LABELLED rather than reported as an ordinary click.
+        aim = json.dumps(
+            {
+                "rendered": True,
+                "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
+                "point": {"x": 5, "y": 5},
+                "target": {"tag": "button", "id": "btn", "classes": []},
+                "hit": {"tag": "button", "id": "btn", "classes": []},
+                "hit_is_target": True,
+                "disabled": False,
+                "pointer_events": "auto",
+                "visibility": "visible",
+            }
+        )
+        # T-10034: the synthetic click is ONE in-page call through ``apply``
+        # (``click_target.SYNTHETIC_JS``), answering ``true`` when it clicked.
         element.apply = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "rendered": True,
-                    "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
-                    "point": {"x": 5, "y": 5},
-                    "target": {"tag": "button", "id": "btn", "classes": []},
-                    "hit": {"tag": "button", "id": "btn", "classes": []},
-                    "hit_is_target": True,
-                    "disabled": False,
-                    "pointer_events": "auto",
-                    "visibility": "visible",
-                }
-            )
+            side_effect=lambda js, *a, **k: True if "elem.click()" in js else aim
         )
         tab = _single_shot_tab()
         tab.query_selector = AsyncMock(return_value=element)
@@ -181,7 +184,11 @@ class TestDomHandlerSilentExcepts:
         result = await DOMHandler.click_element(tab, "#btn")
 
         assert result["dispatch"] == "synthetic"
-        element.click.assert_awaited_once()
+        synthetic = [
+            c for c in element.apply.await_args_list if "elem.click()" in c.args[0]
+        ]
+        assert len(synthetic) == 1
+        element.click.assert_not_awaited()
         assert len(captured_backend_records) == 1
         record = captured_backend_records[0]
         assert record.levelno == logging.DEBUG

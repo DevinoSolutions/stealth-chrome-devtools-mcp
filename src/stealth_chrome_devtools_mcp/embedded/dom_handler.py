@@ -360,10 +360,11 @@ class DOMHandler:
         synthetic click itself — becomes a ``ToolError``, which is never re-run.
         A departure with nothing sent propagates raw, for the caller to re-run.
 
-        The element is asked again whether it is still in its document right
-        before the synthetic click: a node removed AFTER the aim fails its quad
-        read with the same error a ``display:none`` one does, and
-        ``el.click()`` on it succeeds where nothing in the page can hear it.
+        A node removed AFTER the aim fails its quad read with the same error a
+        ``display:none`` one does, so the synthetic click asks the page itself,
+        in the same page-side call, whether the node is still in its document
+        (``click_target.synthetic_click``). Its ``False`` is a departure before
+        any input and is raised as ``ElementDisconnected`` for the re-run.
         """
         ledger = click_target.InputSent()
         try:
@@ -380,15 +381,20 @@ class DOMHandler:
             if detached_element(e) is not None:
                 raise
             debug_logger.log_debug("dom_handler", "click_element", str(e))
-            await DOMHandler._aim(element, selector)
             try:
-                await element.click()
+                clicked = await click_target.synthetic_click(element, selector, ledger)
+            except ToolError:
+                raise
             except Exception as synthetic:
                 raise ToolError(
                     f"the synthetic click on '{selector}' failed "
                     f"({type(synthetic).__name__}); it may have reached the page, "
                     "so it was not repeated"
                 ) from synthetic
+            if not clicked:
+                raise ElementDisconnected(
+                    f"'{selector}' left its document before the synthetic click"
+                )
             return click_target.SYNTHETIC
         return click_target.COORDINATE
 

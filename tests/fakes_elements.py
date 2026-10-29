@@ -197,6 +197,17 @@ class FakeClickTarget:
     with Chrome's quad error (the same one a ``display:none`` node gets),
     ``el.click()`` runs and nothing in the page hears it, and no input at any
     point lands inside it.
+
+    ``removed_before_click`` is the page removing the node in the window right
+    before a synthetic click EXECUTES, after every read the product made
+    (Codex review HIGH on T-10034). nodriver's ``Element.click`` then runs its
+    unguarded ``el.click()`` on the removed node (``click`` is recorded and no
+    listener hears it); the product's one synthetic sender,
+    ``click_target.SYNTHETIC_JS``, checks ``isConnected`` in the same page-side
+    task and answers ``false``, exactly what the real function returns.
+    ``synthetic_error`` is that call's transport failing before any answer.
+    ``calls`` records ``"synthetic"`` for every synthetic ATTEMPT, by either
+    sender, and ``"click"`` only for one that ran.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -224,9 +235,13 @@ class FakeClickTarget:
         detached: bool = False,
         detach_on: str | None = None,
         disconnected: bool = False,
+        removed_before_click: bool = False,
+        synthetic_error: BaseException | None = None,
     ) -> None:
         self.detached = detached
         self.disconnected = disconnected
+        self.removed_before_click = removed_before_click
+        self.synthetic_error = synthetic_error
         self.detach_on = detach_on
         self.viewport = viewport
         self.input_scale = input_scale
@@ -408,9 +423,26 @@ class FakeClickTarget:
             )
 
     async def click(self) -> None:
+        """nodriver's ``Element.click``: resolve, flash, then an UNGUARDED
+        ``el.click()`` -- the product no longer calls it (T-10034)."""
+        self.calls.append("synthetic")
+        if self.removed_before_click:
+            self.disconnected = True
         if self.detached:
             raise left_the_document()
         self.calls.append("click")
+
+    def _synthetic(self) -> bool:
+        """``click_target.SYNTHETIC_JS`` as the page runs it, in one task."""
+        self.calls.append("synthetic")
+        if self.synthetic_error is not None:
+            raise self.synthetic_error
+        if self.removed_before_click:
+            self.disconnected = True
+        if self.disconnected:
+            return False
+        self.calls.append("click")
+        return True
 
     async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
         self.apply_calls.append(js_function)
@@ -421,6 +453,8 @@ class FakeClickTarget:
             if self._aim_answer is not _UNSET:
                 return self._aim_answer
             return self._aim()
+        if "elem.click()" in js_function:
+            return self._synthetic()
         if PROBE_KEY in js_function and "addEventListener" in js_function:
             self.armed = _probe_kinds(js_function)
             self.observed = []
