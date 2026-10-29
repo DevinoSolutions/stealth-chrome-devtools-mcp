@@ -14,6 +14,7 @@ from typing import Any
 
 import nodriver.cdp.dom as cdp_dom
 import nodriver.cdp.target as cdp_target
+from nodriver.core.connection import ProtocolException
 
 from fakes_consts import _UNSET
 
@@ -180,6 +181,13 @@ class FakeClickTarget:
     ``text`` exists only so a pin can assert it never reaches the record: an
     overlay is frequently a consent banner or a modal and its words are the
     page's, not the tool's to echo.
+
+    ``detached`` is the element having LEFT the document (T-10034): every call
+    that addresses it starts with ``DOM.resolveNode``, and Chrome answers that
+    with the error :func:`left_the_document` builds, so ``apply`` and ``click``
+    raise it. ``detach_on`` names the dispatch kind whose DELIVERY removes it —
+    a page that re-renders on hover or on mousedown — so a pin states when the
+    page acted and the error follows from it, never a raise supplied by hand.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -204,7 +212,11 @@ class FakeClickTarget:
         hit_disabled: bool = False,
         fail_on: dict[str, tuple[BaseException, bool]] | None = None,
         read_error: BaseException | None = None,
+        detached: bool = False,
+        detach_on: str | None = None,
     ) -> None:
+        self.detached = detached
+        self.detach_on = detach_on
         self.viewport = viewport
         self.input_scale = input_scale
         self.frame_offset = frame_offset
@@ -351,6 +363,8 @@ class FakeClickTarget:
             self.held = True
         if kind == "mouseReleased":
             self.held = False
+        if kind == self.detach_on:
+            self.detached = True
         wanted = {"mouseMoved": "mousemove", "mousePressed": "mousedown"}.get(kind)
         if wanted == "mousedown" and self.swallows_press:
             return
@@ -368,10 +382,14 @@ class FakeClickTarget:
             )
 
     async def click(self) -> None:
+        if self.detached:
+            raise left_the_document()
         self.calls.append("click")
 
     async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
         self.apply_calls.append(js_function)
+        if self.detached:
+            raise left_the_document()
         if "elementFromPoint" in js_function:
             self.calls.append("aim")
             if self._aim_answer is not _UNSET:
@@ -394,6 +412,19 @@ class FakeClickTarget:
 
 
 PROBE_KEY = "stealth.click.probe"
+
+
+def left_the_document(
+    message: str = "No node with given id found",
+) -> ProtocolException:
+    """Chrome's answer to ``DOM.resolveNode`` for an element no longer in the page.
+
+    The default is STEALTH-…-ER's wording (the node was removed); the other one
+    Chrome uses, "Node with given id does not belong to the document", is
+    STEALTH-…-EP's (detached but still referenced). Built from nodriver's own
+    exception constructor, the way a real reply reaches the product.
+    """
+    return ProtocolException({"message": message, "code": -32000})
 
 
 def _probe_kinds(js_function: str) -> list[str]:

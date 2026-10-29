@@ -183,6 +183,20 @@ _STALE_NODE_MARKERS = (
     "No search session with given id found",
 )
 
+# Chrome's two answers when an element the caller already HOLDS is no longer in
+# the document (T-10034, STEALTH-…-ER and -EP). nodriver addresses a held
+# ``Element`` by its backend node id through ``DOM.resolveNode`` (``apply``,
+# ``click``, ``get_position``, ``update`` all start there): a node the page
+# removed answers the first, a node the page detached but still references
+# answers the second. Deliberately NOT in ``_STALE_NODE_MARKERS``: those say a
+# RESOLUTION raced and re-running it is always right, these say the element a
+# caller is holding is gone, and whether re-running the caller's work is safe is
+# the caller's question (a click that may have been dispatched must not be).
+_DETACHED_ELEMENT_MARKERS = (
+    "No node with given id found",
+    "Node with given id does not belong to the document",
+)
+
 # Package of the CDP event classes nodriver keys its handler table by. A KeyError
 # carrying one of these classes is nodriver's own bookkeeping race, never a
 # lookup miss in our code or a caller's.
@@ -316,6 +330,20 @@ def recoverable_race(exc: BaseException) -> str | None:
     return None
 
 
+def detached_element(exc: BaseException | None) -> str | None:
+    """Describe ``exc`` if it says a HELD element has left the document, else ``None``.
+
+    THE one place that question is answered (T-10034). Matched on Chrome's
+    message text for the reason :data:`_STALE_NODE_MARKERS` is. ``None`` for
+    every other exception, including the resolution races above.
+    """
+    if isinstance(exc, ProtocolException) and any(
+        marker in str(exc) for marker in _DETACHED_ELEMENT_MARKERS
+    ):
+        return "element left the document"
+    return None
+
+
 async def _resolve_with_recovery(
     tab: Tab, what: str, resolve: Callable[[], Awaitable[_T]]
 ) -> _T:
@@ -326,16 +354,54 @@ async def _resolve_with_recovery(
     waiting is :func:`_wait_for`'s and happens outside the lock (F-884).
 
     The lock is taken per ATTEMPT rather than around the whole loop, so the
-    settle sleep below never holds it — a tab whose document is churning must
-    still let a sibling in between two of its own tries.
+    settle sleep in :func:`_recover` never holds it — a tab whose document is
+    churning must still let a sibling in between two of its own tries.
+    """
+
+    async def locked() -> _T:
+        async with _document_lock(tab):
+            return await resolve()
+
+    return await _recover(what, locked, recoverable_race)
+
+
+async def retry_detached(what: str, attempt: Callable[[], Awaitable[_T]]) -> _T:
+    """Run ``attempt``, re-running it while the element it holds has left the page.
+
+    For work that RESOLVES an element and then reads it, where the element can
+    be removed or replaced between the two (T-10034, STEALTH-…-ER):
+    ``attempt`` must resolve afresh on every call, so a re-run aims at the
+    element the page holds NOW. Same bound, same settle and same warning as the
+    resolution races, because it is the same loop (:func:`_recover`); only the
+    question asked of the failure differs (:func:`detached_element`). On the
+    last attempt the detached error itself is raised, for the caller to word.
+
+    No document lock here: ``attempt`` resolves through this module, which
+    takes it per query, and the lock is not re-entrant.
+
+    ``attempt`` must not DISPATCH anything a page acts on. Re-running a read is
+    always safe; re-running an input that may have been delivered acts twice.
+    """
+    return await _recover(what, attempt, detached_element)
+
+
+async def _recover(
+    what: str,
+    run: Callable[[], Awaitable[_T]],
+    classify: Callable[[BaseException], str | None],
+) -> _T:
+    """THE one bounded re-run loop: ``run`` again while ``classify`` names the failure.
+
+    At most :data:`_MAX_RESOLVES` attempts, a growing :data:`_SETTLE_SECONDS`
+    pause between them, a warning per re-run. Anything ``classify`` does not
+    name propagates unchanged on the spot.
     """
     attempt = 0
     while True:
         try:
-            async with _document_lock(tab):
-                return await resolve()
+            return await run()
         except (ProtocolException, KeyError) as exc:
-            race = recoverable_race(exc)
+            race = classify(exc)
             if race is None:
                 raise
             attempt += 1
@@ -350,7 +416,7 @@ async def _resolve_with_recovery(
                 raise
             debug_logger.log_warning(
                 "element_resolution",
-                "_resolve_with_recovery",
+                "_recover",
                 f"{race} ({what}); re-resolving on a fresh document "
                 f"(attempt {attempt}/{_MAX_RESOLVES})",
                 context={"what": what, "attempt": attempt},
@@ -473,8 +539,16 @@ async def _xpath_node_ids(tab: Tab, expression: str) -> list[NodeId]:
             await tab.send(cdp.dom.discard_search_results(search_id))
 
 
-async def refresh_element(tab: Tab, element: Element | None) -> None:
+async def refresh_element(tab: Tab, element: Element | None) -> bool:
     """``Element.update()`` under ``tab``'s document lock (F-884).
+
+    Answers whether the element is still in the document: ``False`` ONLY when
+    Chrome says it has left (:func:`detached_element`, T-10034 STEALTH-…-EP),
+    ``True`` otherwise. The page removing or replacing an element between its
+    resolution and this read is a page race, not a failure of the read, so it
+    is an answer and not a raise; what to do with an element that is gone is
+    the caller's decision (``query_elements`` drops it, ``get_element_state``
+    refuses). Every other error still propagates.
 
     ``update`` reads as "re-read this element" and is nothing of the kind: it
     sends ``DOM.getDocument`` and re-resolves the node against the answer, so
@@ -492,12 +566,19 @@ async def refresh_element(tab: Tab, element: Element | None) -> None:
 
     Tolerates an ``element`` that has no ``update`` (a rediscovered target
     yields a raw ``Connection``-backed node, F-771) and a ``None``, so the two
-    call sites are one line each rather than one line and a guard.
+    call sites are one line each rather than one line and a guard; there is
+    nothing to refresh, so nothing has left, and the answer is ``True``.
     """
     if element is None or not hasattr(element, "update"):
-        return
+        return True
     async with _document_lock(tab):
-        await element.update()
+        try:
+            await element.update()
+        except ProtocolException as exc:
+            if detached_element(exc) is None:
+                raise
+            return False
+    return True
 
 
 async def resolve_element(

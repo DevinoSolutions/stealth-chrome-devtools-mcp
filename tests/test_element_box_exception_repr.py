@@ -341,7 +341,7 @@ class TestNoPageContentInTheException:
             return element
 
         async def _refresh(_tab, _element):
-            return None
+            return True
 
         monkeypatch.setattr(dom_handler_mod, "resolve_element", _resolve)
         monkeypatch.setattr(dom_handler_mod, "refresh_element", _refresh)
@@ -462,7 +462,7 @@ class TestNoPageContentInTheException:
             return element
 
         async def _refresh(_tab, _element):
-            return None
+            return True
 
         monkeypatch.setattr(dom_handler_mod, "resolve_element", _resolve)
         monkeypatch.setattr(dom_handler_mod, "refresh_element", _refresh)
