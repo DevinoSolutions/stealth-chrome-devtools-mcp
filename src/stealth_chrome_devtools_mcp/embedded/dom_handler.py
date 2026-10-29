@@ -16,10 +16,12 @@ from stealth_chrome_devtools_mcp.embedded import (
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
+    detached_element,
     refresh_element,
     resolve_by_text,
     resolve_element,
     resolve_elements,
+    retry_detached,
 )
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -102,7 +104,19 @@ class DOMHandler:
             for idx, elem in enumerate(elements):
                 try:
                     # NEVER ``elem.update()``: it is a DOM.getDocument (F-884).
-                    await refresh_element(tab, elem)
+                    if not await refresh_element(tab, elem):
+                        # The page removed or replaced it after the resolution
+                        # (T-10034, STEALTH-…-EP). A listing answers with what
+                        # IS on the page, so it is dropped rather than described
+                        # from a stale node; re-resolving would restart the whole
+                        # listing per departure. A page race: info, not ERROR.
+                        debug_logger.log_info(
+                            "dom_handler",
+                            "query_elements",
+                            f"Element {idx} left the document after resolution; "
+                            "dropped from the result",
+                        )
+                        continue
 
                     tag_name = elem.tag_name if hasattr(elem, "tag_name") else "unknown"
                     text_content = elem.text_all if hasattr(elem, "text_all") else ""
@@ -249,40 +263,101 @@ class DOMHandler:
         Returns:
             Dict[str, Any]: where the click went — see ``click_target.record``.
 
+        **The element leaving the page (T-10034, STEALTH-…-ER).** The page can
+        remove or replace the element between its resolution and its use. The
+        DISPATCH BOUNDARY is the call into ``click_target.click``: everything
+        before it (resolve, ``scroll_into_view``, the settle, ``aim``) only
+        reads or scrolls, so ``element_resolution.retry_detached`` re-runs the
+        whole span against the element the page holds NOW, bounded. From that
+        call on, input may have gone out (the first ``mouseMoved`` probe, the
+        press, nodriver's ``mouse_click`` or the synthetic ``el.click()``), so a
+        departed element is never retried and never answered with the synthetic
+        fallback: it raises, telling the caller to query again.
+
+        Args:
+            tab (Tab): The browser tab object.
+            selector (str): CSS selector for the element.
+            text_match (Optional[str]): Match element by text content.
+            timeout (int): Timeout in milliseconds.
+
+        Returns:
+            Dict[str, Any]: where the click went — see ``click_target.record``.
+
         Raises:
-            ToolError: the selector resolved to nothing, or the page could not
-                be asked where a click on it would land.
+            ToolError: the selector resolved to nothing, the page could not
+                be asked where a click on it would land, or the element left
+                the page (before input: after the bounded re-resolves; after
+                input: at once).
         """
         try:
-            element = None
 
-            if text_match:
-                element = await resolve_by_text(tab, text_match, best_match=True)
-            else:
-                element = await resolve_element(tab, selector, timeout=timeout / 1000)
-
-            if not element:
-                raise ToolError(f"Element not found: {selector}")
-
-            await element.scroll_into_view()
-            await asyncio.sleep(0.5)
-
-            aim = await click_target.aim(element, selector)
+            async def aimed() -> tuple[Any, dict[str, object]]:
+                if text_match:
+                    element = await resolve_by_text(tab, text_match, best_match=True)
+                else:
+                    element = await resolve_element(
+                        tab, selector, timeout=timeout / 1000
+                    )
+                if not element:
+                    raise ToolError(f"Element not found: {selector}")
+                await element.scroll_into_view()
+                await asyncio.sleep(0.5)
+                return element, await click_target.aim(element, selector)
 
             try:
-                await click_target.click(tab, element, selector, aim)
-                dispatch = click_target.COORDINATE
-            except ToolError:
-                raise
-            except Exception as e:
-                debug_logger.log_debug("dom_handler", "click_element", str(e))
-                await element.click()
-                dispatch = click_target.SYNTHETIC
+                element, aim = await retry_detached(f"click {selector!r}", aimed)
+            except Exception as exc:
+                if detached_element(exc) is None:
+                    raise
+                raise ToolError(
+                    f"'{selector}' left the page each time it was resolved, before "
+                    "any input was sent, so nothing was clicked; query it again "
+                    "once the page settles"
+                ) from exc
+
+            # THE dispatch boundary: from here on nothing is ever re-run.
+            try:
+                dispatch = await DOMHandler._dispatch_click(tab, element, selector, aim)
+            except Exception as exc:
+                # ``click_target.click`` raises a ToolError over the failure once
+                # the press is out, so the cause is asked too.
+                if detached_element(exc) is None and (
+                    detached_element(exc.__cause__) is None
+                ):
+                    raise
+                raise ToolError(
+                    f"'{selector}' left the page while it was being clicked; input "
+                    "may already have reached the page, so the click was not "
+                    "repeated. Query the element again before acting on it"
+                ) from exc
 
             return click_target.record(selector, aim, dispatch)
 
         except Exception as e:
             raise ToolError(f"Failed to click element: {e!s}")
+
+    @staticmethod
+    async def _dispatch_click(
+        tab: Tab, element: Any, selector: str, aim: dict[str, object]
+    ) -> str:
+        """The coordinate click, or the synthetic one when it could not go out.
+
+        A plain error out of ``click_target.click`` is raised before the press,
+        and the synthetic ``el.click()`` answers it — except when the error is
+        the element having left the document: nothing can reach it any more and
+        a probe move may already have gone out, so that one propagates.
+        """
+        try:
+            await click_target.click(tab, element, selector, aim)
+        except ToolError:
+            raise
+        except Exception as e:
+            if detached_element(e) is not None:
+                raise
+            debug_logger.log_debug("dom_handler", "click_element", str(e))
+            await element.click()
+            return click_target.SYNTHETIC
+        return click_target.COORDINATE
 
     @staticmethod
     async def upload_file(
@@ -571,7 +646,11 @@ class DOMHandler:
             if not element:
                 raise ToolError(f"Element not found: {selector}")
 
-            await refresh_element(tab, element)
+            if not await refresh_element(tab, element):
+                raise ToolError(
+                    f"'{selector}' left the page after it was resolved; "
+                    "query it again once the page settles"
+                )
 
             return {
                 "tag_name": element.tag_name

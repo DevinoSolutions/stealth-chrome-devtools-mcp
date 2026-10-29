@@ -51,6 +51,7 @@ from fakes_elements import (
     FakeTextField,
     fake_element,
     fake_target,
+    left_the_document,
 )
 from fakes_harness import (
     DEFAULT_VOLATILE_KEYS,
@@ -137,6 +138,7 @@ __all__ = [
     "js_promise",
     "js_result",
     "js_threw",
+    "left_the_document",
     "live_tools",
     "load_or_capture_golden",
     "nodriver_registry",
