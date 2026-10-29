@@ -194,8 +194,14 @@ class TestHungBrowserError:
         ] * 2
 
 
-def _log_tool_error(shipped, under: Exception, error: ToolError) -> dict:
-    """Ship a ``ToolError`` raised while *under* was in flight, as fastmcp logs it."""
+def _log_tool_error(
+    shipped,
+    under: Exception,
+    error: ToolError,
+    tool: str | None = "click_element",
+) -> dict:
+    """Ship a ``ToolError`` raised while *under* was in flight, as fastmcp logs it
+    (``tool=None``: through a logger that names no tool)."""
     before = len(shipped)
     try:
         try:
@@ -203,9 +209,10 @@ def _log_tool_error(shipped, under: Exception, error: ToolError) -> dict:
         except Exception:
             raise error  # noqa: B904  PERMANENT(an implicit __context__ is the shape under test)
     except ToolError:
-        logging.getLogger(TOOL_CALL_LOGGER).exception(
-            "Error calling tool 'click_element'"
-        )
+        if tool is None:
+            logging.getLogger("stealth.backend").exception("a failure")
+        else:
+            logging.getLogger(TOOL_CALL_LOGGER).exception("Error calling tool %r", tool)
     sentry_sdk.get_client().flush()
     assert len(shipped) == before + 1
     return shipped[-1]
@@ -219,57 +226,134 @@ def _click_gone(selector: str) -> ToolError:
     )
 
 
+NO_NODE = ProtocolException({"code": -32000, "message": "No node with given id found"})
+
+#: The EV/EW/ET title, templated: the selector is a quoted name, so it STAYS.
+CLICK_GONE_TEMPLATE = (
+    "Failed to click element: '#b' left the page each time it was "
+    "resolved, before any input was sent, so nothing was clicked; query "
+    "it again once the page settles"
+)
+
+
 class TestToolError:
-    def test_one_title_over_different_causes_and_selectors_is_one_issue(
-        self, shipped_events
-    ):
-        """-EV (a ProtocolException), -EW (an ElementDisconnected), another page."""
-        under_protocol = _log_tool_error(
-            shipped_events,
-            ProtocolException(
-                {"code": -32000, "message": "No node with given id found"}
-            ),
-            _click_gone("#b"),
-        )
+    def test_one_title_over_different_causes_is_one_issue(self, shipped_events):
+        """-EV (a ProtocolException), -EW (an ElementDisconnected), -ET (another run)."""
+        under_protocol = _log_tool_error(shipped_events, NO_NODE, _click_gone("#b"))
         under_disconnected = _log_tool_error(
             shipped_events,
             ElementDisconnected("'#b' is no longer in its document"),
             _click_gone("#b"),
         )
-        other_selector = _log_tool_error(
-            shipped_events,
-            ProtocolException(
-                {"code": -32000, "message": "No node with given id found"}
-            ),
-            _click_gone("div > a.save-btn"),
-        )
+        another_run = _log_tool_error(shipped_events, NO_NODE, _click_gone("#b"))
 
         fingerprints = {
             tuple(e["fingerprint"])
-            for e in (under_protocol, under_disconnected, other_selector)
+            for e in (under_protocol, under_disconnected, another_run)
         }
         assert fingerprints == {
-            (
-                "tool-error",
-                "ToolError",
-                "Failed to click element: <q> left the page each time it was "
-                "resolved, before any input was sent, so nothing was clicked; query "
-                "it again once the page settles",
-            )
+            ("tool-error", "click_element", "ToolError", CLICK_GONE_TEMPLATE)
         }
         # nothing diagnostic is lost: the full title and the cause chain ship
         values = under_disconnected["exception"]["values"]
         assert "'#b' left the page" in values[-1]["value"]
         assert [v["type"] for v in values][:2] == ["ElementDisconnected", "ToolError"]
 
-    def test_a_different_message_is_a_different_issue(self, shipped_events):
-        gone = _log_tool_error(
+    def test_a_quoted_name_is_a_failure_cause_not_a_value(self, shipped_events):
+        """cdp_element_cloner.py:801 wraps a missing ``stylesheets`` and a missing
+        ``scripts`` KeyError as ``ToolError(str(e))``: two failures, two issues."""
+        stylesheets = _log_tool_error(
             shipped_events,
-            ProtocolException(
-                {"code": -32000, "message": "No node with given id found"}
-            ),
-            _click_gone("#b"),
+            KeyError("stylesheets"),
+            ToolError(str(KeyError("stylesheets"))),
+            tool="extract_related_files",
         )
+        scripts = _log_tool_error(
+            shipped_events,
+            KeyError("scripts"),
+            ToolError(str(KeyError("scripts"))),
+            tool="extract_related_files",
+        )
+
+        assert stylesheets["fingerprint"] == [
+            "tool-error",
+            "extract_related_files",
+            "ToolError",
+            "'stylesheets'",
+        ]
+        assert scripts["fingerprint"] != stylesheets["fingerprint"]
+
+    def test_the_same_tool_and_template_with_different_ids_is_one_issue(
+        self, shipped_events
+    ):
+        def failed(pid: int, instance: str, path: str) -> ToolError:
+            return ToolError(
+                f"Failed to spawn browser: pid {pid} for {instance} could not open "
+                f"{path} on port {pid + 1}"
+            )
+
+        first = _log_tool_error(
+            shipped_events,
+            RuntimeError("x"),
+            failed(
+                105244,
+                "dd340276-97f4-4bbf-bbbf-46b14a24fa0a",
+                "C:\\stealth-mcp-browser-sessions\\sessions\\a-1\\ActorSafetyLists",
+            ),
+            tool="spawn_browser",
+        )
+        second = _log_tool_error(
+            shipped_events,
+            RuntimeError("x"),
+            failed(
+                7,
+                "0a1b2c3d-1111-2222-3333-444455556666",
+                "/tmp/x/y/ActorSafetyLists",
+            ),
+            tool="spawn_browser",
+        )
+
+        assert first["fingerprint"] == second["fingerprint"]
+        assert first["fingerprint"] == [
+            "tool-error",
+            "spawn_browser",
+            "ToolError",
+            "Failed to spawn browser: pid <n> for <id> could not open <path> "
+            "on port <n>",
+        ]
+
+    def test_the_same_message_from_two_tools_is_two_issues(self, shipped_events):
+        click = _log_tool_error(
+            shipped_events,
+            RuntimeError("x"),
+            ToolError("No node found"),
+            tool="click_element",
+        )
+        select = _log_tool_error(
+            shipped_events,
+            RuntimeError("x"),
+            ToolError("No node found"),
+            tool="select_option",
+        )
+
+        assert click["fingerprint"] != select["fingerprint"]
+        assert click["fingerprint"][1:] == [
+            "click_element",
+            "ToolError",
+            "No node found",
+        ]
+
+    def test_an_event_that_names_no_tool_falls_back_to_type_and_template(
+        self, shipped_events
+    ):
+        event = _log_tool_error(
+            shipped_events, RuntimeError("x"), ToolError("Gone after 5s"), tool=None
+        )
+
+        assert event["fingerprint"] == ["tool-error", "ToolError", "Gone after <n>s"]
+
+    def test_a_different_message_is_a_different_issue(self, shipped_events):
+        gone = _log_tool_error(shipped_events, NO_NODE, _click_gone("#b"))
         dom = _log_tool_error(
             shipped_events,
             ProtocolException({"code": -32000, "message": "DOM Error while querying"}),
@@ -280,30 +364,6 @@ class TestToolError:
 
         assert gone["fingerprint"] != dom["fingerprint"]
 
-    def test_ids_and_numbers_do_not_split_a_message(self, shipped_events):
-        def timed_out(seconds: int, instance: str) -> ToolError:
-            return ToolError(
-                f"CDP operation timed out after {seconds}s (instance {instance}). "
-                "The browser may have crashed."
-            )
-
-        first = _log_tool_error(
-            shipped_events,
-            RuntimeError("socket closed"),
-            timed_out(35, "dd340276-97f4-4bbf-bbbf-46b14a24fa0a"),
-        )
-        second = _log_tool_error(
-            shipped_events,
-            RuntimeError("socket closed"),
-            timed_out(30, "0a1b2c3d-1111-2222-3333-444455556666"),
-        )
-
-        assert first["fingerprint"] == second["fingerprint"]
-        assert first["fingerprint"][2] == (
-            "CDP operation timed out after <n>s (instance <id>). "
-            "The browser may have crashed."
-        )
-
     def test_the_error_type_is_part_of_the_fingerprint(self, shipped_events):
         plain = _log_tool_error(
             shipped_events, RuntimeError("x"), ToolError("Instance gone")
@@ -312,18 +372,74 @@ class TestToolError:
             shipped_events, RuntimeError("x"), InstanceNotFoundError("Instance gone")
         )
 
-        assert plain["fingerprint"][1:2] == ["ToolError"]
-        assert subclass["fingerprint"][1:2] == ["InstanceNotFoundError"]
+        assert plain["fingerprint"][2] == "ToolError"
+        assert subclass["fingerprint"][2] == "InstanceNotFoundError"
 
-    def test_the_fingerprint_is_scrubbed_like_the_message(self, shipped_events):
-        event = _log_tool_error(
+
+#: (the secret as it appears in a message, every fragment that must NOT travel).
+SECRETS = {
+    "email with digits": (
+        "Failed to type text: alice123@example.com was refused",
+        ("alice123", "alice", "example.com"),
+    ),
+    "bearer token with digits": (
+        "Request refused with Bearer abc123SecretSuffix attached",
+        ("abc123SecretSuffix", "abc123", "abc", "SecretSuffix", "Suffix"),
+    ),
+    "jwt with digits": (
+        "Session rejected: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        (
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "dBjftJeZ4CVPmB92K27uhbUJU1p1r",
+            "1234567890",
+        ),
+    ),
+    "url with a token query": (
+        "Navigation to https://api.example.com/v1/items?token=s3cr3tT0ken99&page=2 "
+        "failed",
+        ("s3cr3tT0ken99", "s3cr3t", "token=", "page=2"),
+    ),
+    "windows user path": (
+        "Failed to read C:\\Users\\alice123\\AppData\\Local\\Temp\\x.log",
+        ("alice123", "alice"),
+    ),
+    "posix user path": (
+        "Failed to read /home/alice123/.stealth-mcp/logs/x.log",
+        ("alice123", "alice"),
+    ),
+}
+
+
+class TestTheFingerprintCarriesNoSecret:
+    """The message is redacted BEFORE it is templated: templating first turns
+    ``alice123@example.com`` into ``alice<n>@example.com`` (no longer an address)
+    and ``Bearer abc123SecretSuffix`` into ``Bearer abc<n>SecretSuffix`` (whose
+    redaction then removes only ``abc``)."""
+
+    @pytest.mark.parametrize("case", sorted(SECRETS))
+    def test_no_fragment_of_the_secret_is_transmitted(self, shipped_events, case):
+        message, fragments = SECRETS[case]
+
+        event = _log_tool_error(shipped_events, RuntimeError("x"), ToolError(message))
+
+        sent = " ".join(event["fingerprint"])
+        assert sent.startswith("tool-error click_element ToolError ")
+        for fragment in fragments:
+            assert fragment not in sent, (case, fragment, event["fingerprint"])
+        # the event itself is held to the same rule, as before this change
+        assert fragments[0] not in repr(event["exception"])
+
+    def test_a_declared_fingerprint_is_scrubbed_too(self, shipped_events):
+        event = _log_hung(
             shipped_events,
-            RuntimeError("x"),
-            ToolError("Failed to type text: alice@example.com was refused"),
+            "i-1: failed",
+            "heal read C:\\Users\\alice123\\x.log for bob@example.com",
         )
 
-        assert "alice@example.com" not in repr(event["fingerprint"])
-        assert "[redacted-email]" in event["fingerprint"][2]
+        sent = " ".join(event["fingerprint"])
+        assert "alice123" not in sent and "bob" not in sent
 
 
 class TestEverythingElseIsUnchanged:
@@ -367,13 +483,24 @@ class TestTemplate:
     @pytest.mark.parametrize(
         ("text", "template"),
         [
-            ("'#b' left the page", "<q> left the page"),
-            ('"x y" and `z`', "<q> and <q>"),
-            ("it doesn't fail, isn't 'x' fine", "it doesn't fail, isn't <q> fine"),
-            ("after 35s at 0x1f", "after <n>s at <n>x<n>f"),
+            ("'#b' left the page", "'#b' left the page"),
+            ("missing 'stylesheets'", "missing 'stylesheets'"),
+            (
+                "'NoneType' has no attribute 'send'",
+                "'NoneType' has no attribute 'send'",
+            ),
+            ("after 35s at port 9222", "after <n>s at port <n>"),
             ("see https://a.example/p?q=1 now", "see <url> now"),
+            ("opened 'https://a.example/x' ok", "opened '<url>' ok"),
+            ("log C:\\a\\b\\c.log gone", "log <path> gone"),
+            ("log '/tmp/x/y.log' gone", "log '<path>' gone"),
+            (
+                "id 7e75ad01-5c3b-4a95-b86a-3c9530336361 and 3f9a1c2b7d8e4a51",
+                "id <id> and <id>",
+            ),
+            ("Chrome/Chromium and/or Edge", "Chrome/Chromium and/or Edge"),
             ("no values here", "no values here"),
         ],
     )
-    def test_what_differs_per_occurrence_is_replaced(self, text, template):
+    def test_only_per_occurrence_values_are_replaced(self, text, template):
         assert observability._message_template(text) == template

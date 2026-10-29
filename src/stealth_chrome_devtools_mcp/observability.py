@@ -681,11 +681,16 @@ def _is_our_frame(frame: "dict[str, object]") -> bool:
     return isinstance(abs_path, str) and Path(abs_path).is_relative_to(_PACKAGE_DIR)
 
 
-#: The per-occurrence parts of a message, in the order they are replaced: a URL,
-#: a UUID, a quoted span (a selector, a name; the look-arounds keep an
-#: apostrophe inside a word from opening one), then any run of digits.
+#: The per-occurrence VALUES of a message, replaced in this order (T-10034): a URL,
+#: a UUID, a long hex id, a filesystem path (a drive, a UNC share, or a rooted
+#: path of two or more segments), then any run of digits (counts, timings, ports,
+#: pids). Prose and quoted names are NOT touched: a quoted span stays unless it is
+#: itself one of these values, because ``'stylesheets'`` and ``'scripts'`` are two
+#: different failures and ``'#b'`` is the same selector for the same one. The
+#: character classes stop at a quote, so a quoted URL or path loses its value and
+#: keeps its quotes.
 _TEMPLATE_PARTS = (
-    (re.compile(r"https?://\S+"), "<url>"),
+    (re.compile(r"""https?://[^\s'"`<>]+"""), "<url>"),
     (
         re.compile(
             r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -693,19 +698,50 @@ _TEMPLATE_PARTS = (
         ),
         "<id>",
     ),
-    (re.compile(r"""(?<!\w)(['"`])[^\n]{0,200}?\1(?!\w)"""), "<q>"),
+    (re.compile(r"\b(?:0x)?[0-9a-fA-F]{12,}\b"), "<id>"),
+    (
+        re.compile(
+            r"""(?:(?<![\w])[A-Za-z]:[\\/]|\\\\)[^\s'"`<>|*?]+"""
+            r"""|(?<![\w/:.\\<])(?:/[\w.~@%+=-]+){2,}/?"""
+        ),
+        "<path>",
+    ),
     (re.compile(r"\d+"), "<n>"),
 )
 
+#: The tool a ``logger.exception("Error calling tool 'name'")`` record is about:
+#: fastmcp's tool-call log line, and ``tool_failure``'s, which copies it.
+_TOOL_CALL_RE = re.compile(r"\AError calling tool '(?P<name>[A-Za-z0-9_.\-]{1,100})'\Z")
+
 
 def _message_template(text: str) -> str:
-    """*text* with what differs per occurrence replaced, the prose kept."""
+    """*text* with the values that differ per occurrence replaced, the prose kept.
+
+    Takes text that has ALREADY been through :func:`_redact_text`: every rule here
+    rewrites characters (a digit run becomes ``<n>``), which would break the
+    shapes the redaction rules match, so templating raw text leaks a secret's
+    tail (``Bearer abc123Suffix`` -> ``Bearer abc<n>Suffix``).
+    """
     for pattern, placeholder in _TEMPLATE_PARTS:
         text = pattern.sub(placeholder, text)
     return text
 
 
-def _stable_fingerprint(hint: "dict[str, object] | None") -> "list[str] | None":
+def _tool_name(event: "Event") -> "str | None":
+    """The tool the event's log line names, or ``None`` when it names none."""
+    entry = event.get("logentry") if isinstance(event, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    for key in ("formatted", "message"):
+        text = entry.get(key)
+        if isinstance(text, str) and (found := _TOOL_CALL_RE.match(text)):
+            return found.group("name")
+    return None
+
+
+def _stable_fingerprint(
+    event: "Event", hint: "dict[str, object] | None"
+) -> "list[str] | None":
     """The Sentry fingerprint this event should carry, or ``None`` for Sentry's own.
 
     Sentry groups an event by its stack frames, and by the message when there is
@@ -721,10 +757,17 @@ def _stable_fingerprint(hint: "dict[str, object] | None") -> "list[str] | None":
 
     * the exception declares ``sentry_fingerprint`` (a tuple of strings: its kind
       and stable cause), which is used as is;
-    * it is a ``ToolError``: ``tool-error``, its type, and its message with
-      :func:`_message_template` applied. Two defects whose messages differ only in
-      a quoted name or a number group together (the full message is still on every
-      event); a ``ToolError`` that is not shipped at all is dropped before this.
+    * it is a ``ToolError``: ``tool-error``, the tool the log line names (when it
+      names one; an event with no tool identity is grouped by type and template
+      alone), its type, and its message REDACTED first by :func:`_redact_text`
+      and only then templated by :func:`_message_template`. Two failures in one
+      tool whose messages differ only in an id, a path or a number group
+      together (the full message is still on every event); the same message from
+      two tools does not.
+
+    Whatever this returns is walked by :func:`_anonymize` once more in
+    :func:`_scrub_event` before it leaves, so the fingerprint cannot carry what
+    the event itself would not.
     """
     exception = _hint_exception(hint)
     if exception is None:
@@ -738,10 +781,12 @@ def _stable_fingerprint(hint: "dict[str, object] | None") -> "list[str] | None":
         return list(declared)
     base = _expected_error_base()
     if base is not None and isinstance(exception, base):
+        tool = _tool_name(event)
         return [
             "tool-error",
+            *([tool] if tool else []),
             type(exception).__name__,
-            _message_template(str(exception)),
+            _message_template(_redact_text(str(exception))),
         ]
     return None
 
@@ -794,7 +839,9 @@ def _scrub_event(
     if _is_expected_tool_failure(event, hint) or _is_foreign_hook_crash(event):
         return None
     try:
-        fingerprint = None if event.get("fingerprint") else _stable_fingerprint(hint)
+        fingerprint = (
+            None if event.get("fingerprint") else _stable_fingerprint(event, hint)
+        )
         scrubbed = _anonymize(event)
         if isinstance(scrubbed, dict):
             if fingerprint:
