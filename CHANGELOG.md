@@ -5,7 +5,7 @@
 ### take_screenshot captures the format and the full page it was asked for (T-10043)
 
 - `take_screenshot` handed nodriver's `save_screenshot` only a path, and nodriver defaults to `format="jpeg"` and the viewport. So a file named `.png` held JPEG bytes (measured: the 2.1.50 proof's `.png` screenshots start with `ff d8 ff e0`), `format="jpeg"` was the only format a file ever got, and `full_page=True` never captured beyond the viewport, on both paths.
-- The file path now passes the caller's `format` and `full_page`. The inline answer is captured as lossless PNG with `full_page` and re-encoded to the requested format, as before.
+- The file path now passes the caller's `format` and `full_page`. The inline answer is captured as lossless PNG with `full_page` and re-encoded to the requested format, as before. `jpg` is read as `jpeg`, and any other `format` is refused as the caller's error before a capture: once the format reached nodriver, an unknown one went to Chrome as is and came back as `Invalid image format`, a browser failure on its face.
 
 ### Chrome's refusal of a screenshot is a ToolError, not a raw protocol error (T-10034)
 

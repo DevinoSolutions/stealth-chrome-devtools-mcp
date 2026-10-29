@@ -34,7 +34,7 @@ from stealth_chrome_devtools_mcp.embedded.models import (
     NetworkResponse,
 )
 from stealth_chrome_devtools_mcp.embedded.network_interceptor import NetworkInterceptor
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 WINDOWS_ONLY = pytest.mark.skipif(
@@ -691,7 +691,12 @@ class _RecordingScreenshotTab(FakeTab):
 @pytest.mark.parametrize("full_page", [False, True])
 @pytest.mark.parametrize(
     ("to_file", "asked", "sent"),
-    [(True, "png", "png"), (True, "jpeg", "jpeg"), (False, "jpeg", "png")],
+    [
+        (True, "png", "png"),
+        (True, "jpeg", "jpeg"),
+        (True, "JPG", "jpeg"),
+        (False, "jpeg", "png"),
+    ],
 )
 async def test_the_format_and_full_page_reach_nodriver(
     patched_server, home, tmp_path, to_file, asked, sent, full_page
@@ -710,6 +715,25 @@ async def test_the_format_and_full_page_reach_nodriver(
     await call_tool(srv, "take_screenshot", instance_id="i1", **kwargs)
 
     assert tab.shots == [{"format": sent, "full_page": full_page}]
+
+
+@pytest.mark.parametrize("asked", ["", "gif", "webp"])
+async def test_an_unknown_screenshot_format_is_the_callers_error(
+    patched_server, home, tmp_path, asked
+):
+    """T-10043 review: once the format reached nodriver, anything but png/jpeg
+    went to Chrome as is and came back as ``Invalid image format`` -- a refusal
+    of the caller's input dressed as a browser failure (or, for ``webp``, a
+    format the tool does not document). It is refused before any capture."""
+    tab = _RecordingScreenshotTab()
+    srv = _shot_server(patched_server, tab)
+    target = tmp_path / "shot.img"
+
+    with pytest.raises(CallerError, match="accepted values are 'png' and 'jpeg'"):
+        await _shot(srv, target, format=asked)
+
+    assert tab.shots == []
+    assert not target.exists()
 
 
 class _RefusedScreenshotTab(FakeTab):
