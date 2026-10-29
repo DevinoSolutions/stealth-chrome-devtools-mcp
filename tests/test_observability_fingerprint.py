@@ -22,9 +22,11 @@ which cannot fail the way the SDK's own serialization can.
 from __future__ import annotations
 
 import ast
+import asyncio
 import logging
 import pathlib
 import sys
+import types
 
 import pytest
 from nodriver.core.connection import ProtocolException
@@ -33,6 +35,8 @@ from stealth_chrome_devtools_mcp import observability, tool_error_fingerprint
 from stealth_chrome_devtools_mcp.embedded import (
     browser_health,
     clone_probe,
+    element_resolution,
+    forensic_errors,
     tool_registry,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_health import HungBrowserError
@@ -120,7 +124,7 @@ class TestHungBrowserError:
             _hung_message(
                 "7e75ad01-5c3b-4a95-b86a-3c9530336361", 71999, "33.11", 15070
             ),
-            "probe-heal",
+            "heal",
             "TimeoutError at evaluate",
         )
         second = _log_hung(
@@ -128,14 +132,14 @@ class TestHungBrowserError:
             _hung_message(
                 "d0df744d-6ad9-47c0-9352-21c349bf0676", 27273, "16.88", 15003
             ),
-            "probe-heal",
+            "heal",
             "TimeoutError at evaluate",
         )
 
         assert first["fingerprint"] == second["fingerprint"]
         assert first["fingerprint"] == [
             "hung-browser",
-            "probe-heal",
+            "heal",
             "TimeoutError at evaluate",
         ]
 
@@ -145,7 +149,7 @@ class TestHungBrowserError:
             _hung_message(
                 "7e75ad01-5c3b-4a95-b86a-3c9530336361", 71999, "33.11", 15070
             ),
-            "probe-heal",
+            "heal",
             "TimeoutError at evaluate",
         )
 
@@ -160,8 +164,8 @@ class TestHungBrowserError:
     @pytest.mark.parametrize(
         "other",
         [
-            ("probe-heal", "TimeoutError at closeTarget"),  # a different failed step
-            ("probe-heal", "ConnectionError at evaluate"),  # a different error type
+            ("heal", "TimeoutError at closeTarget"),  # a different failed step
+            ("heal", "ConnectionError at evaluate"),  # a different error type
             ("starvation-ceiling", "TimeoutError at evaluate"),  # a different site
         ],
     )
@@ -202,13 +206,12 @@ class TestHungBrowserError:
         ] * 2
 
 
-#: A frame is ours when its code object's file is a real file under the package;
-#: the fixture's own file sits in a directory the fixture adds to that rule, and
-#: its module name is read off the file's path, so this is its name.
+#: The fixture's functions stand in for a file of the package: their code objects
+#: are entered in the CODE map under this module name, the way the map holds the
+#: package's own, so the tests of WHICH frame is named (innermost, deepest cause,
+#: fallback) can pick the function and the message. The map's own correctness is
+#: tested with real package functions, below.
 FIXTURE_FRAME = "stealth_chrome_devtools_mcp.dom_handler"
-
-#: Where the fixture's source files are written (set per test below).
-_FIXTURE_DIR: dict[str, pathlib.Path] = {}
 
 _SITE_SOURCE = """
 def click_element(error, cause):
@@ -234,26 +237,27 @@ def _sites(release_padding: int = 0) -> dict:
     """The fixture's functions, as the file of a release whose code sits
     ``release_padding`` lines further down: same names, different line numbers.
     The module's ``__name__`` is nonsense on purpose: it is never read."""
-    path = _FIXTURE_DIR["dir"] / "dom_handler.py"
-    path.write_text("\n" * release_padding + _SITE_SOURCE, encoding="utf-8")
+    code = compile("\n" * release_padding + _SITE_SOURCE, "dom_handler.py", "exec")
+    for each in tool_error_fingerprint._code_objects(code):  # noqa: SLF001  PERMANENT(the fixture enters its code in the map the package's files are in)
+        tool_error_fingerprint._code_labels[each] = (  # noqa: SLF001  PERMANENT(same)
+            f"{FIXTURE_FRAME}.{each.co_qualname}"
+        )
     namespace = {"__name__": "not.the.module.name"}
-    exec(  # noqa: S102  PERMANENT(compiling the fixture file IS the test: a function at other line numbers)
-        compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace
-    )
+    exec(code, namespace)  # noqa: S102  PERMANENT(executing the fixture IS the test: a function at other line numbers)
     return namespace
 
 
 @pytest.fixture(autouse=True)
-def _fixture_code_is_ours(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        tool_error_fingerprint,
-        "_ROOTS",
-        (*tool_error_fingerprint._ROOTS, tmp_path),  # noqa: SLF001  PERMANENT(the fixture adds a directory of source files to the rule)
-    )
+def _fixture_code_is_ours(monkeypatch):
+    tool_error_fingerprint._refresh()  # noqa: SLF001  PERMANENT(the maps are built before the fixture adds to them)
+    labels = tool_error_fingerprint._code_labels  # noqa: SLF001  PERMANENT(same)
+    before = dict(labels)
     monkeypatch.setitem(
         tool_registry.SECTION_TOOLS, "fixture", ["click_element", "select_option"]
     )
-    _FIXTURE_DIR["dir"] = tmp_path
+    yield
+    labels.clear()
+    labels.update(before)
 
 
 def _ship_tool_error(
@@ -524,6 +528,10 @@ class TestNothingACallerCanSetIsRead:
         )
         assert tool_error_fingerprint.type_name(HungBrowserError) == "HungBrowserError"
         assert tool_error_fingerprint.type_name(ProtocolException) == "<external>"
+        assert tool_error_fingerprint.type_name(FrozenCloneError) == "FrozenCloneError"
+        assert tool_error_fingerprint.type_name(InstanceNotFoundError) == (
+            "InstanceNotFoundError"
+        )
 
     @pytest.mark.parametrize("where", ["<string>", "a file outside the package"])
     def test_a_frame_that_only_claims_the_package_name_is_not_ours(
@@ -558,9 +566,8 @@ class TestNothingACallerCanSetIsRead:
             "KeyError",
         ]
 
-    def test_a_function_name_that_is_not_an_identifier_is_not_read(
-        self, shipped_events
-    ):
+    def test_renamed_code_is_not_ours_whatever_its_name_is(self, shipped_events):
+        """A code object is ours by what it IS, not by the name it carries."""
         function = _sites()["raise_it"]
         function.__code__ = function.__code__.replace(co_name=self.SECRET)
 
@@ -571,24 +578,182 @@ class TestNothingACallerCanSetIsRead:
             site="select_option",
         )
 
-        assert event["fingerprint"][-1] == f"{FIXTURE_FRAME}.<code>"
+        assert event["fingerprint"][-1] == f"{FIXTURE_FRAME}.select_option"
         assert "swordfish" not in " ".join(event["fingerprint"])
+
+    @pytest.mark.parametrize(
+        ("filename", "name"),
+        [
+            (tool_error_fingerprint.__file__, "swordfish"),
+            (element_resolution.__file__, "swordfish"),
+            (element_resolution.__file__, "resolve_element"),
+            (observability.__file__, "_scrub_event"),
+        ],
+        ids=["our-file-secret-name", "other-file", "same-name", "same-name-2"],
+    )
+    def test_code_compiled_under_a_package_file_name_is_not_ours(
+        self, shipped_events, filename, name
+    ):
+        """Codex round 4, HIGH: ``compile()`` takes any file name, including the
+        package's own, and any function name, including one of the package's."""
+        source = (
+            f"def {name}(error, cause):\n"
+            "    try:\n        raise cause\n"
+            "    except Exception:\n        raise error\n"
+        )
+        namespace: dict = {}
+        exec(compile(source, filename, "exec"), namespace)  # noqa: S102  PERMANENT(the caller's code IS the fixture)
+        before = len(shipped_events)
+        try:
+            namespace[name](ToolError("x"), KeyError("k"))
+        except ToolError:
+            _log("click_element")
+        sentry_sdk.get_client().flush()
+
+        assert len(shipped_events) == before + 1
+        assert shipped_events[-1]["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            "KeyError",
+        ]
+
+    def test_two_functions_with_one_name_in_one_module_keep_two_names(self):
+        """Codex round 4, MED: ``resolve_element.<locals>._do`` and
+        ``resolve_by_text.<locals>._do`` share a ``co_name``."""
+
+        class BoomError(KeyError):
+            pass
+
+        class Tab:
+            async def query_selector(self, selector):
+                raise BoomError(selector)
+
+            async def find_element_by_text(self, text, best_match):
+                raise BoomError(text)
+
+        async def provoke(resolve, argument):
+            try:
+                await resolve(Tab(), argument, timeout=0)
+            except BoomError as error:
+                return error
+            raise AssertionError("did not raise")
+
+        by_selector = asyncio.run(provoke(element_resolution.resolve_element, "#a"))
+        by_text = asyncio.run(provoke(element_resolution.resolve_by_text, "a"))
+        module = "stealth_chrome_devtools_mcp.embedded.element_resolution"
+
+        assert tool_error_fingerprint.frame_name(by_selector) == (
+            f"{module}.resolve_element.<locals>._do"
+        )
+        assert tool_error_fingerprint.frame_name(by_text) == (
+            f"{module}.resolve_by_text.<locals>._do"
+        )
+
+    def test_a_module_registered_with_a_package_file_is_not_the_package(
+        self, shipped_events, monkeypatch
+    ):
+        """Codex round 4, HIGH: ``sys.modules`` is a dict anyone writes to, and a
+        module's ``__file__`` is an attribute anyone sets."""
+        fake = types.ModuleType("stealth_chrome_devtools_mcp.pretend")
+        fake.__file__ = element_resolution.__file__
+        secret_error = type(self.SECRET, (Exception,), {"__module__": fake.__name__})
+        setattr(fake, self.SECRET.replace(" ", "_"), secret_error)
+        fake.Pretend = type("Pretend", (Exception,), {"__module__": fake.__name__})
+        monkeypatch.setitem(sys.modules, fake.__name__, fake)
+
+        event = _ship_tool_error(
+            shipped_events, ToolError("x"), cause=secret_error("k")
+        )
+
+        assert tool_error_fingerprint.type_name(fake.Pretend) == "<external>"
+        assert event["fingerprint"][3] == "<external>"
+        assert "swordfish" not in " ".join(event["fingerprint"])
+
+    @pytest.mark.parametrize("on", ["instance", "subclass", "class attribute"])
+    def test_a_declaration_on_a_tool_error_is_not_read(self, shipped_events, on):
+        """Codex round 4, HIGH: a ``sentry_fingerprint`` is an attribute any code
+        can set, on an instance, or on a class of its own."""
+        if on == "instance":
+            error = ToolError("x")
+            error.sentry_fingerprint = (self.SECRET,)
+        else:
+            mine = type("Mine", (ToolError,), {"sentry_fingerprint": (self.SECRET,)})
+            error = mine("x")
+            if on == "subclass":
+                error.sentry_fingerprint = (self.SECRET,)
+
+        event = _ship_tool_error(shipped_events, error, cause=KeyError("k"))
+
+        assert event["fingerprint"][:2] == ["tool-error", "click_element"]
+        assert event["fingerprint"][3] == "KeyError"
+        assert "swordfish" not in " ".join(event["fingerprint"])
+
+    @pytest.mark.parametrize(
+        "declaration",
+        [
+            ("my password is swordfish",),
+            ("hung-browser", "my password is swordfish"),
+            ("hung-browser", "heal swordfish at evaluate extra"),
+            ("hung-browser", "heal TimeoutError at swordfish"),
+            ("swordfish", "heal"),
+            ("hung-browser", "swordfish"),
+            ("hung-browser", "heal C:\\Users\\alice123\\x.log for bob@example.com"),
+        ],
+    )
+    def test_a_declaration_outside_the_vocabulary_is_ignored(
+        self, shipped_events, declaration
+    ):
+        """Even our own class carries nothing but the closed vocabulary."""
+        error = HungBrowserError("i-1: failed")
+        error.sentry_fingerprint = declaration
+        before = len(shipped_events)
+        debug_logger.log_error("browser_health", "probe", error)
+        sentry_sdk.get_client().flush()
+
+        assert len(shipped_events) == before + 1
+        assert "fingerprint" not in shipped_events[-1]
+
+    def test_a_caller_subclass_of_our_forensic_error_declares_nothing(
+        self, shipped_events
+    ):
+        mine = type(self.SECRET, (HungBrowserError,), {})
+
+        before = len(shipped_events)
+        debug_logger.log_error("browser_health", "probe", mine("i-1", "heal"))
+        sentry_sdk.get_client().flush()
+
+        assert len(shipped_events) == before + 1
+        assert "fingerprint" not in shipped_events[-1]
+
+    def test_an_exception_type_we_do_not_define_reads_external_in_a_cause(
+        self, shipped_events
+    ):
+        """A probe can fail with an error of nodriver's or websockets'; it still groups."""
+        event = _log_hung(
+            shipped_events, "i-1: x", "heal ProtocolException at evaluate"
+        )
+        other = _log_hung(shipped_events, "i-2: x", "relaunch-failed swordfish")
+
+        assert event["fingerprint"] == ["hung-browser", "heal <external> at evaluate"]
+        assert other["fingerprint"] == ["hung-browser", "relaunch-failed <external>"]
+
+    def test_the_declarations_of_both_forensic_classes_keep_their_names(self):
+        assert tool_error_fingerprint.declared(
+            FrozenCloneError("c-1", "probe TimeoutError at evaluate")
+        ) == ["frozen-clone", "probe TimeoutError at evaluate"]
+        assert tool_error_fingerprint.declared(
+            HungBrowserError("i-1", "relaunch-probe-fails no instance")
+        ) == ["hung-browser", "relaunch-probe-fails no instance"]
+        assert tool_error_fingerprint.declared(HungBrowserError("i-1")) == [
+            "hung-browser"
+        ]
 
     def test_a_tool_name_that_is_not_registered_is_not_read(self, shipped_events):
         event = _ship_tool_error(shipped_events, ToolError("x"), tool="swordfish_tool")
 
         assert event["fingerprint"][1] == "<tool>"
         assert "swordfish" not in " ".join(event["fingerprint"])
-
-    def test_a_trusted_module_is_found_only_by_where_its_file_is(self, monkeypatch):
-        """``sys.modules`` names a module; the file it was loaded from is the proof."""
-        elsewhere = type(sys)("stealth_chrome_devtools_mcp.pretend")
-        elsewhere.__file__ = __file__
-        elsewhere.Pretend = type("Pretend", (Exception,), {})
-        elsewhere.Pretend.__module__ = elsewhere.__name__
-        monkeypatch.setitem(sys.modules, elsewhere.__name__, elsewhere)
-
-        assert tool_error_fingerprint.type_name(elsewhere.Pretend) == "<external>"
 
 
 def _chained(outer: BaseException, inner: BaseException) -> BaseException:
@@ -693,16 +858,6 @@ class TestTheFingerprintIsBuiltFromNoMessage:
         assert first["fingerprint"] == second["fingerprint"]
         assert "Deploy" not in " ".join(first["fingerprint"])
 
-    def test_a_declared_fingerprint_is_scrubbed_too(self, shipped_events):
-        event = _log_hung(
-            shipped_events,
-            "i-1: failed",
-            "heal read C:\\Users\\alice123\\x.log for bob@example.com",
-        )
-
-        sent = " ".join(event["fingerprint"])
-        assert "alice123" not in sent and "bob" not in sent
-
 
 _HEALTH = pathlib.Path(browser_health.__file__)
 _CLONE_PROBE = pathlib.Path(clone_probe.__file__)
@@ -769,6 +924,43 @@ class TestEveryCauseIsProgramControlled:
             for call in steps
         )
 
+    def test_the_vocabulary_is_exactly_the_steps_the_probe_names(self):
+        tree = ast.parse(_HEALTH.read_text(encoding="utf-8"))
+        named = {
+            call.args[0].value
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call) and ast.unparse(call.func) == "steps.append"
+        }
+
+        # ``connect`` is what ``_describe`` says when no step has been reached
+        assert named | {"connect"} == forensic_errors.STEPS
+
+    @pytest.mark.parametrize("path", [_HEALTH, _CLONE_PROBE], ids=lambda p: p.name)
+    def test_every_cause_a_call_site_passes_is_in_the_closed_vocabulary(self, path):
+        """The call sites and ``forensic_errors``' vocabulary are one list: a
+        site whose cause the vocabulary does not know would ship NO fingerprint."""
+        stand_in = {
+            "failure": "TimeoutError at evaluate",
+            "type(error).__name__": "TimeoutError",
+        }
+        for call in _forensic_calls(path):
+            causes = [
+                "".join(
+                    part.value
+                    if isinstance(part, ast.Constant)
+                    else stand_in[ast.unparse(part.value)]
+                    for part in (
+                        cause.values if isinstance(cause, ast.JoinedStr) else [cause]
+                    )
+                )
+                for cause in call.args[1:]
+            ]
+            error = getattr(forensic_errors, call.func.id)("m", *causes)
+
+            assert tool_error_fingerprint.declared(error) == list(
+                error.sentry_fingerprint
+            ), (path.name, call.lineno, causes)
+
 
 class TestEverythingElseIsUnchanged:
     def test_an_event_with_no_declared_cause_gets_no_fingerprint(self, shipped_events):
@@ -785,15 +977,13 @@ class TestEverythingElseIsUnchanged:
     def test_a_fingerprint_the_scope_already_set_is_kept(self, shipped_events):
         with sentry_sdk.new_scope() as scope:
             scope.fingerprint = ["chosen-upstream"]
-            _log_hung(shipped_events, "i-1: x", "probe-heal", "TimeoutError at connect")
+            _log_hung(shipped_events, "i-1: x", "heal", "TimeoutError at connect")
 
         assert shipped_events[-1]["fingerprint"] == ["chosen-upstream"]
 
     def test_the_hook_changes_nothing_but_the_fingerprint(self):
         """The same event with and without a declared cause differs in ONE key."""
-        error = HungBrowserError(
-            "i-1: probe failed", "probe-heal", "TimeoutError at connect"
-        )
+        error = HungBrowserError("i-1: probe failed", "heal", "TimeoutError at connect")
         event = {"level": "error", "message": "m", "logger": "stealth.backend"}
         shipped = observability._scrub_event(
             dict(event), {"exc_info": (type(error), error, None)}
@@ -803,5 +993,5 @@ class TestEverythingElseIsUnchanged:
         assert plain == event
         assert shipped == {
             **event,
-            "fingerprint": ["hung-browser", "probe-heal", "TimeoutError at connect"],
+            "fingerprint": ["hung-browser", "heal", "TimeoutError at connect"],
         }

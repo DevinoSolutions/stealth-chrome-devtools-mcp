@@ -701,9 +701,10 @@ def _stable_fingerprint(
     everything it was raised while handling, line numbers included, so one title
     was three. Only grouping changes; the message and exception are untouched.
     From the LIVE exception behind the event, the first that applies wins:
-    * it declares ``sentry_fingerprint`` (its kind and stable cause), used as is.
-      Every cause a call site passes is program-controlled text (a step name, an
-      exception type name) and a test scans the call sites to keep it so;
+    * it declares ``sentry_fingerprint`` (its kind and stable cause) and is one of
+      OUR ``ForensicError`` classes declaring only words of the closed vocabulary
+      in ``forensic_errors``: :func:`tool_error_fingerprint.declared`. Any other
+      declaration, whatever sets it, is ignored and the next rule applies;
     * it is a ``ToolError``: see :func:`_tool_error_fingerprint`.
 
     Either way :func:`_scrub_event` walks the result with :func:`_anonymize`.
@@ -711,13 +712,8 @@ def _stable_fingerprint(
     exception = _hint_exception(hint)
     if exception is None:
         return None
-    declared = getattr(exception, "sentry_fingerprint", None)
-    if (
-        isinstance(declared, tuple)
-        and declared
-        and all(isinstance(part, str) for part in declared)
-    ):
-        return list(declared)
+    if (declared := tool_error_fingerprint.declared(exception)) is not None:
+        return declared
     base = _expected_error_base()
     if base is not None and isinstance(exception, base):
         return _tool_error_fingerprint(event, exception)
