@@ -194,6 +194,21 @@ async def test_resolve_by_text_recovers_from_stale_node():
 
 
 @pytest.mark.asyncio
+async def test_resolve_by_text_recovers_from_a_dropped_search_session():
+    """T-10034 (STEALTH-…-EQ, 2.1.47): a document reset between
+    ``DOM.performSearch`` and ``DOM.getSearchResults`` drops the search session,
+    and Chrome answers the second with this text. It reached the caller as a
+    failed click instead of being re-resolved like the node-id form."""
+    sentinel = object()
+    dropped = ProtocolException(
+        {"message": "No search session with given id found", "code": -32000}
+    )
+    tab = _FakeTab(find=[dropped, sentinel])
+    assert await resolve_by_text(tab, "Submit") is sentinel
+    assert tab.find_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_resolve_elements_recovers_from_nodriver_handler_race():
     # STEALTH-CHROME-DEVTOOLS-MCP-2R: select_all -> `await self` -> Tab.wait(),
     # whose handler cleanup raises KeyError(<cdp event class>) under concurrency.
