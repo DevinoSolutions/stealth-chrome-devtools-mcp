@@ -60,6 +60,10 @@ SHORT_LINGER_SECONDS = 5.0
 #: What a held reading keeps back from the end of the linger (the clock starts BEFORE
 #: the holding call, so this covers the hold timer's own scheduling, not the call).
 LINGER_MARGIN_SECONDS = 0.5
+#: Readings of :data:`MEASURE_MS` each allowed for a tab to fall back once its hold
+#: ends (:func:`_fallen_back_rate`): Chrome keeps painting background tabs for a
+#: few seconds after a hold is released, and longer on a slow runner (T-10026).
+FALLBACK_READINGS = 4
 
 #: Paints the page every frame (a page that changes nothing is not held back) and counts.
 START_LOOP_JS = """
@@ -196,6 +200,18 @@ def _skip_if_display_does_not_paint(headless: bool, painted: int) -> None:
         )
 
 
+async def _fallen_back_rate(iid: str, tab_id: str) -> int:
+    """The tab's undriven rate once it has fallen back: readings are repeated while
+    they are over the bar, for at most :data:`FALLBACK_READINGS`, and the last one
+    is returned. Bounded, so a hold that is never released still fails."""
+    rate = await _undriven_rate(iid, tab_id)
+    for _ in range(FALLBACK_READINGS - 1):
+        if rate <= MAX_UNHELD_FRAMES:
+            break
+        rate = await _undriven_rate(iid, tab_id)
+    return rate
+
+
 async def _spawn(tmp_path, headless: bool) -> str:
     result = await get_fn("spawn_browser")(
         headless=headless,
@@ -292,10 +308,13 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         await execute(instance_id=iid, script=START_LOOP_JS, tab_id=driven)
         assert await _held_rate(iid, driven, held_at) >= MIN_FRAMES
 
-        # Without another call it falls back after the linger.
-        await asyncio.sleep(SHORT_LINGER_SECONDS + 1)
-        assert await _undriven_rate(iid, driven) <= MAX_UNHELD_FRAMES
-        assert await _undriven_rate(iid, undriven) <= MAX_UNHELD_FRAMES
+        # Without another call it falls back after the linger. "Falls back" is
+        # bounded, not instant: for a few seconds after a hold ends, Chrome keeps
+        # painting background tabs (T-10026: on Windows the UNTOUCHED tab read 56-57
+        # frames when read first at linger + 1 s; the macOS publish runner read the
+        # driven tab at 45 there). A hold left on never falls back and still fails.
+        assert await _fallen_back_rate(iid, driven) <= MAX_UNHELD_FRAMES
+        assert await _fallen_back_rate(iid, undriven) <= MAX_UNHELD_FRAMES
 
         # A new call holds it again.
         held_at = time.monotonic()
