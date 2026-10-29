@@ -725,19 +725,38 @@ async def _plain_click(tab: Tab, element: Element, ledger: InputSent) -> None:
     await _send_mouse(tab, "mouseReleased", *at, ledger)
 
 
+#: The synthetic script's three answers. Ours, not the page's: every page
+#: call inside the script is wrapped, so nothing the page throws or returns can
+#: become the script's answer, and ``Element.apply`` -- which hands back
+#: ``result[0].value`` and drops ``exceptionDetails``, so a THROWN value lands
+#: there as a plain one -- can only carry one of these from a script that ran.
+SYNTHETIC_DETACHED = "stealth.click.synthetic:detached"
+SYNTHETIC_CLICKED = "stealth.click.synthetic:clicked"
+SYNTHETIC_THREW = "stealth.click.synthetic:threw"
+
 #: THE one synthetic sender's script (T-10034). The connectivity check and the
 #: ``el.click()`` run in ONE page-side task, so the page cannot remove the node
-#: between them: ``false`` is the page saying the node had left and nothing was
-#: clicked, ``true`` that ``el.click()`` ran on a node still in its document.
-#: nodriver's ``Element.click`` is not used: it awaits a ``resolveNode`` and a
-#: ``flash`` (a marker injected into the page) before its unguarded
-#: ``(el) => el.click()``, and a node removed in that window is clicked where no
-#: listener in the page can hear it.
-SYNTHETIC_JS = """(elem) => {
-    if (!elem.isConnected) return false;
-    elem.click();
-    return true;
-}"""
+#: between them. nodriver's ``Element.click`` is not used: it awaits a
+#: ``resolveNode`` and a ``flash`` (a marker injected into the page) before its
+#: unguarded ``(el) => el.click()``, and a node removed in that window is
+#: clicked where no listener in the page can hear it.
+#:
+#: The answer is a token, never a boolean (Codex re-review HIGH): a page whose
+#: ``click()`` calls the native one and then ``throw false`` would otherwise
+#: hand back the very ``false`` that means "nothing ran", and the click would be
+#: re-run on a page that had already taken it. A page that makes
+#: ``isConnected`` read false is taken at its word: nothing is clicked here.
+SYNTHETIC_JS = (
+    """(elem) => {
+    let connected;
+    try { connected = elem.isConnected; } catch (e) { return "__THREW__"; }
+    if (!connected) return "__DETACHED__";
+    try { elem.click(); } catch (e) { return "__THREW__"; }
+    return "__CLICKED__";
+}""".replace("__DETACHED__", SYNTHETIC_DETACHED)
+    .replace("__CLICKED__", SYNTHETIC_CLICKED)
+    .replace("__THREW__", SYNTHETIC_THREW)
+)
 
 
 async def synthetic_click(element: Element, selector: str, ledger: InputSent) -> bool:
@@ -745,28 +764,37 @@ async def synthetic_click(element: Element, selector: str, ledger: InputSent) ->
 
     Sent through ``Element.apply`` (``Runtime.callFunctionOn`` with
     ``userGesture``, as ``Element.click`` sends it), bounded by
-    :data:`INPUT_BUDGET_S`. *ledger* turns true for every outcome except the
-    page's definite ``false``: that answer proves ``el.click()`` never ran, so
-    the caller may re-resolve; a failure, a timeout or a cancellation proves
-    nothing about it, so it counts as input that may have reached the page.
+    :data:`INPUT_BUDGET_S`. ONLY the exact :data:`SYNTHETIC_DETACHED` answer
+    proves ``el.click()`` never ran, so only it leaves *ledger* clear and
+    answers ``False`` for the caller to re-resolve. :data:`SYNTHETIC_CLICKED` is
+    the click. Everything else -- the page's ``click()`` throwing, any other
+    value, a failure, a timeout or a cancellation -- proves nothing about
+    whether the page took the click, so *ledger* is set and it is never re-run.
 
-    Raises ``ToolError`` when the page answered with anything but a boolean.
+    Raises ``ToolError`` for :data:`SYNTHETIC_THREW` and for any answer that is
+    not one of the script's own, saying the click may have reached the page.
     """
     try:
         answer = await asyncio.wait_for(element.apply(SYNTHETIC_JS), INPUT_BUDGET_S)
     except BaseException:
         ledger.sent = True
         raise
-    if answer is False:
+    token = answer if isinstance(answer, str) else None
+    if token == SYNTHETIC_DETACHED:
         return False
     ledger.sent = True
-    if answer is not True:
+    if token == SYNTHETIC_CLICKED:
+        return True
+    if token == SYNTHETIC_THREW:
         raise ToolError(
-            f"the synthetic click on '{selector}' answered with "
-            f"{type(answer).__name__}, not the promised boolean; it may have "
-            "reached the page, so it was not repeated"
+            f"the page's click handler for '{selector}' threw during the "
+            "synthetic click; it may have reached the page, so it was not repeated"
         )
-    return True
+    raise ToolError(
+        f"the synthetic click on '{selector}' answered with "
+        f"{type(answer).__name__}, not one of its own answers; it may have "
+        "reached the page, so it was not repeated"
+    )
 
 
 async def click(

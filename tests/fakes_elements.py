@@ -204,10 +204,20 @@ class FakeClickTarget:
     unguarded ``el.click()`` on the removed node (``click`` is recorded and no
     listener hears it); the product's one synthetic sender,
     ``click_target.SYNTHETIC_JS``, checks ``isConnected`` in the same page-side
-    task and answers ``false``, exactly what the real function returns.
+    task and answers its "detached" value.
     ``synthetic_error`` is that call's transport failing before any answer.
+    ``click_throws`` is a page whose ``click()`` calls the native one and then
+    throws that value (Codex re-review HIGH): the click RAN. ``synthetic_answer``
+    replaces the script's answer outright (a value that is not one of its own).
     ``calls`` records ``"synthetic"`` for every synthetic ATTEMPT, by either
-    sender, and ``"click"`` only for one that ran.
+    sender and including one on a node that no longer resolves, and ``"click"``
+    for every activation the page took.
+
+    The synthetic answer is READ OFF THE SCRIPT the product sent, never assumed
+    (:func:`_synthetic_answers`), and a thrown value the script does not catch
+    is returned as the plain value: that is what V8 puts in
+    ``callFunctionOn``'s ``result`` and what ``Element.apply`` hands back, with
+    ``exceptionDetails`` dropped.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -237,7 +247,11 @@ class FakeClickTarget:
         disconnected: bool = False,
         removed_before_click: bool = False,
         synthetic_error: BaseException | None = None,
+        click_throws: Any = _UNSET,
+        synthetic_answer: Any = _UNSET,
     ) -> None:
+        self.click_throws = click_throws
+        self.synthetic_answer = synthetic_answer
         self.detached = detached
         self.disconnected = disconnected
         self.removed_before_click = removed_before_click
@@ -432,20 +446,27 @@ class FakeClickTarget:
             raise left_the_document()
         self.calls.append("click")
 
-    def _synthetic(self) -> bool:
-        """``click_target.SYNTHETIC_JS`` as the page runs it, in one task."""
-        self.calls.append("synthetic")
+    def _synthetic(self, js_function: str) -> Any:
+        """The product's synthetic script as the page runs it, in one task."""
         if self.synthetic_error is not None:
             raise self.synthetic_error
+        detached, clicked, threw = _synthetic_answers(js_function)
+        if self.synthetic_answer is not _UNSET:
+            return self.synthetic_answer
         if self.removed_before_click:
             self.disconnected = True
         if self.disconnected:
-            return False
+            return detached
         self.calls.append("click")
-        return True
+        if self.click_throws is not _UNSET:
+            return self.click_throws if threw is _UNSET else threw
+        return clicked
 
     async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
         self.apply_calls.append(js_function)
+        if "elem.click()" in js_function:
+            # The ATTEMPT is recorded before ``DOM.resolveNode`` can fail.
+            self.calls.append("synthetic")
         if self.detached:
             raise left_the_document()
         if "elementFromPoint" in js_function:
@@ -454,7 +475,7 @@ class FakeClickTarget:
                 return self._aim_answer
             return self._aim()
         if "elem.click()" in js_function:
-            return self._synthetic()
+            return self._synthetic(js_function)
         if PROBE_KEY in js_function and "addEventListener" in js_function:
             self.armed = _probe_kinds(js_function)
             self.observed = []
@@ -485,6 +506,31 @@ def left_the_document(
     exception constructor, the way a real reply reaches the product.
     """
     return ProtocolException({"message": message, "code": -32000})
+
+
+def _js_value(literal: str) -> Any:
+    return json.loads(literal.strip())
+
+
+def _synthetic_answers(js_function: str) -> tuple[Any, Any, Any]:
+    """(detached, clicked, threw) as the synthetic script itself returns them.
+
+    "detached" is what it returns when the node is not connected, "clicked" its
+    last return, and "threw" what it returns from a ``catch`` around
+    ``elem.click()`` -- ``_UNSET`` when nothing catches it, so a value the
+    page's ``click()`` throws escapes as the script's answer.
+    """
+    detached = re.search(
+        r"if \(!(?:elem\.isConnected|connected)\) return ([^;]+);", js_function
+    )
+    returns = re.findall(r"return ([^;]+);", js_function)
+    caught = re.search(
+        r"elem\.click\(\);\s*\} catch \(e\) \{ return ([^;]+);", js_function
+    )
+    if detached is None or not returns:
+        raise AssertionError("not a synthetic script this double can run")
+    threw = _js_value(caught.group(1)) if caught else _UNSET
+    return _js_value(detached.group(1)), _js_value(returns[-1]), threw
 
 
 def _probe_kinds(js_function: str) -> list[str]:

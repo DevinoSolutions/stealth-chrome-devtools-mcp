@@ -147,6 +147,7 @@ class TestDomHandlerSilentExcepts:
     async def test_click_element_mouse_click_fallback_logs_at_debug(
         self, captured_backend_records
     ):
+        from stealth_chrome_devtools_mcp.embedded import click_target
         from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
         element = MagicMock()
@@ -170,9 +171,11 @@ class TestDomHandlerSilentExcepts:
             }
         )
         # T-10034: the synthetic click is ONE in-page call through ``apply``
-        # (``click_target.SYNTHETIC_JS``), answering ``true`` when it clicked.
+        # (``click_target.SYNTHETIC_JS``), answering its own clicked token.
         element.apply = AsyncMock(
-            side_effect=lambda js, *a, **k: True if "elem.click()" in js else aim
+            side_effect=lambda js, *a, **k: (
+                click_target.SYNTHETIC_CLICKED if "elem.click()" in js else aim
+            )
         )
         tab = _single_shot_tab()
         tab.query_selector = AsyncMock(return_value=element)
