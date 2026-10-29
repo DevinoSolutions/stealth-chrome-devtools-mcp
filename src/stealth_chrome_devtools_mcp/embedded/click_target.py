@@ -103,7 +103,7 @@ if TYPE_CHECKING:
 #: The two kinds of click ``click_element`` can dispatch. ``coordinate`` is
 #: ``Element.mouse_click`` — a real, trusted, hit-tested pointer input at
 #: :func:`aim`'s point. ``synthetic`` is the error-only fallback
-#: ``Element.click``, an in-page ``(el) => el.click()``: untrusted, no
+#: :func:`synthetic_click`, an in-page ``el.click()``: untrusted, no
 #: coordinate, no hit-testing. It is kept because for a ``display:none`` target
 #: it is the only thing that reaches the element at all — what F-876 changes is
 #: that the caller is told which one happened.
@@ -457,8 +457,10 @@ class InputSent:
 
     ``sent`` turns true immediately BEFORE the click's first
     ``Input.dispatchMouseEvent`` goes out, in :func:`_send_mouse` -- the one
-    function here that sends input -- and never turns back. A send that fails
-    still counts: a timeout does not prove the event was not delivered.
+    function here that sends pointer input -- and never turns back. A send
+    that fails still counts: a timeout does not prove the event was not
+    delivered. :func:`synthetic_click`, the one synthetic sender, sets it for
+    every outcome but the page's definite "the node had left, nothing ran".
 
     It is how the caller tells "nothing reached the page" (a re-run or the
     synthetic ``el.click()`` is safe) from "something may have" (neither is:
@@ -721,6 +723,50 @@ async def _plain_click(tab: Tab, element: Element, ledger: InputSent) -> None:
         await _wind_down(tab, element, at, ledger, disarm=False)
         raise
     await _send_mouse(tab, "mouseReleased", *at, ledger)
+
+
+#: THE one synthetic sender's script (T-10034). The connectivity check and the
+#: ``el.click()`` run in ONE page-side task, so the page cannot remove the node
+#: between them: ``false`` is the page saying the node had left and nothing was
+#: clicked, ``true`` that ``el.click()`` ran on a node still in its document.
+#: nodriver's ``Element.click`` is not used: it awaits a ``resolveNode`` and a
+#: ``flash`` (a marker injected into the page) before its unguarded
+#: ``(el) => el.click()``, and a node removed in that window is clicked where no
+#: listener in the page can hear it.
+SYNTHETIC_JS = """(elem) => {
+    if (!elem.isConnected) return false;
+    elem.click();
+    return true;
+}"""
+
+
+async def synthetic_click(element: Element, selector: str, ledger: InputSent) -> bool:
+    """The ONE synthetic ``el.click()``: ``False`` when the page said it left.
+
+    Sent through ``Element.apply`` (``Runtime.callFunctionOn`` with
+    ``userGesture``, as ``Element.click`` sends it), bounded by
+    :data:`INPUT_BUDGET_S`. *ledger* turns true for every outcome except the
+    page's definite ``false``: that answer proves ``el.click()`` never ran, so
+    the caller may re-resolve; a failure, a timeout or a cancellation proves
+    nothing about it, so it counts as input that may have reached the page.
+
+    Raises ``ToolError`` when the page answered with anything but a boolean.
+    """
+    try:
+        answer = await asyncio.wait_for(element.apply(SYNTHETIC_JS), INPUT_BUDGET_S)
+    except BaseException:
+        ledger.sent = True
+        raise
+    if answer is False:
+        return False
+    ledger.sent = True
+    if answer is not True:
+        raise ToolError(
+            f"the synthetic click on '{selector}' answered with "
+            f"{type(answer).__name__}, not the promised boolean; it may have "
+            "reached the page, so it was not repeated"
+        )
+    return True
 
 
 async def click(

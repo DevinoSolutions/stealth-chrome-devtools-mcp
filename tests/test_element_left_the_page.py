@@ -27,6 +27,7 @@ succeed and answer ``isConnected`` false.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -111,17 +112,6 @@ async def test_an_element_gone_after_a_probe_move_is_not_retried():
     hovered = FakeClickTarget(detach_on="mouseMoved")
     spare = FakeClickTarget()
     tab = _ReplacingTab(hovered, spare)
-    # ATTEMPTS, not deliveries: nodriver 0.50's ``Element.click`` resolves the
-    # node first and fails there, so a delivery count cannot see the fallback
-    # being tried. The product must not try it at all.
-    synthetic_attempts: list[str] = []
-    deliver = hovered.click
-
-    async def attempted_click() -> None:
-        synthetic_attempts.append("click")
-        await deliver()
-
-    hovered.click = attempted_click
 
     with pytest.raises(ToolError) as caught:
         await DOMHandler.click_element(tab, SELECTOR)
@@ -131,7 +121,10 @@ async def test_an_element_gone_after_a_probe_move_is_not_retried():
     assert "Query the element again" in message, message
     assert len(tab.select_calls) == 1
     assert spare.landings == []
-    assert synthetic_attempts == []
+    # ATTEMPTS, not deliveries: a synthetic call on a gone node fails before it
+    # clicks, so a delivery count cannot see the fallback being tried. The
+    # double records every attempt, through either sender.
+    assert "synthetic" not in hovered.calls
 
 
 async def test_a_delivered_press_is_never_repeated_when_the_element_leaves():
@@ -180,21 +173,13 @@ async def test_a_plain_click_that_fails_after_its_press_is_never_clicked_again()
         fail_on={"mouseReleased": (RuntimeError("socket hiccup"), True)},
     )
     tab = _ReplacingTab(target, FakeClickTarget())
-    synthetic_attempts: list[str] = []
-    deliver = target.click
-
-    async def attempted_click() -> None:
-        synthetic_attempts.append("click")
-        await deliver()
-
-    target.click = attempted_click
 
     with pytest.raises(ToolError) as caught:
         await DOMHandler.click_element(tab, SELECTOR)
 
     assert "may have reached the page" in str(caught.value), str(caught.value)
     assert len(_presses(target)) == 1
-    assert synthetic_attempts == []
+    assert "synthetic" not in target.calls
     assert len(tab.select_calls) == 1
 
 
@@ -392,10 +377,151 @@ async def test_a_connected_display_none_target_still_gets_the_synthetic_click():
 
     assert result["dispatch"] == "synthetic"
     assert result["reason"] == "not-rendered"
-    assert "click" in hidden.calls
+    assert hidden.calls.count("synthetic") == 1
+    assert hidden.calls.count("click") == 1
     assert hidden.landings == []
     assert len(tab.select_calls) == 1
     assert spare.landings == [] and "click" not in spare.calls
+
+
+# ---------------------------------------------------------------------------
+# (c3) the synthetic click checks and clicks in ONE page-side call (Codex HIGH)
+# ---------------------------------------------------------------------------
+
+
+def _hidden(**kwargs) -> FakeClickTarget:
+    """A connected ``display:none`` target: no box, so the synthetic path."""
+    return FakeClickTarget(
+        rendered=False,
+        mouse_click_error=RuntimeError("could not find position"),
+        **kwargs,
+    )
+
+
+async def test_the_synthetic_script_checks_before_it_clicks():
+    """The double answers ``false`` for a removed node because the real script
+    returns it before ``el.click()``, in the same function."""
+    js = click_target.SYNTHETIC_JS
+    assert js.index("if (!elem.isConnected) return false;") < js.index("elem.click()")
+
+
+async def test_an_element_removed_after_the_last_read_is_never_clicked_synthetically():
+    """Codex review HIGH: a connected ``display:none`` button passed every check
+    and the page's next re-render removed it before ``el.click()`` ran -- on
+    192baaa that was AFTER the second aim, inside nodriver's ``Element.click``.
+    The check and the click are now one page-side call, so the page answers
+    ``false`` and the attempt is re-run. RED on 192baaa: ``el.click()`` ran on
+    the removed node and the answer was ``dispatch: synthetic``."""
+    hidden = _hidden(removed_before_click=True)
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(hidden, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "click" not in hidden.calls
+    assert hidden.calls.count("synthetic") == 1
+    assert len(_presses(fresh)) == 1
+    assert len(tab.select_calls) == 2
+    assert result["dispatch"] == "coordinate"
+
+
+async def test_the_page_answering_false_on_every_attempt_clicks_nothing():
+    targets = [_hidden(removed_before_click=True) for _ in range(_MAX_RESOLVES + 2)]
+    tab = _ReplacingTab(*targets)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "nothing was clicked" in message, message
+    assert len(tab.select_calls) == _MAX_RESOLVES
+    assert all("click" not in t.calls and t.landings == [] for t in targets)
+    assert [t.calls.count("synthetic") for t in targets] == [1, 1, 1, 0, 0]
+
+
+async def test_false_then_true_is_re_run_once_and_clicked_once():
+    removed = _hidden(removed_before_click=True)
+    hidden = _hidden()
+    tab = _ReplacingTab(removed, hidden)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert len(tab.select_calls) == 2
+    assert "click" not in removed.calls
+    assert hidden.calls.count("click") == 1
+    assert result["dispatch"] == "synthetic"
+
+
+class _HangingSynthetic(FakeClickTarget):
+    """The synthetic call's reply never comes back."""
+
+    async def apply(self, js_function, *args, **kwargs):
+        if "elem.click()" in js_function:
+            self.calls.append("synthetic")
+            await asyncio.Event().wait()
+        return await super().apply(js_function, *args, **kwargs)
+
+
+@pytest.mark.parametrize("failure", ["transport", "timeout"])
+async def test_a_synthetic_call_that_fails_is_never_re_run(monkeypatch, failure):
+    """No boolean came back, so the page may have run ``el.click()``: never
+    re-run, never repeated. RED on 192baaa because the failure is modelled on
+    the one sender that now exists; the rule is the post-input rule."""
+    monkeypatch.setattr(click_target, "INPUT_BUDGET_S", 0.05)
+    if failure == "transport":
+        hidden = _hidden(synthetic_error=ConnectionError("socket closed"))
+    else:
+        hidden = _HangingSynthetic(
+            rendered=False, mouse_click_error=RuntimeError("could not find position")
+        )
+    spare = FakeClickTarget()
+    tab = _ReplacingTab(hidden, spare)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "may have reached the page" in message, message
+    assert len(tab.select_calls) == 1
+    assert hidden.calls.count("synthetic") == 1
+    assert spare.landings == [] and "synthetic" not in spare.calls
+
+
+@pytest.mark.parametrize(
+    ("answer", "clicked", "sent"),
+    [(False, False, False), (True, True, True)],
+)
+async def test_synthetic_click_records_input_unless_the_page_said_false(
+    answer, clicked, sent
+):
+    """``InputSent`` after the one synthetic sender: only the page's definite
+    ``false`` -- ``el.click()`` never ran -- leaves it clear for a re-run."""
+    target = _hidden(removed_before_click=not answer)
+    ledger = click_target.InputSent()
+
+    assert await click_target.synthetic_click(target, SELECTOR, ledger) is clicked
+    assert ledger.sent is sent
+
+
+async def test_synthetic_click_records_input_when_no_answer_came_back():
+    target = _hidden(synthetic_error=ConnectionError("socket closed"))
+    ledger = click_target.InputSent()
+
+    with pytest.raises(ConnectionError):
+        await click_target.synthetic_click(target, SELECTOR, ledger)
+    assert ledger.sent is True
+
+
+async def test_synthetic_click_refuses_an_answer_that_is_not_a_boolean():
+    class _Blank(FakeClickTarget):
+        async def apply(self, js_function, *args, **kwargs):
+            return None  # a script that THREW lands here as None
+
+    ledger = click_target.InputSent()
+    with pytest.raises(ToolError) as caught:
+        await click_target.synthetic_click(_Blank(), SELECTOR, ledger)
+    assert "may have reached the page" in str(caught.value)
+    assert ledger.sent is True
 
 
 # ---------------------------------------------------------------------------
