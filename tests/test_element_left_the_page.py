@@ -163,6 +163,100 @@ async def test_an_element_that_leaves_on_its_own_mousedown_is_a_clicked_element(
     assert result["dispatch"] == "coordinate"
 
 
+async def test_a_plain_click_that_fails_after_its_press_is_never_clicked_again():
+    """Review HIGH. An element with no hit-testable point (here: off the
+    viewport) took nodriver's ``mouse_click``, which sends the press AND the
+    release before it returns; a plain error after them reached the synthetic
+    fallback, and the page took a SECOND click. RED before: dispatch came back
+    ``synthetic`` with the fallback run. The boundary is the first input, as
+    recorded by ``click_target.InputSent``, never the error's type."""
+    target = FakeClickTarget(
+        rect=(-500.0, 20.0, 40.0, 20.0),
+        fail_on={"mouseReleased": (RuntimeError("socket hiccup"), True)},
+    )
+    tab = _ReplacingTab(target, FakeClickTarget())
+    synthetic_attempts: list[str] = []
+    deliver = target.click
+
+    async def attempted_click() -> None:
+        synthetic_attempts.append("click")
+        await deliver()
+
+    target.click = attempted_click
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "may have reached the page" in str(caught.value), str(caught.value)
+    assert len(_presses(target)) == 1
+    assert synthetic_attempts == []
+    assert len(tab.select_calls) == 1
+
+
+class _LeavesAfterAim(FakeClickTarget):
+    """The page re-renders right after the aim read: the box read that follows
+    it, still before any input, is the first thing to find the element gone."""
+
+    async def apply(self, js_function, *args, **kwargs):
+        answer = await super().apply(js_function, *args, **kwargs)
+        if "elementFromPoint" in js_function:
+            self.detached = True
+        return answer
+
+
+async def test_an_element_gone_before_the_first_input_inside_the_click_is_re_run():
+    """The re-run boundary is the first INPUT, not the call into
+    ``click_target.click``: its box read and probe arm send nothing."""
+    gone = _LeavesAfterAim()
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(gone, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert gone.landings == []
+    assert len(_presses(fresh)) == 1
+    assert len(tab.select_calls) == 2
+    assert result["dispatch"] == "coordinate"
+
+
+# ---------------------------------------------------------------------------
+# one deadline across the re-runs (review MED)
+# ---------------------------------------------------------------------------
+
+
+class _LateTab(FakeTab):
+    """Answers each resolution from a script, then nothing."""
+
+    def __init__(self, *answers) -> None:
+        super().__init__(select_result=None)
+        self._answers = list(answers)
+
+    async def query_selector(self, selector, *args, **kwargs):
+        self.select_calls.append(selector)
+        return self._answers.pop(0) if self._answers else None
+
+
+async def test_the_re_runs_spend_one_deadline(monkeypatch):
+    """RED before: each re-run handed the caller's WHOLE timeout to a fresh
+    resolution, so a late element that left and did not come back cost 1.5 s +
+    a new 2 s wait on a 2 s budget. The clock is the module's timing seam."""
+    clock = [0.0]
+
+    async def advance(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(element_resolution, "_now", lambda: clock[0])
+    monkeypatch.setattr(element_resolution, "_sleep", advance)
+    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.5)
+    tab = _LateTab(None, None, None, FakeClickTarget(detached=True))
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR, timeout=2000)
+
+    assert "Element not found" in str(caught.value), str(caught.value)
+    assert clock[0] <= 2.0, clock[0]
+
+
 # ---------------------------------------------------------------------------
 # (c) the re-resolve is bounded
 # ---------------------------------------------------------------------------
