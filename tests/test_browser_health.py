@@ -21,6 +21,7 @@ import os
 import re
 import threading
 import time
+from datetime import timedelta
 from types import SimpleNamespace
 
 import psutil
@@ -58,6 +59,7 @@ class _Log:
 
     def __init__(self) -> None:
         self.lines: list[tuple[str, str, str]] = []
+        self.errors: list[BaseException] = []
 
     def log_info(self, _component, method, message, *_a, **_k):
         self.lines.append(("info", method, str(message)))
@@ -70,6 +72,7 @@ class _Log:
 
     def log_error(self, _component, method, error, *_a, **_k):
         self.lines.append(("error", method, f"{type(error).__name__}: {error}"))
+        self.errors.append(error)
 
     def at(self, level: str) -> list[str]:
         return [message for lvl, _m, message in self.lines if lvl == level]
@@ -343,6 +346,29 @@ class TestWhenItHeals:
         assert error.startswith("HungBrowserError") and "healing" in error
         assert "targets(page=1 other=0)" in error
         assert any("healed" in line for line in log.at("info"))
+
+    async def test_two_freezes_report_one_fingerprint(self, monkeypatch, log):
+        """T-10034: the heal's ERROR is grouped by its failed step and error type,
+        never by the instance id, uptime or timings its message embeds."""
+        manager = BrowserManager()
+        _install(manager)
+        _install(manager, "i-other")
+        manager._instances["i-other"]["instance"].created_at -= timedelta(seconds=5000)
+        stage = _Stage(manager, monkeypatch, ids=(INSTANCE_ID, "i-other"))
+        stage.probe_error = TimeoutError
+        stage.probe_results = {INSTANCE_ID: [False, False], "i-other": [False, False]}
+        health = stage.health()
+
+        await health.check_once()
+        await health.check_once()
+
+        first, second = log.errors
+        assert str(first) != str(second)
+        assert first.sentry_fingerprint == second.sentry_fingerprint
+        assert first.sentry_fingerprint == (
+            "hung-browser",
+            "heal TimeoutError at evaluate",
+        )
 
     async def test_a_pass_between_two_failures_resets_the_count(self, stage):
         stage.probe_results[INSTANCE_ID] = [False, True, False]

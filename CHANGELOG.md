@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)
+
+- Seven `HungBrowserError` events in the project's Sentry (STEALTH-CHROME-DEVTOOLS-MCP-ES, -EJ, -EF, -EE, -DY, -DQ, -DB) were seven issues, because the report is logged at ERROR and never raised, so it has no stack and Sentry grouped it by a message that embeds the instance id, uptime (`uptime=71999s`), process counts, `free_ram=33.11GB`, paths and step timings (`evaluate=15070ms`): the freeze rate could not be read off the issue list. `observability._scrub_event` now sets the event's `fingerprint` from the live exception (`_stable_fingerprint`): `HungBrowserError` and `FrozenCloneError` are `forensic_errors.ForensicError`s that carry their kind and the stable cause the call site passes (for the probe heal: `["hung-browser", "probe-heal", "TimeoutError at evaluate"]`), so the same step and error type is one issue whatever the instance, uptime or timings, and a different step, error type or site is another. The message, the exception and the scrub are unchanged.
+- One click `ToolError` title ("Failed to click element: '#b' left the page each time it was resolved ...") was three issues (-EV 15 events, -EW 5, -ET 1): the same `ToolError` over a `ProtocolException` in two and an `ElementDisconnected` in the third, and different source lines per release (`dom_handler.py` 330/313 in 2.1.50, 331/314 in 2.1.53), all of which Sentry's stack grouping reads. A `ToolError` that ships is now fingerprinted by its type and its message with the per-occurrence parts (URLs, UUIDs, quoted selectors and names, digit runs) replaced, so those three are one issue; two different messages stay two.
+
 ## 2.1.53
 
 ### An editable checkout reports its errors as environment=development, not production (T-10363)

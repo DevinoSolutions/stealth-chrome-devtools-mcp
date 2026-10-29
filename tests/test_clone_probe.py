@@ -33,6 +33,7 @@ CLONE = "i-clone"
 class _Log:
     def __init__(self) -> None:
         self.lines: list[tuple[str, str]] = []
+        self.errors: list[BaseException] = []
 
     def log_info(self, _component, _method, message, *_a, **_k):
         self.lines.append(("info", str(message)))
@@ -42,6 +43,7 @@ class _Log:
 
     def log_error(self, _component, _method, error, *_a, **_k):
         self.lines.append(("error", f"{type(error).__name__}: {error}"))
+        self.errors.append(error)
 
     def at(self, level: str) -> list[str]:
         return [message for lvl, message in self.lines if lvl == level]
@@ -283,6 +285,12 @@ class TestTheFirstMissIsCaptured:
         assert "steps(" in error
         assert rig.fresh_asked == [browser.websocket_url]
         assert rig.own_asked == [browser]
+        # T-10034: grouped by the failed step and error type, not by the record
+        (report,) = log.errors
+        assert report.sentry_fingerprint == (
+            "frozen-clone",
+            "probe TimeoutError at evaluate",
+        )
         assert probe.records[CLONE] in error
 
     async def test_a_dead_backend_connection_reads_as_fresh_answers_own_does_not(
