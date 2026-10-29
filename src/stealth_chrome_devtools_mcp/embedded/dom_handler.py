@@ -31,16 +31,17 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 #: removed but still references has an EMPTY computed style, so the three style
 #: tests alone pass for it and it listed as visible (T-10284); it is asked
 #: whether it is in a document first, through ``click_target``'s one
-#: connectivity read, so it can never read as visible.
+#: connectivity read, and only the ``yes`` token passes the gate: a ``no``, a
+#: read that threw and a value that is no token all read as not visible.
 VISIBLE_JS = """(elem) => {
-    __IS_CONNECTED__
-    if (!(__CONNECTED__)) return false;
+    __CONNECTIVITY__
+    if (connectivity(elem) !== "__YES__") return false;
     var style = window.getComputedStyle(elem);
     return style.display !== 'none' &&
            style.visibility !== 'hidden' &&
            style.opacity !== '0';
-}""".replace("__IS_CONNECTED__", click_target.IS_CONNECTED_JS).replace(
-    "__CONNECTED__", click_target.CONNECTED_EXPR_JS
+}""".replace("__CONNECTIVITY__", click_target.CONNECTIVITY_JS).replace(
+    "__YES__", click_target.CONNECTED_YES
 )
 
 
@@ -214,6 +215,17 @@ class DOMHandler:
                         )
                         break
 
+                except ToolError as unreadable:
+                    # A connectivity read that FAILED (``refresh_element``,
+                    # T-10284) is neither a departure nor a failure this loop may
+                    # absorb. The handler below logs an element it cannot describe
+                    # and moves on, which here would answer "not on the page" for a
+                    # node that may be (a getter that throws on a connected one),
+                    # silently. Only the page's own ``no`` drops an element; an
+                    # unreadable one fails the listing, saying which.
+                    raise ToolError(
+                        f"element {idx} of {selector!r}: {unreadable}"
+                    ) from unreadable
                 except Exception as elem_error:
                     debug_logger.log_error(
                         "DOMHandler",
@@ -348,10 +360,12 @@ class DOMHandler:
         target gives (T-10034, STEALTH-…-ER). ``isConnected`` tells them apart,
         and a departure is raised as ``ElementDisconnected``, which
         ``detached_element`` classifies like Chrome's own reply: nothing has
-        been sent yet, so ``retry_detached`` re-resolves it.
+        been sent yet, so ``retry_detached`` re-resolves it. Only the page's
+        ``no`` is a departure: a read that failed is a ``ToolError``
+        (``click_target.connectivity``), and nothing is re-resolved or sent.
         """
         aim = await click_target.aim(element, selector)
-        if not click_target.connected(aim):
+        if not click_target.connectivity(aim.get("connected"), f"'{selector}'"):
             raise ElementDisconnected(f"'{selector}' is no longer in its document")
         return aim
 

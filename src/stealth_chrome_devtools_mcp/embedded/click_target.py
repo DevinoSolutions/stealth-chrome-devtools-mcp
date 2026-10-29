@@ -131,6 +131,44 @@ POINTER_EVENTS_NONE = "pointer-events-none"
 COVERED = "covered"
 DISABLED = "disabled"
 
+#: THE page-side read of "is this node still in a document" (T-10284), and its
+#: ONE vocabulary: every script that asks (:data:`AIM_JS`, :data:`SYNTHETIC_JS`,
+#: :data:`CONNECTED_JS`, ``dom_handler``'s visibility script) is built from
+#: :data:`CONNECTIVITY_JS`, nothing else in the package reads ``isConnected``,
+#: and :func:`connectivity` is the one reader of the answer on this side.
+#:
+#: The answer is one of three TOKENS, never a boolean. ``Element.apply`` drops
+#: ``exceptionDetails`` and hands back ``result[0].value``, so a value a getter
+#: THROWS arrives as a plain one: ``throw true`` is indistinguishable from a
+#: ``true`` that was read, and a thrown Error is ``None``, the same as "no
+#: answer". A token can only come from a script that ran to the line that
+#: returns it: the read is inside a ``try`` and a throw becomes
+#: :data:`CONNECTED_THREW`, as does any value that is not a boolean. Only
+#: ``no`` is a departure.
+#:
+#: The getter is the NATIVE ``Node.prototype.isConnected`` accessor, never
+#: ``elem.isConnected`` (a ``<form>`` with a control named ``isConnected``
+#: shadows that member, see :data:`NATIVES_JS`). A page script that REPLACES the
+#: accessor is the accepted boundary until T-10299 (an isolated world): one
+#: that throws is read as ``threw``, one that answers a boolean is believed.
+CONNECTED_YES = "stealth.connected:yes"
+CONNECTED_NO = "stealth.connected:no"
+CONNECTED_THREW = "stealth.connected:threw"
+
+CONNECTIVITY_JS = (
+    """const connectivity = (node) => {
+        try {
+            const answer = Object.getOwnPropertyDescriptor(
+                Node.prototype, 'isConnected').get.call(node);
+            if (answer === true) return "__YES__";
+            if (answer === false) return "__NO__";
+        } catch (e) { return "__THREW__"; }
+        return "__THREW__";
+    };""".replace("__YES__", CONNECTED_YES)
+    .replace("__NO__", CONNECTED_NO)
+    .replace("__THREW__", CONNECTED_THREW)
+)
+
 #: The ONE read. Answers with a JSON **string** for the same reason
 #: ``text_entry.READ_JS`` does. ``getClientRects()[0]`` is the box nodriver
 #: clicks. An element with NO client rects has no box at all: the rect comes back
@@ -153,7 +191,8 @@ DISABLED = "disabled"
 #: fieldset is deliberately left out of the ancestor list for that reason: the
 #: CONTROL's own ``:disabled`` already applies the fieldset and legend rules.
 #:
-#: ``connected`` is ``elem.isConnected`` (T-10034, STEALTH-…-ER). A node the page
+#: ``connected`` is the connectivity token (:data:`CONNECTIVITY_JS`, T-10034,
+#: STEALTH-…-ER). A node the page
 #: REMOVED has no client rects either, and the read still succeeds through the
 #: script's reference to it, so without this it answers exactly like a
 #: ``display:none`` target and earns the synthetic click -- on a node no listener
@@ -163,7 +202,7 @@ DISABLED = "disabled"
 #: while the host is in the document; ``document.contains`` answers false there)
 #: and inside an iframe (connected to its OWN document). A disconnected node is
 #: never hit-tested: it has no box, and no point in the page can be over it, so
-#: it can never read as "covered". :func:`connected` is the one reader.
+#: it can never read as "covered". :func:`connectivity` is the one reader.
 #: The NATIVE accessor or method for every member the click path reads off a
 #: node, each read ONCE at the top of the script that uses it (Codex round 5).
 #: Never ``elem.<name>``: an HTML ``<form>`` is ``[LegacyOverrideBuiltIns]``, so
@@ -175,7 +214,6 @@ DISABLED = "disabled"
 NATIVES_JS = (
     "const getter = (proto, name) => "
     "Object.getOwnPropertyDescriptor(proto, name).get;\n"
-    "    const isConnected = getter(Node.prototype, 'isConnected');\n"
     "    const ownerDocument = getter(Node.prototype, 'ownerDocument');\n"
     "    const nodeName = getter(Node.prototype, 'nodeName');\n"
     "    const getRootNode = Node.prototype.getRootNode;\n"
@@ -190,8 +228,10 @@ NATIVES_JS = (
     "    const elementFromPoint = Document.prototype.elementFromPoint;"
 )
 
-AIM_JS = """(elem) => {
+AIM_JS = (
+    """(elem) => {
     __NATIVES__
+    __CONNECTIVITY__
     const inert = (node) => {
         if (!node) return false;
         if (matches.call(node, ':disabled')) return true;
@@ -199,8 +239,8 @@ AIM_JS = """(elem) => {
             node, 'button,input,select,textarea,optgroup,option');
         return !!owner && matches.call(owner, ':disabled');
     };
-    const connected = isConnected.call(elem) === true;
-    const rects = connected ? getClientRects.call(elem) : [];
+    const state = connectivity(elem);
+    const rects = state === "__YES__" ? getClientRects.call(elem) : [];
     const box = rects.length ? rects[0] : null;
     const style = window.getComputedStyle(elem);
     const shape = (node) => node === null ? null : {
@@ -225,7 +265,7 @@ AIM_JS = """(elem) => {
             hosts.indexOf(under) !== -1);
     }
     return JSON.stringify({
-        connected: connected,
+        connected: state,
         rendered: !!box,
         rect: {
             left: box ? box.left : 0,
@@ -243,6 +283,9 @@ AIM_JS = """(elem) => {
         visibility: String(style.visibility)
     });
 }""".replace("__NATIVES__", NATIVES_JS)
+    .replace("__CONNECTIVITY__", CONNECTIVITY_JS)
+    .replace("__YES__", CONNECTED_YES)
+)
 
 
 #: How far (CSS px) a page-observed event may be from the point it was aimed at
@@ -395,43 +438,42 @@ def _shape(raw: object) -> dict[str, object] | None:
     }
 
 
-#: THE page-side read of "is this node still in a document" (T-10284): the
-#: declaration and the strict expression every script that asks it is built from
-#: -- :data:`SYNTHETIC_JS`, :data:`CONNECTED_JS` and ``dom_handler``'s
-#: visibility script. Never ``elem.isConnected`` (a ``<form>`` with a control
-#: named ``isConnected`` shadows it, see :data:`NATIVES_JS`), and only a literal
-#: ``true`` is connected: a thrown read comes back as ``None`` and a shadowed
-#: one serialises to ``{}``, and neither is a document the node is in.
-IS_CONNECTED_JS = (
-    "const isConnected =\n"
-    "        Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected').get;"
-)
-CONNECTED_EXPR_JS = "isConnected.call(elem) === true"
-
 #: The connectivity read ON ITS OWN, for a caller that holds an ``Element`` and
 #: has no aim to read it off (``element_resolution.refresh_element``). One
-#: boolean, one ``Element.apply``. nodriver's ``update()`` re-resolves by
+#: token, one ``Element.apply``. nodriver's ``update()`` re-resolves by
 #: backend node id and that succeeds for a node the page removed but still
 #: references, so ``update`` cannot say whether an element has left the page.
 CONNECTED_JS = (
-    ("(elem) => {\n    __IS_CONNECTED__\n    return __CONNECTED__;\n}")
-    .replace("__IS_CONNECTED__", IS_CONNECTED_JS)
-    .replace("__CONNECTED__", CONNECTED_EXPR_JS)
-)
+    "(elem) => {\n    __CONNECTIVITY__\n    return connectivity(elem);\n}"
+).replace("__CONNECTIVITY__", CONNECTIVITY_JS)
 
 
-def connected(facts: dict[str, object]) -> bool:
-    """Whether :func:`aim`'s answer is about an element still in its document.
+def connectivity(answer: object, what: str) -> bool:
+    """THE reader of a connectivity answer: ``True`` in a document, ``False`` left.
 
-    ``True`` only for a literal ``connected: true`` (Codex round 5): anything
-    else -- ``false``, a missing field, or the ``{}`` a shadowed
-    ``isConnected`` serialised to -- is not connected. That is the safe
-    direction, because nothing has been sent yet: the caller re-resolves it
-    before any input (T-10034). It is not one of :func:`reason`'s answers: a
-    departed element is not a target the click "could not reach", it is no
-    target at all.
+    Accepts ONLY the script's own tokens (:data:`CONNECTED_YES`,
+    :data:`CONNECTED_NO`). ``False`` is the page SAYING the node left: the one
+    answer that is a departure. Everything else -- :data:`CONNECTED_THREW`, a
+    value that is no token (a ``true`` a getter threw, ``None`` from a thrown
+    Error or from a script that stopped returning its token, a shadowed
+    object) -- is a read that did not succeed, which says nothing about the
+    node, so it raises ``ToolError`` naming *what* could not be read. It is
+    never a departure (the caller would drop or refuse a node that may be
+    there) and never a connected node (the caller would act on one that may be
+    gone).
     """
-    return facts.get("connected") is True
+    if isinstance(answer, str):
+        if answer == CONNECTED_YES:
+            return True
+        if answer == CONNECTED_NO:
+            return False
+    found = (
+        "the page's isConnected read threw or answered something that is not a boolean"
+        if answer == CONNECTED_THREW
+        else f"the page answered with {type(answer).__name__}, not one of the "
+        "connectivity read's own answers"
+    )
+    raise ToolError(f"could not read whether {what} is still in its document: {found}")
 
 
 def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measured order)
@@ -812,16 +854,16 @@ SYNTHETIC_THREW = "stealth.click.synthetic:threw"
 #: 4, accepted until T-10299 moves these reads into an isolated world).
 SYNTHETIC_JS = (
     """(elem) => {
-    __IS_CONNECTED__
+    __CONNECTIVITY__
     const click = HTMLElement.prototype.click;
-    let connected;
-    try { connected = __CONNECTED__; }
-    catch (e) { return "__THREW__"; }
-    if (!connected) return "__DETACHED__";
+    const state = connectivity(elem);
+    if (state === "__NO__") return "__DETACHED__";
+    if (state !== "__YES__") return "__THREW__";
     try { click.call(elem); } catch (e) { return "__THREW__"; }
     return "__CLICKED__";
-}""".replace("__IS_CONNECTED__", IS_CONNECTED_JS)
-    .replace("__CONNECTED__", CONNECTED_EXPR_JS)
+}""".replace("__CONNECTIVITY__", CONNECTIVITY_JS)
+    .replace("__NO__", CONNECTED_NO)
+    .replace("__YES__", CONNECTED_YES)
     .replace("__DETACHED__", SYNTHETIC_DETACHED)
     .replace("__CLICKED__", SYNTHETIC_CLICKED)
     .replace("__THREW__", SYNTHETIC_THREW)

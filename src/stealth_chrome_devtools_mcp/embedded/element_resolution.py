@@ -583,15 +583,17 @@ async def _xpath_node_ids(tab: Tab, expression: str) -> list[NodeId]:
 
 
 async def _require_connected(element: Element) -> None:
-    """Raise :class:`ElementDisconnected` unless the page says *element* is connected.
+    """Raise :class:`ElementDisconnected` if the page says *element* has left.
 
-    ONE ``Element.apply`` of :data:`click_target.CONNECTED_JS` (T-10284). Only a
-    literal ``true`` is connected, as in :func:`click_target.connected`: a read
-    that threw (``None``) or a shadowed ``isConnected`` is not an element
-    anyone can use, and answering "gone" is the direction that costs a re-query
-    rather than an action on a node no document holds.
+    ONE ``Element.apply`` of :data:`click_target.CONNECTED_JS` (T-10284), read by
+    :func:`click_target.connectivity`: only the page's own ``no`` is a departure.
+    A read that did not succeed -- a getter that threw, a value that is no
+    token -- raises ``ToolError`` instead. It is not "gone" (a connected node
+    whose getter throws would be dropped from a listing, silently) and not
+    "connected" (a node the page removed would be acted on).
     """
-    if await element.apply(click_target.CONNECTED_JS) is not True:
+    answer = await element.apply(click_target.CONNECTED_JS)
+    if not click_target.connectivity(answer, "the element"):
         raise ElementDisconnected("the element is no longer in its document")
 
 
@@ -613,9 +615,11 @@ async def refresh_element(tab: Tab, element: Element | None) -> bool:
     ``display !== 'none'`` holds) with no bounding box, and a state read of it
     fails at ``get_position``. So the answer also reads ``isConnected`` off the
     node (:func:`_require_connected`, the script ``click_target`` builds its own
-    reads from) and classifies a ``false`` through the same
-    :func:`detached_element` as Chrome's reply. One extra read per element,
-    outside the document lock: it resolves no node id.
+    reads from) and classifies the page's ``no`` through the same
+    :func:`detached_element` as Chrome's reply. A read that FAILED is not an
+    answer about the element and raises ``ToolError`` (see
+    :func:`click_target.connectivity`). One extra read per element, outside the
+    document lock: it resolves no node id.
 
     ``update`` reads as "re-read this element" and is nothing of the kind: it
     sends ``DOM.getDocument`` and re-resolves the node against the answer, so

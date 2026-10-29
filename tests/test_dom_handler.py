@@ -15,7 +15,7 @@ zero-match still returns ``[]``. Hermetic (a fake Tab), so the fast unit lane.
 import pytest
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp.embedded import element_resolution
+from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import _MAX_RESOLVES
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -54,6 +54,8 @@ class _FakeElement:
 
     async def apply(self, js_function, *args, **kwargs):
         # The connectivity read (T-10284): this element is in its document.
+        if js_function == click_target.CONNECTED_JS:
+            return click_target.CONNECTED_YES
         return True
 
     async def get_position(self):
