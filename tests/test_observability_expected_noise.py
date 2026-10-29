@@ -960,6 +960,69 @@ class TestTheSessionLoopCouldNotTellTheClient:
         assert live == ["ExceptionGroup", "ValueError", "KeyError", "TypeError"]
         assert live == [link.type_name for link in expected_events._links(event, None)]
 
+    def test_a_falsey_member_is_not_walked_past_on_either_path(self):
+        """The SDK's group mode follows a cause and a group's members only
+        ``if exc_value and ...`` (``utils.py``:929-931, :953-955, :975), so an
+        exception whose ``__bool__`` is False is serialized WITHOUT its cause.
+        The live walk must stop there too, or the two paths judge different
+        links (T-10034 re-review)."""
+        from stealth_chrome_devtools_mcp import expected_events
+
+        class FalseyError(Exception):
+            def __bool__(self) -> bool:
+                return False
+
+        def chain():
+            try:
+                try:
+                    raise RuntimeError("cause")  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+                except RuntimeError as cause:
+                    leaf = FalseyError("falsey")
+                    leaf.__cause__ = cause
+                raise ExceptionGroup("g", [leaf])  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+            except ExceptionGroup:
+                return sys.exc_info()
+
+        event, hint = tool_manager_event(chain())
+        walked = observability._exception_chain(observability._hint_exception(hint))
+        live = [link.type_name for link in expected_events._links(event, walked)]
+        serialized = [link.type_name for link in expected_events._links(event, None)]
+
+        assert serialized == [
+            "ExceptionGroup",
+            "TestTheSessionLoopCouldNotTellTheClient."
+            "test_a_falsey_member_is_not_walked_past_on_either_path."
+            "<locals>.FalseyError",
+        ]
+        assert live == serialized
+
+    def test_a_falsey_reported_exception_is_walked_past(self):
+        """The plain mode has no such guard: ``walk_exception_chain`` tests
+        ``is not None`` (``utils.py``:828-832), so it keeps the cause."""
+        from stealth_chrome_devtools_mcp import expected_events
+
+        class FalseyError(Exception):
+            def __bool__(self) -> bool:
+                return False
+
+        def chain():
+            try:
+                try:
+                    raise RuntimeError("cause")  # noqa: TRY301  PERMANENT(the real chain IS the fixture; see _raise)
+                except RuntimeError as cause:
+                    raise FalseyError("falsey") from cause
+            except FalseyError:
+                return sys.exc_info()
+
+        event, hint = tool_manager_event(chain())
+        walked = observability._exception_chain(observability._hint_exception(hint))
+        live = [link.type_name for link in expected_events._links(event, walked)]
+        serialized = [link.type_name for link in expected_events._links(event, None)]
+
+        assert len(serialized) == 2
+        assert serialized[1] == "RuntimeError"
+        assert live == serialized
+
     def test_the_same_group_on_another_logger_still_ships(self):
         pair = logged(
             "stealth.backend",
