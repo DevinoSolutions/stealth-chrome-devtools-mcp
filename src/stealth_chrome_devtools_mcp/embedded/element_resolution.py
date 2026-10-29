@@ -404,7 +404,9 @@ async def retry_detached(
 
     ONE deadline: ``timeout`` (seconds) is fixed when this is called and each
     attempt is handed what is LEFT of it, to pass to its resolution — so the
-    re-runs never add up to a multiple of what the caller asked for.
+    re-runs' RESOLUTIONS never add up to more than the caller asked for. What
+    an attempt does after its resolution (a click's post-scroll wait) and the
+    settle between attempts come on top of that budget, not out of it.
 
     No document lock here: ``attempt`` resolves through this module, which
     takes it per query, and the lock is not re-entrant.

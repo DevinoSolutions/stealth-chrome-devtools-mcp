@@ -322,11 +322,15 @@ class FakeClickTarget:
         return member in self.form_controls and f"elem.{member}" in js_function
 
     def _aim(self, js_function: str) -> Any:
-        # A shadowed ``isConnected`` is the control: truthy, serialised as {}.
-        connected: Any = (
-            {} if self._shadowed(js_function, "isConnected") else not self.disconnected
-        )
-        if connected and self._shadowed(js_function, "getClientRects"):
+        # A shadowed ``isConnected`` is the control. Two different facts follow
+        # from it and are kept apart (Codex round 6): its JavaScript TRUTHINESS,
+        # which decides the script's own branches -- an object is truthy -- and
+        # what ``JSON.stringify`` writes for it, ``{}``, which is falsy in
+        # Python and must never decide a JS-side branch here.
+        shadowed = self._shadowed(js_function, "isConnected")
+        js_truthy = True if shadowed else not self.disconnected
+        connected: Any = {} if shadowed else not self.disconnected
+        if js_truthy and self._shadowed(js_function, "getClientRects"):
             # ``elem.getClientRects()`` calls the control: TypeError, uncaught.
             # A thrown Error OBJECT reaches the caller as ``None`` (measured on
             # real Chrome: "the page answered with NoneType"); a thrown
