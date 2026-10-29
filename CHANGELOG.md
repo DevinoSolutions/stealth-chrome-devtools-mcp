@@ -1,15 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### A session that crashed telling a departed client about its disconnect is dropped as a client disconnect (T-10034)
+
+- mcp's session loop logs an exception it read off the stream (`Received exception from stream: `, already dropped as `client-disconnect`) and then sends the client a log notification about it. When the client has gone, the write stream is already closed, anyio raises `ClosedResourceError` under three task groups, and `streamable_http_manager` logs `Session … crashed` (Sentry STEALTH-CHROME-DEVTOOLS-MCP-EN, 25 events on 2.1.47). `client-disconnect` gains a third arm for exactly that shape: logger `mcp.server.streamable_http_manager`, every non-group link an anyio `ClosedResourceError` raised from `_handle_message` calling `send_log_message`. A closed stream from any other send, and a group holding any other failure, still ship. The live exception walk now selects exactly the links sentry-sdk serializes (a reported group's members in its order; a group under an ordinary exception stays one link, as the SDK leaves it), so both paths judge the same links (F-929's §3.1); measured, no existing verdict moves. A chain longer than 24 links is never recognised on either path: the live walk collects one link past that bound, so a walk it cut short ships rather than dropping a real defect it never reached.
+
 ## 2.1.51
 
 ### take_screenshot captures the format and the full page it was asked for (T-10043)
 
 - `take_screenshot` handed nodriver's `save_screenshot` only a path, and nodriver defaults to `format="jpeg"` and the viewport. So a file named `.png` held JPEG bytes (measured: the 2.1.50 proof's `.png` screenshots start with `ff d8 ff e0`), `format="jpeg"` was the only format a file ever got, and `full_page=True` never captured beyond the viewport, on both paths.
 - The file path now passes the caller's `format` and `full_page`. The inline answer is captured as lossless PNG with `full_page` and re-encoded to the requested format, as before. `jpg` is read as `jpeg`, and any other `format` is refused as the caller's error before a capture: once the format reached nodriver, an unknown one went to Chrome as is and came back as `Invalid image format`, a browser failure on its face.
-
-### A session that crashed telling a departed client about its disconnect is dropped as a client disconnect (T-10034)
-
-- mcp's session loop logs an exception it read off the stream (`Received exception from stream: `, already dropped as `client-disconnect`) and then sends the client a log notification about it. When the client has gone, the write stream is already closed, anyio raises `ClosedResourceError` under three task groups, and `streamable_http_manager` logs `Session … crashed` (Sentry STEALTH-CHROME-DEVTOOLS-MCP-EN, 25 events on 2.1.47). `client-disconnect` gains a third arm for exactly that shape: logger `mcp.server.streamable_http_manager`, every non-group link an anyio `ClosedResourceError` raised from `_handle_message` calling `send_log_message`. A closed stream from any other send, and a group holding any other failure, still ship. The live exception walk now selects exactly the links sentry-sdk serializes (a reported group's members in its order; a group under an ordinary exception stays one link, as the SDK leaves it), so both paths judge the same links (F-929's §3.1); measured, no existing verdict moves. A chain longer than 24 links is never recognised on either path: the live walk collects one link past that bound, so a walk it cut short ships rather than dropping a real defect it never reached.
 
 ### Chrome's refusal of a screenshot is a ToolError, not a raw protocol error (T-10034)
 
