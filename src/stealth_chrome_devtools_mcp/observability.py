@@ -52,6 +52,7 @@ serialized payload — and hands both to that one rule set.
 """
 
 import importlib.metadata
+import json
 import logging
 import re
 from functools import cache
@@ -288,6 +289,31 @@ def _release() -> str | None:
         return importlib.metadata.version(_PACKAGE_NAME)
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def _environment() -> str:
+    """The Sentry ``environment`` tag: ``development`` for an editable install.
+
+    An editable checkout or worktree reports the same ``release`` as the wheel
+    it was cut from (``_release`` reads the frozen pyproject version), so
+    without this its dev-run errors land in that release's production health
+    read (T-10363). Editable is PEP 610's own answer: the installer's
+    ``direct_url.json`` with ``dir_info.editable`` true. A wheel install has no
+    such file; anything unreadable or unparsable is ``production`` too — the
+    tag only moves an install out of the release read when it is provably a
+    dev one, and telemetry never breaks boot over it.
+    """
+    try:
+        text = importlib.metadata.distribution(_PACKAGE_NAME).read_text(
+            "direct_url.json"
+        )
+        if text is None:
+            return "production"
+        dir_info = json.loads(text).get("dir_info") or {}
+        return "development" if dir_info.get("editable") is True else "production"
+    except Exception:  # noqa: BLE001  PERMANENT(telemetry never breaks boot, #55)
+        _log.debug("direct_url.json unreadable; environment=production", exc_info=True)
+        return "production"
 
 
 def _redact_url(match: "re.Match[str]") -> str:
@@ -842,6 +868,7 @@ def sentry_init(*, auto_enabling_integrations: bool = True) -> bool:
             AsyncioIntegration(),
         ],
         release=_release(),
+        environment=_environment(),
         before_send=_scrub_event,
         # The SDK captures every frame's local variables by default. In THIS
         # product those locals hold proxy credentials (`proxy_utils`,
