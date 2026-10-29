@@ -455,6 +455,13 @@ def _exception_chain(exc: BaseException) -> "list[BaseException]":
       is outermost on both paths — so a ``ToolError`` in a task group still ships
       (F-929's noise half, left open).
 
+    In group mode an exception that is FALSEY (a ``__bool__`` returning
+    False) is serialized without its cause, context or members, because each
+    of those reads opens ``if exc_value and ...`` (:929-931, :953-955, :975);
+    ``walk_exception_chain`` tests only ``is not None`` (:828-832), so the
+    plain mode walks past one. A ``__bool__`` that raises is the never-raises
+    wrapper's to catch, and that ships.
+
     Both modes skip an exception already seen, so a cycle terminates the way the
     SDK's does. Bounded at ONE PAST ``expected_events.MAX_LINKS``, never at it: a
     walk stopped AT the bound handed ``classify`` a prefix that looked whole, and
@@ -475,6 +482,10 @@ def _exception_chain(exc: BaseException) -> "list[BaseException]":
         following = (
             current.__cause__ if current.__suppress_context__ else current.__context__
         )
+        # Group mode reads an exception's cause and members only if it is
+        # TRUTHY (:929, :953, :975); the plain walk tests ``is not None``.
+        if expand and not current:
+            continue
         members = (
             list(current.exceptions)
             if expand and hasattr(current, "exceptions")
