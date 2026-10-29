@@ -406,7 +406,9 @@ async def retry_detached(
     attempt is handed what is LEFT of it, to pass to its resolution — so the
     re-runs' RESOLUTIONS never add up to more than the caller asked for. What
     an attempt does after its resolution (a click's post-scroll wait) and the
-    settle between attempts come on top of that budget, not out of it.
+    settle between attempts are not bounded by that deadline; the time they
+    take is counted against it, so it shortens what the next resolution is
+    handed.
 
     No document lock here: ``attempt`` resolves through this module, which
     takes it per query, and the lock is not re-entrant.
