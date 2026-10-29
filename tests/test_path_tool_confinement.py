@@ -10,6 +10,7 @@ agent calls) with ``tests/fakes.py`` doubles — no Chrome — against a throwaw
 ``HOME``.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -28,6 +29,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     network_export,
     path_confinement,
 )
+from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.debug_logger import DebugLogger
 from stealth_chrome_devtools_mcp.embedded.models import (
     NetworkRequest,
@@ -674,18 +676,30 @@ async def test_a_failed_screenshot_leaves_no_empty_file_behind(
 
 
 class _RecordingScreenshotTab(FakeTab):
-    """Writes a real 1x1 PNG and records what reached nodriver."""
+    """Writes a real PNG and records what reached nodriver: the arguments, and
+    the path it was handed (the inline path's temp file). *size* pixels of
+    random noise defeat compression, so a large size crosses the inline answer's
+    token ceiling."""
 
-    def __init__(self) -> None:
+    def __init__(self, size: tuple[int, int] = (1, 1)) -> None:
         super().__init__()
+        self.size = size
         self.shots: list[dict[str, Any]] = []
+        self.paths: list[Path] = []
 
     async def save_screenshot(self, path, *args, **kwargs):
         from PIL import Image
 
         self.shots.append(kwargs)
-        Image.new("RGB", (1, 1)).save(path, format="PNG")
+        self.paths.append(Path(path))
+        width, height = self.size
+        noise = os.urandom(width * height * 3)
+        Image.frombytes("RGB", self.size, noise).save(path, format="PNG")
         return str(path)
+
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8\xff"
 
 
 @pytest.mark.parametrize("full_page", [False, True])
@@ -717,6 +731,50 @@ async def test_the_format_and_full_page_reach_nodriver(
     assert tab.shots == [{"format": sent, "full_page": full_page}]
 
 
+@pytest.mark.parametrize(
+    ("asked", "magic"),
+    [
+        ("png", PNG_SIGNATURE),
+        ("PNG", PNG_SIGNATURE),
+        ("jpg", JPEG_MAGIC),
+        ("JPEG", JPEG_MAGIC),
+    ],
+)
+async def test_the_inline_answer_holds_the_format_asked_for(
+    patched_server, home, asked, magic
+):
+    """T-10043 reviews (Opus, Codex): the kwargs pin shows what reached nodriver,
+    not what came back. The inline answer is base64 of the RE-ENCODED image, and
+    it once keyed that re-encode on the raw ``format`` -- so ``jpg`` came back
+    as PNG. The temp capture is removed afterwards either way."""
+    tab = _RecordingScreenshotTab()
+    srv = _shot_server(patched_server, tab)
+
+    answer = await call_tool(srv, "take_screenshot", instance_id="i1", format=asked)
+
+    assert isinstance(answer, str)
+    assert base64.b64decode(answer).startswith(magic)
+    assert tab.paths, "nothing was captured"
+    assert not tab.paths[0].exists(), "the inline capture's temp file was left behind"
+
+
+async def test_a_large_inline_answer_is_saved_under_the_canonical_extension(
+    patched_server, home, tmp_path, monkeypatch
+):
+    """Codex review: past the token ceiling the inline answer goes to a file,
+    named after the format. ``jpg`` must give JPEG bytes under ``.jpeg``, the
+    one name the format maps to, not PNG bytes under ``.jpg``."""
+    tab = _RecordingScreenshotTab(size=(1200, 1200))
+    srv = _shot_server(patched_server, tab)
+    monkeypatch.setattr(rt.response_handler, "clone_dir", tmp_path)
+
+    answer = await call_tool(srv, "take_screenshot", instance_id="i1", format="jpg")
+
+    assert isinstance(answer, dict), "the noise image did not cross the ceiling"
+    assert answer["filename"].endswith(".jpeg")
+    assert Path(answer["file_path"]).read_bytes().startswith(JPEG_MAGIC)
+
+
 @pytest.mark.parametrize("asked", ["", "gif", "webp"])
 async def test_an_unknown_screenshot_format_is_the_callers_error(
     patched_server, home, tmp_path, asked
@@ -737,9 +795,14 @@ async def test_an_unknown_screenshot_format_is_the_callers_error(
 
 
 class _RefusedScreenshotTab(FakeTab):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paths: list[Path] = []
+
     async def save_screenshot(self, path, *args, **kwargs):
         # The shape nodriver raises for Chrome's refusal of Page.captureScreenshot
         # (Sentry STEALTH-CHROME-DEVTOOLS-MCP-E7, 2.1.46 and 2.1.47).
+        self.paths.append(Path(path))
         raise ProtocolException({"message": "Internal error", "code": -32603})
 
 
@@ -750,16 +813,25 @@ async def test_chromes_refusal_of_a_screenshot_is_a_tool_error(
     """T-10034: the refusal escaped ``take_screenshot`` as a raw
     ``ProtocolException``, outside the one error convention. RED before T-10034:
     ``ProtocolException`` is not a ``ToolError``."""
-    srv = _shot_server(patched_server, _RefusedScreenshotTab())
+    tab = _RefusedScreenshotTab()
+    srv = _shot_server(patched_server, tab)
     target = tmp_path / "shot.png"
     kwargs = {"file_path": str(target)} if to_file else {}
 
     with pytest.raises(
         ToolError, match="Chrome could not capture the page: Internal error"
-    ):
+    ) as caught:
         await call_tool(srv, "take_screenshot", instance_id="i1", **kwargs)
 
-    assert not target.exists()
+    # Exactly ToolError (Codex review of #355): a CallerError would also pass
+    # ``pytest.raises(ToolError)`` and would drop this browser failure from
+    # Sentry. Chrome's own error stays chained for the reader.
+    assert type(caught.value) is ToolError
+    assert isinstance(caught.value.__cause__, ProtocolException)
+    # The file the capture was handed is gone: the precreated target on the
+    # file path, the temp file on the inline one.
+    assert tab.paths, "the capture was never attempted"
+    assert not tab.paths[0].exists()
 
 
 def _logger_with_entries() -> DebugLogger:
