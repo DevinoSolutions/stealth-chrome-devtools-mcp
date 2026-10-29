@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The background-tab throttle test gives a released hold a bounded time to fall back (T-10026)
+
+- Test-only. `test_an_undriven_background_tab_stays_throttled_until_a_tool_acts` read a tab once, one second after its hold's linger ended, and required it throttled. For a few seconds after a hold is released Chrome keeps painting background tabs: on Windows the untouched tab read 56 and 57 frames per 2 s when read first at that point (headless and headed), and the 2.1.50 publish gate's macOS runner read the driven tab at 45 (`assert 45 <= 15`, run 40736857506 attempt 2; the same commit skipped the node in attempt 1).
+- The fallback is now read up to `FALLBACK_READINGS` (4) times of 2 s each, stopping at the first throttled reading. A hold that is never released still fails.
+
 ### The real IDLE canary test gives the child the start budget it waits for (T-9662)
 
 - Test-only. `test_the_real_child_wakes_and_is_gone_after_stop` waited 30 s for the child's "ready" but left the child the product's 5 s `CANARY_READY_SECONDS`, so on a host where a process start took 18-26 s the canary was stopped unready and the test failed. The test now patches the child's budget to its own wait. No product change.
