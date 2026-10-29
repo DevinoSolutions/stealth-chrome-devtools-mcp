@@ -399,10 +399,14 @@ def _hidden(**kwargs) -> FakeClickTarget:
 
 
 async def test_the_synthetic_script_checks_before_it_clicks():
-    """The double answers ``false`` for a removed node because the real script
-    returns it before ``el.click()``, in the same function."""
+    """The double reads the script's answers off the script itself; what it
+    cannot read is that the real script asks ``isConnected`` BEFORE it clicks,
+    in the same function, and catches what the page's ``click()`` throws."""
     js = click_target.SYNTHETIC_JS
-    assert js.index("if (!elem.isConnected) return false;") < js.index("elem.click()")
+    detached = f'if (!connected) return "{click_target.SYNTHETIC_DETACHED}";'
+    caught = f'try {{ elem.click(); }} catch (e) {{ return "{click_target.SYNTHETIC_THREW}"; }}'
+    assert js.index("connected = elem.isConnected;") < js.index(detached)
+    assert js.index(detached) < js.index(caught)
 
 
 async def test_an_element_removed_after_the_last_read_is_never_clicked_synthetically():
@@ -521,6 +525,105 @@ async def test_synthetic_click_refuses_an_answer_that_is_not_a_boolean():
     with pytest.raises(ToolError) as caught:
         await click_target.synthetic_click(_Blank(), SELECTOR, ledger)
     assert "may have reached the page" in str(caught.value)
+    assert ledger.sent is True
+
+
+# ---------------------------------------------------------------------------
+# (c4) only the script's own "detached" answer means nothing ran (Codex re-review)
+# ---------------------------------------------------------------------------
+
+
+def _same_node(target: FakeClickTarget) -> _ReplacingTab:
+    """A page that did NOT replace the element: every resolution finds it."""
+    return _ReplacingTab(*([target] * (_MAX_RESOLVES + 1)))
+
+
+async def test_a_click_that_throws_false_after_clicking_is_never_re_run():
+    """Codex re-review HIGH: ``click()`` overridden to call the native click and
+    then ``throw false``. ``Element.apply`` hands back the thrown ``false`` as a
+    plain value, which on 5a30f2a meant "the node had left": the click was
+    re-run three times and the page took three activations. RED on 5a30f2a."""
+    hidden = _hidden(click_throws=False)
+    tab = _same_node(hidden)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "click handler" in message and "threw" in message, message
+    assert "may have reached the page" in message, message
+    assert hidden.calls.count("click") == 1
+    assert len(tab.select_calls) == 1
+
+
+#: ``click_target.SYNTHETIC_DETACHED`` spelled out, so the module still collects
+#: against a parent that has no such constant (the RED run);
+#: ``test_the_detached_token_is_the_one_the_tests_throw`` keeps them equal.
+DETACHED_TOKEN = "stealth.click.synthetic:detached"
+
+
+async def test_the_detached_token_is_the_one_the_tests_throw():
+    assert click_target.SYNTHETIC_DETACHED == DETACHED_TOKEN
+
+
+@pytest.mark.parametrize(
+    "thrown",
+    [False, True, 0, "", None, {"x": 1}, DETACHED_TOKEN],
+    ids=["false", "true", "zero", "empty", "undefined", "object", "the-token"],
+)
+async def test_a_click_that_throws_any_value_is_never_re_run(thrown):
+    hidden = _hidden(click_throws=thrown)
+    tab = _same_node(hidden)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "threw" in message and "may have reached the page" in message, message
+    assert hidden.calls.count("click") == 1
+    assert hidden.calls.count("synthetic") == 1
+    assert len(tab.select_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "answer", [True, False, None], ids=["true", "false", "undefined"]
+)
+async def test_an_answer_that_is_not_a_token_is_never_re_run(answer):
+    """``undefined`` arrives from ``Element.apply`` as ``None``."""
+    hidden = _hidden(synthetic_answer=answer)
+    tab = _same_node(hidden)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "not one of its own answers" in message, message
+    assert "may have reached the page" in message, message
+    assert hidden.calls.count("synthetic") == 1
+    assert len(tab.select_calls) == 1
+
+
+async def test_only_the_exact_detached_token_leaves_the_ledger_clear():
+    exact = click_target.InputSent()
+    near = click_target.InputSent()
+
+    detached = _hidden(synthetic_answer=click_target.SYNTHETIC_DETACHED)
+    assert await click_target.synthetic_click(detached, SELECTOR, exact) is False
+    assert exact.sent is False
+
+    almost = _hidden(synthetic_answer=click_target.SYNTHETIC_DETACHED + " ")
+    with pytest.raises(ToolError):
+        await click_target.synthetic_click(almost, SELECTOR, near)
+    assert near.sent is True
+
+
+async def test_a_click_handler_that_threw_sets_the_ledger():
+    ledger = click_target.InputSent()
+    with pytest.raises(ToolError) as caught:
+        await click_target.synthetic_click(
+            _hidden(click_throws=False), SELECTOR, ledger
+        )
+    assert "click handler" in str(caught.value)
     assert ledger.sent is True
 
 
