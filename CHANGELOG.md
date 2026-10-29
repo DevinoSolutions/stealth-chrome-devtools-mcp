@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.51
 
 ### take_screenshot captures the format and the full page it was asked for (T-10043)
 
