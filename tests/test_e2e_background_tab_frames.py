@@ -22,8 +22,8 @@ runner lowers the count, never to the unheld tab's 2.
 
 The fall back is read on a PAIR, the driven tab and an untouched control measured at
 the same time, and is backed by a check that counts no frame at all: once the linger
-and the stop's send budget are over, the driven tab is no longer held and
-``Page.stopScreencast`` was sent to it. Frame counts need Chrome to throttle a
+and the stop's send budget (plus 0.5 s) after the holding call, Chrome has
+ANSWERED a ``Page.stopScreencast`` for the driven tab and it is no longer held. Frame counts need Chrome to throttle a
 background tab, which the macOS CI runner does only some of the time (T-10026).
 
 Style follows the plan_E2E suite: ``e2e_helpers`` mechanism, bounded waits, every
@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from dataclasses import dataclass
 
 import pytest
 
@@ -67,7 +68,7 @@ SHORT_LINGER_SECONDS = 5.0
 #: the holding call, so this covers the hold timer's own scheduling, not the call).
 LINGER_MARGIN_SECONDS = 0.5
 #: Readings of :data:`MEASURE_MS` each allowed for a tab to fall back once its hold
-#: ends (:func:`_fallen_back_rate`): Chrome keeps painting background tabs for a
+#: ends (:func:`_fallen_back_pair`): Chrome keeps painting background tabs for a
 #: few seconds after a hold is released, and longer on a slow runner (T-10026).
 FALLBACK_READINGS = 4
 
@@ -206,28 +207,44 @@ def _skip_if_display_does_not_paint(headless: bool, painted: int) -> None:
         )
 
 
-async def _fallen_back_rate(iid: str, tab_id: str) -> int:
-    """The tab's undriven rate once it has fallen back: readings are repeated while
-    they are over the bar, for at most :data:`FALLBACK_READINGS`, and the last one
-    is returned. Bounded, so a hold that is never released still fails."""
-    rate = await _undriven_rate(iid, tab_id)
-    for _ in range(FALLBACK_READINGS - 1):
-        if rate <= MAX_UNHELD_FRAMES:
+async def _fallen_back_pair(iid: str, driven: str, control: str) -> tuple[int, int]:
+    """The driven tab's and the control's undriven rates once the hold has ended,
+    every attempt reading BOTH over the same :data:`MEASURE_MS` window. An attempt
+    with either over the bar is repeated as a pair, for at most
+    :data:`FALLBACK_READINGS`, and the last attempt is returned: two numbers from
+    one window, never one tab's early seconds against the other's late ones.
+    Bounded, so a hold that is never released still fails."""
+    for _ in range(FALLBACK_READINGS):
+        driven_rate, control_rate = await asyncio.gather(
+            _undriven_rate(iid, driven), _undriven_rate(iid, control)
+        )
+        if max(driven_rate, control_rate) <= MAX_UNHELD_FRAMES:
             break
-        rate = await _undriven_rate(iid, tab_id)
-    return rate
+    return driven_rate, control_rate
 
 
-def _sent_methods(monkeypatch, tab) -> list[str]:
-    """Spy on *tab*'s ``send``: the CDP method of every command its transport takes,
-    in order. A pass-through: the caller's own command generator is driven, and only
-    the method of its first step is read on the way."""
-    sent: list[str] = []
+@dataclass
+class _Sent:
+    """One command a tab's transport took (:func:`_record_sends`)."""
+
+    method: str = ""
+    #: ``None`` while in flight, ``False`` once it raised (Chrome refused it).
+    ok: bool | None = None
+    error: str = ""
+    #: ``time.monotonic()`` when it ended, answered or not.
+    done_at: float = 0.0
+
+
+def _record_sends(monkeypatch, tab) -> list[_Sent]:
+    """Spy on *tab*'s ``send``: every command its transport takes, in order, with
+    whether Chrome ANSWERED it and when. A pass-through: the caller's own command
+    generator is driven, its method read on the way, and an error re-raised."""
+    sent: list[_Sent] = []
     original = tab.send
 
-    def tapped(cdp_obj):
+    def tapped(cdp_obj, record: _Sent):
         command = next(cdp_obj)
-        sent.append(command.get("method", ""))
+        record.method = command.get("method", "")
         reply = yield command
         try:
             cdp_obj.send(reply)
@@ -236,29 +253,48 @@ def _sent_methods(monkeypatch, tab) -> list[str]:
         raise RuntimeError("a CDP command generator asked for a second reply")
 
     async def spy(cdp_obj, *args, **kwargs):
-        return await original(tapped(cdp_obj), *args, **kwargs)
+        record = _Sent()
+        sent.append(record)
+        try:
+            result = await original(tapped(cdp_obj, record), *args, **kwargs)
+        except BaseException as error:
+            record.ok, record.error = False, f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            record.done_at = time.monotonic()
+        record.ok = True
+        return result
 
     monkeypatch.setattr(tab, "send", spy)
     return sent
 
 
-async def _assert_released(tab_id: str, sent: list[str], by: float) -> None:
-    """The release, read without counting a frame: by *by* (a ``time.monotonic()``)
-    the tab is no longer held AND ``Page.stopScreencast`` went to it. Polled, so a
-    release that comes early passes early. ``paint_hold`` has no public query, so
-    this reads its private ``_held`` (target id -> hold), as tests/test_paint_hold.py
-    does; *sent* is :func:`_sent_methods`' record."""
-    while True:
-        held = tab_id in paint_hold._held
-        stopped = "Page.stopScreencast" in sent
-        if (not held and stopped) or time.monotonic() >= by:
-            break
+async def _assert_released(tab_id: str, sent: list[_Sent], by: float) -> None:
+    """The release, read without counting a frame: Chrome ANSWERED a
+    ``Page.stopScreencast`` sent to the tab, the answer came by *by* (a
+    ``time.monotonic()``: the linger after the holding call plus the stop's send
+    budget and :data:`LINGER_MARGIN_SECONDS`), and the tab is no longer held. The
+    spy stamps every answer when it comes, so this may run after the readings and
+    still holds the release to its bound; it waits only while *by* is ahead. A stop
+    Chrome refused does not count: ``paint_hold._stop`` only logs a refusal, and the
+    capture may still be on. ``paint_hold`` has no public query, so this reads its
+    private ``_held`` (target id -> hold), as tests/test_paint_hold.py does."""
+
+    def stops() -> list[_Sent]:
+        return [
+            s for s in sent if s.method == "Page.stopScreencast" and s.ok is not None
+        ]
+
+    while not stops() and time.monotonic() < by:
         await asyncio.sleep(0.1)
-    assert not held and stopped, (
-        f"the hold on the driven tab was not released "
-        f"{SHORT_LINGER_SECONDS + paint_hold.SEND_BUDGET_S:.1f} s after the last "
-        f"call (linger + the stop's send budget): still held={held}, "
-        f"Page.stopScreencast sent={stopped}"
+    held = tab_id in paint_hold._held
+    in_time = any(s.ok and s.done_at <= by for s in stops())
+    bound = SHORT_LINGER_SECONDS + paint_hold.SEND_BUDGET_S + LINGER_MARGIN_SECONDS
+    assert in_time and not held, (
+        f"the hold on the driven tab was not released within {bound:.1f} s of the "
+        f"last call (linger + the stop's send budget + margin): still held={held}, "
+        f"Page.stopScreencast sends as (answered, error, seconds past the bound)="
+        f"{[(s.ok, s.error, round(s.done_at - by, 2)) for s in stops()]}"
     )
 
 
@@ -336,8 +372,9 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
 
     A tab no tool acts on stays at its throttled rate, a driven one paints, and one
     that was driven falls back ``LINGER_SECONDS`` after the last call. The fall
-    back is checked twice: without frames (the hold is gone and
-    ``Page.stopScreencast`` was sent, on every platform), and by frames, on the
+    back is checked twice: without frames (the hold is gone and Chrome answered
+    ``Page.stopScreencast`` within the linger, the send budget and 0.5 s, on every
+    platform), and by frames, on the
     driven tab and an untouched control read at the same time. "Stays throttled" is
     measured, not assumed: where Chrome does not throttle an untouched background
     tab (the macOS CI runner has no display), at startup or after the linger, there
@@ -394,7 +431,7 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         # The spy is cleared at the holding call, so an earlier hold's stop (were
         # there one) cannot answer for this one.
         driven_tab = tab_open.find(browser, driven)
-        sent = _sent_methods(monkeypatch, driven_tab)
+        sent = _record_sends(monkeypatch, driven_tab)
         held_at = time.monotonic()
         await execute(instance_id=iid, script=START_LOOP_JS, tab_id=driven)
         # The hold's deadline is set inside the call, so it ends by the linger after
@@ -416,15 +453,13 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         # painting background tabs (T-10026: on Windows the UNTOUCHED tab read 56-57
         # frames when read first at linger + 1 s; the macOS publish runner read the
         # driven tab at 45 there). So the driven tab and the untouched control are
-        # read at the SAME time, each re-read while over the bar, and decided as a
-        # pair (:func:`_decide_fallback`): a lone reading of the driven tab cannot
+        # read over the SAME windows, re-read together while either is over the
+        # bar, and decided as a pair (:func:`_decide_fallback`): a lone reading of the driven tab cannot
         # tell a hold left on from a runner that stopped throttling mid-test (macOS
         # read 79 on the 2.1.51 publish gate after passing the startup premise). The
         # release is also checked without frames, on every platform and BEFORE the
         # pair can skip (:func:`_assert_released`). A hold left on fails either way.
-        driven_rate, control_rate = await asyncio.gather(
-            _fallen_back_rate(iid, driven), _fallen_back_rate(iid, undriven)
-        )
+        driven_rate, control_rate = await _fallen_back_pair(iid, driven, undriven)
         await _assert_released(driven, sent, released_by)
         _decide_fallback(driven_rate, control_rate)
 
