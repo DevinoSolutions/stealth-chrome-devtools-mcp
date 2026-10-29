@@ -188,12 +188,18 @@ class Progress:
     it answered ``Page.navigate`` with one and committed its error page for it.
     Never ``net::ERR_ABORTED``: that one commits nothing of ours, and the page
     the tab lands on after it is some other document's (F-933).
+    ``last_event``: the last lifecycle event of the document the tab is showing
+    (``DOMContentLoaded``, ``firstPaint``, …) — how far a committed page got
+    before the budget ran out (T-9955: a timeout that said only ``accepted,
+    committed`` could not tell a page that never parsed from one waiting on
+    ``load``).
     """
 
     accepted: bool = False
     committed: bool = False
     superseded: int = 0
     error_text: str | None = None
+    last_event: str | None = None
 
     def describe(self) -> str:
         """This attempt's facts as one clause, for the caller's warning line.
@@ -208,6 +214,8 @@ class Progress:
             parts.append(f"superseded by {self.superseded} later document(s)")
         if self.error_text:
             parts.append(f"Chrome's reason: {self.error_text}")
+        if self.last_event:
+            parts.append(f"last lifecycle event: {self.last_event}")
         return ", ".join(parts)
 
 
@@ -256,6 +264,8 @@ class _Chain:
         if loader_id not in self.loaders:
             return  # an older document's event, or the replay's
         self.seen.add((loader_id, name))
+        if loader_id == self.loaders[-1]:
+            self.progress.last_event = name
         if loader_id == self.own and name == COMMIT:
             self.progress.committed = True
 
