@@ -493,6 +493,11 @@ async def get_page_content(
     )
 
 
+#: The formats ``take_screenshot`` accepts, by every spelling it takes, mapped to
+#: the one name nodriver and PIL are given (T-10043).
+SCREENSHOT_FORMATS = {"png": "png", "jpeg": "jpeg", "jpg": "jpeg"}
+
+
 async def _capture(
     tab: Tab, path: Path, instance_id: str, *, image_format: str, full_page: bool
 ) -> None:
@@ -543,6 +548,16 @@ async def take_screenshot(
 
     from PIL import Image
 
+    # One spelling per format before anything reaches Chrome (T-10043): nodriver
+    # renames only ``jpg``/``JPEG`` and hands any other value to CDP, which
+    # answers ``Invalid image format`` -- a refusal of the CALLER's input that
+    # would otherwise read as a browser failure.
+    image_format = SCREENSHOT_FORMATS.get(format.lower())
+    if image_format is None:
+        raise CallerError(
+            f"format={format!r} is not a screenshot format; accepted values are "
+            "'png' and 'jpeg'."
+        )
     tab = await _require_tab(rt.browser_manager, instance_id)
 
     if file_path:
@@ -551,7 +566,11 @@ async def take_screenshot(
         )
         try:
             await _capture(
-                tab, save_path, instance_id, image_format=format, full_page=full_page
+                tab,
+                save_path,
+                instance_id,
+                image_format=image_format,
+                full_page=full_page,
             )
         except BaseException:
             discard_precreated(save_path, created)
@@ -568,7 +587,7 @@ async def take_screenshot(
         )
 
         with Image.open(tmp_path) as img:
-            if img.mode in ("RGBA", "LA", "P") and format.lower() == "jpeg":
+            if img.mode in ("RGBA", "LA", "P") and image_format == "jpeg":
                 background = Image.new("RGB", img.size, (255, 255, 255))
                 if img.mode == "P":
                     img = img.convert("RGBA")
@@ -579,7 +598,7 @@ async def take_screenshot(
 
             output_buffer = io.BytesIO()
 
-            if format.lower() == "jpeg":
+            if image_format == "jpeg":
                 img.save(output_buffer, format="JPEG", quality=85, optimize=True)
             else:
                 img.save(output_buffer, format="PNG", optimize=True)
@@ -592,7 +611,7 @@ async def take_screenshot(
             if estimated_tokens > 20000:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 screenshot_filename = (
-                    f"screenshot_{timestamp}_{instance_id[:8]}.{format.lower()}"
+                    f"screenshot_{timestamp}_{instance_id[:8]}.{image_format}"
                 )
                 screenshot_path = rt.response_handler.clone_dir / screenshot_filename
 
