@@ -91,6 +91,7 @@ class _FakeElement:
         ``FakeClickTarget`` is the double that does that."""
         return json.dumps(
             {
+                "connected": True,
                 "rendered": True,
                 "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
                 "point": {"x": 5, "y": 5},

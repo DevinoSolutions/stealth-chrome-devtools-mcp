@@ -218,6 +218,15 @@ class FakeClickTarget:
     is returned as the plain value: that is what V8 puts in
     ``callFunctionOn``'s ``result`` and what ``Element.apply`` hands back, with
     ``exceptionDetails`` dropped.
+
+    ``form_controls`` names the controls of a ``<form>`` target (Codex round
+    5). A form is ``[LegacyOverrideBuiltIns]``: a script that reads
+    ``elem.<name>`` for one of them gets the CONTROL -- a truthy object, which
+    ``JSON.stringify`` writes as ``{}``, and which throws ``TypeError`` when
+    called (a thrown Error reaches ``Element.apply``'s caller as ``None``) --
+    while a script that reads through the native prototype accessor
+    gets the real member. Which one the product's script does is read off the
+    script text, never assumed.
     """
 
     def __init__(  # noqa: PLR0913  PERMANENT(one field per measured DOM fact)
@@ -249,7 +258,9 @@ class FakeClickTarget:
         synthetic_error: BaseException | None = None,
         click_throws: Any = _UNSET,
         synthetic_answer: Any = _UNSET,
+        form_controls: tuple[str, ...] = (),
     ) -> None:
+        self.form_controls = tuple(form_controls)
         self.click_throws = click_throws
         self.synthetic_answer = synthetic_answer
         self.detached = detached
@@ -306,7 +317,21 @@ class FakeClickTarget:
         width, height = self.viewport
         return 0 <= x <= width and 0 <= y <= height
 
-    def _aim(self) -> str:
+    def _shadowed(self, js_function: str, member: str) -> bool:
+        """Whether *js_function* reads *member* in a way a named control shadows."""
+        return member in self.form_controls and f"elem.{member}" in js_function
+
+    def _aim(self, js_function: str) -> Any:
+        # A shadowed ``isConnected`` is the control: truthy, serialised as {}.
+        connected: Any = (
+            {} if self._shadowed(js_function, "isConnected") else not self.disconnected
+        )
+        if connected and self._shadowed(js_function, "getClientRects"):
+            # ``elem.getClientRects()`` calls the control: TypeError, uncaught.
+            # A thrown Error OBJECT reaches the caller as ``None`` (measured on
+            # real Chrome: "the page answered with NoneType"); a thrown
+            # primitive arrives as itself.
+            return None
         # ``AIM_JS`` reads no client rects off a disconnected node: it has none.
         boxed = self.rendered and not self.disconnected
         left, top, width, height = self.rect if boxed else (0.0, 0.0, 0.0, 0.0)
@@ -321,7 +346,7 @@ class FakeClickTarget:
             hit = {"tag": tag, "id": element_id, "classes": list(classes)}
         return json.dumps(
             {
-                "connected": not self.disconnected,
+                "connected": connected,
                 "rendered": boxed,
                 "rect": {
                     "left": left,
@@ -455,8 +480,13 @@ class FakeClickTarget:
             return self.synthetic_answer
         if self.removed_before_click:
             self.disconnected = True
-        if self.disconnected:
+        shadowed = self._shadowed(js_function, "isConnected")
+        if self.disconnected and not shadowed:
             return detached
+        if self._shadowed(js_function, "click"):
+            # ``elem.click()`` calls the control: TypeError, before any click;
+            # uncaught, the thrown Error reaches the caller as ``None``.
+            return None if threw is _UNSET else threw
         self.calls.append("click")
         if self.click_throws is not _UNSET:
             return self.click_throws if threw is _UNSET else threw
@@ -464,7 +494,7 @@ class FakeClickTarget:
 
     async def apply(self, js_function: str, *args: Any, **kwargs: Any) -> Any:
         self.apply_calls.append(js_function)
-        if "elem.click()" in js_function:
+        if _is_synthetic(js_function):
             # The ATTEMPT is recorded before ``DOM.resolveNode`` can fail.
             self.calls.append("synthetic")
         if self.detached:
@@ -473,8 +503,8 @@ class FakeClickTarget:
             self.calls.append("aim")
             if self._aim_answer is not _UNSET:
                 return self._aim_answer
-            return self._aim()
-        if "elem.click()" in js_function:
+            return self._aim(js_function)
+        if _is_synthetic(js_function):
             return self._synthetic(js_function)
         if PROBE_KEY in js_function and "addEventListener" in js_function:
             self.armed = _probe_kinds(js_function)
@@ -512,6 +542,11 @@ def _js_value(literal: str) -> Any:
     return json.loads(literal.strip())
 
 
+def _is_synthetic(js_function: str) -> bool:
+    """Whether *js_function* is a synthetic-click script (any revision)."""
+    return "elem.click()" in js_function or "click.call(elem)" in js_function
+
+
 def _synthetic_answers(js_function: str) -> tuple[Any, Any, Any]:
     """(detached, clicked, threw) as the synthetic script itself returns them.
 
@@ -525,7 +560,9 @@ def _synthetic_answers(js_function: str) -> tuple[Any, Any, Any]:
     )
     returns = re.findall(r"return ([^;]+);", js_function)
     caught = re.search(
-        r"elem\.click\(\);\s*\} catch \(e\) \{ return ([^;]+);", js_function
+        r"(?:elem\.click\(\)|click\.call\(elem\));\s*\} catch \(e\) "
+        r"\{ return ([^;]+);",
+        js_function,
     )
     if detached is None or not returns:
         raise AssertionError("not a synthetic script this double can run")

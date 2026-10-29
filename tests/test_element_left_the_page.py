@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import pytest
 from nodriver.core.connection import ProtocolException
@@ -273,7 +274,7 @@ async def test_the_re_resolve_is_bounded_and_says_nothing_was_clicked():
 async def test_the_aim_script_reads_the_fact_the_double_answers():
     """The double's ``connected`` stands for this script's ``isConnected`` read;
     a pin built on one must not outlive the other."""
-    assert "elem.isConnected" in click_target.AIM_JS
+    assert "const connected = isConnected.call(elem) === true;" in click_target.AIM_JS
     assert "connected: connected" in click_target.AIM_JS
 
 
@@ -404,8 +405,8 @@ async def test_the_synthetic_script_checks_before_it_clicks():
     in the same function, and catches what the page's ``click()`` throws."""
     js = click_target.SYNTHETIC_JS
     detached = f'if (!connected) return "{click_target.SYNTHETIC_DETACHED}";'
-    caught = f'try {{ elem.click(); }} catch (e) {{ return "{click_target.SYNTHETIC_THREW}"; }}'
-    assert js.index("connected = elem.isConnected;") < js.index(detached)
+    caught = f'try {{ click.call(elem); }} catch (e) {{ return "{click_target.SYNTHETIC_THREW}"; }}'
+    assert js.index("connected = isConnected.call(elem) === true;") < js.index(detached)
     assert js.index(detached) < js.index(caught)
 
 
@@ -460,7 +461,7 @@ class _HangingSynthetic(FakeClickTarget):
     """The synthetic call's reply never comes back."""
 
     async def apply(self, js_function, *args, **kwargs):
-        if "elem.click()" in js_function:
+        if js_function == click_target.SYNTHETIC_JS:
             self.calls.append("synthetic")
             await asyncio.Event().wait()
         return await super().apply(js_function, *args, **kwargs)
@@ -625,6 +626,130 @@ async def test_a_click_handler_that_threw_sets_the_ledger():
         )
     assert "click handler" in str(caught.value)
     assert ledger.sent is True
+
+
+# ---------------------------------------------------------------------------
+# (c5) a <form>'s named controls shadow ANY member (Codex round 5)
+# ---------------------------------------------------------------------------
+
+#: Every member the two scripts must never read off the target directly.
+_SHADOWABLE = ("isConnected", "click", "getClientRects")
+
+
+def _form(**kwargs) -> FakeClickTarget:
+    """A ``display:none`` ``<form>`` whose controls are named after members."""
+    return _hidden(tag="form", form_controls=_SHADOWABLE, **kwargs)
+
+
+async def test_the_click_scripts_read_the_target_only_through_native_accessors():
+    """RED on ca45646: both scripts read ``elem.isConnected`` and call
+    ``elem.getClientRects()`` / ``elem.click()``, which a form's named control
+    shadows with no page script involved."""
+    for name, js in (
+        ("AIM_JS", click_target.AIM_JS),
+        ("SYNTHETIC_JS", click_target.SYNTHETIC_JS),
+        ("ARM_PROBE_JS", click_target.ARM_PROBE_JS),
+    ):
+        assert re.search(r"\b(?:elem|node|owner|r)\.[A-Za-z]", js) is None, name
+    natives = (
+        "getter(Node.prototype, 'isConnected')",
+        "Element.prototype.getClientRects",
+        "Element.prototype.matches",
+        "Element.prototype.closest",
+        "Node.prototype.contains",
+        "Node.prototype.getRootNode",
+        "Document.prototype.elementFromPoint",
+        "isConnected.call(elem) === true",
+    )
+    for native in natives:
+        assert native in click_target.AIM_JS, native
+    assert "getOwnPropertyDescriptor(Node.prototype, 'isConnected').get" in (
+        click_target.SYNTHETIC_JS
+    )
+    assert "HTMLElement.prototype.click" in click_target.SYNTHETIC_JS
+    assert "isConnected.call(elem) === true" in click_target.SYNTHETIC_JS
+    assert "click.call(elem)" in click_target.SYNTHETIC_JS
+
+
+@pytest.mark.parametrize(
+    ("value", "connected"),
+    [(True, True), (False, False), ({}, False), (1, False), ("true", False)],
+    ids=["true", "false", "shadowed", "one", "string"],
+)
+async def test_only_a_literal_true_is_connected(value, connected):
+    """RED on ca45646: ``connected()`` accepted anything but ``False``,
+    including the ``{}`` a shadowed ``isConnected`` serialises to."""
+    assert click_target.connected({"connected": value}) is connected
+
+
+async def test_an_aim_answer_with_no_connected_field_is_not_connected():
+    assert click_target.connected({"rendered": False}) is False
+
+
+async def test_a_removed_form_that_shadows_is_connected_is_re_resolved():
+    """Codex round 5, its exact shape: ``<form><input name=isConnected>`` that a
+    re-render removed but still references. RED on ca45646: the aim read
+    ``connected: {}``, ``connected()`` accepted it, the synthetic script read
+    the truthy control, clicked the removed form and answered CLICKED."""
+    removed = _hidden(tag="form", form_controls=("isConnected",), disconnected=True)
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(removed, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "click" not in removed.calls
+    assert len(tab.select_calls) == 2
+    assert len(_presses(fresh)) == 1
+    assert result["dispatch"] == "coordinate"
+
+
+async def test_a_removed_form_that_shadows_every_member_is_re_resolved():
+    """RED on ca45646: ``elem.getClientRects()`` called the control and the aim
+    read threw, so the call failed with "could not read where a click on it
+    would land" instead of re-resolving."""
+    removed = _form(disconnected=True)
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(removed, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "click" not in removed.calls
+    assert len(tab.select_calls) == 2
+    assert result["dispatch"] == "coordinate"
+
+
+async def test_a_form_removed_after_the_aim_is_never_clicked_synthetically():
+    """The synthetic script's own read is the one that matters here: the aim
+    saw a connected form, the page removed it before the synthetic click ran,
+    and a shadowed ``isConnected`` would have read the truthy control."""
+    removed = _hidden(
+        tag="form", form_controls=("isConnected",), removed_before_click=True
+    )
+    fresh = FakeClickTarget()
+    tab = _ReplacingTab(removed, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert "click" not in removed.calls
+    assert removed.calls.count("synthetic") == 1
+    assert len(tab.select_calls) == 2
+    assert result["dispatch"] == "coordinate"
+
+
+async def test_a_connected_form_that_shadows_every_member_is_clicked_once():
+    """RED on ca45646: the aim's ``elem.getClientRects()`` threw on the control
+    and nothing was clicked; a connected ``display:none`` form is exactly what
+    the synthetic fallback exists for."""
+    form = _form()
+    tab = _same_node(form)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert result["dispatch"] == "synthetic"
+    assert result["reason"] == "not-rendered"
+    assert form.calls.count("click") == 1
+    assert form.calls.count("synthetic") == 1
+    assert len(tab.select_calls) == 1
 
 
 # ---------------------------------------------------------------------------

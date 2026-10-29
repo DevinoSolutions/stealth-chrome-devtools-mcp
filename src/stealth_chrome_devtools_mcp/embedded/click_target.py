@@ -164,21 +164,49 @@ DISABLED = "disabled"
 #: and inside an iframe (connected to its OWN document). A disconnected node is
 #: never hit-tested: it has no box, and no point in the page can be over it, so
 #: it can never read as "covered". :func:`connected` is the one reader.
+#: The NATIVE accessor or method for every member the click path reads off a
+#: node, each read ONCE at the top of the script that uses it (Codex round 5).
+#: Never ``elem.<name>``: an HTML ``<form>`` is ``[LegacyOverrideBuiltIns]``, so
+#: a named control shadows ANY member -- ``<input name=isConnected>`` makes
+#: ``form.isConnected`` the input, a truthy object, with no page script
+#: involved -- and a removed form then read as connected and was clicked
+#: synthetically. A page script that REPLACES these prototypes is the accepted
+#: boundary until T-10299 (an isolated world); a named control is not.
+NATIVES_JS = (
+    "const getter = (proto, name) => "
+    "Object.getOwnPropertyDescriptor(proto, name).get;\n"
+    "    const isConnected = getter(Node.prototype, 'isConnected');\n"
+    "    const ownerDocument = getter(Node.prototype, 'ownerDocument');\n"
+    "    const nodeName = getter(Node.prototype, 'nodeName');\n"
+    "    const getRootNode = Node.prototype.getRootNode;\n"
+    "    const contains = Node.prototype.contains;\n"
+    "    const tagName = getter(Element.prototype, 'tagName');\n"
+    "    const idOf = getter(Element.prototype, 'id');\n"
+    "    const classListOf = getter(Element.prototype, 'classList');\n"
+    "    const getClientRects = Element.prototype.getClientRects;\n"
+    "    const matches = Element.prototype.matches;\n"
+    "    const closest = Element.prototype.closest;\n"
+    "    const hostOf = getter(ShadowRoot.prototype, 'host');\n"
+    "    const elementFromPoint = Document.prototype.elementFromPoint;"
+)
+
 AIM_JS = """(elem) => {
+    __NATIVES__
     const inert = (node) => {
         if (!node) return false;
-        if (node.matches(':disabled')) return true;
-        const owner = node.closest('button,input,select,textarea,optgroup,option');
-        return !!owner && owner.matches(':disabled');
+        if (matches.call(node, ':disabled')) return true;
+        const owner = closest.call(
+            node, 'button,input,select,textarea,optgroup,option');
+        return !!owner && matches.call(owner, ':disabled');
     };
-    const connected = elem.isConnected;
-    const rects = connected ? elem.getClientRects() : [];
+    const connected = isConnected.call(elem) === true;
+    const rects = connected ? getClientRects.call(elem) : [];
     const box = rects.length ? rects[0] : null;
     const style = window.getComputedStyle(elem);
     const shape = (node) => node === null ? null : {
-        tag: String(node.tagName || node.nodeName || '').toLowerCase(),
-        id: String(node.id || ''),
-        classes: Array.prototype.slice.call(node.classList || []).map(String)
+        tag: String(tagName.call(node) || nodeName.call(node) || '').toLowerCase(),
+        id: String(idOf.call(node) || ''),
+        classes: Array.prototype.slice.call(classListOf.call(node) || []).map(String)
     };
     let point = null;
     let hit = null;
@@ -186,14 +214,14 @@ AIM_JS = """(elem) => {
     let under = null;
     if (box) {
         point = {x: box.left + box.width / 2, y: box.top + box.height / 2};
-        under = document.elementFromPoint(point.x, point.y);
+        under = elementFromPoint.call(ownerDocument.call(elem), point.x, point.y);
         hit = shape(under);
-        // ``document.elementFromPoint`` answers the shadow HOST for a point over an
+        // ``elementFromPoint`` answers the shadow HOST for a point over an
         // element inside any shadow root, so the host stands for the element.
         const hosts = [];
-        for (let n = elem, r = n.getRootNode(); r instanceof ShadowRoot;
-             r = n.getRootNode()) { hosts.push(r.host); n = r.host; }
-        hitIsTarget = !!under && (under === elem || elem.contains(under) ||
+        for (let n = elem, r = getRootNode.call(n); r instanceof ShadowRoot;
+             r = getRootNode.call(n)) { n = hostOf.call(r); hosts.push(n); }
+        hitIsTarget = !!under && (under === elem || contains.call(elem, under) ||
             hosts.indexOf(under) !== -1);
     }
     return JSON.stringify({
@@ -214,7 +242,7 @@ AIM_JS = """(elem) => {
         pointer_events: String(style.pointerEvents),
         visibility: String(style.visibility)
     });
-}"""
+}""".replace("__NATIVES__", NATIVES_JS)
 
 
 #: How far (CSS px) a page-observed event may be from the point it was aimed at
@@ -255,11 +283,16 @@ ARM_PROBE_JS = """(elem) => {
     const key = Symbol.for('__KEY__');
     if (typeof window[key] === 'function') window[key]();
     const kinds = __KINDS__;
+    const getRootNode = Node.prototype.getRootNode;
+    const shadow = (name) =>
+        Object.getOwnPropertyDescriptor(ShadowRoot.prototype, name).get;
+    const hostOf = shadow('host');
+    const modeOf = shadow('mode');
     const closedHosts = [];
-    for (let n = elem, r = n.getRootNode(); r instanceof ShadowRoot;
-         r = n.getRootNode()) {
-        if (r.mode === 'closed') closedHosts.push(r.host);
-        n = r.host;
+    for (let n = elem, r = getRootNode.call(n); r instanceof ShadowRoot;
+         r = getRootNode.call(n)) {
+        if (modeOf.call(r) === 'closed') closedHosts.push(hostOf.call(r));
+        n = hostOf.call(r);
     }
     const log = [];
     const handler = (e) => {
@@ -365,12 +398,15 @@ def _shape(raw: object) -> dict[str, object] | None:
 def connected(facts: dict[str, object]) -> bool:
     """Whether :func:`aim`'s answer is about an element still in its document.
 
-    ``False`` only for an explicit ``connected: false`` -- the page saying the
-    node has left. It is not one of :func:`reason`'s answers: a departed
-    element is not a target the click "could not reach", it is no target at
-    all, and the caller re-resolves it before any input (T-10034).
+    ``True`` only for a literal ``connected: true`` (Codex round 5): anything
+    else -- ``false``, a missing field, or the ``{}`` a shadowed
+    ``isConnected`` serialised to -- is not connected. That is the safe
+    direction, because nothing has been sent yet: the caller re-resolves it
+    before any input (T-10034). It is not one of :func:`reason`'s answers: a
+    departed element is not a target the click "could not reach", it is no
+    target at all.
     """
-    return facts.get("connected") is not False
+    return facts.get("connected") is True
 
 
 def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measured order)
@@ -751,10 +787,14 @@ SYNTHETIC_THREW = "stealth.click.synthetic:threw"
 #: 4, accepted until T-10299 moves these reads into an isolated world).
 SYNTHETIC_JS = (
     """(elem) => {
+    const isConnected =
+        Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected').get;
+    const click = HTMLElement.prototype.click;
     let connected;
-    try { connected = elem.isConnected; } catch (e) { return "__THREW__"; }
+    try { connected = isConnected.call(elem) === true; }
+    catch (e) { return "__THREW__"; }
     if (!connected) return "__DETACHED__";
-    try { elem.click(); } catch (e) { return "__THREW__"; }
+    try { click.call(elem); } catch (e) { return "__THREW__"; }
     return "__CLICKED__";
 }""".replace("__DETACHED__", SYNTHETIC_DETACHED)
     .replace("__CLICKED__", SYNTHETIC_CLICKED)
