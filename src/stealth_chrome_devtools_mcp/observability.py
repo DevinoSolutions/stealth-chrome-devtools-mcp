@@ -681,62 +681,80 @@ def _is_our_frame(frame: "dict[str, object]") -> bool:
     return isinstance(abs_path, str) and Path(abs_path).is_relative_to(_PACKAGE_DIR)
 
 
-#: The per-occurrence VALUES of a message, replaced in this order (T-10034): a URL,
-#: a UUID, a long hex id, a filesystem path (a drive, a UNC share, or a rooted
-#: path of two or more segments), then any run of digits (counts, timings, ports,
-#: pids). Prose and quoted names are NOT touched: a quoted span stays unless it is
-#: itself one of these values, because ``'stylesheets'`` and ``'scripts'`` are two
-#: different failures and ``'#b'`` is the same selector for the same one. The
-#: character classes stop at a quote, so a quoted URL or path loses its value and
-#: keeps its quotes.
-_TEMPLATE_PARTS = (
-    (re.compile(r"""https?://[^\s'"`<>]+"""), "<url>"),
-    (
-        re.compile(
-            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{12}\b"
-        ),
-        "<id>",
-    ),
-    (re.compile(r"\b(?:0x)?[0-9a-fA-F]{12,}\b"), "<id>"),
-    (
-        re.compile(
-            r"""(?:(?<![\w])[A-Za-z]:[\\/]|\\\\)[^\s'"`<>|*?]+"""
-            r"""|(?<![\w/:.\\<])(?:/[\w.~@%+=-]+){2,}/?"""
-        ),
-        "<path>",
-    ),
-    (re.compile(r"\d+"), "<n>"),
-)
-
-#: The tool a ``logger.exception("Error calling tool 'name'")`` record is about:
-#: fastmcp's tool-call log line, and ``tool_failure``'s, which copies it.
+#: The tool an ``Error calling tool 'name'`` log line (fastmcp's, or
+#: ``tool_failure``'s copy of it) is about.
 _TOOL_CALL_RE = re.compile(r"\AError calling tool '(?P<name>[A-Za-z0-9_.\-]{1,100})'\Z")
 
+#: What a fingerprint element reads when the event has nothing for it.
+_NOT_NAMED = "-"
 
-def _message_template(text: str) -> str:
-    """*text* with the values that differ per occurrence replaced, the prose kept.
-
-    Takes text that has ALREADY been through :func:`_redact_text`: every rule here
-    rewrites characters (a digit run becomes ``<n>``), which would break the
-    shapes the redaction rules match, so templating raw text leaks a secret's
-    tail (``Bearer abc123Suffix`` -> ``Bearer abc<n>Suffix``).
-    """
-    for pattern, placeholder in _TEMPLATE_PARTS:
-        text = pattern.sub(placeholder, text)
-    return text
+#: A bound on the traceback walk: a pathological recursion must not stall a send.
+_MAX_TRACEBACK_FRAMES = 1000
 
 
 def _tool_name(event: "Event") -> "str | None":
     """The tool the event's log line names, or ``None`` when it names none."""
     entry = event.get("logentry") if isinstance(event, dict) else None
-    if not isinstance(entry, dict):
-        return None
     for key in ("formatted", "message"):
-        text = entry.get(key)
+        text = entry.get(key) if isinstance(entry, dict) else None
         if isinstance(text, str) and (found := _TOOL_CALL_RE.match(text)):
             return found.group("name")
     return None
+
+
+def _app_frame_name(error: BaseException) -> "str | None":
+    """``module.function`` of the innermost frame of OUR code in *error*'s
+    traceback, or ``None``: no line number (lines move across releases, which is
+    what split STEALTH-CHROME-DEVTOOLS-MCP-ET from -EV), no path, no local. A
+    frame run as ``__main__`` (the backend runs ``server.py`` under ``runpy``) is
+    named by its path under the package, so one function has one name."""
+    found, traceback = None, error.__traceback__
+    for _ in range(_MAX_TRACEBACK_FRAMES):
+        if traceback is None:
+            break
+        code = traceback.tb_frame.f_code
+        module = traceback.tb_frame.f_globals.get("__name__")
+        if _is_our_frame({"module": module, "abs_path": code.co_filename}):
+            if not isinstance(module, str) or module == "__main__":
+                path = Path(code.co_filename).relative_to(_PACKAGE_DIR)
+                module = ".".join(
+                    filter(None, (_IMPORT_NAME, *path.with_suffix("").parts))
+                )
+            found = f"{module}.{code.co_qualname}"
+        traceback = traceback.tb_next
+    return found
+
+
+def _tool_error_fingerprint(event: "Event", error: BaseException) -> "list[str]":
+    """``["tool-error", tool, ToolError type, "Cause>Cause", "module.function"]``.
+
+    Built ONLY from facts the program controls: the registered tool's name, class
+    names, and the module and function of our own innermost frame. Never from the
+    message: a ``ToolError`` can carry what the CALLER typed (``click_element(
+    text_match="my password is swordfish")`` is raised as ``find 'my password is
+    swordfish'``) or what the machine holds (an install path with spaces), and no
+    redaction rule can tell either from prose. The full message is still the
+    event's message, so every detail is on every event; only grouping is coarser.
+
+    * the chain is the exception types UNDER the ``ToolError``, outermost first
+      (``ProtocolException>KeyError``), ``-`` when there are none;
+    * the frame is the innermost frame of our code in the DEEPEST cause's
+      traceback (the raise site of the real failure), else the ``ToolError``'s own
+      raise site, else the element is left out (the tool and the types alone).
+
+    Accepted: two ``KeyError`` keys raised in one function are ONE issue (each
+    event shows its own key in its message); another tool, function or type is not.
+    """
+    chain = _exception_chain(error)
+    frame = _app_frame_name(chain[-1]) or _app_frame_name(error)
+    parts = [
+        "tool-error",
+        _tool_name(event) or _NOT_NAMED,
+        type(error).__name__,
+        ">".join(type(link).__name__ for link in chain[1:]) or _NOT_NAMED,
+        *([frame] if frame else []),
+    ]
+    return [_redact_text(part) for part in parts]
 
 
 def _stable_fingerprint(
@@ -744,30 +762,19 @@ def _stable_fingerprint(
 ) -> "list[str] | None":
     """The Sentry fingerprint this event should carry, or ``None`` for Sentry's own.
 
-    Sentry groups an event by its stack frames, and by the message when there is
-    no stack. Both split one defect across issues (T-10034): a report logged
-    without being raised (``forensic_errors.ForensicError``) has no stack and a
-    message full of ids, uptimes and timings, so each freeze was a NEW issue; and
-    a ``ToolError`` is grouped by the stack of everything it was raised while
-    handling, so one title was three issues (a different CDP error underneath,
-    and a different source line per release). Only grouping changes here; the
-    event's message and exception are untouched.
+    Sentry groups by stack frames, or by the message when there is no stack, and
+    both split one defect across issues (T-10034): a ``ForensicError`` is logged
+    without being raised, so each freeze (a message full of ids, uptimes and
+    timings) was a NEW issue; a ``ToolError`` is grouped by the stack of
+    everything it was raised while handling, line numbers included, so one title
+    was three. Only grouping changes; the message and exception are untouched.
+    From the LIVE exception behind the event, the first that applies wins:
+    * it declares ``sentry_fingerprint`` (its kind and stable cause), used as is.
+      Every cause a call site passes is program-controlled text (a step name, an
+      exception type name) and a test scans the call sites to keep it so;
+    * it is a ``ToolError``: see :func:`_tool_error_fingerprint`.
 
-    Two cases, both from the LIVE exception behind the event, and the first wins:
-
-    * the exception declares ``sentry_fingerprint`` (a tuple of strings: its kind
-      and stable cause), which is used as is;
-    * it is a ``ToolError``: ``tool-error``, the tool the log line names (when it
-      names one; an event with no tool identity is grouped by type and template
-      alone), its type, and its message REDACTED first by :func:`_redact_text`
-      and only then templated by :func:`_message_template`. Two failures in one
-      tool whose messages differ only in an id, a path or a number group
-      together (the full message is still on every event); the same message from
-      two tools does not.
-
-    Whatever this returns is walked by :func:`_anonymize` once more in
-    :func:`_scrub_event` before it leaves, so the fingerprint cannot carry what
-    the event itself would not.
+    Either way :func:`_scrub_event` walks the result with :func:`_anonymize`.
     """
     exception = _hint_exception(hint)
     if exception is None:
@@ -781,13 +788,7 @@ def _stable_fingerprint(
         return list(declared)
     base = _expected_error_base()
     if base is not None and isinstance(exception, base):
-        tool = _tool_name(event)
-        return [
-            "tool-error",
-            *([tool] if tool else []),
-            type(exception).__name__,
-            _message_template(_redact_text(str(exception))),
-        ]
+        return _tool_error_fingerprint(event, exception)
     return None
 
 
@@ -803,9 +804,8 @@ def _scrub_event(
        :func:`_is_expected_tool_failure` and the six named classes in
        :mod:`expected_events` — and so is a foreign interpreter's own crash
        caught by our process-global hook, see :func:`_is_foreign_hook_crash`;
-    1. everything that survives is scrubbed, and given a stable fingerprint where
-       Sentry's own grouping would split one defect across issues, see
-       :func:`_stable_fingerprint` (T-10034).
+    1. everything that survives is scrubbed and, where Sentry's own grouping would
+       split one defect, given a stable fingerprint: :func:`_stable_fingerprint`.
 
     Five removals, all universal — there is no maintainer-only path:
 
