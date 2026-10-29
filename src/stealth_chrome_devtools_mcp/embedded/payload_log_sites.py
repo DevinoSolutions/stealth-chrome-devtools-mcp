@@ -475,10 +475,11 @@ def _chain(exc: BaseException) -> list[BaseException]:
     blast radius — so it was FILED as **F-929**
     (``audit/stage2/finding_F929_exception_group_bypasses_expected_events.md``).
     T-10034 has since given it a group arm too, with its own measurement of
-    what newly drops. The two now see the same MEMBERS and still differ in
-    ORDER: this walk is breadth-first, because only membership is asked here,
-    and that one is the SDK's pre-order, because ``expected_events`` reads
-    positions.
+    what newly drops, and made it select exactly what sentry-sdk serializes:
+    members only under a REPORTED group, in the SDK's pre-order, because
+    ``expected_events`` reads positions. This walk stays wider — every group,
+    breadth-first — because it asks a redaction question, where seeing more
+    can only redact more.
 
     Why the arm exists when no site in :data:`PAYLOAD_EXCEPTION_SITES` reaches
     it today: an ``ExceptionGroup``'s own ``str()`` carries NONE of its leaves

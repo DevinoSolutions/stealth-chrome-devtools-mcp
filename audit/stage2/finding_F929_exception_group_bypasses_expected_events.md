@@ -1,8 +1,9 @@
 # F-929 — an `ExceptionGroup` bypasses every chain-keyed expected-event class
 
 **Status:** FILED, not fixed. No code change ships with this document.
-**Update (T-10034):** §3.1's half is CLOSED. `_exception_chain` now follows a
-group's members in the SDK's own pre-order, and
+**Update (T-10034):** §3.1's half is CLOSED. `_exception_chain` now selects exactly
+the links sentry-sdk serializes — a REPORTED group's members in its pre-order,
+and a group under an ordinary exception as one link, as the SDK does — and
 `TestTheSessionLoopCouldNotTellTheClient.test_both_paths_judge_the_same_links`
 pins the two link lists, not a verdict. The measurement §5 asks for came out
 EMPTY — old walk against new over this document's four leaves plus

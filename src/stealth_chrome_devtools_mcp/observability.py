@@ -430,33 +430,39 @@ def _expected_error_base() -> "type[BaseException] | None":
 
 
 def _exception_chain(exc: BaseException) -> "list[BaseException]":
-    """``exc``, everything it was raised from, and everything it GROUPS.
+    """``exc`` and exactly the exceptions the SDK serializes with it, in its order.
 
-    Mirrors the SDK's own walk (``__cause__``, else ``__context__`` unless
-    ``raise ... from None`` suppressed it) so the live-object path and the
-    payload path below judge the SAME set of exceptions. Cycle-safe, and
-    bounded as the last paragraph says.
+    The live-object path and the payload path below must judge the SAME links,
+    so this mirrors ``sentry_sdk/utils.py`` (2.73.0) rule for rule rather than
+    approximating it. ``exceptions_from_error_tuple`` (:996-1031) has TWO modes,
+    chosen ONCE, by the REPORTED exception alone:
 
-    **And a group's members, in the SDK's order** (T-10034, closing F-929's
-    §3.1 half). ``sentry_sdk.utils.exceptions_from_error`` visits an exception,
-    then its cause-or-context, then each of ``exceptions`` in turn, each
-    recursively — a pre-order the serialized ``values`` list in reverse, which
-    ``expected_events._links`` undoes. Without this arm a task group's failure
-    was ONE link live and every leaf on the payload path. Widening it drops
-    nothing that shipped: every rule but one reads the OUTERMOST link or
-    requires every link to be a non-group kind, and the group is outermost on
-    both paths — so a ``ToolError`` in a task group still ships (F-929's noise
-    half, left open). ``client-disconnect``'s grouped arm is the one rule that
-    reads a group's leaves, and it is why this walk had to see them.
-    ``isinstance(BaseExceptionGroup)``, never ``getattr(exc, "exceptions")``,
-    for ``payload_log_sites._chain``'s reason.
+    * **not a group** — ``walk_exception_chain`` (:822-849): ``__cause__`` if
+      ``__suppress_context__`` is set, else ``__context__``, and nothing else.
+      A group met on the way is one link and its members are NOT serialized, so
+      they are not walked either: a ``CallerError`` raised from a group of 23 is
+      two links on both paths (T-10034 re-review).
+    * **a group** (``isinstance(exc, BaseExceptionGroup)``, :1004) —
+      ``exceptions_from_error`` (:857-993), recursively for EVERY exception it
+      reaches: the exception, then its cause-or-context by the same flag
+      (:923-972), then each of ``exceptions`` (:975-991), duck-typed there with
+      ``hasattr`` and so here. A pre-order the serialized ``values`` list in
+      reverse, which ``expected_events._links`` undoes. Without this mode a task
+      group's failure was ONE link live and every leaf on the payload path
+      (F-929 §3.1); ``client-disconnect``'s grouped arm is the one rule that reads
+      a group's leaves. It drops nothing that shipped: every other rule reads the
+      OUTERMOST link or requires every link to be a non-group kind, and the group
+      is outermost on both paths — so a ``ToolError`` in a task group still ships
+      (F-929's noise half, left open).
 
-    Bounded at ONE PAST ``expected_events.MAX_LINKS``, never at it: a walk
-    stopped AT the bound handed ``classify`` a prefix that looked whole, and a
-    group of matching leaves with a real defect past them was dropped live
+    Both modes skip an exception already seen, so a cycle terminates the way the
+    SDK's does. Bounded at ONE PAST ``expected_events.MAX_LINKS``, never at it: a
+    walk stopped AT the bound handed ``classify`` a prefix that looked whole, and
+    a group of matching leaves with a real defect past them was dropped live
     while the payload shipped it. One past makes a cut-short walk too long to
     judge, so it ships — the way the payload path ships the same chain.
     """
+    expand = isinstance(exc, BaseExceptionGroup)
     chain: list[BaseException] = []
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
@@ -466,11 +472,13 @@ def _exception_chain(exc: BaseException) -> "list[BaseException]":
             continue
         seen.add(id(current))
         chain.append(current)
-        following = current.__cause__
-        if following is None and not current.__suppress_context__:
-            following = current.__context__
+        following = (
+            current.__cause__ if current.__suppress_context__ else current.__context__
+        )
         members = (
-            list(current.exceptions) if isinstance(current, BaseExceptionGroup) else []
+            list(current.exceptions)
+            if expand and hasattr(current, "exceptions")
+            else []
         )
         # A stack, so pushed in reverse: the cause is visited first, then the
         # members in order — the SDK's pre-order.
