@@ -493,15 +493,25 @@ async def get_page_content(
     )
 
 
-async def _capture(tab: Tab, path: Path, instance_id: str) -> None:
+async def _capture(
+    tab: Tab, path: Path, instance_id: str, *, image_format: str, full_page: bool
+) -> None:
     """``Tab.save_screenshot`` under the CDP budget, with Chrome's refusal of the
     capture raised as a ``ToolError`` naming Chrome's reason (T-10034, Sentry
     STEALTH-CHROME-DEVTOOLS-MCP-E7: ``Internal error`` and ``Session with given
     id not found`` escaped this tool as a raw ``ProtocolException``). A
     ``ToolError`` and not a ``CallerError``: the browser failed, not the
-    caller's input, so it stays a Sentry issue."""
+    caller's input, so it stays a Sentry issue.
+
+    *image_format* and *full_page* are handed to nodriver every time (T-10043):
+    its defaults are ``jpeg`` and the viewport, so a call that named neither
+    wrote JPEG bytes into a ``.png`` and never captured beyond the viewport,
+    whatever the caller asked for."""
     try:
-        await rt._with_cdp_timeout(tab.save_screenshot(path), instance_id=instance_id)
+        await rt._with_cdp_timeout(
+            tab.save_screenshot(path, format=image_format, full_page=full_page),
+            instance_id=instance_id,
+        )
     except ProtocolException as error:
         raise ToolError(f"Chrome could not capture the page: {error}") from error
 
@@ -540,7 +550,9 @@ async def take_screenshot(
             file_path, tool="take_screenshot", overwrite=overwrite
         )
         try:
-            await _capture(tab, save_path, instance_id)
+            await _capture(
+                tab, save_path, instance_id, image_format=format, full_page=full_page
+            )
         except BaseException:
             discard_precreated(save_path, created)
             raise
@@ -550,7 +562,10 @@ async def take_screenshot(
         tmp_path = Path(tmp_file.name)
 
     try:
-        await _capture(tab, tmp_path, instance_id)
+        # Lossless capture; the requested format is applied by the re-encode below.
+        await _capture(
+            tab, tmp_path, instance_id, image_format="png", full_page=full_page
+        )
 
         with Image.open(tmp_path) as img:
             if img.mode in ("RGBA", "LA", "P") and format.lower() == "jpeg":

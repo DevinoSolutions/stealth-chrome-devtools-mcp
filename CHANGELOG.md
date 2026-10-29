@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### take_screenshot captures the format and the full page it was asked for (T-10043)
+
+- `take_screenshot` handed nodriver's `save_screenshot` only a path, and nodriver defaults to `format="jpeg"` and the viewport. So a file named `.png` held JPEG bytes (measured: the 2.1.50 proof's `.png` screenshots start with `ff d8 ff e0`), `format="jpeg"` was the only format a file ever got, and `full_page=True` never captured beyond the viewport, on both paths.
+- The file path now passes the caller's `format` and `full_page`. The inline answer is captured as lossless PNG with `full_page` and re-encoded to the requested format, as before.
+
 ### Chrome's refusal of a screenshot is a ToolError, not a raw protocol error (T-10034)
 
 - `take_screenshot` let `Tab.save_screenshot`'s `ProtocolException` escape when Chrome refused `Page.captureScreenshot` (`Internal error`; `Session with given id not found` once the tab's target was gone), outside the one error convention (Sentry STEALTH-CHROME-DEVTOOLS-MCP-E7, 2.1.46 and 2.1.47). Both capture paths now go through one helper that raises `ToolError("Chrome could not capture the page: <Chrome's reason>")`. It stays a Sentry issue: the browser failed, not the caller's input.
