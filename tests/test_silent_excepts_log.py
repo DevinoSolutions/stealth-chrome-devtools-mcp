@@ -159,6 +159,7 @@ class TestDomHandlerSilentExcepts:
         # LABELLED rather than reported as an ordinary click.
         aim = json.dumps(
             {
+                "connected": True,
                 "rendered": True,
                 "rect": {"left": 0, "top": 0, "width": 10, "height": 10},
                 "point": {"x": 5, "y": 5},
@@ -174,7 +175,9 @@ class TestDomHandlerSilentExcepts:
         # (``click_target.SYNTHETIC_JS``), answering its own clicked token.
         element.apply = AsyncMock(
             side_effect=lambda js, *a, **k: (
-                click_target.SYNTHETIC_CLICKED if "elem.click()" in js else aim
+                click_target.SYNTHETIC_CLICKED
+                if js == click_target.SYNTHETIC_JS
+                else aim
             )
         )
         tab = _single_shot_tab()
@@ -188,7 +191,9 @@ class TestDomHandlerSilentExcepts:
 
         assert result["dispatch"] == "synthetic"
         synthetic = [
-            c for c in element.apply.await_args_list if "elem.click()" in c.args[0]
+            c
+            for c in element.apply.await_args_list
+            if c.args[0] == click_target.SYNTHETIC_JS
         ]
         assert len(synthetic) == 1
         element.click.assert_not_awaited()
