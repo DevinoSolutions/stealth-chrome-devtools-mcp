@@ -20,6 +20,12 @@ Measured on Chrome 155, Windows, 2 s windows: ~110-120 frames held, 2 not held,
 ~120 in the foreground tab. The bar is a quarter of the foreground rate: a loaded
 runner lowers the count, never to the unheld tab's 2.
 
+The fall back is read on a PAIR, the driven tab and an untouched control measured at
+the same time, and is backed by a check that counts no frame at all: once the linger
+and the stop's send budget are over, the driven tab is no longer held and
+``Page.stopScreencast`` was sent to it. Frame counts need Chrome to throttle a
+background tab, which the macOS CI runner does only some of the time (T-10026).
+
 Style follows the plan_E2E suite: ``e2e_helpers`` mechanism, bounded waits, every
 spawn closed in ``finally``. Hermetic: ``about:blank`` and ``window.open`` only.
 """
@@ -212,6 +218,81 @@ async def _fallen_back_rate(iid: str, tab_id: str) -> int:
     return rate
 
 
+def _sent_methods(monkeypatch, tab) -> list[str]:
+    """Spy on *tab*'s ``send``: the CDP method of every command its transport takes,
+    in order. A pass-through: the caller's own command generator is driven, and only
+    the method of its first step is read on the way."""
+    sent: list[str] = []
+    original = tab.send
+
+    def tapped(cdp_obj):
+        command = next(cdp_obj)
+        sent.append(command.get("method", ""))
+        reply = yield command
+        try:
+            cdp_obj.send(reply)
+        except StopIteration as done:
+            return done.value
+        raise RuntimeError("a CDP command generator asked for a second reply")
+
+    async def spy(cdp_obj, *args, **kwargs):
+        return await original(tapped(cdp_obj), *args, **kwargs)
+
+    monkeypatch.setattr(tab, "send", spy)
+    return sent
+
+
+async def _assert_released(tab_id: str, sent: list[str], by: float) -> None:
+    """The release, read without counting a frame: by *by* (a ``time.monotonic()``)
+    the tab is no longer held AND ``Page.stopScreencast`` went to it. Polled, so a
+    release that comes early passes early. ``paint_hold`` has no public query, so
+    this reads its private ``_held`` (target id -> hold), as tests/test_paint_hold.py
+    does; *sent* is :func:`_sent_methods`' record."""
+    while True:
+        held = tab_id in paint_hold._held
+        stopped = "Page.stopScreencast" in sent
+        if (not held and stopped) or time.monotonic() >= by:
+            break
+        await asyncio.sleep(0.1)
+    assert not held and stopped, (
+        f"the hold on the driven tab was not released "
+        f"{SHORT_LINGER_SECONDS + paint_hold.SEND_BUDGET_S:.1f} s after the last "
+        f"call (linger + the stop's send budget): still held={held}, "
+        f"Page.stopScreencast sent={stopped}"
+    )
+
+
+def _decide_fallback(driven_rate: int, control_rate: int) -> None:
+    """The fall back, decided on the PAIR read at the same time. The control is a
+    tab no tool touched, so it reads whether Chrome throttles a background tab at
+    that moment. Throttled control and an unthrottled driven tab: a hold that was
+    never released, a FAIL everywhere. Both throttled: a pass. An unthrottled
+    control means the premise every frame count rests on was lost mid-test: on
+    macOS (whose CI runner throttles only some of the time, T-10026) that skips by
+    name with both numbers, elsewhere (measured throttled) it FAILS. A hold left
+    on reads as that last case too, because a held tab un-throttles its painting
+    siblings (F-1019; measured here with the release removed: driven 114, control
+    57), which is why :func:`_assert_released` runs first, on every platform."""
+    if control_rate > MAX_UNHELD_FRAMES:
+        message = (
+            f"the throttle premise was lost on this host mid-test: after the linger "
+            f"the untouched control tab counted {control_rate} frames in "
+            f"{MEASURE_MS} ms (throttled is <= {MAX_UNHELD_FRAMES}) while the driven "
+            f"tab, whose hold was released, counted {driven_rate}, so no frame "
+            f"count tells a released hold here (or another tab's hold is "
+            f"un-throttling its siblings)"
+        )
+        if sys.platform == "darwin":
+            pytest.skip(message)
+        pytest.fail(message)
+    assert driven_rate <= MAX_UNHELD_FRAMES, (
+        f"a hold that was never released: after the linger the driven tab counted "
+        f"{driven_rate} frames in {MEASURE_MS} ms while the untouched control tab, "
+        f"read at the same time, counted {control_rate} (throttled is "
+        f"<= {MAX_UNHELD_FRAMES})"
+    )
+
+
 async def _spawn(tmp_path, headless: bool) -> str:
     result = await get_fn("spawn_browser")(
         headless=headless,
@@ -254,11 +335,15 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
     """The cost bound: painting is paid for only while a tool is driving the tab.
 
     A tab no tool acts on stays at its throttled rate, a driven one paints, and one
-    that was driven falls back ``LINGER_SECONDS`` after the last call. "Stays
-    throttled" is measured, not assumed: where Chrome does not throttle an untouched
-    background tab (the macOS CI runner has no display) there is nothing for a hold
-    to lift, so the node skips by name; the product claim (a tool-driven background
-    tab paints) is the two other nodes', which run there.
+    that was driven falls back ``LINGER_SECONDS`` after the last call. The fall
+    back is checked twice: without frames (the hold is gone and
+    ``Page.stopScreencast`` was sent, on every platform), and by frames, on the
+    driven tab and an untouched control read at the same time. "Stays throttled" is
+    measured, not assumed: where Chrome does not throttle an untouched background
+    tab (the macOS CI runner has no display), at startup or after the linger, there
+    is nothing for a hold to lift, so the frame counts skip by name there and FAIL
+    elsewhere; the product claim (a tool-driven background tab paints) is the two
+    other nodes', which run there.
     """
     monkeypatch.setattr(paint_hold, "LINGER_SECONDS", SHORT_LINGER_SECONDS)
     new_tab, close = get_fn("new_tab"), get_fn("close_instance")
@@ -287,6 +372,8 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         # untouched tab's 62 on one macOS run, so a bar on it measures the runner.
         # The exemption is macOS-only: on Windows and Linux (measured throttled) an
         # unthrottled undriven tab is a product regression and must FAIL, not skip.
+        # One 2 s reading can pass on a brief stall (a GPU process restart), so the
+        # premise is read AGAIN after the linger, on the control (_decide_fallback).
         undriven_rate = await _undriven_rate(iid, undriven)
         if sys.platform == "darwin" and undriven_rate > MAX_UNHELD_FRAMES:
             pytest.skip(
@@ -304,17 +391,42 @@ async def test_an_undriven_background_tab_stays_throttled_until_a_tool_acts(
         )
 
         # A tool call starts the driven tab's loop: it is held from that call on.
+        # The spy is cleared at the holding call, so an earlier hold's stop (were
+        # there one) cannot answer for this one.
+        driven_tab = tab_open.find(browser, driven)
+        sent = _sent_methods(monkeypatch, driven_tab)
         held_at = time.monotonic()
         await execute(instance_id=iid, script=START_LOOP_JS, tab_id=driven)
+        # The hold's deadline is set inside the call, so it ends by the linger after
+        # the call returns, and the stop then has its send budget.
+        released_by = (
+            time.monotonic()
+            + SHORT_LINGER_SECONDS
+            + paint_hold.SEND_BUDGET_S
+            + LINGER_MARGIN_SECONDS
+        )
+        hold = paint_hold._held.get(driven)  # private, as in _assert_released
+        assert hold is not None and hold.tab is driven_tab, (
+            "the tool call did not hold the tab the spy watches"
+        )
         assert await _held_rate(iid, driven, held_at) >= MIN_FRAMES
 
         # Without another call it falls back after the linger. "Falls back" is
         # bounded, not instant: for a few seconds after a hold ends, Chrome keeps
         # painting background tabs (T-10026: on Windows the UNTOUCHED tab read 56-57
         # frames when read first at linger + 1 s; the macOS publish runner read the
-        # driven tab at 45 there). A hold left on never falls back and still fails.
-        assert await _fallen_back_rate(iid, driven) <= MAX_UNHELD_FRAMES
-        assert await _fallen_back_rate(iid, undriven) <= MAX_UNHELD_FRAMES
+        # driven tab at 45 there). So the driven tab and the untouched control are
+        # read at the SAME time, each re-read while over the bar, and decided as a
+        # pair (:func:`_decide_fallback`): a lone reading of the driven tab cannot
+        # tell a hold left on from a runner that stopped throttling mid-test (macOS
+        # read 79 on the 2.1.51 publish gate after passing the startup premise). The
+        # release is also checked without frames, on every platform and BEFORE the
+        # pair can skip (:func:`_assert_released`). A hold left on fails either way.
+        driven_rate, control_rate = await asyncio.gather(
+            _fallen_back_rate(iid, driven), _fallen_back_rate(iid, undriven)
+        )
+        await _assert_released(driven, sent, released_by)
+        _decide_fallback(driven_rate, control_rate)
 
         # A new call holds it again.
         held_at = time.monotonic()
