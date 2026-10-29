@@ -57,8 +57,9 @@ event can arrive in (see "one rule, two paths" below):
     ``TimeoutError``, and it must keep shipping.
 
 ``client-disconnect``
-    Either the chain is entirely ``starlette.requests.ClientDisconnect``, or the
-    event is the message-only form the session loop logs. **That second arm
+    The chain is entirely ``starlette.requests.ClientDisconnect``; or the
+    event is the message-only form the session loop logs; or it is that loop
+    failing to tell the client (the third arm, below). **That second arm
     matches "an exception with NO TEXT at ``mcp.server.lowlevel.server``", not
     "a ``ClientDisconnect``"** — and it cannot be narrower.
     ``mcp/server/lowlevel/server.py``:713 (mcp 1.28.1; :707 in 1.27.1) is a
@@ -73,6 +74,24 @@ event can arrive in (see "one rule, two paths" below):
     named again in the finding's §6. The match is EQUALITY, never a prefix: the
     same line with a real tail — "Received response with an unknown request ID:
     … Method not found" — is a protocol fault and keeps shipping.
+
+    **The third arm is that same line's NEXT statement failing** (T-10034,
+    Sentry -EN, 25 events on 2.1.47). Line :714 (mcp 1.30.0) follows the log
+    with ``await session.send_log_message(...)``, telling the client about the
+    exception — on a write stream the session's ``_receive_loop`` has already
+    closed, because the read stream ending is what closed it. anyio's
+    ``MemoryObjectSendStream.send_nowait`` raises ``ClosedResourceError``,
+    three task groups wrap it (the lowlevel ``Server.run``'s, ``BaseSession``'s,
+    ``streamable_http_manager``'s ``session_tg``), and ``run_server``'s
+    ``except Exception: logger.exception(f"Session {session_id} crashed")``
+    logs the group on :data:`SESSION_MANAGER_LOGGER`. The rule is that logger,
+    every link a group or an anyio ``ClosedResourceError``, at least one of the
+    latter, and EVERY one of them carrying :data:`STREAM_LOG_FRAMES`
+    adjacently — the one call site of ``send_log_message`` in
+    ``_handle_message``. A ``ClosedResourceError`` from any other send (a
+    response, a progress notification) is not this line and still ships, and so
+    does a group holding anything else. It needs the live walk to see a group's
+    members, which ``observability._exception_chain`` does for this.
 
 ``proactor-teardown``
     Logger ``asyncio``, message beginning ``Exception in callback
@@ -172,7 +191,9 @@ The two paths do NOT agree on ORDER, and that is normalized here rather than in
 each rule: the live chain walks outermost-first (``exc``, then its cause), while
 Sentry's ``values`` list the ROOT cause first and the reported exception LAST.
 :func:`_links` hands every rule one order — **outermost first** — so
-``links[0]`` is the exception Sentry titles the issue with on either path.
+``links[0]`` is the exception Sentry titles the issue with on either path. A
+group's members are in both, in the SDK's pre-order (each exception, its cause,
+then its members), since T-10034 widened the live walk to follow them.
 
 There is exactly ONE exception to name-and-module matching, and it is the one
 that was already there: our own error base is matched with ``isinstance`` when
@@ -326,6 +347,13 @@ BUDGET_KINDS = (
 )
 
 CLIENT_GONE = Kind(frozenset({"ClientDisconnect"}), frozenset({"starlette.requests"}))
+#: A task group's wrapper — the builtin, which the SDK writes with no module.
+#: Only ``ExceptionGroup``: anyio raises ``BaseExceptionGroup``, which builds an
+#: ``ExceptionGroup`` whenever every member is an ``Exception``, as here.
+TASK_GROUP = Kind(frozenset({"ExceptionGroup"}), None)
+#: anyio re-exports its exceptions with ``__module__ = "anyio"`` (measured,
+#: anyio 4.15.1), so that is what both paths carry.
+STREAM_CLOSED = Kind(frozenset({"ClosedResourceError"}), frozenset({"anyio"}))
 CONNECTION_RESET = Kind(frozenset({"ConnectionResetError"}), None)
 CONNECTION_REFUSED = Kind(frozenset({"ConnectionRefusedError"}), None)
 CALLER_VALIDATION = Kind(
@@ -345,9 +373,23 @@ ARG_VALIDATION_FRAMES = (
     Frame("pydantic.type_adapter", "validate_python"),
 )
 
+#: The two frames of ``mcp/server/lowlevel/server.py``:714 (mcp 1.30.0) —
+#: ``_handle_message``'s ``case Exception():`` arm calling
+#: ``session.send_log_message`` — which every ``ClosedResourceError`` in
+#: ``client-disconnect``'s grouped arm must carry, adjacently. Measured on both
+#: paths through the real ``Server._handle_message``; below them run
+#: ``mcp.shared.session send_notification`` and anyio's ``send``/``send_nowait``.
+STREAM_LOG_FRAMES = (
+    Frame("mcp.server.lowlevel.server", "_handle_message"),
+    Frame("mcp.server.session", "send_log_message"),
+)
+
 #: The loggers the four logger-gated classes name, verbatim.
 ASYNCIO_LOGGER = "asyncio"
 MCP_SESSION_LOGGER = "mcp.server.lowlevel.server"
+#: Where ``StreamableHTTPSessionManager``'s ``run_server`` logs a session that
+#: crashed — ``logger.exception(f"Session {session_id} crashed")``.
+SESSION_MANAGER_LOGGER = "mcp.server.streamable_http_manager"
 #: The logger fastmcp reports a failed tool call on: ``FastMCP.fastmcp.tools.
 #: tool_manager`` in 2.11, ``fastmcp.tools.tool_manager`` in 2.14 (F-943), and
 #: ``FastMCP.call_tool``'s own module since fastmcp 3 removed the
@@ -433,9 +475,16 @@ def _error_convention(facts: EventFacts) -> bool:
 
 
 def _client_disconnect(facts: EventFacts) -> bool:
-    """The client went away mid-request — from the POST, or from the session loop."""
+    """The client went away mid-request — from the POST, or from the session loop.
+
+    Three arms: the POST's ``ClientDisconnect``; the session loop's bare
+    message; and that loop's next line failing to tell the client, a group of
+    nothing but ``ClosedResourceError`` raised under :data:`STREAM_LOG_FRAMES`.
+    """
     if _all_are(facts.links, CLIENT_GONE):
         return True
+    if facts.logger == SESSION_MANAGER_LOGGER:
+        return _only_a_closed_log_send(facts.links)
     return (
         not facts.links
         and facts.logger == MCP_SESSION_LOGGER
@@ -528,6 +577,20 @@ def _is_budget(link: Link) -> bool:
 def _all_are(links: "tuple[Link, ...]", kind: Kind) -> bool:
     """Every link is that kind, and there is at least one link to say it about."""
     return bool(links) and all(kind.matches(link) for link in links)
+
+
+def _only_a_closed_log_send(links: "tuple[Link, ...]") -> bool:
+    """Groups wrapping nothing but mcp's log send on a closed stream.
+
+    Every non-group link must be that ``ClosedResourceError`` with its frames,
+    and there must be one: a group with any other member is a real failure that
+    happens to share a task group with a client that left.
+    """
+    leaves = [link for link in links if not TASK_GROUP.matches(link)]
+    return bool(leaves) and all(
+        STREAM_CLOSED.matches(link) and _has_adjacent(link.frames, STREAM_LOG_FRAMES)
+        for link in leaves
+    )
 
 
 def _has_adjacent(frames: "tuple[Frame, ...]", pair: "tuple[Frame, Frame]") -> bool:
