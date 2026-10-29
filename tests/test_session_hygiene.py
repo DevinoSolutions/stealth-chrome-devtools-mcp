@@ -163,6 +163,34 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+#: The whole client conversation below takes ~1.5 s, the sweep poll inside it
+#: is bounded at 10 s on its own; past this the test FAILS naming its step.
+_CONVERSATION_BUDGET_SECONDS = 20.0
+
+
+class _Steps:
+    """One deadline over the client conversation, and the step it is on.
+
+    Every await in the conversation was unbounded: no request timeout on
+    ``call_tool``, none on the ``initialize`` inside ``Client.__aenter__``. A
+    reply that never comes then held the pre-push lane for 21+ minutes
+    (T-10195) instead of failing. The deadline turns that into a failure that
+    names the step and the one process-global state known to cause it."""
+
+    def __init__(self) -> None:
+        self.now = "starting"
+
+    def failure(self) -> str:
+        from sse_starlette.sse import AppStatus
+
+        return (
+            f"no answer within {_CONVERSATION_BUDGET_SECONDS:.0f} s while "
+            f"{self.now} (sse_starlette AppStatus.should_exit="
+            f"{AppStatus.should_exit}; True ends every SSE reply at once, "
+            "see conftest._sse_app_status_reset)"
+        )
+
+
 async def _abandon_one(url: str) -> str:
     """A liveness-probe-shaped session whose DELETE never happens."""
     async with httpx.AsyncClient(timeout=10) as client:
@@ -195,7 +223,10 @@ async def test_end_to_end_abandoned_probes_are_reaped_and_the_live_client_is_not
     The window is held open while the probes are built and shortened after
     they are counted: both settings are read at every sweep, and five
     sequential round trips can outlast a 0.5 s window on a loaded machine,
-    which reaped the first probes before the count (pre-push, 2026-10-10)."""
+    which reaped the first probes before the count (pre-push, 2026-10-10).
+
+    The conversation runs under one deadline that names the step it ran out
+    in: a reply that never came hung the pre-push lane (T-10195)."""
     import uvicorn
 
     monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 60.0)
@@ -222,34 +253,53 @@ async def test_end_to_end_abandoned_probes_are_reaped_and_the_live_client_is_not
             await asyncio.sleep(0.1)
         assert server.started
 
-        async with Client(StreamableHttpTransport(url)) as client:
-            assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
-            orphans = [await _abandon_one(url) for _ in range(5)]
-            manager = session_hygiene.active_manager()
-            assert manager is not None, "FastMCP did not build OUR manager"
-            assert len(manager._server_instances) == 6
+        steps = _Steps()
+        try:
+            async with asyncio.timeout(_CONVERSATION_BUDGET_SECONDS) as budget:
+                steps.now = "entering the Client (initialize)"
+                async with Client(StreamableHttpTransport(url)) as client:
+                    steps.now = "the first call_tool"
+                    assert (await client.call_tool("echo", {"text": "hi"})).data == "hi"
+                    steps.now = "opening the five abandoned probe sessions"
+                    orphans = [await _abandon_one(url) for _ in range(5)]
+                    manager = session_hygiene.active_manager()
+                    assert manager is not None, "FastMCP did not build OUR manager"
+                    assert len(manager._server_instances) == 6
 
-            monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 0.5)
-            for _ in range(100):  # bounded: 10 s, against a 0.5 s window
-                if len(manager._server_instances) == 1:
-                    break
-                await asyncio.sleep(0.1)
+                    monkeypatch.setattr(session_hygiene, "ABANDONED_AFTER_SECONDS", 0.5)
+                    steps.now = "waiting for the sweep to reap the probes"
+                    for _ in range(100):  # bounded: 10 s, against a 0.5 s window
+                        if len(manager._server_instances) == 1:
+                            break
+                        await asyncio.sleep(0.1)
 
-            assert len(manager._server_instances) == 1
-            assert (
-                await client.call_tool("echo", {"text": "still here"})
-            ).data == "still here"
+                    assert len(manager._server_instances) == 1
+                    steps.now = "the call_tool after the sweep"
+                    assert (
+                        await client.call_tool("echo", {"text": "still here"})
+                    ).data == "still here"
 
-            async with httpx.AsyncClient(timeout=10) as raw:
-                resp = await raw.post(
-                    url,
-                    json={"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
-                    headers={
-                        "Accept": "application/json, text/event-stream",
-                        "mcp-session-id": orphans[0],
-                    },
-                )
-            assert resp.status_code == 404, (resp.status_code, resp.text)
+                    steps.now = "pinging a reaped session id"
+                    async with httpx.AsyncClient(timeout=10) as raw:
+                        resp = await raw.post(
+                            url,
+                            json={
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "ping",
+                                "params": {},
+                            },
+                            headers={
+                                "Accept": "application/json, text/event-stream",
+                                "mcp-session-id": orphans[0],
+                            },
+                        )
+                    assert resp.status_code == 404, (resp.status_code, resp.text)
+                    steps.now = "leaving the Client (DELETE and disconnect)"
+        except TimeoutError:
+            if not budget.expired():
+                raise
+            pytest.fail(steps.failure(), pytrace=False)
     finally:
         server.should_exit = True
         with contextlib.suppress(asyncio.CancelledError, Exception):

@@ -427,12 +427,10 @@ async def test_over_http_each_proxy_is_its_own_caller_and_tab_id_arrives(monkeyp
     import uvicorn
     from fastmcp import Client, FastMCP
     from fastmcp.client.transports import StreamableHttpTransport
-    from sse_starlette.sse import AppStatus
 
     from stealth_chrome_devtools_mcp.embedded import backend_client, tool_registry
     from stealth_chrome_devtools_mcp.embedded.tool_registry import ToolRegistry
 
-    monkeypatch.setattr(AppStatus, "should_exit", False)
     # The registry's section table is process-global: this throwaway tool must
     # not join the live surface the count tripwires read.
     monkeypatch.setattr(tool_registry, "SECTION_TOOLS", defaultdict(list))
@@ -481,7 +479,6 @@ async def test_over_http_each_proxy_is_its_own_caller_and_tab_id_arrives(monkeyp
     finally:
         server.should_exit = True
         await asyncio.wait_for(serve, timeout=10)
-        AppStatus.should_exit = False
 
 
 def test_the_proxy_transport_stamps_one_caller_id_per_process():
