@@ -1,6 +1,16 @@
 # F-929 — an `ExceptionGroup` bypasses every chain-keyed expected-event class
 
 **Status:** FILED, not fixed. No code change ships with this document.
+**Update (T-10034):** §3.1's half is CLOSED. `_exception_chain` now follows a
+group's members in the SDK's own pre-order, and
+`TestTheSessionLoopCouldNotTellTheClient.test_both_paths_judge_the_same_links`
+pins the two link lists, not a verdict. The measurement §5 asks for came out
+EMPTY — old walk against new over this document's four leaves plus
+`CallerError`, each bare, grouped, doubly grouped beside a `ValueError`, and as
+the cause of a `ToolError`, on four loggers: 0 verdicts moved. Every rule but `client-disconnect`'s new grouped arm reads the outermost
+link or requires every link to be a non-group kind, so no existing verdict moves.
+The noise half stays open — a `ToolError` in a task group still ships, because
+the group is its outermost link on both paths.
 **Module:** `src/stealth_chrome_devtools_mcp/observability.py` (`_exception_chain`),
 consumed by `src/stealth_chrome_devtools_mcp/expected_events.py` (`classify`).
 **Found:** 2026-09-21, from the other side, while closing F-913's review defect S3

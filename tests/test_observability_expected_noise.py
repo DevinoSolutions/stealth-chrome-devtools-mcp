@@ -148,15 +148,20 @@ def _sdk_client():
         yield seen
 
 
-def logged(logger_name: str, message: str, exc=None, pathname="/app/x.py"):
+def logged(
+    logger_name: str, message: str, exc=None, pathname="/app/x.py", exc_info=None
+):
     """The (event, hint) pair the REAL ``LoggingIntegration`` builds for a record.
 
     ``EventHandler`` is the class ``LoggingIntegration(event_level=ERROR)``
     installs, so driving it directly produces the ``logger`` key, the
     ``logentry`` dict and the ``hint["log_record"]`` exactly as production gets
     them — including the absence of ``exception`` for a message-only record.
+    ``exc_info`` is for an exception already caught where it was raised, whose
+    traceback must not gain this file's frame.
     """
-    exc_info = _raise(exc) if exc is not None else None
+    if exc is not None:
+        exc_info = _raise(exc)
     record = logging.LogRecord(
         name=logger_name,
         level=logging.ERROR,
@@ -288,6 +293,85 @@ def tool_manager_event(exc_info, logger_name=TOOL_CALL_LOGGER, tool="navigate"):
 
 def client_disconnect():
     return pytest.importorskip("starlette.requests").ClientDisconnect
+
+
+#: `StreamableHTTPSessionManager.run_server`'s
+#: ``logger.exception(f"Session {session_id} crashed")`` (mcp 1.30.0).
+SESSION_MANAGER_LOGGER = "mcp.server.streamable_http_manager"
+SESSION_CRASHED = "Session 3f2a9c0e5b7d4e1f8a6c2b9d0e4f7a1c crashed"
+
+
+def session_crash_info(*bodies):
+    """Sentry -EN's chain: ``bodies`` run as tasks inside three real task groups.
+
+    The three are the lowlevel ``Server.run``'s, ``BaseSession``'s and
+    ``streamable_http_manager``'s ``session_tg`` — nested the way they are when
+    ``run_server`` catches the group and logs it. Each body is handed a
+    ``ServerSession`` whose write stream is already CLOSED, which is the state
+    the session's ``_receive_loop`` leaves when the read stream ends.
+    """
+    import anyio
+
+    ServerSession = pytest.importorskip("mcp.server.session").ServerSession
+    InitializationOptions = pytest.importorskip(
+        "mcp.server.models"
+    ).InitializationOptions
+    ServerCapabilities = pytest.importorskip("mcp.types").ServerCapabilities
+
+    async def run():
+        write_send, _write_receive = anyio.create_memory_object_stream(1)
+        _read_send, read_receive = anyio.create_memory_object_stream(1)
+        session = ServerSession(
+            read_receive,
+            write_send,
+            InitializationOptions(
+                server_name="t", server_version="0", capabilities=ServerCapabilities()
+            ),
+        )
+        await write_send.aclose()
+        try:
+            async with (
+                anyio.create_task_group() as _session_tg,
+                anyio.create_task_group() as _base_session_tg,
+                anyio.create_task_group() as server_tg,
+            ):
+                for body in bodies:
+                    server_tg.start_soon(body, session)
+        except Exception:  # noqa: BLE001  PERMANENT(run_server's own `except Exception` is what logs it; the fixture is that catch)
+            return sys.exc_info()
+        return None
+
+    info = anyio.run(run)
+    assert info is not None, "expected the task groups to raise"
+    return info
+
+
+def notify_a_stream_exception(session):
+    """The real ``Server._handle_message`` handed an exception off the stream.
+
+    Its ``case Exception():`` arm logs ``Received exception from stream: `` and
+    then calls ``session.send_log_message`` — mcp 1.30.0's line 714, the frames
+    Sentry -EN carries. Returned unawaited, so the task's own coroutine IS
+    ``_handle_message``, as it is under ``Server.run``'s ``tg.start_soon``.
+    """
+    Server = pytest.importorskip("mcp.server.lowlevel.server").Server
+    return Server("t")._handle_message(client_disconnect()(), session, None)
+
+
+async def send_on_the_closed_stream(session):
+    """The same anyio ``ClosedResourceError``, raised from a send that is not
+    mcp's log notification."""
+    await session._write_stream.send(None)
+
+
+async def fail_unrelated(session):
+    """A real failure in a sibling task of the same session. Shielded so the
+    group's first failure cannot cancel it before it raises."""
+    import anyio
+
+    with anyio.CancelScope(shield=True):
+        await anyio.sleep(0.01)
+        raise AttributeError("'NoneType' object has no attribute 'send'")
 
 
 def _through_tool_run(body, arguments):
@@ -676,6 +760,114 @@ class TestTheClientWentAway:
                 return sys.exc_info()
 
         assert not dropped(tool_manager_event(chain(), STREAMABLE_HTTP_LOGGER))
+
+
+class TestTheSessionLoopCouldNotTellTheClient:
+    """Sentry -EN (T-10034, 25 events on 2.1.47): the line after the bare
+    message. ``_handle_message`` logs the stream exception and then sends the
+    client a log notification on a write stream already closed; anyio raises
+    ``ClosedResourceError`` under three task groups and ``run_server`` logs the
+    group as ``Session … crashed``."""
+
+    def _en(self):
+        return logged(
+            SESSION_MANAGER_LOGGER,
+            SESSION_CRASHED,
+            exc_info=session_crash_info(notify_a_stream_exception),
+        )
+
+    def test_the_fixture_is_sentry_ens_shape(self):
+        """Three groups over one ``ClosedResourceError`` whose frames are the
+        ones the issue shows, from the SDK's own serializer."""
+        event, _ = self._en()
+        values = event["exception"]["values"]
+
+        assert [(v["type"], v.get("module")) for v in values] == [
+            ("ClosedResourceError", "anyio"),
+            ("ExceptionGroup", None),
+            ("ExceptionGroup", None),
+            ("ExceptionGroup", None),
+        ]
+        assert [
+            (f["module"], f["function"]) for f in values[0]["stacktrace"]["frames"]
+        ] == [
+            ("mcp.server.lowlevel.server", "_handle_message"),
+            ("mcp.server.session", "send_log_message"),
+            ("mcp.shared.session", "send_notification"),
+            ("anyio.streams.memory", "send"),
+            ("anyio.streams.memory", "send_nowait"),
+        ]
+
+    def test_it_is_dropped_as_a_client_disconnect(self):
+        from stealth_chrome_devtools_mcp import expected_events
+
+        pair = self._en()
+
+        assert TestTheClassesAreNamed()._classify(pair) == (
+            expected_events.CLIENT_DISCONNECT
+        )
+        assert dropped(pair)
+
+    def test_it_is_dropped_from_the_payload_alone(self):
+        from stealth_chrome_devtools_mcp import expected_events
+
+        pair = payload_only(self._en())
+
+        assert TestTheClassesAreNamed()._classify(pair) == (
+            expected_events.CLIENT_DISCONNECT
+        )
+        assert dropped(pair)
+
+    def test_both_paths_judge_the_same_links(self):
+        """F-929 §3.1's pin, keyed on the SETS and not on a verdict: before
+        T-10034 the live chain was the outer group alone."""
+        from stealth_chrome_devtools_mcp import expected_events
+
+        event, hint = self._en()
+        chain = observability._exception_chain(observability._hint_exception(hint))
+
+        live = expected_events._links(event, chain)
+        serialized = expected_events._links(event, None)
+
+        assert [(link.type_name, link.module) for link in live] == [
+            (link.type_name, link.module) for link in serialized
+        ]
+        assert len(live) == 4
+
+    def test_a_closed_stream_from_any_other_send_still_ships(self):
+        """The same exception, the same groups, the same logger — not line 714."""
+        pair = logged(
+            SESSION_MANAGER_LOGGER,
+            SESSION_CRASHED,
+            exc_info=session_crash_info(send_on_the_closed_stream),
+        )
+        assert pair[0]["exception"]["values"][0]["type"] == "ClosedResourceError"
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
+
+    def test_a_group_with_any_other_failure_still_ships(self):
+        """The client left AND something else broke: the something else is ours."""
+        pair = logged(
+            SESSION_MANAGER_LOGGER,
+            SESSION_CRASHED,
+            exc_info=session_crash_info(notify_a_stream_exception, fail_unrelated),
+        )
+        types = {v["type"] for v in pair[0]["exception"]["values"]}
+        assert {"ClosedResourceError", "AttributeError"} <= types
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
+
+    def test_the_same_group_on_another_logger_still_ships(self):
+        pair = logged(
+            "stealth.backend",
+            SESSION_CRASHED,
+            exc_info=session_crash_info(notify_a_stream_exception),
+        )
+
+        assert not dropped(pair)
+        assert not dropped(payload_only(pair))
 
 
 # ===========================================================================

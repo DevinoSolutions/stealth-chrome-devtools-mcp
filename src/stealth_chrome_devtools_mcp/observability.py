@@ -430,25 +430,47 @@ def _expected_error_base() -> "type[BaseException] | None":
 
 
 def _exception_chain(exc: BaseException) -> "list[BaseException]":
-    """``exc`` and everything it was raised from, in the order Sentry reports them.
+    """``exc``, everything it was raised from, and everything it GROUPS.
 
     Mirrors the SDK's own walk (``__cause__``, else ``__context__`` unless
     ``raise ... from None`` suppressed it) so the live-object path and the
     payload path below judge the SAME set of exceptions. Bounded and cycle-safe
     for the same reason :data:`_MAX_EVENT_DEPTH` exists.
+
+    **And a group's members, in the SDK's order** (T-10034, closing F-929's
+    §3.1 half). ``sentry_sdk.utils.exceptions_from_error`` visits an exception,
+    then its cause-or-context, then each of ``exceptions`` in turn, each
+    recursively — a pre-order the serialized ``values`` list in reverse, which
+    ``expected_events._links`` undoes. Without this arm a task group's failure
+    was ONE link live and every leaf on the payload path. Widening it drops
+    nothing that shipped: every rule but one reads the OUTERMOST link or
+    requires every link to be a non-group kind, and the group is outermost on
+    both paths — so a ``ToolError`` in a task group still ships (F-929's noise
+    half, left open). ``client-disconnect``'s grouped arm is the one rule that
+    reads a group's leaves, and it is why this walk had to see them.
+    ``isinstance(BaseExceptionGroup)``, never ``getattr(exc, "exceptions")``,
+    for ``payload_log_sites._chain``'s reason.
     """
     chain: list[BaseException] = []
     seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        if len(chain) >= _MAX_EVENT_DEPTH:
-            break
+    pending: list[BaseException] = [exc]
+    while pending and len(chain) < _MAX_EVENT_DEPTH:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         chain.append(current)
         following = current.__cause__
         if following is None and not current.__suppress_context__:
             following = current.__context__
-        current = following
+        members = (
+            list(current.exceptions) if isinstance(current, BaseExceptionGroup) else []
+        )
+        # A stack, so pushed in reverse: the cause is visited first, then the
+        # members in order — the SDK's pre-order.
+        pending.extend(reversed(members))
+        if following is not None:
+            pending.append(following)
     return chain
 
 
