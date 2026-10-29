@@ -646,7 +646,8 @@ install and nothing to configure: the SDK ships with the package and the
 destination is built in.
 
 **What a report contains.** The exception type and message, the stack trace, the
-package version, and the platform. Three things are kept out of it:
+package version, whether the package is an editable (development) install, and
+the platform. Three things are kept out of it:
 
 - your **machine name** (Sentry's `server_name`) is dropped entirely;
 - your **username** is removed from every path, so a stack frame reads

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### An editable checkout reports its errors as environment=development, not production (T-10363)
+
+- `sentry_init` passed no `environment`, so the SDK's default `production` tagged every install, and an editable checkout or worktree also carries its pyproject version as `release`. On 2026-10-29, 11 of the 33 errors under release 2.1.50 in the previous 24 h came from dev runs in an editable worktree, which made the 2.1.50 release-health read wrong.
+- `observability._environment` reads the installed distribution's PEP 610 `direct_url.json`: `dir_info.editable` true gives `environment="development"`. Everything else gives `environment="production"`, now passed explicitly: a wheel install with no such file, a file without `dir_info`, malformed JSON, or a missing distribution. The `release` string is unchanged. The backend, the stdio proxy and the ops CLI all go through this one init.
+
 ## 2.1.52
 
 2.1.51 was tagged but never published: its publish run failed on the macOS integration cell (`test_an_undriven_background_tab_stays_throttled_until_a_tool_acts`, T-10026). Everything listed under 2.1.51 ships for the first time in this release, together with the entries below.

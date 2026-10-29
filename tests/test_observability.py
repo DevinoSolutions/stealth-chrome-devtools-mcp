@@ -51,6 +51,7 @@ deterministic fixture is `tests/fakes.py` (the one harness home).
 from __future__ import annotations
 
 import builtins
+import importlib.metadata
 import json
 import locale
 import logging
@@ -153,6 +154,99 @@ def test_sentry_init_returns_false_instead_of_raising_when_the_sdk_is_missing(
 
     with patch("builtins.__import__", _blocked_import):
         assert observability.sentry_init() is False
+
+
+# ── T-10363: an editable checkout reports environment=development ───────────
+def _installed_as(monkeypatch, tmp_path, direct_url):
+    """Make ``distribution(<pkg>)`` answer with a REAL ``PathDistribution``.
+
+    The dist-info directory is built on disk the way an installer leaves it,
+    and ``read_text`` is importlib.metadata's own, so an absent file reads as
+    ``None`` exactly as it does for a wheel install. *direct_url* is the file's
+    raw text, or ``None`` for no file at all.
+    """
+    dist_info = tmp_path / "stealth_chrome_devtools_mcp-9.9.9.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: stealth-chrome-devtools-mcp\nVersion: 9.9.9\n",
+        encoding="utf-8",
+    )
+    if direct_url is not None:
+        (dist_info / "direct_url.json").write_text(direct_url, encoding="utf-8")
+    dist = importlib.metadata.PathDistribution(dist_info)
+    real = importlib.metadata.distribution
+
+    def _distribution(name):
+        return dist if name == observability._PACKAGE_NAME else real(name)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _distribution)
+
+
+_EDITABLE = '{"url": "file:///C:/src/wt", "dir_info": {"editable": true}}'
+
+
+def test_an_editable_install_reports_the_development_environment(monkeypatch, tmp_path):
+    """PEP 610: ``dir_info.editable`` true is what an editable install writes."""
+    _installed_as(monkeypatch, tmp_path, _EDITABLE)
+    assert observability._environment() == "development"
+
+
+@pytest.mark.parametrize(
+    "direct_url",
+    [
+        pytest.param(None, id="wheel-no-direct_url"),
+        pytest.param(
+            '{"url": "file:///C:/src/wt", "dir_info": {}}', id="dir-not-editable"
+        ),
+        pytest.param(
+            '{"url": "file:///C:/src/wt", "dir_info": {"editable": false}}',
+            id="editable-false",
+        ),
+        pytest.param(
+            '{"url": "https://x.test/a.whl", "archive_info": {}}', id="no-dir_info"
+        ),
+        pytest.param('{"dir_info": {"editable": "true"}}', id="editable-not-bool"),
+        pytest.param('{"dir_info": "editable"}', id="dir_info-not-object"),
+        pytest.param('["dir_info"]', id="not-an-object"),
+        pytest.param('{"dir_info": {"editable": tru', id="malformed-json"),
+    ],
+)
+def test_anything_but_a_proven_editable_install_is_production(
+    monkeypatch, tmp_path, direct_url
+):
+    _installed_as(monkeypatch, tmp_path, direct_url)
+    assert observability._environment() == "production"
+
+
+def test_a_missing_distribution_is_production(monkeypatch):
+    """The real lookup, for a name nothing installed: PackageNotFoundError."""
+    monkeypatch.setattr(observability, "_PACKAGE_NAME", "no-such-dist-t10363")
+    with pytest.raises(importlib.metadata.PackageNotFoundError):
+        importlib.metadata.distribution(observability._PACKAGE_NAME)
+    assert observability._environment() == "production"
+
+
+@pytest.mark.parametrize(
+    ("direct_url", "expected"),
+    [(_EDITABLE, "development"), (None, "production")],
+    ids=["editable", "wheel"],
+)
+def test_sentry_init_passes_the_environment_explicitly(
+    monkeypatch, tmp_path, direct_url, expected
+):
+    """Passed both ways: left out, the SDK's own default says "production"
+    for an editable checkout too, which is the T-10363 defect. The release
+    string is untouched by it."""
+    pytest.importorskip("sentry_sdk")
+    monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
+    _installed_as(monkeypatch, tmp_path, direct_url)
+    captured = {}
+
+    with patch("sentry_sdk.init", lambda **kwargs: captured.update(kwargs)):
+        assert observability.sentry_init() is True
+
+    assert captured["environment"] == expected
+    assert captured["release"] == observability._release()
 
 
 # ===========================================================================
