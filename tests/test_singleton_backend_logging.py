@@ -11,11 +11,44 @@ nowhere. This pins that a boot-time crash's traceback now lands in
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import backend_launch, singleton
+
+# The ceiling for a child that never shows its output and never exits. A slow start
+# is NOT what it bounds (T-9675: a host whose process starts took 9-12 s lost a fixed
+# 10 s window); the wait below ends on events, so a crash that was not captured fails
+# the moment the child is gone, not at this deadline.
+_CHILD_DEADLINE_SECONDS = 120
+
+
+def _boot_log_when_settled(boot_log: Path, pid: int, needle: str) -> str:
+    """The boot log's text once *needle* is in it or the child *pid* has exited.
+
+    Both are observable events. The text appearing is success, as fast as the child
+    is. The child exiting means its output is on disk or never will be, so the final
+    read is the answer, empty or not. Neither is a guess about how long a start takes.
+    """
+    deadline = time.monotonic() + _CHILD_DEADLINE_SECONDS
+    try:
+        child: psutil.Process | None = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        child = None
+    while True:
+        text = boot_log.read_text(encoding="utf-8") if boot_log.exists() else ""
+        if needle in text or child is None:
+            return text
+        if time.monotonic() > deadline:
+            pytest.fail(f"boot-crash child {pid} still running, no {needle!r} logged")
+        try:
+            child.wait(0.05)
+            child = None  # gone: read once more, then answer
+        except psutil.TimeoutExpired:
+            pass
 
 
 @pytest.fixture()
@@ -44,17 +77,19 @@ class TestBootLogRedirect:
             lambda port: [sys.executable, str(crashing_module)],
         )
 
+        launched = []
+        real_spawn = backend_launch.spawn
+
+        def spy(*args, **kwargs):
+            launched.append(real_spawn(*args, **kwargs))
+            return launched[-1]
+
+        monkeypatch.setattr(backend_launch, "spawn", spy)
+
         singleton._start_server_process(19999)
 
         boot_log = isolated_state / "logs" / "backend-boot.log"
-        deadline = time.monotonic() + 10
-        text = ""
-        while time.monotonic() < deadline:
-            if boot_log.exists():
-                text = boot_log.read_text(encoding="utf-8")
-                if "injected boot crash" in text:
-                    break
-            time.sleep(0.05)
+        text = _boot_log_when_settled(boot_log, launched[0].pid, "injected boot crash")
 
         assert "injected boot crash for test_boot_crash_is_captured" in text
         assert "RuntimeError" in text
