@@ -20,12 +20,6 @@
 - One call has ONE retry budget, shared by its two renames: at most 3 transient rename failures in all (a `PermissionError` or Windows error 5, 32 or 33), whichever step fails, and so at most two pauses, 0.1 s then 0.2 s, 0.3 s in total. A transient failure retries the whole move-aside-and-publish step from the top. An earlier draft gave the move-aside its own three tries inside each of the publish's three; replaying a move-aside that fails twice then passes, with every publish failing, gave 9 move-asides, 3 publishes and 1.2 s of pauses. The publish failure puts the old tree back first and the pause follows, so at every pause the target holds the old, complete tree: sleeping between the two renames leaves it absent for the pause, and a concurrent copy that chose it as its source would read a missing directory (`copy_delta` accepts one). If putting the old tree back fails, the error is raised as before. Any other `OSError` gets one try, and a profile a live browser holds is refused before any rename. A copy that needed a retry writes one WARNING (`profile.replace_tree_locked`) with the count and the first cause. Tests read the target at every pause and count the failed renames and the total pause time for each way the budget can be split between the two steps.
 - The seed refresh reports `seed_error: "seed-in-use"` only for a held seed, as before; for the other causes it reports `<code>: <sentence>` (`stealthy close` prints it after `seed not refreshed:`).
 
-### `query_elements` and `get_element_state` no longer report a node the page removed as still on the page (T-10284)
-
-### A node the page removed no longer lists or waits as on the page, and a page with its own global `Node` no longer breaks the DOM tools (T-10284)
-
-### A node the page removed no longer lists or waits as on the page; `click_element` works on a page with its own global `Node`; the new reads leave the page's user activation alone (T-10284)
-
 ### A node the page removed no longer lists or waits as on the page; the click and listing reads run in an isolated world no page can steer; a read that failed is never an answer (T-10284, closes T-10299)
 
 Everything below is relative to 2.1.53; the entry describes what a user of 2.1.53 sees change.
