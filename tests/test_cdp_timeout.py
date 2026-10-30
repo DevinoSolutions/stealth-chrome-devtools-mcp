@@ -88,6 +88,26 @@ class TestWithCdpTimeoutMechanism:
         assert elapsed < 1.0, "Exception should propagate immediately"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("bound", [0, -1, -0.5])
+    async def test_a_non_positive_bound_means_the_default_and_starts_nothing_early(
+        self, bound
+    ):
+        """T-10690: ``asyncio.timeout(<= 0)`` STARTS the operation and cancels it
+        at its first await, after its request is already out, where ``wait_for``
+        never started it. So ``<= 0`` means the default (30 s), the one rule 0
+        always had, and the operation runs to its end."""
+        steps: list[str] = []
+
+        async def operation():
+            steps.append("sent")
+            await asyncio.sleep(0.01)
+            steps.append("answered")
+            return "done"
+
+        assert await _with_cdp_timeout(operation(), timeout=bound) == "done"
+        assert steps == ["sent", "answered"]
+
+    @pytest.mark.asyncio
     async def test_custom_timeout_override(self):
         """Custom timeout should override the default."""
 
@@ -547,7 +567,7 @@ class TestWithCdpTimeoutIsCanonical:
         for path, lines in self._tool_source_lines().items():
             wrapper = self._wrapper_line_range(lines)
             for i, line in enumerate(lines):
-                if "asyncio.timeout(" not in line:
+                if "asyncio.timeout" not in line:
                     continue
                 if wrapper and wrapper[0] <= i < wrapper[1]:
                     continue  # the canonical wrapper's own timeout — allowed.
