@@ -292,6 +292,32 @@ def _tool_errors_departed_stores_hygiene():
 
 
 @pytest.fixture(autouse=True)
+def _paint_hold_hygiene():
+    """No test may leave a screencast hold, or a caller-owned target, for the next (T-9542).
+
+    ``paint_hold._held`` / ``_caller_owned`` are module globals that live as long as
+    the process, and every tool driven through ``tab_binding.tab_for`` with a
+    ``FakeTab`` writes to them under the default target ``T-faketab``.
+    ``test_paint_hold`` cleaned up only inside its own file, so its closed-tab pin
+    failed under some ``-k`` selections. CLEARED through ``forget`` (which also ends
+    the release timer) on ``_tool_errors_departed_stores_hygiene``'s precedent.
+    ``test_paint_hold_isolation`` is the pin.
+
+    The import is function-local for the reason ``_in_memory_storage_hygiene`` gives.
+    """
+    from stealth_chrome_devtools_mcp.embedded import paint_hold
+
+    def clear() -> None:
+        for key in list(paint_hold._held):
+            paint_hold.forget(key)
+        paint_hold._caller_owned.clear()
+
+    clear()
+    yield
+    clear()
+
+
+@pytest.fixture(autouse=True)
 def _sse_app_status_reset():
     """No test may start with sse_starlette's shutdown flag left set (T-10195).
 

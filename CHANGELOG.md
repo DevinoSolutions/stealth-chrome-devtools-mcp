@@ -42,6 +42,10 @@
 
 ## 2.1.54
 
+### Test-only: `paint_hold` state is reset around every test (T-9542)
+
+- Test-only, no product change. `test_paint_hold.py::test_a_closed_tab_is_forgotten_and_its_timer_task_ends` failed under `-k 'login_persistence or browser_manager or spawn or profile or close'` with a leftover `T-faketab` hold: tests that drive a tool through `tab_binding.tab_for` with `FakeTab` leave a hold in `paint_hold._held` (process-global), and only `test_paint_hold.py` cleaned up. `tests/conftest.py` now clears `_held` (ending the release timers) and `_caller_owned` before and after every test; `tests/test_paint_hold_isolation.py` runs a leaker and then a victim in one session and fails without the fixture.
+
 ### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)
 
 - Seven `HungBrowserError` events in the project's Sentry (STEALTH-CHROME-DEVTOOLS-MCP-ES, -EJ, -EF, -EE, -DY, -DQ, -DB) were seven issues, because the report is logged at ERROR and never raised, so it has no stack and Sentry grouped it by a message that embeds the instance id, uptime (`uptime=71999s`), process counts, `free_ram=33.11GB`, paths and step timings (`evaluate=15070ms`): the freeze rate could not be read off the issue list. `observability._scrub_event` now sets the event's `fingerprint` from the live exception (`_stable_fingerprint`): `HungBrowserError` and `FrozenCloneError` are `forensic_errors.ForensicError`s that carry their kind and the stable cause the call site passes (for the probe heal: `["hung-browser", "heal TimeoutError at evaluate"]`), so the same step and error type is one issue whatever the instance, uptime or timings, and a different step, error type or site is another. The message, the exception and the scrub are unchanged.
