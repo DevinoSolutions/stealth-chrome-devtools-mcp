@@ -721,6 +721,35 @@ class TestNothingACallerCanSetIsRead:
         assert len(shipped_events) == before + 1
         assert "fingerprint" not in shipped_events[-1]
 
+    @pytest.mark.parametrize("container", ["str-subclass", "tuple-subclass"])
+    def test_a_declaration_of_rigged_builtin_subclasses_is_ignored(
+        self, shipped_events, container
+    ):
+        """A str subclass that equals every word (and hashes like one) is not a
+        word of the vocabulary; a tuple subclass is not a declaration (Codex,
+        review of 200ab62: the secret shipped as the fingerprint)."""
+        rigged = type(
+            "S",
+            (str,),
+            {
+                "__hash__": lambda self: hash("hung-browser"),
+                "__eq__": lambda self, other: True,
+            },
+        )
+        if container == "str-subclass":
+            declaration = (rigged(self.SECRET),)
+        else:
+            declaration = type("T", (tuple,), {})(("hung-browser", "heal"))
+        error = HungBrowserError("i-1: failed")
+        error.sentry_fingerprint = declaration
+        before = len(shipped_events)
+        debug_logger.log_error("browser_health", "probe", error)
+        sentry_sdk.get_client().flush()
+
+        assert len(shipped_events) == before + 1
+        assert "fingerprint" not in shipped_events[-1]
+        assert "swordfish" not in repr(shipped_events[-1].get("fingerprint"))
+
     def test_a_caller_subclass_of_our_forensic_error_declares_nothing(
         self, shipped_events
     ):
