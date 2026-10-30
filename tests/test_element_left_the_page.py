@@ -436,7 +436,7 @@ async def test_the_synthetic_script_checks_before_it_clicks():
     )
     unreadable = (
         f'if (state !== "{click_target.CONNECTED_YES}") '
-        f'return "{click_target.SYNTHETIC_THREW}";'
+        f'return "{click_target.SYNTHETIC_UNREAD}";'
     )
     caught = f'try {{ click.call(elem); }} catch (e) {{ return "{click_target.SYNTHETIC_THREW}"; }}'
     assert js.index(read) < js.index(detached) < js.index(unreadable)
@@ -714,20 +714,20 @@ async def test_the_click_scripts_read_the_target_only_through_native_accessors()
     ):
         assert re.search(r"\b(?:elem|node|owner|r)\.[A-Za-z]", js) is None, name
     natives = (
-        "Element.prototype.getClientRects",
-        "Element.prototype.matches",
-        "Element.prototype.closest",
-        "Node.prototype.contains",
-        "Node.prototype.getRootNode",
-        "Document.prototype.elementFromPoint",
+        "getClientRects",
+        "matches",
+        "closest",
+        "contains",
+        "getRootNode",
     )
     for native in natives:
-        assert native in click_target.AIM_JS, native
+        assert f"native(elem, '{native}')" in click_target.AIM_JS, native
+    assert "native(doc, 'elementFromPoint')" in click_target.AIM_JS
     # The connectivity read is the one shared fragment, which reads the native
     # accessor itself (CONNECTIVITY_JS) -- neither script has its own.
     assert click_target.CONNECTIVITY_JS in click_target.AIM_JS
     assert click_target.CONNECTIVITY_JS in click_target.SYNTHETIC_JS
-    assert "HTMLElement.prototype.click" in click_target.SYNTHETIC_JS
+    assert "const click = native(elem, 'click');" in click_target.SYNTHETIC_JS
     assert "click.call(elem)" in click_target.SYNTHETIC_JS
 
 
@@ -1074,9 +1074,64 @@ async def test_refresh_element_reads_connectivity_once_and_only_after_update():
     assert gone.apply_calls == []
 
 
-def _package_sources() -> list[Path]:
-    root = Path(click_target.__file__).parent
-    return sorted(root.glob("*.py"))
+def _package_root() -> Path:
+    return Path(click_target.__file__).parents[1]
+
+
+def _folded(node: ast.AST) -> str | None:
+    """The string a constant, an f-string or a ``'a' + 'b'`` evaluates to."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = [_folded(value) for value in node.values]
+        return "".join(part for part in parts if part is not None)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _folded(node.left), _folded(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _string_constants(path: Path) -> list[tuple[int, str]]:
+    """Every string a module's code can hand to a page, as (line, text).
+
+    The WHOLE module (T-10284 review): every string at any depth except a
+    docstring, whatever its quote style. The pieces of an f-string are joined
+    and a ``'is' + 'Connected'`` is folded, so splitting a spelling across
+    constants does not hide it.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    scopes = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, scopes)
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    found = []
+    for node in ast.walk(tree):
+        text = None if id(node) in docstrings else _folded(node)
+        if text:
+            found.append((node.lineno, text))
+    return found
+
+
+def _package_scripts() -> list[tuple[str, int, str]]:
+    """Every ``(file, line, text)`` the package could run in a page: all string
+    constants of every ``.py`` under the package (recursively, so
+    ``tool_sections/`` and the rest of the tree are in) and every ``.js`` file."""
+    root = _package_root()
+    scripts = [
+        (path.relative_to(root).as_posix(), line, text)
+        for path in sorted(root.rglob("*.py"))
+        for line, text in _string_constants(path)
+    ]
+    scripts += [
+        (path.relative_to(root).as_posix(), 1, path.read_text(encoding="utf-8"))
+        for path in sorted(root.rglob("*.js"))
+    ]
+    return scripts
 
 
 async def test_the_one_connectivity_read_builds_every_script_that_asks():
@@ -1090,21 +1145,110 @@ async def test_the_one_connectivity_read_builds_every_script_that_asks():
         assert re.search(r"\belem\.isConnected\b", js) is None, name
 
 
+#: Any spelling of the property: single, double or back quotes, ``.isConnected``,
+#: ``["isConnected"]``, ``function (e) { return e.isConnected }`` all contain the
+#: word. The one place that may is the shared fragment.
+_IS_CONNECTED = re.compile(r"isConnected")
+
+#: A read of a DOM interface through its GLOBAL, which a page's own top-level
+#: ``class Node {}`` replaces: ``Node.prototype``, ``Node["prototype"]``,
+#: ``x instanceof ShadowRoot``.
+_INTERFACE = (
+    r"(?:Node|Element|Document|HTMLElement|ShadowRoot|DocumentFragment|EventTarget)"
+)
+_GLOBAL_INTERFACE_READ = re.compile(
+    rf"\b{_INTERFACE}\b\s*(?:\.\s*prototype\b|\[\s*['\"`]prototype)"
+    rf"|\binstanceof\s+{_INTERFACE}\b"
+)
+
+
+async def test_the_census_sees_the_whole_package():
+    """The census is only as good as what it scans (review finding 5): it used
+    to glob ``embedded/*.py`` and skip ``tool_sections/`` and the rest."""
+    files = {name for name, _, _ in _package_scripts()}
+    assert "embedded/click_target.py" in files
+    assert "embedded/page_natives.py" in files
+    assert "server.py" in files
+    assert any(name.startswith("embedded/tool_sections/") for name in files), files
+    assert any(name.endswith(".js") for name in files)
+
+
 async def test_no_other_script_in_the_package_reads_is_connected():
-    """Codex finding 4: the extraction left a second implementation in
-    ``NATIVES_JS`` and ``AIM_JS``. Census over every string constant of the
-    package that is a script: ``'isConnected'`` is spelled in exactly one, the
-    shared fragment, and no script reads ``.isConnected`` off a node."""
-    spelled = []
-    for path in _package_sources():
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
-                continue
-            if "'isConnected'" in node.value:
-                spelled.append((path.name, node.value))
-            if "=>" in node.value:
-                assert re.search(r"\.isConnected\b", node.value) is None, path.name
-    assert [name for name, _ in spelled] == ["click_target.py"], spelled
+    """Codex finding 4, widened by review finding 5: ``isConnected`` is spelled,
+    in any form, in exactly ONE string of the whole package -- the shared
+    fragment -- and in no ``.js`` file."""
+    spelled = [
+        (name, text)
+        for name, _, text in _package_scripts()
+        if _IS_CONNECTED.search(text)
+    ]
+    assert [name for name, _ in spelled] == ["embedded/click_target.py"], [
+        name for name, _ in spelled
+    ]
+    only = spelled[0][1]
+    assert only.count("isConnected") == 1
+    assert "native(node, 'isConnected').call(node)" in only
+    assert only.strip().startswith("const connectivity = (node) =>")
+
+
+async def test_no_script_in_the_package_reads_a_dom_interface_through_its_global():
+    """Review finding 1: a page that declares a top-level ``class Node {}`` made
+    every ``Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected')``
+    throw. No script anywhere in the package may read ``Node.prototype`` (or any
+    interface's): the members come from the node's own prototype chain, through
+    ``page_natives.NATIVE_JS``, the one helper."""
+    spelled = [
+        (name, line, _GLOBAL_INTERFACE_READ.search(text).group(0))
+        for name, line, text in _package_scripts()
+        if _GLOBAL_INTERFACE_READ.search(text)
+    ]
+    assert spelled == []
+    # Imported here, not at the top: the module still collects against a parent
+    # that has no ``page_natives`` (the RED run).
+    from stealth_chrome_devtools_mcp.embedded import page_natives
+
+    assert "Object.getPrototypeOf(obj)" in page_natives.NATIVE_JS
+    for name, js in (
+        ("CONNECTIVITY_JS", click_target.CONNECTIVITY_JS),
+        ("ROOTS_JS", page_natives.ROOTS_JS),
+        ("NATIVES_JS", page_natives.NATIVES_JS),
+        ("SYNTHETIC_JS", click_target.SYNTHETIC_JS),
+        ("ARM_PROBE_JS", click_target.ARM_PROBE_JS),
+    ):
+        assert page_natives.NATIVE_JS in js, name
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "Object.getOwnPropertyDescriptor(Node.prototype, 'x').get",
+        "Element . prototype . matches",
+        "Document['prototype'].elementFromPoint",
+        "r instanceof ShadowRoot",
+        "function (e) { return e.isConnected }",
+        'e["isConnected"]',
+        "`isConnected`",
+    ],
+)
+async def test_the_census_patterns_catch_every_spelling(spelling):
+    assert _GLOBAL_INTERFACE_READ.search(spelling) or _IS_CONNECTED.search(spelling)
+
+
+async def test_the_census_reads_split_and_formatted_strings(tmp_path):
+    module = tmp_path / "m.py"
+    module.write_text(
+        '"""docstring: isConnected"""\n'
+        "a = 'e.is' + 'Connected'\n"
+        "b = f\"{x}.isConn\" 'ected'\n"
+        "def f():\n"
+        '    "also a docstring Node.prototype"\n'
+        "    return 'plain'\n",
+        encoding="utf-8",
+    )
+    texts = [text for _, text in _string_constants(module)]
+    assert any(_IS_CONNECTED.search(t) for t in texts)
+    assert sum(1 for t in texts if _IS_CONNECTED.search(t)) >= 2
+    assert not any("docstring" in t for t in texts)
 
 
 async def test_the_double_speaks_the_products_connectivity_vocabulary():
@@ -1306,16 +1450,82 @@ async def test_a_click_on_a_node_whose_connectivity_cannot_be_read_sends_nothing
 
 
 async def test_the_synthetic_script_clicks_only_on_the_yes_token():
+    """Finding 2 (T-10284 review): a connectivity read that failed is answered
+    with the script's own ``unread`` token, not the ``threw`` one the page's
+    click handler gives. RED on 1c7761e: the message said the page's click
+    handler "threw ... it may have reached the page" although ``click.call``
+    never ran."""
     ledger = click_target.InputSent()
     unreadable = _hidden(getter_throws=True)
 
-    with pytest.raises(ToolError, match="threw"):
+    with pytest.raises(ToolError) as caught:
         await click_target.synthetic_click(unreadable, SELECTOR, ledger)
 
+    message = str(caught.value)
+    assert message == (
+        "could not read whether '#target' is still in its document; "
+        "nothing was clicked, and it was not repeated"
+    )
+    assert "click handler" not in message and "reached the page" not in message
     assert "click" not in unreadable.calls
-    # A read that failed proves nothing about whether the page took a click, so
-    # the ledger is set and the attempt is never re-run (the unchanged rule).
+    # A read that failed proves nothing about whether the page took a click (its
+    # own getter ran), so the ledger is set and the attempt is never re-run (the
+    # unchanged rule).
     assert ledger.sent is True
+
+
+async def test_the_synthetic_script_has_four_answers_of_its_own():
+    answers = {
+        click_target.SYNTHETIC_DETACHED,
+        click_target.SYNTHETIC_CLICKED,
+        click_target.SYNTHETIC_THREW,
+        click_target.SYNTHETIC_UNREAD,
+    }
+    assert len(answers) == 4
+    for answer in answers:
+        assert f'"{answer}"' in click_target.SYNTHETIC_JS, answer
+    unread = f'if (state !== "{click_target.CONNECTED_YES}") return "{click_target.SYNTHETIC_UNREAD}";'
+    assert unread in click_target.SYNTHETIC_JS
+
+
+class _UnreadableAtTheSyntheticClick(FakeClickTarget):
+    """Readable for the aim, unreadable for the synthetic script: the page's
+    getter starts throwing in the window between the two reads."""
+
+    async def apply(self, js_function, *args, **kwargs):
+        if js_function == click_target.SYNTHETIC_JS:
+            self.getter_throws = True
+        return await super().apply(js_function, *args, **kwargs)
+
+
+async def test_click_element_whose_synthetic_read_fails_says_nothing_was_clicked():
+    target = _UnreadableAtTheSyntheticClick(
+        rendered=False, mouse_click_error=RuntimeError("could not find position")
+    )
+    spare = FakeClickTarget()
+    tab = _ReplacingTab(target, spare)
+
+    with pytest.raises(ToolError) as caught:
+        await DOMHandler.click_element(tab, SELECTOR)
+
+    message = str(caught.value)
+    assert "could not read whether '#target' is still in its document" in message
+    assert "nothing was clicked" in message
+    assert "click handler" not in message
+    # Not re-resolved and not repeated: the attempt is spent.
+    assert len(tab.select_calls) == 1
+    assert "click" not in target.calls and spare.landings == []
+
+
+async def test_a_click_handler_that_throws_is_still_the_threw_answer():
+    """The other half of finding 2: the page's own ``click()`` throwing keeps
+    the ``threw`` token and its wording."""
+    target = _hidden(click_throws="boom")
+    with pytest.raises(ToolError) as caught:
+        await click_target.synthetic_click(target, SELECTOR, click_target.InputSent())
+
+    assert "click handler" in str(caught.value)
+    assert "may have reached the page" in str(caught.value)
 
 
 async def test_a_removed_form_that_shadows_is_connected_is_dropped_from_a_listing():
@@ -1349,3 +1559,160 @@ async def test_a_removed_form_that_shadows_is_connected_has_left_the_page():
     assert await refresh_element(FakeTab(), live) is True
     with pytest.raises(ToolError, match="left the page after it was resolved"):
         await DOMHandler.get_element_state(_TabOf(removed), SELECTOR)
+
+
+# ---------------------------------------------------------------------------
+# (g) a page that declares its own global named ``Node`` (T-10284 review)
+# ---------------------------------------------------------------------------
+#
+# ``class Node {}`` / ``function Node(){}`` / ``var Node = 1`` at the top level
+# of a page (a linked-list demo) replaces the ``Node`` global. A script that
+# read ``Node.prototype`` then threw on EVERY element: the connectivity read
+# answered ``threw`` and ``query_elements`` / ``get_element_state`` always
+# raised where 2.1.53 answered, and ``click_element``'s natives threw uncaught.
+# ``page_declares_node`` makes the double model that page: a script that still
+# reads ``Node.prototype`` gets the failure, one that walks the node's own
+# prototype chain does not.
+
+
+def _on_node_page(element_id: str = "node", **kwargs) -> FakeClickTarget:
+    return FakeClickTarget(
+        tag="li",
+        element_id=element_id,
+        text=element_id,
+        page_declares_node=True,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("visible_only", [True, False])
+async def test_query_elements_on_a_page_declaring_node_lists_as_on_any_page(
+    visible_only,
+):
+    """RED on 1c7761e: ``ToolError: element 0 of 'li': could not read whether
+    the element is still in its document`` for every element of the page."""
+    live = _on_node_page("live")
+    removed = _on_node_page("removed", disconnected=True)
+
+    results = await DOMHandler.query_elements(
+        _TabOf(removed, live), "li", visible_only=visible_only
+    )
+
+    assert _ids(results) == ["live"]
+    assert results[0].is_visible is True
+
+
+async def test_get_element_state_on_a_page_declaring_node_answers_as_on_any_page():
+    state = await DOMHandler.get_element_state(_TabOf(_on_node_page("live")), SELECTOR)
+
+    assert state["attributes"] == {"id": "live"}
+    assert state["is_visible"] is True
+    with pytest.raises(ToolError, match="left the page after it was resolved"):
+        await DOMHandler.get_element_state(
+            _TabOf(_on_node_page("gone", disconnected=True)), SELECTOR
+        )
+
+
+async def test_click_element_on_a_page_declaring_node_clicks_once():
+    """RED on 1c7761e: ``NATIVES_JS`` read ``Node.prototype`` outside any
+    ``try`` -- the aim threw and the click never happened."""
+    target = _on_node_page("button")
+    tab = _ReplacingTab(target)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert result["dispatch"] == "coordinate"
+    assert len(_presses(target)) == 1
+
+
+async def test_click_element_on_a_page_declaring_node_still_re_resolves_a_removed_node():
+    removed = _on_node_page("gone", disconnected=True)
+    fresh = _on_node_page("fresh")
+    tab = _ReplacingTab(removed, fresh)
+
+    result = await DOMHandler.click_element(tab, SELECTOR)
+
+    assert result["dispatch"] == "coordinate"
+    assert removed.landings == [] and len(_presses(fresh)) == 1
+    assert len(tab.select_calls) == 2
+
+
+async def test_the_synthetic_click_on_a_page_declaring_node_clicks_once():
+    hidden = _on_node_page(
+        "hidden",
+        rendered=False,
+        mouse_click_error=RuntimeError("could not find position"),
+    )
+
+    result = await DOMHandler.click_element(_ReplacingTab(hidden), SELECTOR)
+
+    assert result["dispatch"] == "synthetic"
+    assert hidden.calls.count("click") == 1
+
+
+async def test_the_double_fails_a_script_that_still_reads_the_node_global():
+    """The double's own contract (finding 1): under ``page_declares_node`` a
+    script that reads ``Node.prototype`` inside the connectivity ``try`` answers
+    ``threw``, one that reads it anywhere else throws uncaught (``None``), and
+    the shipped scripts, which read neither, are answered as on any page."""
+    page = _on_node_page("x")
+    regressed = click_target.CONNECTED_JS.replace(
+        "native(node, 'isConnected')",
+        "Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected').get",
+    )
+    assert regressed != click_target.CONNECTED_JS
+    assert await page.apply(regressed) == THREW
+    outside = "(elem) => { return Node.prototype.getRootNode.call(elem); }"
+    assert await page.apply(outside) is None
+    assert await page.apply(click_target.CONNECTED_JS) == YES
+    # ... and only a page that declares Node is affected.
+    assert await FakeClickTarget().apply(regressed) is None
+
+
+@pytest.mark.parametrize("on_node_page", [False, True], ids=["plain", "declares-node"])
+async def test_wait_for_element_visible_is_not_satisfied_by_a_removed_node(
+    on_node_page,
+):
+    """Finding 4. ``wait_for_element(visible=True)`` kept its own style-only
+    script, a second visibility check: a node the page removed but still
+    references has an empty computed style, so it was "visible" and the wait
+    returned True. RED on 1c7761e: ``True``."""
+    removed = FakeClickTarget(
+        tag="li",
+        element_id="removed",
+        disconnected=True,
+        page_declares_node=on_node_page,
+    )
+
+    waited = await DOMHandler.wait_for_element(
+        _TabOf(removed), "li", timeout=100, visible=True
+    )
+
+    assert waited is False
+    assert removed.apply_calls == [dom_handler.VISIBLE_JS]
+
+
+@pytest.mark.parametrize("on_node_page", [False, True], ids=["plain", "declares-node"])
+async def test_wait_for_element_visible_returns_for_a_connected_node(on_node_page):
+    live = FakeClickTarget(tag="li", element_id="live", page_declares_node=on_node_page)
+
+    assert await DOMHandler.wait_for_element(
+        _TabOf(live), "li", timeout=100, visible=True
+    )
+    assert live.apply_calls == [dom_handler.VISIBLE_JS]
+
+
+async def test_wait_for_element_without_visible_asks_the_page_nothing():
+    removed = FakeClickTarget(tag="li", element_id="removed", disconnected=True)
+
+    assert await DOMHandler.wait_for_element(
+        _TabOf(removed), "li", timeout=100, visible=False
+    )
+    assert removed.apply_calls == []
+
+
+async def test_no_second_visibility_script_is_left_in_dom_handler():
+    """``VISIBLE_JS`` is the only script in ``dom_handler`` that tests
+    ``getComputedStyle`` for visibility."""
+    source = Path(dom_handler.__file__).read_text(encoding="utf-8")
+    assert source.count("getComputedStyle") == 1

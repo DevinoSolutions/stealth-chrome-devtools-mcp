@@ -95,6 +95,7 @@ from typing import TYPE_CHECKING
 
 from nodriver import cdp
 
+from stealth_chrome_devtools_mcp.embedded import page_natives
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
@@ -146,25 +147,29 @@ DISABLED = "disabled"
 #: :data:`CONNECTED_THREW`, as does any value that is not a boolean. Only
 #: ``no`` is a departure.
 #:
-#: The getter is the NATIVE ``Node.prototype.isConnected`` accessor, never
+#: The getter is the NATIVE ``isConnected`` accessor, found by
+#: :data:`page_natives.NATIVE_JS` on the NODE's own prototype chain: never
 #: ``elem.isConnected`` (a ``<form>`` with a control named ``isConnected``
-#: shadows that member, see :data:`NATIVES_JS`). A page script that REPLACES the
-#: accessor is the accepted boundary until T-10299 (an isolated world): one
-#: that throws is read as ``threw``, one that answers a boolean is believed.
+#: shadows that member) and never through the ``Node`` global (a page's own
+#: top-level ``class Node {}`` replaces it, and every element then read
+#: ``threw``). A page script that REPLACES the accessor is the accepted
+#: boundary until T-10299 (an isolated world): one that throws is read as
+#: ``threw``, one that answers a boolean is believed.
 CONNECTED_YES = "stealth.connected:yes"
 CONNECTED_NO = "stealth.connected:no"
 CONNECTED_THREW = "stealth.connected:threw"
 
 CONNECTIVITY_JS = (
     """const connectivity = (node) => {
+        __NATIVE__
         try {
-            const answer = Object.getOwnPropertyDescriptor(
-                Node.prototype, 'isConnected').get.call(node);
+            const answer = native(node, 'isConnected').call(node);
             if (answer === true) return "__YES__";
             if (answer === false) return "__NO__";
         } catch (e) { return "__THREW__"; }
         return "__THREW__";
-    };""".replace("__YES__", CONNECTED_YES)
+    };""".replace("__NATIVE__", page_natives.NATIVE_JS)
+    .replace("__YES__", CONNECTED_YES)
     .replace("__NO__", CONNECTED_NO)
     .replace("__THREW__", CONNECTED_THREW)
 )
@@ -203,31 +208,6 @@ CONNECTIVITY_JS = (
 #: and inside an iframe (connected to its OWN document). A disconnected node is
 #: never hit-tested: it has no box, and no point in the page can be over it, so
 #: it can never read as "covered". :func:`connectivity` is the one reader.
-#: The NATIVE accessor or method for every member the click path reads off a
-#: node, each read ONCE at the top of the script that uses it (Codex round 5).
-#: Never ``elem.<name>``: an HTML ``<form>`` is ``[LegacyOverrideBuiltIns]``, so
-#: a named control shadows ANY member -- ``<input name=isConnected>`` makes
-#: ``form.isConnected`` the input, a truthy object, with no page script
-#: involved -- and a removed form then read as connected and was clicked
-#: synthetically. A page script that REPLACES these prototypes is the accepted
-#: boundary until T-10299 (an isolated world); a named control is not.
-NATIVES_JS = (
-    "const getter = (proto, name) => "
-    "Object.getOwnPropertyDescriptor(proto, name).get;\n"
-    "    const ownerDocument = getter(Node.prototype, 'ownerDocument');\n"
-    "    const nodeName = getter(Node.prototype, 'nodeName');\n"
-    "    const getRootNode = Node.prototype.getRootNode;\n"
-    "    const contains = Node.prototype.contains;\n"
-    "    const tagName = getter(Element.prototype, 'tagName');\n"
-    "    const idOf = getter(Element.prototype, 'id');\n"
-    "    const classListOf = getter(Element.prototype, 'classList');\n"
-    "    const getClientRects = Element.prototype.getClientRects;\n"
-    "    const matches = Element.prototype.matches;\n"
-    "    const closest = Element.prototype.closest;\n"
-    "    const hostOf = getter(ShadowRoot.prototype, 'host');\n"
-    "    const elementFromPoint = Document.prototype.elementFromPoint;"
-)
-
 AIM_JS = (
     """(elem) => {
     __NATIVES__
@@ -259,8 +239,8 @@ AIM_JS = (
         // ``elementFromPoint`` answers the shadow HOST for a point over an
         // element inside any shadow root, so the host stands for the element.
         const hosts = [];
-        for (let n = elem, r = getRootNode.call(n); r instanceof ShadowRoot;
-             r = getRootNode.call(n)) { n = hostOf.call(r); hosts.push(n); }
+        for (let n = elem, h = shadow(getRootNode.call(n), 'host'); h !== null;
+             h = shadow(getRootNode.call(n), 'host')) { n = h; hosts.push(n); }
         hitIsTarget = !!under && (under === elem || contains.call(elem, under) ||
             hosts.indexOf(under) !== -1);
     }
@@ -282,7 +262,7 @@ AIM_JS = (
         pointer_events: String(style.pointerEvents),
         visibility: String(style.visibility)
     });
-}""".replace("__NATIVES__", NATIVES_JS)
+}""".replace("__NATIVES__", page_natives.NATIVES_JS)
     .replace("__CONNECTIVITY__", CONNECTIVITY_JS)
     .replace("__YES__", CONNECTED_YES)
 )
@@ -326,16 +306,12 @@ ARM_PROBE_JS = """(elem) => {
     const key = Symbol.for('__KEY__');
     if (typeof window[key] === 'function') window[key]();
     const kinds = __KINDS__;
-    const getRootNode = Node.prototype.getRootNode;
-    const shadow = (name) =>
-        Object.getOwnPropertyDescriptor(ShadowRoot.prototype, name).get;
-    const hostOf = shadow('host');
-    const modeOf = shadow('mode');
+    __ROOTS__
     const closedHosts = [];
-    for (let n = elem, r = getRootNode.call(n); r instanceof ShadowRoot;
+    for (let n = elem, r = getRootNode.call(n); shadow(r, 'host') !== null;
          r = getRootNode.call(n)) {
-        if (modeOf.call(r) === 'closed') closedHosts.push(hostOf.call(r));
-        n = hostOf.call(r);
+        if (shadow(r, 'mode') === 'closed') closedHosts.push(shadow(r, 'host'));
+        n = shadow(r, 'host');
     }
     const log = [];
     const handler = (e) => {
@@ -360,7 +336,7 @@ ARM_PROBE_JS = """(elem) => {
         }
     });
     return true;
-}""".replace("__KEY__", PROBE_KEY)
+}""".replace("__ROOTS__", page_natives.ROOTS_JS).replace("__KEY__", PROBE_KEY)
 
 #: Disposes the probe and answers with what it saw, as a JSON **string** (same
 #: reason as :data:`AIM_JS`). ``[]`` when nothing arrived — a listener ahead of
@@ -468,7 +444,7 @@ def connectivity(answer: object, what: str) -> bool:
         if answer == CONNECTED_NO:
             return False
     found = (
-        "the page's isConnected read threw or answered something that is not a boolean"
+        "the page's connectivity read threw or answered something that is not a boolean"
         if answer == CONNECTED_THREW
         else f"the page answered with {type(answer).__name__}, not one of the "
         "connectivity read's own answers"
@@ -828,7 +804,7 @@ async def _plain_click(tab: Tab, element: Element, ledger: InputSent) -> None:
     await _send_mouse(tab, "mouseReleased", *at, ledger)
 
 
-#: The synthetic script's three answers. Ours, not the page's: every page
+#: The synthetic script's four answers. Ours, not the page's: every page
 #: call inside the script is wrapped, so nothing the page throws or returns can
 #: become the script's answer, and ``Element.apply`` -- which hands back
 #: ``result[0].value`` and drops ``exceptionDetails``, so a THROWN value lands
@@ -836,6 +812,9 @@ async def _plain_click(tab: Tab, element: Element, ledger: InputSent) -> None:
 SYNTHETIC_DETACHED = "stealth.click.synthetic:detached"
 SYNTHETIC_CLICKED = "stealth.click.synthetic:clicked"
 SYNTHETIC_THREW = "stealth.click.synthetic:threw"
+#: The connectivity read did not succeed, so ``click()`` never ran: not the
+#: page's click handler throwing (:data:`SYNTHETIC_THREW`), and not a departure.
+SYNTHETIC_UNREAD = "stealth.click.synthetic:unread"
 
 #: THE one synthetic sender's script (T-10034). The connectivity check and the
 #: ``el.click()`` run in ONE page-side task, so the page cannot remove the node
@@ -854,16 +833,19 @@ SYNTHETIC_THREW = "stealth.click.synthetic:threw"
 #: 4, accepted until T-10299 moves these reads into an isolated world).
 SYNTHETIC_JS = (
     """(elem) => {
+    __NATIVE__
     __CONNECTIVITY__
-    const click = HTMLElement.prototype.click;
+    const click = native(elem, 'click');
     const state = connectivity(elem);
     if (state === "__NO__") return "__DETACHED__";
-    if (state !== "__YES__") return "__THREW__";
+    if (state !== "__YES__") return "__UNREAD__";
     try { click.call(elem); } catch (e) { return "__THREW__"; }
     return "__CLICKED__";
-}""".replace("__CONNECTIVITY__", CONNECTIVITY_JS)
+}""".replace("__NATIVE__", page_natives.NATIVE_JS)
+    .replace("__CONNECTIVITY__", CONNECTIVITY_JS)
     .replace("__NO__", CONNECTED_NO)
     .replace("__YES__", CONNECTED_YES)
+    .replace("__UNREAD__", SYNTHETIC_UNREAD)
     .replace("__DETACHED__", SYNTHETIC_DETACHED)
     .replace("__CLICKED__", SYNTHETIC_CLICKED)
     .replace("__THREW__", SYNTHETIC_THREW)
@@ -880,10 +862,13 @@ async def synthetic_click(element: Element, selector: str, ledger: InputSent) ->
     answers ``False`` for the caller to re-resolve. :data:`SYNTHETIC_CLICKED` is
     the click. Everything else -- the page's ``click()`` throwing, any other
     value, a failure, a timeout or a cancellation -- proves nothing about
-    whether the page took the click, so *ledger* is set and it is never re-run.
+    whether the page took the click, so *ledger* is set and it is never re-run;
+    that includes :data:`SYNTHETIC_UNREAD`, because the page's own getter ran.
 
-    Raises ``ToolError`` for :data:`SYNTHETIC_THREW` and for any answer that is
-    not one of the script's own, saying the click may have reached the page.
+    Raises ``ToolError`` for :data:`SYNTHETIC_UNREAD` (the page's connectivity
+    read failed, ``click()`` never ran), for :data:`SYNTHETIC_THREW` and for any
+    answer that is not one of the script's own, the last two saying the click may
+    have reached the page.
     """
     try:
         answer = await asyncio.wait_for(element.apply(SYNTHETIC_JS), INPUT_BUDGET_S)
@@ -896,6 +881,11 @@ async def synthetic_click(element: Element, selector: str, ledger: InputSent) ->
     ledger.sent = True
     if token == SYNTHETIC_CLICKED:
         return True
+    if token == SYNTHETIC_UNREAD:
+        raise ToolError(
+            f"could not read whether '{selector}' is still in its document; "
+            "nothing was clicked, and it was not repeated"
+        )
     if token == SYNTHETIC_THREW:
         raise ToolError(
             f"the page's click handler for '{selector}' threw during the "
