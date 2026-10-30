@@ -75,6 +75,9 @@ _TOOL_CALL_RE = re.compile(r"\AError calling tool '(?P<name>[A-Za-z0-9_.\-]{1,10
 #: What an element reads when the event has nothing for it, and when what it has
 #: is not something the program itself defines.
 NOT_NAMED, EXTERNAL, UNREGISTERED = "-", "<external>", "<tool>"
+#: The one cause element for every way of saying "the held element left the page"
+#: (``element_resolution.detached_element``, T-11043).
+DEPARTED = "ElementDeparted"
 
 #: A bound on the traceback walk: a pathological recursion must not stall a send.
 _MAX_TRACEBACK_FRAMES = 1000
@@ -424,12 +427,41 @@ def parts(event: Mapping[str, object], chain: Sequence[BaseException]) -> list[s
 
     Accepted: two ``KeyError`` keys raised in one function are ONE issue (each
     event shows its own key in its message); another tool, function or type is not.
+
+    One exception to both rules (T-11043): a cause that
+    ``element_resolution.detached_element`` classifies as "the element left the
+    page" is ONE cause, :data:`DEPARTED`, whichever way Chrome said so. Chrome's
+    own ``No node with given id found`` (raised in ``page_natives``) and the page's
+    ``isConnected`` answer (``ElementDisconnected``, raised in ``dom_handler``) are
+    a race inside Chrome over one event, so neither their types nor their raise
+    sites tell them apart: the chain ends at the first departure, and the frame is
+    that of the link above it. The event itself still carries the whole chain.
     """
-    frame = frame_name(chain[-1]) or frame_name(chain[0])
+    departed = _first_departure(chain)
+    if departed is None:
+        causes = [type_name(type(link)) for link in chain[1:]]
+        frame = frame_name(chain[-1]) or frame_name(chain[0])
+    else:
+        causes = [type_name(type(link)) for link in chain[1:departed]] + [DEPARTED]
+        frame = frame_name(chain[departed - 1]) or frame_name(chain[0])
     return [
         "tool-error",
         tool_name(event) or NOT_NAMED,
         type_name(type(chain[0])),
-        ">".join(type_name(type(link)) for link in chain[1:]) or NOT_NAMED,
+        ">".join(causes) or NOT_NAMED,
         *([frame] if frame else []),
     ]
+
+
+def _first_departure(chain: Sequence[BaseException]) -> int | None:
+    """Index in *chain* (never 0, the ``ToolError`` itself) of the outermost cause
+    that says a held element left the page, else ``None``. The question is
+    ``element_resolution.detached_element``'s, THE one place it is answered."""
+    # Lazily, as :func:`tool_name` does: nothing here needs the page layer loaded
+    # unless a tool error is being fingerprinted.
+    from stealth_chrome_devtools_mcp.embedded import element_resolution
+
+    for index, link in enumerate(chain[1:], start=1):
+        if element_resolution.detached_element(link) is not None:
+            return index
+    return None

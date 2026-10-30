@@ -328,7 +328,7 @@ class TestToolError:
             "tool-error",
             "click_element",
             "ToolError",
-            "ProtocolException",
+            tool_error_fingerprint.DEPARTED,
             "stealth_chrome_devtools_mcp.dom_handler.click_element",
         ]
         # nothing diagnostic is lost: the full title and the cause chain ship
@@ -336,18 +336,71 @@ class TestToolError:
         assert "'#b' left the page" in values[-1]["value"]
         assert [v["type"] for v in values][:2] == ["ProtocolException", "ToolError"]
 
-    def test_a_different_cause_type_is_another_issue(self, shipped_events):
-        """-EW: the same title over an ``ElementDisconnected``, not a
-        ``ProtocolException``, is a different root failure and its own issue."""
-        protocol = _ship_tool_error(shipped_events, _click_gone(), cause=NO_NODE)
+    def test_an_element_that_left_the_page_is_one_issue_whichever_way_chrome_said_so(
+        self, shipped_events
+    ):
+        """-EY (``ProtocolException`` from ``page_natives``) and -EZ
+        (``ElementDisconnected`` from ``dom_handler``): one title, one meaning, a
+        race inside Chrome decides which. Raised from different functions, as in
+        production, they are still ONE issue, and the event keeps Chrome's reason."""
+        protocol = _ship_tool_error(
+            shipped_events,
+            _click_gone(),
+            cause=_raised_by(_sites()["raise_it"], NO_NODE),
+        )
         disconnected = _ship_tool_error(
             shipped_events,
             _click_gone(),
             cause=ElementDisconnected("'#b' is no longer in its document"),
         )
 
-        assert disconnected["fingerprint"][3] == "ElementDisconnected"
-        assert disconnected["fingerprint"] != protocol["fingerprint"]
+        assert protocol["fingerprint"] == disconnected["fingerprint"]
+        assert protocol["fingerprint"] == [
+            "tool-error",
+            "click_element",
+            "ToolError",
+            tool_error_fingerprint.DEPARTED,
+            f"{FIXTURE_FRAME}.click_element",
+        ]
+        assert [v["type"] for v in protocol["exception"]["values"]][:2] == [
+            "ProtocolException",
+            "ToolError",
+        ]
+        assert (
+            "No node with given id found" in protocol["exception"]["values"][0]["value"]
+        )
+        assert [v["type"] for v in disconnected["exception"]["values"]][:2] == [
+            "ElementDisconnected",
+            "ToolError",
+        ]
+
+    def test_a_cause_that_is_not_a_departure_keeps_its_own_issue(self, shipped_events):
+        """Only what ``detached_element`` classifies is merged: another Chrome
+        refusal (or a ``KeyError``) under the same title stays its own issue."""
+        departed = _ship_tool_error(
+            shipped_events, _click_gone(), cause=ElementDisconnected("gone")
+        )
+        refused = _ship_tool_error(
+            shipped_events,
+            _click_gone(),
+            cause=ProtocolException({"code": -32000, "message": "Not attached"}),
+        )
+
+        assert refused["fingerprint"][3] == "ProtocolException"
+        assert refused["fingerprint"] != departed["fingerprint"]
+
+    def test_the_causes_above_a_departure_stay_in_the_fingerprint(self, shipped_events):
+        wrapped = _chained(ElementDisconnected("gone"), KeyError("a"))
+        event = _ship_tool_error(
+            shipped_events,
+            ToolError("x"),
+            cause=_chained(ProtocolException({"message": "m"}), wrapped),
+        )
+
+        assert (
+            event["fingerprint"][3]
+            == f"ProtocolException>{tool_error_fingerprint.DEPARTED}"
+        )
 
     def test_different_keys_raised_in_one_function_are_one_issue(self, shipped_events):
         """cdp_element_cloner.py:801 wraps a missing ``stylesheets`` and a missing
@@ -820,7 +873,12 @@ class TestNothingACallerCanSetIsRead:
     def test_protocol_exception_keeps_its_name_in_a_chain_and_a_freeze(
         self, shipped_events
     ):
-        chain = _ship_tool_error(shipped_events, ToolError("x"), cause=NO_NODE)
+        # Not the departure reply: that one is ``ElementDeparted`` (T-11043).
+        chain = _ship_tool_error(
+            shipped_events,
+            ToolError("x"),
+            cause=ProtocolException({"code": -32000, "message": "Not attached"}),
+        )
         freeze = _log_hung(
             shipped_events, "i-1: x", "heal ProtocolException at evaluate"
         )
