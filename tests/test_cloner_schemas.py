@@ -42,6 +42,8 @@ from stealth_chrome_devtools_mcp.embedded import file_based_element_cloner as _f
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("instant_element_wait")
+
 GOLDENS_DIR = Path(__file__).resolve().parent / "goldens"
 _JS_DIR = Path(_cdc.__file__).resolve().parent / "js"
 

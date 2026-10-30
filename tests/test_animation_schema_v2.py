@@ -30,6 +30,8 @@ from fakes import (
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("instant_element_wait")
+
 # ---------------------------------------------------------------------------
 # Fact payloads (test DATA; the transport MECHANISM lives in fakes.py)
 # ---------------------------------------------------------------------------

@@ -21,6 +21,8 @@ from stealth_chrome_devtools_mcp.embedded import animation_facts
 from stealth_chrome_devtools_mcp.embedded import cdp_element_cloner as _cdc
 from test_animation_schema_v2 import TWO_ANIMATIONS, computed, extract, facts, only
 
+pytestmark = pytest.mark.usefixtures("instant_element_wait")
+
 
 def waapi_entry(name, target_selector, keyframes=2, relation="self", **over):
     """One live-animation fact record, small enough to multiply by the hundred.

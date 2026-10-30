@@ -42,6 +42,8 @@ from stealth_chrome_devtools_mcp.embedded import js_aspect_answer as _jsa
 from stealth_chrome_devtools_mcp.embedded import progressive_element_cloner as _pec
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
+pytestmark = pytest.mark.usefixtures("instant_element_wait")
+
 # ---------------------------------------------------------------------------
 # Canned seams (kept local: this file pins the ERROR convention, not the schema,
 # which stays pinned in test_cloner_schemas.py).
