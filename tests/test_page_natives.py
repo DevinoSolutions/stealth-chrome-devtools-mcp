@@ -629,6 +629,29 @@ async def test_a_failed_leftover_release_is_logged_and_never_the_reads_result(
     assert _left(node) == []
 
 
+@pytest.mark.parametrize(
+    "settle", [0, 0.02], ids=["before-the-releases-start", "releases-in-flight"]
+)
+async def test_a_read_cancelled_while_releasing_leftovers_puts_them_back(settle):
+    """The review of 8c19f72: a read cancelled after it took the leftovers off the
+    tab, but before their releases finished, forgot them, so no later read could
+    release them and they lived until a navigation."""
+    node = _Hangs()
+    await _cancelled_mid_read(node)
+    waiting = list(_left(node))
+    assert len(waiting) == 1
+    node.hangs = False
+    node.release_hangs = True
+
+    read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(settle)
+    read.cancel()
+    await _ends_within(asyncio.wait([read]), 0.2)
+
+    assert read.cancelled()
+    assert _left(node) == waiting
+
+
 async def test_a_tab_whose_reads_keep_failing_keeps_a_bounded_list(backend_log):
     node = _Hangs()
     cap = page_natives.MAX_LEFTOVERS
