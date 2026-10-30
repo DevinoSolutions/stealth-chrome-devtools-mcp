@@ -1,7 +1,7 @@
 """T-9542: ``paint_hold``'s process-global state is per-test, whoever left it.
 
 ``paint_hold._held`` and ``_caller_owned`` are module globals that live as long as the
-process. Any test that drives a tool through ``tab_binding.tab_for`` with ``FakeTab``'s
+process. Any test that drives a tool through ``tab_binding.tab_for_caller`` with ``FakeTab``'s
 default target ``T-faketab`` (the login-persistence, browser-manager, spawn, profile and
 close suites do) leaves a hold on it, and ``test_paint_hold``'s own cleanup only runs
 inside that file. So ``test_a_closed_tab_is_forgotten_and_its_timer_task_ends`` failed

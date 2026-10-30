@@ -31,12 +31,7 @@ STOP = "Page.stopScreencast"
 @pytest.fixture(autouse=True)
 def _short_linger(monkeypatch):
     monkeypatch.setattr(paint_hold, "LINGER_SECONDS", 0.2)
-    yield
-    for key in list(paint_hold._held):
-        paint_hold.forget(key)
-    getattr(
-        paint_hold, "_browserless_caller_owned", set()
-    ).clear()  # a caller's screencast must not leak into the next test
+    # the state between tests is cleared by tests/conftest.py's _paint_hold_hygiene
 
 
 async def test_a_driven_tab_is_held_with_a_frame_that_never_comes():
