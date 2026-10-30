@@ -135,7 +135,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-quality
           path: release-evidence
@@ -186,7 +186,7 @@ jobs:
           --python "${{ matrix.python-version }}"
           --out "runner-identity.json"
       - name: Upload runner identity
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: runner-identity-unit-${{ matrix.runner_os }}-${{ matrix.runner_arch }}-py${{ matrix.python-version }}
           path: runner-identity.json
@@ -216,7 +216,7 @@ jobs:
           --mq "MQ-130"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-unit-${{ matrix.runner_os }}-${{ matrix.runner_arch }}-py${{ matrix.python-version }}
           path: release-evidence
@@ -262,7 +262,7 @@ jobs:
           --cov-fail-under=55
           --junitxml=junit.xml -o junit_family=xunit1
       - name: Upload coverage report + runner identity
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: coverage-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: |
@@ -289,7 +289,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-coverage-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: release-evidence
@@ -410,7 +410,7 @@ jobs:
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
       - name: Upload Chrome + runner identity
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: identity-integration-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: |
@@ -528,7 +528,7 @@ jobs:
           --mq "MQ-162"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-integration-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: release-evidence
@@ -606,7 +606,7 @@ jobs:
           STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
       - name: Upload Chrome + runner identity
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: identity-transport-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: |
@@ -667,7 +667,7 @@ jobs:
           --mq "MQ-144"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-transport-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: release-evidence
@@ -727,7 +727,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-known-gaps
           path: release-evidence
@@ -820,7 +820,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-offline-stealth-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
           path: release-evidence
@@ -865,7 +865,7 @@ jobs:
           python3 tools/package_verify.py assert-version
           --manifest release-manifest.json --tag "$RELEASE_TAG"
       - name: Upload the one immutable dist artifact
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: dist
           path: |
@@ -898,7 +898,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-build-dist
           path: release-evidence
@@ -916,7 +916,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Download the one dist artifact
-        uses: DevinoSolutions/artifact/download@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/download@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: dist
       - name: Verify the downloaded artifacts against the build manifest
@@ -980,7 +980,7 @@ jobs:
           --manifest release-manifest.json
       - name: Upload package-verify evidence
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: package-verify-evidence
           path: |
@@ -1014,7 +1014,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-package-verify
           path: release-evidence
@@ -1083,7 +1083,7 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
           sleep 3
       - name: Download the one dist artifact
-        uses: DevinoSolutions/artifact/download@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/download@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: dist
       - name: 'KNOWN GAP: this macOS cell verifies NO navigation (F-773)'
@@ -1124,7 +1124,7 @@ jobs:
           STEALTH_MCP_NO_ERROR_REPORTING: "true"
       - name: Upload smoke result + identity
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: install-smoke-${{ matrix.kind }}-${{ matrix.cell.runner_os }}-${{ matrix.cell.runner_arch }}
           path: |
@@ -1156,7 +1156,7 @@ jobs:
           --artifact "runner-identity=runner-identity.json"
       - name: Upload this cell's release-evidence record
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-install-smoke-${{ matrix.kind }}-${{ matrix.cell.runner_os }}-${{ matrix.cell.runner_arch }}
           path: release-evidence
@@ -1203,7 +1203,7 @@ jobs:
         # so it needs the package importable -- the count is never typed.
         run: uv sync --locked --extra test --extra sentry
       - name: Download every cell's evidence record
-        uses: DevinoSolutions/artifact/download@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/download@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           pattern: release-evidence-*
           merge-multiple: true
@@ -1219,7 +1219,7 @@ jobs:
           --event "${{ github.event_name }}"
       - name: Upload the aggregate ledger
         if: always()
-        uses: DevinoSolutions/artifact/upload@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: release-evidence-aggregate
           path: release-evidence
