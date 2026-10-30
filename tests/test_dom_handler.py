@@ -16,23 +16,12 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import AppliesOverCdp
-from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
+from stealth_chrome_devtools_mcp.embedded import click_target
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import _MAX_RESOLVES
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-
-@pytest.fixture(autouse=True)
-def _instant_backoff(monkeypatch):
-    # Zero the recovery backoff so the unit lane stays fast while the real
-    # sleep(0) code path still runs. Mirrors tests/test_element_resolution.py.
-    monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
-    # And F-884's wait, for the same reason: nodriver used to poll for a
-    # zero-match INSIDE one call, so a pin could assert one call and still be
-    # describing a 10 s wait. The loop is this module's now and visible, so zero
-    # its budget here — the production wait is unchanged either way.
-    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
+pytestmark = pytest.mark.usefixtures("instant_element_wait")
 
 
 def _stale():

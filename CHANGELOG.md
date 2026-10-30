@@ -30,6 +30,12 @@
 
 - `paint_hold._caller_owned` (the targets whose caller runs their own screencast) was a module-level set of target ids, removed only by `forget` (`close_tab`) or the caller's stop. A tab lost any other way (`close_instance`, a crash, the page closing itself, a relaunch) left its id there for the life of the backend. The ids now live on the tab's browser (`tab_open`'s per-browser state), so they go with the browser on close, crash and relaunch, and the `close_tab` tool clears its tab's id from the live browser. Remaining gap: a tab that closes itself (or is closed by another tab) while its browser lives keeps its id until that browser goes; ids are unique, so nothing misbehaves. Four tests in `tests/test_paint_hold.py` use real nodriver `Browser`/`Tab` objects (27 passed in that file).
 
+### Test-only: hermetic cloner tests no longer sit out a 10 s timeout (T-10957)
+
+- Sixteen hermetic tests in `test_animation_honesty.py`, `test_cloner_schemas.py`, `test_animation_schema_v2.py` and `test_cloner_error_convention.py` each took 10.1 s (about 162 s together) in the full `-m "not integration"` run (6192 passed, 22 skipped, 996 s). Cause: a `FakeTab` with `select_result=None` is a selector that matches nothing, so `element_resolution`'s own poll (`_DEFAULT_WAIT_SECONDS = 10.0`) ran its full default before answering "not found". `instant_element_wait` (`tests/conftest.py`) is now the one home for zeroing `element_resolution`'s settle, wait and poll constants: the four cloner modules and the five DOM-resolution modules (`test_dom_handler.py`, `test_element_left_the_page.py`, `test_element_resolution.py`, `test_page_natives.py`, `test_xpath_dispatch.py`) all opt in through `pytestmark`, and the five file-local `_instant_backoff` copies are gone. The nine modules pass the same 553 tests before and after. Production timeouts are unchanged.
+- `test_cdp_timeout.py::test_zero_timeout_uses_default` took 30.01 s sitting out the real `CDP_OPERATION_TIMEOUT`; it now runs with two patched defaults (1.5 s and 7.25 s) and asserts the value handed to the wait is each one, so a literal fall-back cannot pass; each case takes 0.12 s.
+- The full `-m "not integration"` run went from 996.06 s to 867.45 s, with the same 6192 passed and 22 skipped. Five `test_chrome_cold_start_probe.py` tests (10-29 s each, real-process probes) are now the slowest and are not touched here.
+
 ## 2.1.54
 
 ### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)

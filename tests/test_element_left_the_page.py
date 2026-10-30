@@ -61,7 +61,10 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.usefixtures("instant_element_wait"),
+]
 
 SELECTOR = "#target"
 DETACHED_EP = "Node with given id does not belong to the document"
@@ -72,15 +75,6 @@ YES = "stealth.connected:yes"
 NO = "stealth.connected:no"
 #: A spelling the product used to answer and no longer does: now it is no token.
 THREW = "stealth.connected:threw"
-
-
-@pytest.fixture(autouse=True)
-def _instant_backoff(monkeypatch):
-    # Same zeroing as tests/test_element_resolution.py: the settle and the wait
-    # are real code paths, only their durations go.
-    monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
-    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
 
 
 class _ReplacingTab(FakeTab):
