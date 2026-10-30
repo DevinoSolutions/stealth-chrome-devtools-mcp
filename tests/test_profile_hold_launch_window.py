@@ -363,7 +363,9 @@ class TestAFailedLaunchHoldsUntilItsChromeIsReaped:
         self, tmp_path, monkeypatch, launch_seams
     ):
         launch_seams(False)
+        before = time.time()
         await _fail_launch(tmp_path, monkeypatch, RuntimeError("boom"))
+        after = time.time()
         assert hold(tmp_path) is not None, "a failed launch's Chrome read as FREE"
 
         grace = profile_lock.FAILED_LAUNCH_GRACE_SECONDS
@@ -372,6 +374,11 @@ class TestAFailedLaunchHoldsUntilItsChromeIsReaped:
         rungs = sum(patience for _m, patience, _o in ProcessCleanup._KILL_RUNGS)
         assert rungs < grace < spawn_budget.LAUNCH_BUDGET_SECONDS / 4
         marker = tmp_path / profile_lock.LAUNCH_NAME
+        # The back-date the product itself wrote, which `age_marker` then
+        # replaces: without this the test no longer reads what it releases.
+        backdate = spawn_budget.LAUNCH_BUDGET_SECONDS - grace
+        written = marker.stat().st_mtime
+        assert before - backdate - 1 <= written <= after - backdate + 1
 
         assert age_marker(tmp_path, marker, grace - 2) is not None
         assert age_marker(tmp_path, marker, grace + 2) is None
