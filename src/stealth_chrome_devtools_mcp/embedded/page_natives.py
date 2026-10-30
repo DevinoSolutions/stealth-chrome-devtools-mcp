@@ -294,7 +294,12 @@ def _leave(tab: Tab, group: str) -> None:
         except AttributeError:
             return  # a tab that takes no attributes remembers nothing
     left.append(group)
-    if len(left) > MAX_LEFTOVERS:
+    _cap(left)
+
+
+def _cap(left: list[str]) -> None:
+    """Keep the newest :data:`MAX_LEFTOVERS` of *left*; one warning per drop."""
+    while len(left) > MAX_LEFTOVERS:
         dropped = left.pop(0)
         debug_logger.log_warning(
             "page_natives",
@@ -310,7 +315,9 @@ async def _release_leftovers(tab: Tab) -> None:
     twice) and released together, so the wait is :data:`RELEASE_WAIT_S` however
     many there are. A read cancelled during that wait puts back every group whose
     release did not finish, so the next read still releases it (releasing a
-    group twice is harmless; forgetting one keeps it until a navigation).
+    group twice is harmless; forgetting one keeps it until a navigation). They go
+    back AHEAD of any group a concurrent read left meanwhile, since they are
+    older, so the cap still drops the oldest.
     """
     left = getattr(tab, _LEFTOVERS, None)
     if not left:
@@ -326,9 +333,9 @@ async def _release_leftovers(tab: Tab) -> None:
     try:
         await asyncio.gather(*(release(g) for g in groups))
     except asyncio.CancelledError:
-        for group in groups:
-            if group not in finished:
-                _leave(tab, group)
+        # `left` is still the tab's list: a concurrent failed read appended to it
+        left[:0] = [group for group in groups if group not in finished]
+        _cap(left)
         raise
 
 

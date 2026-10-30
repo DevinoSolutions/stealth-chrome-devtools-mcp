@@ -652,6 +652,33 @@ async def test_a_read_cancelled_while_releasing_leftovers_puts_them_back(settle)
     assert _left(node) == waiting
 
 
+async def test_groups_put_back_go_ahead_of_newer_ones_so_the_cap_drops_the_oldest(
+    backend_log,
+):
+    """The review of 03f018c: put back after a group a concurrent read left
+    meanwhile, the full list made the cap evict that NEWER group."""
+    node = _Hangs()
+    cap = page_natives.MAX_LEFTOVERS
+    old = [f"old-{n}" for n in range(cap)]
+    for group in old:
+        page_natives._leave(node.tab, group)
+    node.hangs = False
+    node.release_hangs = True
+
+    read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.02)  # all `cap` releases in flight
+    page_natives._leave(node.tab, "newer")  # another read failed meanwhile
+    read.cancel()
+    await _ends_within(asyncio.wait([read]), 0.2)
+
+    assert read.cancelled()
+    assert _left(node) == [*old[1:], "newer"]
+    dropped = [
+        r.getMessage() for r in backend_log() if "dropped unreleased" in r.getMessage()
+    ]
+    assert len(dropped) == 1 and "old-0" in dropped[0]
+
+
 async def test_a_tab_whose_reads_keep_failing_keeps_a_bounded_list(backend_log):
     node = _Hangs()
     cap = page_natives.MAX_LEFTOVERS
