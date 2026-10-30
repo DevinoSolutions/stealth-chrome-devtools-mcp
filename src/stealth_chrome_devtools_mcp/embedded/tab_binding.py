@@ -179,12 +179,15 @@ def bind(instance_id: str, target_id: str) -> None:
         _keep((who, instance_id), str(target_id))
 
 
-def forget_tab(instance_id: str, target_id: str) -> None:
-    """Drop every binding to a tab that was closed."""
+def forget_tab(
+    instance_id: str, target_id: str, browser: Browser | None = None
+) -> None:
+    """Drop every binding to a tab that was closed (and, given its *browser*, the
+    caller-screencast mark kept on that browser)."""
     for key, bound in list(_bound.items()):
         if key[1] == instance_id and bound == str(target_id):
             del _bound[key]
-    paint_hold.forget(str(target_id))
+    paint_hold.forget(str(target_id), browser)
 
 
 def forget_instance(instance_id: str) -> None:

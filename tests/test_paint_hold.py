@@ -34,7 +34,9 @@ def _short_linger(monkeypatch):
     yield
     for key in list(paint_hold._held):
         paint_hold.forget(key)
-    paint_hold._browserless_caller_owned.clear()  # a caller's screencast must not leak into the next test
+    getattr(
+        paint_hold, "_browserless_caller_owned", set()
+    ).clear()  # a caller's screencast must not leak into the next test
 
 
 async def test_a_driven_tab_is_held_with_a_frame_that_never_comes():
@@ -380,4 +382,15 @@ async def test_crash_style_discard_leaves_nothing_behind_for_the_dead_browser():
     assert ref() is None
     successor = _real_tab(_real_browser(), "t-1")
     await paint_hold.hold(successor)
+    assert "t-1" in paint_hold._held
+
+
+async def test_close_tab_clears_the_callers_screencast_mark_on_a_live_browser():
+    browser = _real_browser()
+    tab = _real_tab(browser, "t-1")
+    await _caller_screencast(tab)
+    await paint_hold.hold(tab)
+    assert paint_hold._held == {}  # theirs, so no hold
+    tab_binding.forget_tab("iid", "t-1", browser=browser)  # what close_tab does
+    await paint_hold.hold(_real_tab(browser, "t-1"))  # the id is not theirs any more
     assert "t-1" in paint_hold._held
