@@ -64,6 +64,30 @@ def test_a_child_that_never_settles_is_killed_before_the_failure(tmp_path):
             child.kill()
 
 
+def test_a_child_that_settles_as_the_deadline_kill_lands_is_an_answer(
+    tmp_path, monkeypatch
+):
+    """It wrote its traceback and exited between the last wait and the kill: the
+    kill finds no process, and the log already holds the needle."""
+    log = tmp_path / "boot.log"
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    def exited_just_now(self):
+        log.write_text("Traceback ... needle", encoding="utf-8")
+        raise psutil.NoSuchProcess(self.pid)
+
+    monkeypatch.setattr(psutil.Process, "kill", exited_just_now)
+    try:
+        text = boot_log_when_settled(
+            log, child.pid, "needle", identity="time.sleep", deadline=0.3
+        )
+        assert "needle" in text
+    finally:
+        monkeypatch.undo()
+        if child.poll() is None:
+            child.kill()
+
+
 def test_a_stranger_is_never_killed_at_the_deadline(tmp_path):
     log = tmp_path / "boot.log"
     # Our own pid passes the "alive" test, fails identity: returns, no kill, no fail.
