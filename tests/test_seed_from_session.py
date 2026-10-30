@@ -1089,8 +1089,9 @@ class TestALockedCloneDirIsNotABrowser:
         assert message.startswith(WRAPPED)
         assert "target-locked" in message
         assert "PermissionError" in message
-        assert "No browser holds it" in message
-        assert "retried" in message
+        assert "profile_lock saw no browser holding it before the copy" in message
+        assert "No browser holds it" not in message
+        assert "can be retried" in message
         assert "target-in-use" not in message
         assert str(clone) in message
 
@@ -1105,6 +1106,7 @@ class TestALockedCloneDirIsNotABrowser:
         )
 
         assert "publish-failed" in message
-        assert "No browser holds it" in message
-        assert "retried" in message
+        assert "profile_lock saw no browser holding it before the copy" in message
+        assert "No browser holds it" not in message
+        assert "can be retried" in message
         assert "target-in-use" not in message

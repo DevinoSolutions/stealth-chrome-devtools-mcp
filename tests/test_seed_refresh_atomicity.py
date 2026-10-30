@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,6 +59,10 @@ MARKER = profile_seed.MARKER_NAME
 #: Chrome >= 96's cookie jar — the file that IS the login, per
 #: ``profile_seed.LOGIN_WITNESSES``. The product's own spelling of it is pinned
 #: to a single home by ``test_profile_seed_truth``; this is a fixture path.
+#: What a refusal may say about a browser: an observation made BEFORE the copy,
+#: never "no browser holds it" (``profile_lock`` cannot see every starting Chrome).
+SAW_NO_BROWSER = "profile_lock saw no browser holding it before the copy started"
+
 COOKIES = Path("Default") / "Network" / "Cookies"
 
 SEED_LOGIN = b"seed-login-jar-the-old-generation"
@@ -226,6 +231,7 @@ class TestADeathMidRefreshLeavesTheSeedUsable:
 _SUICIDE_CHILD = """
 import os, sys
 from pathlib import Path
+from types import SimpleNamespace
 from stealth_chrome_devtools_mcp.embedded import clone_storage, profile_copy
 
 # This child runs WITHOUT conftest, so `tests/operator_fence.py` is not
@@ -365,7 +371,9 @@ class TestAFailedDisplaceChangesNothing:
         result = clone_storage._refresh_master_snapshot_if_safe("test")
 
         assert result["seed_refreshed"] is False
-        assert result["seed_error"].startswith(profile_copy.TARGET_LOCKED)
+        assert result["seed_error"].startswith(
+            (profile_copy.TARGET_LOCKED, profile_copy.TARGET_NOT_REPLACED)
+        )
         assert _login(seed_layout["snapshot"]) == SEED_LOGIN, "the seed moved anyway"
 
 
@@ -668,8 +676,9 @@ class TestEachRefusalNamesItsOwnCause:
         assert refused.code != clone_storage.TARGET_IN_USE
         assert "PermissionError" in refused.detail
         assert str(idle_clone) in refused.detail
-        assert "No browser holds it" in refused.detail
-        assert "retried" in refused.detail
+        assert SAW_NO_BROWSER in refused.detail
+        assert "No browser holds it" not in refused.detail
+        assert "can be retried" in refused.detail
         assert "target-in-use" not in str(refused)
         assert _login(idle_clone) == STALE_LOGIN, "the tree moved anyway"
         assert _scratch_in(seed_layout["sessions"]) == []
@@ -686,8 +695,9 @@ class TestEachRefusalNamesItsOwnCause:
         assert attempts, "the publishing rename was never reached"
         assert refused.code == profile_copy.PUBLISH_FAILED
         assert "PermissionError" in refused.detail
-        assert "No browser holds it" in refused.detail
-        assert "retried" in refused.detail
+        assert SAW_NO_BROWSER in refused.detail
+        assert "No browser holds it" not in refused.detail
+        assert "can be retried" in refused.detail
         assert "target-in-use" not in str(refused)
         assert _login(idle_clone) == STALE_LOGIN, "the old tree was not put back"
         assert _scratch_in(seed_layout["sessions"]) == []
@@ -700,17 +710,37 @@ class TestEachRefusalNamesItsOwnCause:
         assert refused.code == clone_storage.TARGET_IN_USE
         assert "a browser holds it" in refused.detail
         assert "pid" in refused.detail
-        assert "No browser holds it" not in refused.detail
+        assert SAW_NO_BROWSER not in refused.detail
         assert "retried" not in refused.detail
         assert _login(idle_clone) == STALE_LOGIN
 
-    def test_the_three_codes_are_three_codes(self):
+    def test_the_four_codes_are_four_codes(self):
         codes = {
             clone_storage.TARGET_IN_USE,
             profile_copy.TARGET_LOCKED,
+            profile_copy.TARGET_NOT_REPLACED,
             profile_copy.PUBLISH_FAILED,
         }
-        assert len(codes) == 3
+        assert len(codes) == 4
+
+    def test_an_error_that_is_not_a_lock_claims_neither_a_lock_nor_a_retry(
+        self, seed_layout, idle_clone, monkeypatch
+    ):
+        """An I/O error is not evidence of a lock, so the move-aside code is
+        the neutral one and the sentence says nothing about retrying."""
+        attempts = fail_a_rename(monkeypatch, "displace", OSError(5, "I/O error"))
+
+        refused = _copy_onto(seed_layout, idle_clone)
+
+        assert len(attempts) == 1
+        assert refused.code == profile_copy.TARGET_NOT_REPLACED
+        assert "locked" not in str(refused).lower()
+        assert "retried" not in refused.detail
+        assert "OSError" in refused.detail
+        assert str(idle_clone) in refused.detail
+        assert SAW_NO_BROWSER in refused.detail
+        assert "Nothing was changed" in refused.detail
+        assert _login(idle_clone) == STALE_LOGIN
 
     def test_the_refresh_reports_a_lock_in_its_own_words(
         self, seed_layout, monkeypatch
@@ -786,7 +816,11 @@ class TestATransientLockIsRetriedABoundedNumberOfTimes:
         refused = _copy_onto(seed_layout, idle_clone)
 
         assert len(attempts) == profile_copy.RENAME_ATTEMPTS == 3
-        assert refused.code in {profile_copy.TARGET_LOCKED, profile_copy.PUBLISH_FAILED}
+        assert refused.code == (
+            profile_copy.TARGET_LOCKED
+            if step == "displace"
+            else profile_copy.PUBLISH_FAILED
+        )
         assert _login(idle_clone) == STALE_LOGIN
 
     def test_the_bound_costs_well_under_a_second_per_rename(self):
@@ -805,6 +839,9 @@ class TestATransientLockIsRetriedABoundedNumberOfTimes:
 
         assert len(attempts) == 1
         assert refused.code == profile_copy.PUBLISH_FAILED
+        assert "locked" not in str(refused).lower()
+        assert "retried" not in refused.detail
+        assert SAW_NO_BROWSER in refused.detail
 
     def test_a_live_browser_is_refused_before_any_rename(
         self, seed_layout, idle_clone, monkeypatch
@@ -818,3 +855,85 @@ class TestATransientLockIsRetriedABoundedNumberOfTimes:
 
         assert refused.code == clone_storage.TARGET_IN_USE
         assert attempts == [], "a held profile must never reach a rename"
+
+
+def _tree(root: Path) -> dict[str, bytes] | None:
+    """Every file under *root* with its bytes, or None when *root* is absent —
+    what a concurrent copy that chose it as its SOURCE would read."""
+    if not root.exists():
+        return None
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _read_the_target_at_every_sleep(monkeypatch, target: Path) -> list:
+    """Give ``profile_copy`` a clock whose ``sleep`` READS *target* and returns
+    what it found, so a test can assert on the tree a concurrent reader would
+    have seen at each pause."""
+
+    seen: list = []
+    monkeypatch.setattr(
+        profile_copy,
+        "time",
+        SimpleNamespace(sleep=lambda _s: seen.append(_tree(target)), time=time.time),
+    )
+    return seen
+
+
+class TestTheTargetIsNeverAbsentWhileAnythingSleeps:
+    """Codex round 2, HIGH. The publish backoff slept between the two renames,
+    so ``master-snapshot`` was MISSING for the pause, and a concurrent copy that
+    had already chosen it as its source ran both passes inside the gap:
+    ``copy_delta`` accepts a missing source and the result was an empty clone
+    published as a success. The wait now comes AFTER the old tree is back."""
+
+    @pytest.mark.parametrize("times", [None, profile_copy.RENAME_ATTEMPTS - 1])
+    @pytest.mark.parametrize("step", ["displace", "publish"])
+    def test_every_pause_sees_the_complete_old_tree(
+        self, step, times, seed_layout, idle_clone, monkeypatch
+    ):
+        old = _tree(idle_clone)
+        assert old, "the fixture has to hold a tree to lose"
+        seen = _read_the_target_at_every_sleep(monkeypatch, idle_clone)
+        fail_a_rename(
+            monkeypatch, step, PermissionError(13, "Access is denied"), times=times
+        )
+
+        _copy_onto(seed_layout, idle_clone)
+
+        assert len(seen) >= profile_copy.RENAME_ATTEMPTS - 1, "no pause was reached"
+        assert all(tree == old for tree in seen), (
+            "a pause saw the target absent or incomplete: "
+            f"{[None if t is None else sorted(t) for t in seen if t != old]}"
+        )
+
+    def test_a_publish_that_keeps_failing_pauses_between_whole_steps(
+        self, seed_layout, idle_clone, monkeypatch
+    ):
+        seen = _read_the_target_at_every_sleep(monkeypatch, idle_clone)
+        attempts = fail_a_rename(
+            monkeypatch, "publish", PermissionError(13, "Access is denied")
+        )
+
+        refused = _copy_onto(seed_layout, idle_clone)
+
+        assert len(attempts) == profile_copy.RENAME_ATTEMPTS
+        # the settle between the two copy passes, then one pause after each
+        # failed publish but the last
+        assert len(seen) == 1 + profile_copy.RENAME_ATTEMPTS - 1
+        assert refused.code == profile_copy.PUBLISH_FAILED
+        assert _scratch_in(seed_layout["sessions"]) == []
+
+    def test_a_restore_that_fails_still_raises(
+        self, seed_layout, idle_clone, monkeypatch
+    ):
+        """2.1.53's behaviour, kept: the target really is absent then, and the
+        caller has to hear about it rather than be told nothing changed."""
+        monkeypatch.setattr(profile_copy, "_undisplace", lambda _target: False)
+        fail_a_rename(monkeypatch, "publish", PermissionError(13, "Access is denied"))
+
+        with pytest.raises(PermissionError):
+            _copy_onto(seed_layout, idle_clone)
