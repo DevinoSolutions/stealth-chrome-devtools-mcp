@@ -54,7 +54,7 @@ def is_internal_url(url: str | None) -> bool:
     return any(lowered.startswith(scheme) for scheme in INTERNAL_URL_SCHEMES)
 
 
-def resource_type_of(event) -> str | None:
+def resource_type_of(event, fields: tuple[str, ...] = ("type_", "type")) -> str | None:
     """Read the CDP resource type off a Network event as a plain string.
 
     THE one home for this read (F-803). nodriver's generated CDP dataclasses
@@ -65,11 +65,12 @@ def resource_type_of(event) -> str | None:
     hand-built event double can silently reintroduce the null.
 
     Returns the CDP-cased value (``"Document"``, ``"XHR"``, ...) or None when
-    the event carries no type (``RequestWillBeSent.type_`` is optional).
+    the event carries no type (``RequestWillBeSent.type_`` is optional). *fields*
+    names the attributes to try: ``Fetch.requestPaused`` calls it ``resource_type``.
     """
-    raw = getattr(event, "type_", None)
-    if raw is None:
-        raw = getattr(event, "type", None)
+    raw = next(
+        (v for v in (getattr(event, f, None) for f in fields) if v is not None), None
+    )
     if raw is None:
         return None
     # ResourceType is an enum.Enum in nodriver; tolerate a bare string too.

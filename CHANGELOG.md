@@ -15,13 +15,13 @@
 
 - No product change. `test_one_nothing_can_reap_holds_for_the_grace_only` failed once in the 2.1.54 release lane (head 8cfd54d: 1 failed, 6191 passed) on `assert aged(grace - 2) is not None`. Its `aged` helper dated the launch marker from the mtime the marker had when the failed launch wrote it, while `profile_hold` compares against the wall clock, so any lane that spent more than 2 s between that write and the check read `grace - 2` as already expired. Isolated it passed 3 of 3 (0.8-1.45 s). The ageing is now one helper, `age_marker`, that takes the date from the clock at the check, and a new node, `test_a_slow_lane_between_the_write_and_the_check_does_not_age_it`, sleeps 2.2 s between the write and the check: against the old mtime-relative ageing it fails (2.51 s), with the fix it passes (2.54 s). The whole file runs 35 passed in 8.5-15.3 s here (a review run saw up to 21.3 s). The grace test now also pins the back-date `_release_launch(failed=True)` writes (the marker's mtime must sit `LAUNCH_BUDGET_SECONDS - FAILED_LAUNCH_GRACE_SECONDS` before the failure), so a product that stops back-dating, or back-dates by another amount, fails it; the two grace assertions themselves are unchanged.
 
-## 2.1.54
+### A bad `resource_type` in a dynamic hook is refused with the valid list; a valid one now matches (T-9478)
 
-### A bad `resource_type` in a dynamic hook is refused with the valid list (T-9478)
-
-- `create_dynamic_hook` with a `resource_type` that is not a CDP `ResourceType` (e.g. `"scripts"`) used to fail inside `setup_interception`, which swallowed it: with a tab armed the caller read the misleading "could not be armed" error, with none armed the hook was stored and never matched. It is now a `CallerError` naming all 19 valid types (read off the enum, case-insensitive), raised before the hook is stored.
-- A `resource_type` requirement never matched a real request: the request carried `str(ResourceType.FETCH)` (`ResourceType.XHR`) while the requirement is the documented `Document` / `XHR` form. It now carries the CDP value (`XHR`) and the comparison ignores case.
+- `create_dynamic_hook` with a `resource_type` that is not a CDP `ResourceType` (e.g. `"scripts"`) used to fail inside `setup_interception`, which swallowed it: with a tab armed the caller read the misleading "could not be armed" error, with none armed the hook was stored and never matched. It is now a `CallerError` listing the 19 valid types as Chrome and our docs spell them (`Document`, `XHR`, `WebSocket`, `EventSource`, ...), raised before the hook is stored. A type is accepted by its CDP value or its member name (`WebSocket` or `WEB_SOCKET`), in any case; 6 of the 19 differ between the two (`TextTrack`, `EventSource`, `WebSocket`, `SignedExchange`, `CSPViolationReport`, `FedCM`).
+- A `resource_type` requirement never matched a real request: the request carried `str(ResourceType.XHR)` (`"ResourceType.XHR"`) while the requirement is the CDP value (`"XHR"`). It now carries the CDP value, and the requirement is read through the same lookup that validates it, so what is accepted is what matches. Chrome reports a page `fetch()` as `XHR`, so a hook for it names `XHR`, not `Fetch`. An explicit `"resource_type": null` means no filter (it used to be stored and then match nothing).
 - A bug in `create_hook` was reported twice at ERROR (our own `log_error` and FastMCP's `logger.exception`); it is now reported once.
+
+## 2.1.54
 
 ### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)
 

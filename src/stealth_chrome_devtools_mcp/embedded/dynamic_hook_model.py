@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import nodriver as uc
+
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
@@ -32,6 +34,26 @@ def describe_error(error: BaseException) -> str:
     :data:`ERROR_TEXT_LIMIT` characters: the one text for the hook's ``last_error``
     and for the WARNING about it (the traceback is attached to the log separately)."""
     return f"{type(error).__name__}: {error}"[:ERROR_TEXT_LIMIT]
+
+
+def resource_type_named(name: object) -> uc.cdp.network.ResourceType | None:
+    """The CDP ``ResourceType`` a hook's ``resource_type`` names (``None``: no filter).
+
+    The one reading of that requirement (T-9478), for ``create_hook``'s refusal and for
+    ``DynamicHook.matches``. The member name (``WEB_SOCKET``) and the CDP value Chrome
+    reports and our docs show (``WebSocket``) both name a type, case-insensitively, so
+    what validates is what matches. Raises ``CallerError`` listing the values."""
+    if name is None:
+        return None
+    types = uc.cdp.network.ResourceType
+    if isinstance(name, str):
+        for member in types:
+            if name.lower() in (member.name.lower(), member.value.lower()):
+                return member
+    raise CallerError(
+        f"Unknown resource_type {name!r}; valid resource types: "
+        f"{', '.join(member.value for member in types)} (case-insensitive)"
+    )
 
 
 @dataclass
@@ -167,10 +189,9 @@ class DynamicHook:
                 return False
 
             # Check resource type
-            if (
-                "resource_type" in self.requirements
-                and str(request.resource_type).lower()
-                != str(self.requirements["resource_type"]).lower()
+            wanted = resource_type_named(self.requirements.get("resource_type"))
+            if wanted is not None and str(request.resource_type).lower() != (
+                wanted.value.lower()
             ):
                 return False
 
