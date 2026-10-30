@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mixed frames</title>
+</head>
+<body style="margin:0">
+  <!-- T-10284: one page, three IN-PROCESS frames in this order -- a frame of another
+       origin of the same site (?peer=, the second fixture origin), a data: frame,
+       a same-origin srcdoc frame -- and a button in each, plus one in the main
+       frame. A frame's click is reported to the main page with postMessage (a
+       cross-origin frame cannot be read from here), which counts it in
+       window.__clicks. A frame removes its own button, keeping a reference, when it
+       is sent "remove". #btn-hidden is a display:none button whose click listener
+       blocks the page when asked to (?hidden=confirm | busy). -->
+  <button id="btn-main" style="display:block;width:120px;height:40px;margin:10px">Main Button</button>
+  <button id="btn-hidden" style="display:none">Hidden Button</button>
+  <script>
+    window.__clicks = {};
+    window.__loaded = 0;
+    window.__hiddenClicks = 0;
+    var params = new URLSearchParams(location.search);
+    addEventListener('message', function (e) {
+      if (typeof e.data === 'string' && e.data.indexOf('click:') === 0) {
+        var name = e.data.slice(6);
+        window.__clicks[name] = (window.__clicks[name] || 0) + 1;
+      }
+    });
+    document.getElementById('btn-main').addEventListener('click', function () {
+      window.__clicks.main = (window.__clicks.main || 0) + 1;
+    });
+    document.getElementById('btn-hidden').addEventListener('click', function () {
+      window.__hiddenClicks++;
+      if (params.get('hidden') === 'confirm') confirm('blocked');
+      if (params.get('hidden') === 'busy') {
+        var until = Date.now() + 8000;
+        while (Date.now() < until) { /* the page is busy */ }
+      }
+    });
+    function body(name, label) {
+      return '<body style="margin:0"><button id="btn-' + name + '" ' +
+        'style="display:block;width:120px;height:40px;margin:10px">' + label +
+        '</button><script>var btn=document.getElementById("btn-' + name + '");' +
+        'window.__held=btn;btn.addEventListener("click",function(){' +
+        'parent.postMessage("click:' + name + '","*")});' +
+        'addEventListener("message",function(e){if(e.data==="remove")btn.remove()})' +
+        '<\/script></body>';
+    }
+    function add(id, set) {
+      var frame = document.createElement('iframe');
+      frame.id = id;
+      frame.style.cssText = 'display:block;width:200px;height:60px;border:0';
+      frame.addEventListener('load', function () { window.__loaded++; });
+      set(frame);
+      document.body.appendChild(frame);
+    }
+    add('f-other', function (f) { f.src = params.get('peer') + '/mixed_frames_child.html'; });
+    add('f-data', function (f) {
+      f.src = 'data:text/html;charset=utf-8,' + encodeURIComponent(body('data', 'Data Button'));
+    });
+    add('f-srcdoc', function (f) { f.srcdoc = body('srcdoc', 'Srcdoc Button'); });
+  </script>
+</body>
+</html>

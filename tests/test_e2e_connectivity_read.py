@@ -31,6 +31,8 @@ holds.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -45,6 +47,7 @@ from e2e_helpers import (
     navigate_and_settle,
     runtime,
     sandbox_kwargs,
+    wait_for_js,
     warmup_once,
 )
 from stealth_chrome_devtools_mcp.embedded import (
@@ -786,3 +789,178 @@ async def test_a_script_that_throws_is_a_failed_read_in_real_chrome(
         assert kind
     finally:
         await close(instance_id=iid)
+
+
+# ---------------------------------------------------------------------------
+# T-10284 (review of 3f9cc1d): in-process frames of every origin kind
+# ---------------------------------------------------------------------------
+
+#: The frames of ``mixed_frames.html``, in the order the page lists them, with the
+#: label of the button each holds. ``main`` is the control.
+_MIXED = (
+    ("main", "Main Button"),
+    ("other", "Other-origin Button"),
+    ("data", "Data Button"),
+    ("srcdoc", "Srcdoc Button"),
+)
+
+
+def _xpath(name: str) -> str:
+    return f"//button[@id='btn-{name}']"
+
+
+async def _mixed_page(fixture_origin_pair, query=""):
+    """A spawned browser on ``mixed_frames.html`` once all three frames loaded."""
+    origin_a, origin_b = fixture_origin_pair
+    iid = (await get_fn("spawn_browser")(headless=True, **sandbox_kwargs()))[
+        "instance_id"
+    ]
+    try:
+        await navigate_and_settle(
+            iid, f"{origin_a}/mixed_frames.html?peer={origin_b}{query}"
+        )
+        assert await wait_for_js(iid, "window.__loaded", 3, timeout=10.0) == 3
+        return iid, await runtime.browser_manager.get_tab(iid)
+    except BaseException:
+        await get_fn("close_instance")(instance_id=iid)
+        raise
+
+
+async def _clicked(iid: str, name: str, expected: int) -> int:
+    return await wait_for_js(
+        iid, f"(window.__clicks.{name} || 0)", expected, timeout=5.0
+    )
+
+
+def _resolves(monkeypatch, tab, node) -> None:
+    """Make the tab's selector queries answer *node*: the tools' selectors reach
+    the main frame only (``querySelector`` does not enter a frame, in 2.1.53 as
+    now), so a node of a frame is handed to ``query_elements`` /
+    ``get_element_state`` / ``wait_for_element`` the way a caller holds it."""
+
+    async def one(selector, *args, **kwargs):
+        return node
+
+    async def many(selector, *args, **kwargs):
+        return [node]
+
+    monkeypatch.setattr(tab, "query_selector", one)
+    monkeypatch.setattr(tab, "query_selector_all", many)
+
+
+async def test_a_button_in_any_in_process_frame_reads_and_clicks(
+    fixture_origin_pair, tmp_empty_root, monkeypatch
+):
+    """RED on 3f9cc1d: the main frame's isolated world resolves a node of a frame
+    of another origin, and of a ``data:`` frame, to a null object; the call that
+    followed had no ``objectId`` (-32602), the search ended at that first failure
+    and charged it to the node as "left the page". Every read of such a node
+    failed (``refresh_element`` false, ``node_is_visible`` false), so
+    ``query_elements`` listed nothing, ``wait_for_element`` timed out and
+    ``click_element`` said "left the page each time ... nothing was clicked" -- and
+    the same for a ``srcdoc`` frame LISTED AFTER one of them. 2.1.53 read all of
+    them. Here each of the page's four buttons is found (by its text: the one
+    resolution that enters frames), read, listed, stated, waited on and clicked,
+    with the page's own listener hearing it."""
+    iid, tab = await _mixed_page(fixture_origin_pair)
+    try:
+        query = get_fn("query_elements")
+        state = get_fn("get_element_state")
+        wait = get_fn("wait_for_element")
+        click = get_fn("click_element")
+        for name, label in _MIXED:
+            held = await element_resolution.resolve_by_text(tab, label, timeout=5)
+            assert held is not None, name
+            assert await element_resolution.refresh_element(tab, held), name
+            assert await page_natives.run(held, click_target.CONNECTED_JS) == YES, name
+            assert await element_resolution.node_is_visible(held, name) is True, name
+
+            _resolves(monkeypatch, tab, held)
+            rows = await query(instance_id=iid, selector="x", visible_only=True)
+            assert [row["tag_name"] for row in rows] == ["button"], (name, rows)
+            assert rows[0]["is_visible"] is True, (name, rows)
+            described = await state(instance_id=iid, selector="x")
+            assert described["tag_name"] == "button", (name, described)
+            assert await wait(instance_id=iid, selector="x", timeout=5000), name
+            monkeypatch.undo()
+
+            record = await click(instance_id=iid, selector="x", text_match=label)
+            assert record["reason"] is None, (name, record)
+            assert await _clicked(iid, name, 1) == 1, (name, record)
+        # and where the selector reaches (the main frame), the selectors do too
+        for selector in (_xpath("main"), "#btn-main"):
+            assert (await click(instance_id=iid, selector=selector))["reason"] is None
+        assert await _clicked(iid, "main", 3) == 3
+    finally:
+        await get_fn("close_instance")(instance_id=iid)
+
+
+async def test_a_removed_button_in_any_in_process_frame_reads_departed(
+    fixture_origin_pair, tmp_empty_root
+):
+    """The frame's own page removes its button (keeping a reference) and, after
+    that, the whole frame goes: each is a departure in every frame kind, and the
+    nodes of the frames that are still there keep reading while the others leave."""
+    iid, tab = await _mixed_page(fixture_origin_pair)
+    try:
+        frames = {"other": "f-other", "data": "f-data", "srcdoc": "f-srcdoc"}
+        held = {}
+        for name in frames:
+            held[name] = await element_resolution.resolve_by_text(
+                tab, dict(_MIXED)[name], timeout=5
+            )
+            assert held[name] is not None, name
+        remaining = list(frames)
+        for name, frame in frames.items():
+            node = held[name]
+            await eval_js(
+                iid,
+                f"document.getElementById('{frame}').contentWindow"
+                ".postMessage('remove', '*') || true",
+            )
+            for _ in range(50):
+                if await page_natives.run(node, click_target.CONNECTED_JS) == NO:
+                    break
+                await tab.sleep(0.1)
+            assert await page_natives.run(node, click_target.CONNECTED_JS) == NO, name
+            assert not await element_resolution.refresh_element(tab, node), name
+            assert await element_resolution.node_is_visible(node, name) is False, name
+
+            # the frame itself leaves: no frame holds the node any more
+            await eval_js(iid, f"document.getElementById('{frame}').remove() || true")
+            remaining.remove(name)
+            with pytest.raises(Exception) as caught:  # noqa: PT011  PERMANENT(the departure classification is what is asserted)
+                await page_natives.run(node, click_target.CONNECTED_JS)
+            assert element_resolution.detached_element(caught.value) is not None, name
+            assert not await element_resolution.refresh_element(tab, node), name
+
+            # every frame that is still there is read, whatever order it is in
+            for other in remaining:
+                read = await page_natives.run(held[other], click_target.CONNECTED_JS)
+                assert read == YES, (name, other, read)
+    finally:
+        await get_fn("close_instance")(instance_id=iid)
+
+
+@pytest.mark.parametrize("blocker", ["confirm", "busy"])
+async def test_a_synthetic_click_on_a_blocked_page_is_bounded_as_in_2_1_53(
+    fixture_origin_pair, tmp_empty_root, blocker
+):
+    """RED on 3f9cc1d: the release of the read's object group was awaited behind
+    the blocked page, so ``INPUT_BUDGET_S`` (5 s) became 8 s (a listener that
+    busy-waits 8 s) or, for ``confirm()``, the 30 s ``browser may have crashed``
+    of ``_with_cdp_timeout``. The answer is the 2.1.53 one: at the budget, saying
+    the click may have reached the page and was not repeated."""
+    iid, tab = await _mixed_page(fixture_origin_pair, f"&hidden={blocker}")
+    try:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(Exception, match="may have reached the page, so it was"):  # noqa: PT011  PERMANENT(the wording is what is asserted)
+            await get_fn("click_element")(instance_id=iid, selector="#btn-hidden")
+        elapsed = asyncio.get_running_loop().time() - started
+        # (the 0.5 s scroll settle precedes the click; 2.1.53: 5.01 s, 3f9cc1d: 8.01 s)
+        assert elapsed < click_target.INPUT_BUDGET_S + 2.0, elapsed
+    finally:
+        if blocker == "confirm":
+            with contextlib.suppress(Exception):
+                await tab.send(cdp.page.handle_java_script_dialog(accept=False))
+        await get_fn("close_instance")(instance_id=iid)

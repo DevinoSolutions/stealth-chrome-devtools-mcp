@@ -582,7 +582,9 @@ async def _require_connected(element: Element) -> None:
         raise ElementDisconnected("the element is no longer in its document")
 
 
-async def refresh_element(tab: Tab, element: Element | None) -> bool:
+async def refresh_element(
+    tab: Tab, element: Element | None, *, read_connectivity: bool = True
+) -> bool:
     """``Element.update()`` under ``tab``'s document lock (F-884), then ``isConnected``.
 
     Answers whether the element is still in the document: ``False`` ONLY when
@@ -615,6 +617,12 @@ async def refresh_element(tab: Tab, element: Element | None) -> bool:
     table twenty times while a sibling was mid-query. That is why this is the
     one home for it and why no caller may reach ``element.update()`` directly.
 
+    ``read_connectivity=False`` skips that read, for the one caller whose NEXT
+    read is :func:`node_is_visible`: :data:`VISIBLE_JS` is gated on the same
+    connectivity token and answers ``no`` for a node that is not in a document, so
+    asking twice would send the five commands of a read twice per listed row
+    (``query_elements(visible_only=True)``, T-10284).
+
     Deliberately NOT inside ``_resolve_with_recovery``: a stale node here means
     the element the caller already holds is gone from the document, which is an
     answer about that element, not a race worth re-running — and a retry loop
@@ -634,6 +642,8 @@ async def refresh_element(tab: Tab, element: Element | None) -> bool:
             if detached_element(exc) is None:
                 raise
             return False
+    if not read_connectivity:
+        return True
     try:
         await _require_connected(element)
     except ProtocolException as exc:

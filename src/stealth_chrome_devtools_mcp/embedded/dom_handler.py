@@ -107,7 +107,12 @@ class DOMHandler:
             for idx, elem in enumerate(elements):
                 try:
                     # NEVER ``elem.update()``: it is a DOM.getDocument (F-884).
-                    if not await refresh_element(tab, elem):
+                    # With ``visible_only`` the visibility read below is the
+                    # connectivity read too (that script answers ``no`` for a
+                    # node that is not in a document): one read per row.
+                    if not await refresh_element(
+                        tab, elem, read_connectivity=not visible_only
+                    ):
                         # The page removed or replaced it after the resolution
                         # (T-10034, STEALTH-…-EP). A listing answers with what
                         # IS on the page, so it is dropped rather than described

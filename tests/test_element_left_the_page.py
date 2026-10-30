@@ -985,23 +985,23 @@ async def test_query_elements_drops_a_node_the_page_removed_but_still_references
         for r in backend_log()
         if "left the document after resolution" in r.getMessage()
     ]
-    assert [r.levelno for r in dropped] == [logging.INFO]
+    # With ``visible_only`` the visibility read is the connectivity read (one read
+    # per row): the removed node is not visible, and is dropped by that answer.
+    assert [r.levelno for r in dropped] == ([] if visible_only else [logging.INFO])
 
 
-async def test_a_node_that_leaves_after_the_refresh_is_never_listed_as_visible():
-    """The window between the connectivity read and the visibility read: the
-    page removes the node there. An empty computed style passes the style tests,
-    so the visibility script must ask ``isConnected`` itself, through the same
-    answer. RED on f9fe86e: it was listed as visible."""
+async def test_a_node_that_leaves_after_the_update_is_never_listed_as_visible():
+    """The window between the document-locked ``update`` and the visibility read:
+    the page removes the node there. An empty computed style passes the style
+    tests, so the visibility script must ask ``isConnected`` itself, through the
+    same answer (with ``visible_only`` it is the ONE connectivity read of the
+    row). RED on f9fe86e: it was listed as visible."""
 
-    class _RemovedAfterTheRefresh(FakeClickTarget):
-        async def apply(self, js_function, *args, **kwargs):
-            answer = await super().apply(js_function, *args, **kwargs)
-            if "getComputedStyle" not in js_function:
-                self.disconnected = True
-            return answer
+    class _RemovedAfterTheUpdate(FakeClickTarget):
+        async def update(self):
+            self.disconnected = True
 
-    gone = _RemovedAfterTheRefresh(tag="li", element_id="gone", text="gone")
+    gone = _RemovedAfterTheUpdate(tag="li", element_id="gone", text="gone")
 
     results = await DOMHandler.query_elements(_TabOf(gone), "li", visible_only=True)
 
@@ -1021,9 +1021,12 @@ async def test_a_connected_node_is_listed_unchanged_with_one_connectivity_read(
     assert _ids(results) == ["live"]
     assert results[0].is_visible is True
     assert results[0].bounding_box is not None
-    reads = [js for js in live.apply_calls if js == click_target.CONNECTED_JS]
-    assert len(reads) == 1
-    assert len(live.apply_calls) == (2 if visible_only else 1)
+    # ONE read of the node's connectivity per row: with ``visible_only`` it is
+    # the visibility script (it answers the token for a node that is not in a
+    # document), otherwise the connectivity script.
+    assert live.apply_calls == [
+        element_resolution.VISIBLE_JS if visible_only else click_target.CONNECTED_JS
+    ]
 
 
 async def test_a_connected_display_none_node_is_still_filtered_by_visible_only():
@@ -1399,6 +1402,9 @@ async def test_a_connectivity_answer_that_is_no_token_is_a_read_error(answer):
     assert "left the page" not in str(state.value)
 
     for visible_only in (True, False):
+        if visible_only and isinstance(answer, bool):
+            # the visibility script's own answer for a node in a document
+            continue
         with pytest.raises(ToolError) as listing:
             await DOMHandler.query_elements(
                 _TabOf(_Answers(answer)), "li", visible_only=visible_only
@@ -1734,16 +1740,15 @@ async def test_the_read_only_scripts_are_sent_without_a_user_gesture():
     await DOMHandler.wait_for_element(_TabOf(node), "li", timeout=100, visible=True)
     await click_target.aim(node, "li")
 
-    assert node.read_gestures == [False] * 5
+    assert node.read_gestures == [False] * 4
     assert node.apply_calls == [
-        click_target.CONNECTED_JS,
         click_target.CONNECTED_JS,
         element_resolution.VISIBLE_JS,
         element_resolution.VISIBLE_JS,
         click_target.AIM_JS,
     ]
     await click_target.synthetic_click(node, "li", click_target.InputSent())
-    assert node.read_gestures == [False] * 5 + [True], "the click is not a read"
+    assert node.read_gestures == [False] * 4 + [True], "the click is not a read"
     assert node.apply_calls[-1] == click_target.SYNTHETIC_JS
 
 
