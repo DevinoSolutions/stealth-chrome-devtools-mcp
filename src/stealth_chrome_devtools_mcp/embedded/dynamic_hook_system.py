@@ -30,7 +30,25 @@ from stealth_chrome_devtools_mcp.embedded.tab_close import (
     report_gone_aware,
     session_gone,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
+
+
+def _resource_type(name: object) -> uc.cdp.network.ResourceType | None:
+    """The CDP ``ResourceType`` a hook's ``resource_type`` names, or ``None`` for none.
+
+    The one lookup, shared by ``create_hook`` (which refuses a bad name before the hook
+    is stored, T-9478) and ``setup_interception``. The valid names are read off the
+    enum, case-insensitively, so they cannot drift from nodriver's."""
+    if name is None:
+        return None
+    members = uc.cdp.network.ResourceType.__members__
+    member = members.get(name.upper()) if isinstance(name, str) else None
+    if member is None:
+        raise CallerError(
+            f"Unknown resource_type {name!r}; valid resource types: "
+            f"{', '.join(members)} (case-insensitive)"
+        )
+    return member
 
 
 def _has_response(event) -> bool:
@@ -169,22 +187,14 @@ class DynamicHookSystem:
                 if stage == "response":
                     pattern = uc.cdp.fetch.RequestPattern(
                         url_pattern=url_pattern,
-                        resource_type=getattr(
-                            uc.cdp.network.ResourceType, resource_type.upper()
-                        )
-                        if resource_type
-                        else None,
+                        resource_type=_resource_type(resource_type),
                         request_stage=uc.cdp.fetch.RequestStage.RESPONSE,
                     )
                     response_patterns.append(pattern)
                 else:
                     pattern = uc.cdp.fetch.RequestPattern(
                         url_pattern=url_pattern,
-                        resource_type=getattr(
-                            uc.cdp.network.ResourceType, resource_type.upper()
-                        )
-                        if resource_type
-                        else None,
+                        resource_type=_resource_type(resource_type),
                         request_stage=uc.cdp.fetch.RequestStage.REQUEST,
                     )
                     request_patterns.append(pattern)
@@ -386,8 +396,8 @@ class DynamicHookSystem:
                 post_data=event.request.post_data
                 if hasattr(event.request, "post_data")
                 else None,
-                resource_type=str(event.resource_type)
-                if hasattr(event, "resource_type")
+                resource_type=event.resource_type.value
+                if getattr(event, "resource_type", None) is not None
                 else None,
                 stage=stage,
             )
@@ -602,53 +612,45 @@ class DynamicHookSystem:
         priority: int = 100,
     ) -> str:
         """Create a new dynamic hook."""
-        try:
-            hook_id = str(uuid.uuid4())
-            hook = DynamicHook(hook_id, name, requirements, function_code, priority)
+        # T-9478: before anything is stored. An unknown resource_type used to fail
+        # inside setup_interception, which swallowed it.
+        _resource_type(requirements.get("resource_type"))
+        hook_id = str(uuid.uuid4())
+        hook = DynamicHook(hook_id, name, requirements, function_code, priority)
 
-            async with self._lock:
-                self.hooks[hook_id] = hook
+        async with self._lock:
+            self.hooks[hook_id] = hook
 
-                if instance_ids:
-                    for instance_id in instance_ids:
-                        if instance_id not in self.instance_hooks:
-                            self.instance_hooks[instance_id] = []
-                        self.instance_hooks[instance_id].append(hook_id)
-                else:
-                    for instance_id in self.instance_hooks:
-                        self.instance_hooks[instance_id].append(hook_id)
+            if instance_ids:
+                for instance_id in instance_ids:
+                    if instance_id not in self.instance_hooks:
+                        self.instance_hooks[instance_id] = []
+                    self.instance_hooks[instance_id].append(hook_id)
+            else:
+                for instance_id in self.instance_hooks:
+                    self.instance_hooks[instance_id].append(hook_id)
 
-                targets = list(instance_ids or self.instance_hooks)
+            targets = list(instance_ids or self.instance_hooks)
 
-            # F-772: interception is armed only at spawn, and a zero-hook spawn
-            # now (correctly) arms nothing. Re-arm through the SAME entry point
-            # so a hook created later still intercepts. T-9135: every tab armed
-            # so far (a closed one left with Chrome's report), and a hook that
-            # armed nowhere for an instance we drive is not a success.
-            registered = [i for i in targets if i in self._armed_tabs]
-            armed = 0
-            for instance_id in registered:
-                for tab in list(self._armed_tabs[instance_id].values()):
-                    armed += await self.setup_interception(tab, instance_id)
-            if registered and not armed:
-                await self._refuse_unarmed(hook_id, name, registered)
+        # F-772: interception is armed only at spawn, and a zero-hook spawn
+        # now (correctly) arms nothing. Re-arm through the SAME entry point
+        # so a hook created later still intercepts. T-9135: every tab armed
+        # so far (a closed one left with Chrome's report), and a hook that
+        # armed nowhere for an instance we drive is not a success.
+        registered = [i for i in targets if i in self._armed_tabs]
+        armed = 0
+        for instance_id in registered:
+            for tab in list(self._armed_tabs[instance_id].values()):
+                armed += await self.setup_interception(tab, instance_id)
+        if registered and not armed:
+            await self._refuse_unarmed(hook_id, name, registered)
 
-            debug_logger.log_info(
-                "dynamic_hook_system",
-                "create_hook",
-                f"Created hook {name} with ID {hook_id}",
-            )
-            return hook_id
-
-        except ToolError:
-            raise
-        except Exception as e:
-            debug_logger.log_error(
-                "dynamic_hook_system",
-                "create_hook",
-                f"Failed to create hook {name}: {e}",
-            )
-            raise
+        debug_logger.log_info(
+            "dynamic_hook_system",
+            "create_hook",
+            f"Created hook {name} with ID {hook_id}",
+        )
+        return hook_id
 
     async def _refuse_unarmed(
         self, hook_id: str, name: str, instance_ids: list[str]

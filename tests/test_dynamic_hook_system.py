@@ -499,7 +499,7 @@ def _paused_event(*, response_status_code=None, request=None):
         request_id=uc.cdp.fetch.RequestId("req-1"),
         response_status_code=response_status_code,
         response_error_reason=None,
-        resource_type="Document",
+        resource_type=uc.cdp.network.ResourceType.DOCUMENT,
     )
     if request is not None:
         event.request = request
