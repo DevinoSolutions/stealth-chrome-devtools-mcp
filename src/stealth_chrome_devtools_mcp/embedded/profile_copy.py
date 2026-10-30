@@ -69,6 +69,7 @@ import shutil
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -325,10 +326,89 @@ def _discard_stale_staging(target: Path) -> None:
                 rmtree_robust(entry)
 
 
-def _displace(target: Path) -> bool:
+#: Why :func:`replace_tree` did not replace, for the two causes that are NOT a
+#: live browser (T-10522). ``clone_storage`` owns the third, ``TARGET_IN_USE``,
+#: because only it knows whether a browser holds a directory. All three used to
+#: travel as that one code, so a transient Windows lock was reported to the
+#: caller as a browser holding a profile that no browser held, with no hint
+#: that the same call would work a moment later.
+TARGET_LOCKED = "target-locked"
+PUBLISH_FAILED = "publish-failed"
+
+#: Attempts at ONE of :func:`replace_tree`'s two renames, and the pause that
+#: grows between them. A rename of a profile directory on Windows fails while
+#: anything holds a handle inside it — OneDrive, an antivirus scan, the search
+#: indexer, a Chrome that has just exited — and each of those lets go in
+#: milliseconds to a second. Three tries over ~0.3 s turn most of those into
+#: success at a cost nobody sees next to a ~101 MB copy, and a lock that outlasts
+#: them is reported as ``TARGET_LOCKED`` / ``PUBLISH_FAILED`` and retryable by
+#: the caller. Only a transient error is retried (:func:`_is_transient`): a
+#: live browser is refused BEFORE any rename (``clone_storage``), and an error
+#: that will not clear gets one try.
+RENAME_ATTEMPTS = 3
+RENAME_BACKOFF_SECONDS = 0.1
+
+#: Windows errors a rename gets while something holds a handle: access denied,
+#: sharing violation, lock violation. They arrive as ``PermissionError``, and
+#: are named so a plain ``OSError`` carrying one is recognised the same way.
+_TRANSIENT_WINERRORS = frozenset({5, 32, 33})
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A copy that did not run, and the sentence a caller is told.
+
+    ``code`` is the machine-readable cause (``clone_storage.TARGET_IN_USE``,
+    :data:`TARGET_LOCKED` or :data:`PUBLISH_FAILED`) and ``detail`` the whole
+    sentence, written by the one place that knows which cause it was."""
+
+    code: str
+    detail: str
+
+    def __str__(self) -> str:
+        return f"{self.code}: {self.detail}"
+
+
+def _is_transient(exc: OSError) -> bool:
+    """Whether *exc* is the kind of failure a short wait can clear."""
+    return (
+        isinstance(exc, PermissionError)
+        or getattr(exc, "winerror", None) in _TRANSIENT_WINERRORS
+    )
+
+
+def _describe(exc: OSError) -> str:
+    """The error as a caller can look it up: type, Windows error if any, text."""
+    winerror = getattr(exc, "winerror", None)
+    code = f" winerror {winerror}" if winerror else ""
+    return f"{type(exc).__name__}{code}: {exc.strerror or exc}"
+
+
+def _rename(source: Path, dest: Path, causes: list[OSError]) -> OSError | None:
+    """``source.replace(dest)``, retried per :data:`RENAME_ATTEMPTS` while the
+    error is transient. None when it worked, else the error that ended it; every
+    transient error seen is appended to *causes* for the one WARNING the caller
+    writes."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            source.replace(dest)
+        except OSError as exc:
+            if not _is_transient(exc):
+                return exc
+            causes.append(exc)
+            if attempt == RENAME_ATTEMPTS:
+                return exc
+        else:
+            return None
+        time.sleep(RENAME_BACKOFF_SECONDS * attempt)
+
+
+def _displace(target: Path, causes: list[OSError]) -> OSError | None:
     """Move a complete *target* aside to its previous-generation sibling, so the
     commit that follows renames onto a free name and the old tree survives it.
-    False when it could not be moved, in which case nothing has changed.
+    The error when it could not be moved, in which case nothing has changed.
 
     ONE generation, deliberately NOT a retention window like ``.trash``'s. An
     evicted clone is the only copy of that session, which is the whole reason
@@ -345,11 +425,7 @@ def _displace(target: Path) -> bool:
     previous = target.with_name(f"{target.name}{PREVIOUS_SUFFIX}")
     if previous.exists():
         rmtree_robust(previous)
-    try:
-        target.replace(previous)
-    except OSError:
-        return False
-    return True
+    return _rename(target, previous, causes)
 
 
 def _undisplace(target: Path) -> bool:
@@ -369,11 +445,14 @@ def _undisplace(target: Path) -> bool:
 
 def replace_tree(
     source: Path, target: Path, *, stamp: Callable[[Path], object]
-) -> bool:
+) -> Refusal | None:
     """Build a copy of *source* beside *target* and publish it in ONE rename.
-    True when the new tree is in place; False when the tree already there could
-    not be moved out of the way, or when the publishing rename failed and the
-    displaced tree was put back — in which case nothing has changed.
+    None when the new tree is in place; otherwise the :class:`Refusal` — the
+    tree already there could not be moved out of the way (:data:`TARGET_LOCKED`),
+    or the publishing rename failed and the displaced tree was put back
+    (:data:`PUBLISH_FAILED`) — in which case nothing has changed. Neither means
+    a browser holds the target: that is asked before this is called, and these
+    are a lock something else had on the directory for longer than the retries.
 
     Built beside rather than in place because the target may be the SEED every
     later session is copied from, and rebuilding in place means deleting it
@@ -404,6 +483,7 @@ def replace_tree(
     staging = target.with_name(
         f"{target.name}{STAGING_SUFFIX}{os.getpid()}-{next(_STAGING_SEQ)}"
     )
+    causes: list[OSError] = []
     _discard_stale_staging(target)
     try:
         staging.mkdir(parents=True, exist_ok=True)
@@ -413,19 +493,40 @@ def replace_tree(
         stamp(staging)
         displaced = False
         if target.exists():
-            if not _displace(target):
-                return False
+            failure = _displace(target, causes)
+            if failure is not None:
+                return Refusal(
+                    TARGET_LOCKED,
+                    f"the profile already at {target} could not be moved aside "
+                    f"({_describe(failure)}). No browser holds it: something else "
+                    "has a file in it open (OneDrive, antivirus, the indexer, a "
+                    "browser that has just closed). Nothing was changed, and "
+                    "the same call can be retried.",
+                )
             displaced = True
-        try:
-            staging.replace(target)
-        except OSError:
+        failure = _rename(staging, target, causes)
+        if failure is not None:
             if displaced and not _undisplace(target):
-                raise
-            return False
-        return True
+                raise failure
+            return Refusal(
+                PUBLISH_FAILED,
+                f"the new copy could not be put in place at {target} "
+                f"({_describe(failure)}), and what was there before is back as "
+                "it was. No browser holds it: something else has a file in it "
+                "open (OneDrive, antivirus, the indexer). Nothing was changed, "
+                "and the same call can be retried.",
+            )
+        return None
     finally:
         if staging.exists():
             rmtree_robust(staging)
+        if causes:
+            debug_logger.log_warning(
+                "profile",
+                "replace_tree_locked",
+                f"{len(causes)} transient rename failure(s) replacing {target}; "
+                f"first cause {_describe(causes[0])}",
+            )
 
 
 def dir_size_bytes(path: Path) -> int:

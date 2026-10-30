@@ -13,6 +13,13 @@
 - artifact#7 (v1.2.2, 67676f3) treats Cloudflare's 520-524 as transport errors, retried on the usual 5-attempt schedule; 501, 525 and 526 and a missing object still fail at once. It also classifies a failed `mc` call on mc's own words only, so an artifact name such as `code520` cannot turn a missing object into a retried error.
 - The 22 `DevinoSolutions/artifact` refs in `publish.yml` and `release-gate.yml` move from 5bb08e7 to 67676f3 (v1.2.2). The `v1` tag is not moved.
 
+### A copy refused for a lock something else holds no longer says a browser holds the profile (T-10522)
+
+- Measured on the 2.1.53 tree: `profile_copy.replace_tree` answered `False` for two causes besides a live holder (the tree already at the target could not be moved aside; the publishing rename raised and the old tree was put back), and `clone_storage._copy_profile_tree` turned all three into the one code `target-in-use`. With a `PermissionError` injected into each rename, the unnamed-spawn error read `profile copy into <clone> was refused: target-in-use` for both, which is the text seen on the live MCP (uv tool 2.1.47) on 2026-10-29 when no browser held the directory and an immediate retry succeeded. What held the directory there was not measured.
+- Now each cause has its own code and sentence, written by the copier: `target-in-use` only when a live browser holds the target (the sentence carries the holder's pid or lock as `profile_lock` reports it), `target-locked` when the existing profile could not be moved aside, `publish-failed` when the new copy could not be put in place and the old one was restored. The two lock sentences name the error (`PermissionError`, plus the Windows error number when there is one) and the path, say that no browser holds it, that nothing was changed, and that the same call can be retried. `replace_tree` now returns `None` or a `profile_copy.Refusal(code, detail)` instead of a bool.
+- Each of the two renames is tried 3 times, with a pause of 0.1 s and then 0.2 s between tries (0.3 s at most per rename), and only for a `PermissionError` or a Windows error 5, 32 or 33. Any other `OSError` gets one try, and a profile a live browser holds is refused before any rename. A copy that needed a retry writes one WARNING (`profile.replace_tree_locked`) with the count and the first cause. The retry bound is pinned by a test that counts the failed renames.
+- The seed refresh reports `seed_error: "seed-in-use"` only for a held seed, as before; for the two lock causes it reports `target-locked: ...` or `publish-failed: ...` with the sentence (`stealthy close` prints it after `seed not refreshed:`).
+
 ## 2.1.53
 
 ### An editable checkout reports its errors as environment=development, not production (T-10363)

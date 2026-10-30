@@ -39,10 +39,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
-from fakes import held_profile
+from fakes import fail_a_rename, held_profile
 from stealth_chrome_devtools_mcp import cli, cli_call, cli_render
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
+    profile_copy,
     profile_seed,
     profile_source,
 )
@@ -1052,3 +1053,58 @@ class TestTheSourceAskIsPaidForTwice:
 
         clone_storage._seed_source_for_copy("work")
         assert seen.count("work") == 3, f"the pre-copy read is fresh: {seen}"
+
+
+class TestALockedCloneDirIsNotABrowser:
+    """T-10522, observed on the live MCP 2026-10-29: an UNNAMED spawn failed with
+    ``profile copy into <clone> was refused: target-in-use`` while no browser
+    held that directory, and the same call succeeded a moment later. The code
+    said a browser holds it; the cause was a lock on the old clone that the
+    copier could not move aside. Drives the real tool through the real resolver,
+    as every node of this file does, and asserts what the CALLER reads."""
+
+    async def _unnamed_spawn_onto_an_old_clone(
+        self, call_tool, patched_server, tmp_session_root
+    ) -> tuple[Path, str]:
+        clone = await clone_storage._clone_profile_dir_for_session(
+            tmp_session_root["sessions"]
+        )
+        (clone / "Default").mkdir(parents=True)
+        (clone / "Default" / "Preferences").write_text("{}", encoding="utf-8")
+        profile_seed.write_marker(
+            clone, source=clone, source_kind="test", seeded_from="default"
+        )
+        return clone, await _spawn_refusal(call_tool, patched_server)
+
+    async def test_a_lock_on_the_old_clone_says_no_browser_holds_it(
+        self, call_tool, patched_server, tmp_session_root, monkeypatch
+    ):
+        monkeypatch.setattr(profile_copy, "RENAME_BACKOFF_SECONDS", 0)
+        fail_a_rename(monkeypatch, "displace", PermissionError(13, "Access is denied"))
+
+        clone, message = await self._unnamed_spawn_onto_an_old_clone(
+            call_tool, patched_server, tmp_session_root
+        )
+
+        assert message.startswith(WRAPPED)
+        assert "target-locked" in message
+        assert "PermissionError" in message
+        assert "No browser holds it" in message
+        assert "retried" in message
+        assert "target-in-use" not in message
+        assert str(clone) in message
+
+    async def test_a_failed_publish_says_so_in_its_own_words(
+        self, call_tool, patched_server, tmp_session_root, monkeypatch
+    ):
+        monkeypatch.setattr(profile_copy, "RENAME_BACKOFF_SECONDS", 0)
+        fail_a_rename(monkeypatch, "publish", PermissionError(13, "Access is denied"))
+
+        _clone, message = await self._unnamed_spawn_onto_an_old_clone(
+            call_tool, patched_server, tmp_session_root
+        )
+
+        assert "publish-failed" in message
+        assert "No browser holds it" in message
+        assert "retried" in message
+        assert "target-in-use" not in message
