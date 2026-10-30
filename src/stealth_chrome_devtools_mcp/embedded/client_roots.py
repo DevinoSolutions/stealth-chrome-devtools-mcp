@@ -44,7 +44,12 @@ async def session_seed() -> str:
 
         # F-790: bound this OPTIONAL server->client round trip (see settings.py).
         bound = get_settings().client_roots_timeout_seconds
-        listed = await asyncio.wait_for(get_context().list_roots(), bound)
+        listed = []
+        # 0 asks nothing (settings.py): ``asyncio.timeout(0)`` would send the
+        # request and cancel it at its first await, which ``wait_for`` never did.
+        if bound > 0:
+            async with asyncio.timeout(bound):
+                listed = await get_context().list_roots()
         roots = [path for path in (_root_to_path(r) for r in listed) if path]
     except Exception as e:  # noqa: BLE001  PERMANENT(an optional client round trip must degrade to the local chain, never fail a spawn)
         message = str(e) or f"{type(e).__name__} awaiting roots/list"

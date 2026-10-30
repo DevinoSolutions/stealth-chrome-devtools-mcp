@@ -141,9 +141,8 @@ async def _disconnect(connection: Connection) -> None:
     when a second cancellation must not abandon a half-open socket.
     """
     with contextlib.suppress(Exception):
-        await asyncio.wait_for(
-            asyncio.shield(connection.aclose()), DROP_TIMEOUT_SECONDS
-        )
+        async with asyncio.timeout(DROP_TIMEOUT_SECONDS):
+            await asyncio.shield(connection.aclose())
 
 
 async def _drop(browser: Browser) -> None:

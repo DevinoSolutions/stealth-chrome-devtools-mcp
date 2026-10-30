@@ -575,8 +575,8 @@ async def _send_mouse(
     """
     pressing = kind != "mouseMoved"
     ledger.sent = True
-    await asyncio.wait_for(
-        tab.send(
+    async with asyncio.timeout(INPUT_BUDGET_S):
+        await tab.send(
             cdp.input_.dispatch_mouse_event(
                 kind,
                 x=x,
@@ -585,21 +585,17 @@ async def _send_mouse(
                 buttons=1 if kind == "mousePressed" else 0,
                 click_count=1 if pressing else 0,
             )
-        ),
-        INPUT_BUDGET_S,
-    )
+        )
 
 
 async def _arm(element: Element, kinds: list[str]) -> None:
     try:
-        await asyncio.wait_for(
-            page_natives.run(
+        async with asyncio.timeout(INPUT_BUDGET_S):
+            await page_natives.run(
                 element,
                 ARM_PROBE_JS.replace("__KINDS__", json.dumps(kinds)),
                 user_gesture=True,
-            ),
-            INPUT_BUDGET_S,
-        )
+            )
     except BaseException:
         # An arm that timed out may still have run; dispose now, not at the next arm.
         await _disarm(element)
@@ -608,9 +604,8 @@ async def _arm(element: Element, kinds: list[str]) -> None:
 
 async def _read(element: Element) -> list[dict[str, object]]:
     """Dispose the probe and answer what it saw (see :data:`READ_PROBE_JS`)."""
-    answer = await asyncio.wait_for(
-        page_natives.run(element, READ_PROBE_JS, user_gesture=True), INPUT_BUDGET_S
-    )
+    async with asyncio.timeout(INPUT_BUDGET_S):
+        answer = await page_natives.run(element, READ_PROBE_JS, user_gesture=True)
     seen = json.loads(answer) if isinstance(answer, str) else None
     if not isinstance(seen, list):
         raise ToolError(
@@ -882,10 +877,8 @@ async def synthetic_click(element: Element, selector: str, ledger: InputSent) ->
     not one of the script's own, both saying the click may have reached the page.
     """
     try:
-        answer = await asyncio.wait_for(
-            page_natives.run(element, SYNTHETIC_JS, user_gesture=True),
-            INPUT_BUDGET_S,
-        )
+        async with asyncio.timeout(INPUT_BUDGET_S):
+            answer = await page_natives.run(element, SYNTHETIC_JS, user_gesture=True)
     except BaseException:
         ledger.sent = True
         raise

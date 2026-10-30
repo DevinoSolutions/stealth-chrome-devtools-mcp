@@ -91,21 +91,22 @@ navigation. No deadline is enforced here — the caller wraps the whole thing in
 its navigation budget, exactly as it wrapped ``tab.get``; *budget_seconds* is
 handed in only so F-787's sleep can be clipped to it as it always was.
 
-**What a cancelled attempt still tells the caller.** The caller's ``wait_for``
-cancels this coroutine on timeout, so nothing can be RETURNED from a timed-out
-attempt — :class:`Progress` is what it writes on the way, and every field is a
-fact the caller cannot otherwise have: ``accepted`` (``Page.navigate`` answered,
-i.e. Chrome took the navigation on THIS tab), ``committed`` (our own document
-reached ``init``) and ``superseded`` (how many later documents committed in the
-frame while we waited). ``accepted`` is the line between the two timeouts
-``BrowserManager.navigate`` used to treat as one. Before it, the tab may be
-stale or racing and the one-shot recovery on a fresh tab (F-824's budget) is the
-right answer. After it, the page is Chrome's — committed and slow, committed and
-never reaching ``load``, or replaced again and again — and replacing the tab
-would throw away a page that exists and spend a second full budget doing it. So
-a timeout after acceptance is REPORTED, never retried; :meth:`Progress.describe`
-is the one phrasing of that report, and it exists because the warning line it
-feeds used to end in an empty ``TimeoutError`` message.
+**What a cancelled attempt still tells the caller.** The caller's
+``asyncio.timeout`` cancels this coroutine on timeout, so nothing can be
+RETURNED from a timed-out attempt — :class:`Progress` is what it writes on the
+way, and every field is a fact the caller cannot otherwise have: ``accepted``
+(``Page.navigate`` answered, i.e. Chrome took the navigation on THIS tab),
+``committed`` (our own document reached ``init``) and ``superseded`` (how many
+later documents committed in the frame while we waited). ``accepted`` is the
+line between the two timeouts ``BrowserManager.navigate`` used to treat as one.
+Before it, the tab may be stale or racing and the one-shot recovery on a fresh
+tab (F-824's budget) is the right answer. After it, the page is Chrome's —
+committed and slow, committed and never reaching ``load``, or replaced again and
+again — and replacing the tab would throw away a page that exists and spend a
+second full budget doing it. So a timeout after acceptance is REPORTED, never
+retried; :meth:`Progress.describe` is the one phrasing of that report, and it
+exists because the warning line it feeds used to end in an empty
+``TimeoutError`` message.
 
 A leaf: ``nodriver`` and ``tool_errors`` only; the tab arrives as an argument.
 """
@@ -553,7 +554,7 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
         # grace anchored at `started` would already be spent on arrival and
         # would call every pre-empted navigation a download. And half of what is
         # LEFT, never all of it: a grace that expires at the caller's own
-        # deadline loses the race to the enclosing wait_for, and the named
+        # deadline loses the race to the enclosing timeout, and the named
         # answer it exists to produce is replaced by a bare timeout.
         left_of_budget = max(0.0, budget_seconds - (loop.time() - started))
         grace = loop.time() + min(ABORTED_GRACE_SECONDS, left_of_budget / 2)
@@ -572,7 +573,8 @@ async def navigate(  # noqa: PLR0913  PERMANENT(the tab, url, wait_until, budget
                 if left <= 0:
                     raise _aborted_error(url)
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(arrived.wait(), left)
+                    async with asyncio.timeout(left):
+                        await arrived.wait()
             else:
                 await arrived.wait()
     finally:

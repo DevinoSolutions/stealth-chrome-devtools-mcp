@@ -216,7 +216,8 @@ async def reattach(browser: Browser) -> None:
         await browser.aclose()
         browser.target = browser.session_id = None
         try:
-            await asyncio.wait_for(browser.attach(), POPUP_ARM_BUDGET_SECONDS)
+            async with asyncio.timeout(POPUP_ARM_BUDGET_SECONDS):
+                await browser.attach()
         except BaseException:
             await browser.aclose()
             browser.target, browser.session_id = target, session_id
@@ -312,9 +313,8 @@ async def open_tab(browser: Browser, url: str, *, background: bool = False) -> T
 async def _discover(browser: Browser) -> None:
     """Switch on Target discovery, which is what makes Chrome send
     ``targetCreated`` and ``targetDestroyed`` at all. Bounded; raises on failure."""
-    await asyncio.wait_for(
-        browser.send(cdp.target.set_discover_targets(True)), POPUP_ARM_BUDGET_SECONDS
-    )
+    async with asyncio.timeout(POPUP_ARM_BUDGET_SECONDS):
+        await browser.send(cdp.target.set_discover_targets(True))
 
 
 async def arm_popups(
@@ -375,10 +375,12 @@ async def _arm_popup(
 ) -> None:
     try:
         # Nothing registers a target from the event: ask Chrome for it.
-        await asyncio.wait_for(update_targets(browser), POPUP_ARM_BUDGET_SECONDS)
+        async with asyncio.timeout(POPUP_ARM_BUDGET_SECONDS):
+            await update_targets(browser)
         tab = find(browser, str(target_id))
         if tab is not None and not is_closed(browser):
-            await asyncio.wait_for(arm(*args, tab), POPUP_ARM_BUDGET_SECONDS)
+            async with asyncio.timeout(POPUP_ARM_BUDGET_SECONDS):
+                await arm(*args, tab)
     except TimeoutError:
         debug_logger.log_warning(
             "tab_open",

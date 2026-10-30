@@ -182,7 +182,8 @@ class IdleCanary:
         try:
             self._proc = await _spawn_canary()
             self._reader = asyncio.create_task(self._count(self._proc))
-            await asyncio.wait_for(self._announced.wait(), CANARY_READY_SECONDS)
+            async with asyncio.timeout(CANARY_READY_SECONDS):
+                await self._announced.wait()
         except Exception as error:  # noqa: BLE001  PERMANENT(F-1007: a canary that cannot start is no evidence, never an error in the probe loop)
             reason = type(error).__name__
         else:
@@ -244,7 +245,8 @@ class IdleCanary:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             try:
-                await asyncio.wait_for(proc.wait(), CANARY_REAP_SECONDS)
+                async with asyncio.timeout(CANARY_REAP_SECONDS):
+                    await proc.wait()
             except TimeoutError:
                 debug_logger.log_warning(
                     "scheduling_lag", "canary", f"pid {proc.pid} not reaped yet"

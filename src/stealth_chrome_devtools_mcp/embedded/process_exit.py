@@ -78,7 +78,7 @@ a backend's exit. That does NOT collide with uvicorn's 2.0 s
 ``timeout_graceful_shutdown`` (``logging_setup._GRACEFUL_SHUTDOWN_SECONDS``,
 F-809): in uvicorn 0.x's ``Server.shutdown`` that budget wraps
 ``_wait_tasks_to_complete()`` ALONE (``uvicorn/server.py``:279-282) and
-``await self.lifespan.shutdown()`` runs after it, outside the ``wait_for``,
+``await self.lifespan.shutdown()`` runs after it, outside the ``asyncio.timeout``,
 with no deadline (:291-293) — so the lifespan shutdown was never bounded by
 it, before this change or after. The closes are left serial on purpose:
 parallelising them would run N ``_blocking_teardown`` calls at once, and each
@@ -308,10 +308,8 @@ async def wait_for_exit_async(
     """
     started = time.monotonic()
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(wait_for_exit, pid, timeout),
-            timeout=timeout + _THREAD_SLACK_SECONDS,
-        )
+        async with asyncio.timeout(timeout + _THREAD_SLACK_SECONDS):
+            return await asyncio.to_thread(wait_for_exit, pid, timeout)
     except TimeoutError:
         return Exited(pid, False, time.monotonic() - started, "wait-abandoned")
     except Exception as err:  # noqa: BLE001  PERMANENT(never blocks a close)

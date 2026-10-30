@@ -504,13 +504,13 @@ class TestACloseWaitsForAPendingExchange:
 
         tab.evaluate = stuck.__get__(tab)
         granted: list[float] = []
-        real_wait_for = asyncio.wait_for
+        real_timeout = asyncio.timeout
 
-        async def spy(awaitable, timeout):
-            granted.append(timeout)
-            return await real_wait_for(awaitable, timeout)
+        def spy(delay):
+            granted.append(delay)
+            return real_timeout(delay)
 
-        monkeypatch.setattr(login_persistence.asyncio, "wait_for", spy)
+        monkeypatch.setattr(login_persistence.asyncio, "timeout", spy)
         task = asyncio.create_task(login_persistence.ensure_session_restore(browser))
         for _ in range(100):
             await asyncio.sleep(0.01)

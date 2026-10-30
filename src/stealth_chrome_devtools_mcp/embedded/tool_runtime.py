@@ -207,7 +207,8 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
     """
     t = timeout or CDP_OPERATION_TIMEOUT
     try:
-        return await asyncio.wait_for(coro, timeout=t)
+        async with asyncio.timeout(t):
+            return await coro
     except TimeoutError:
         tag = f" (instance {instance_id})" if instance_id else ""
         raise ToolError(

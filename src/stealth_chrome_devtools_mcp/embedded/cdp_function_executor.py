@@ -833,9 +833,8 @@ class CDPFunctionExecutor:
                 f"Translated JS: {debug_logger.fingerprint(js_code)}",
             )
 
-            return await asyncio.wait_for(
-                self.inject_and_execute_script(tab, js_code), timeout=10.0
-            )
+            async with asyncio.timeout(10.0):
+                return await self.inject_and_execute_script(tab, js_code)
         except TimeoutError:
             # Best-effort: terminate_execution is NOT a reliable interrupt for
             # a synchronous JS loop; this is best-effort, not a guarantee.

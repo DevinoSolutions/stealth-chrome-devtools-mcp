@@ -235,10 +235,10 @@ reaper.
 
 `browser_manager.close_instance` runs the blocking browser kill via
 `asyncio.to_thread(self._blocking_teardown, …)` under a **real**
-`asyncio.wait_for(…, timeout=self.CLOSE_KILL_TIMEOUT)` (default `5.0`s, from
+`asyncio.timeout(self.CLOSE_KILL_TIMEOUT)` (default `5.0`s, from
 `settings`), and it does so with the `_instances` lock **released** across the await.
 Before M7 a single hung close held the lock and froze every other session's dispatch;
-the `wait_for` bound is now real because the blocking work is off the event loop.
+the `asyncio.timeout` bound is now real because the blocking work is off the event loop.
 
 ### 2.5 `in_memory_storage` is deliberately non-durable
 

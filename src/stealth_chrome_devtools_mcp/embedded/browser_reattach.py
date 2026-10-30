@@ -535,15 +535,13 @@ async def adopt_held_profile(  # noqa: PLR0911  PERMANENT(each return is a DIFFE
         if running:
             return Held(instance_id=candidate.instance_id, running=True)
         try:
-            adopted_id = await asyncio.wait_for(
-                _adopt_one(
+            async with asyncio.timeout(ATTACH_BUDGET_SECONDS):
+                adopted_id = await _adopt_one(
                     manager,
                     cleanup,
                     candidate,
                     extra_diagnostics={"ignored_spawn_args": ignored_args or []},
-                ),
-                timeout=ATTACH_BUDGET_SECONDS,
-            )
+                )
         except Refused as exc:
             # The rule working, not a failure: a sibling backend claimed this
             # browser between `held_by` and the claim. Reported as the remedy it
@@ -679,10 +677,8 @@ async def run(manager: BrowserManager, cleanup: ProcessCleanup) -> list[str]:
             if already:
                 continue
             try:
-                await asyncio.wait_for(
-                    _adopt_one(manager, cleanup, candidate),
-                    timeout=ATTACH_BUDGET_SECONDS,
-                )
+                async with asyncio.timeout(ATTACH_BUDGET_SECONDS):
+                    await _adopt_one(manager, cleanup, candidate)
             except Refused as exc:
                 # THE one outcome that must never reach the reap below, and the
                 # two shapes of it are one class on purpose (`Undecided` is a

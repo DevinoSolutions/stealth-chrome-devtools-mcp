@@ -250,10 +250,8 @@ class AuthenticatedProxyForwarder:
         header_lines: list[bytes] = []
 
         try:
-            request_line = await asyncio.wait_for(
-                reader.readline(),
-                timeout=request_timeout,
-            )
+            async with asyncio.timeout(request_timeout):
+                request_line = await reader.readline()
             if not request_line:
                 await self._close_writer(writer)
                 return
@@ -291,10 +289,8 @@ class AuthenticatedProxyForwarder:
                     raise ValueError(f"Invalid target endpoint: {target_host_port}")  # noqa: TRY301  plan_M4ph1
 
             while True:
-                header = await asyncio.wait_for(
-                    reader.readline(),
-                    timeout=request_timeout,
-                )
+                async with asyncio.timeout(request_timeout):
+                    header = await reader.readline()
                 if len(header) > max_line_length:
                     await self._write_and_close(
                         writer,
@@ -311,10 +307,10 @@ class AuthenticatedProxyForwarder:
                     self.ssl_context or ssl.create_default_context()
                 )
 
-            remote_reader, remote_writer = await asyncio.wait_for(
-                asyncio.open_connection(**connection_args),
-                timeout=upstream_connect_timeout,
-            )
+            async with asyncio.timeout(upstream_connect_timeout):
+                remote_reader, remote_writer = await asyncio.open_connection(
+                    **connection_args
+                )
 
             credentials = f"{self.username}:{self.password}"
             encoded_credentials = base64.b64encode(credentials.encode()).decode("ascii")
@@ -333,10 +329,8 @@ class AuthenticatedProxyForwarder:
             await remote_writer.drain()
 
             if method == "CONNECT":
-                response_line = await asyncio.wait_for(
-                    remote_reader.readline(),
-                    timeout=request_timeout,
-                )
+                async with asyncio.timeout(request_timeout):
+                    response_line = await remote_reader.readline()
                 if not response_line:
                     await self._write_and_close(
                         writer,
@@ -345,10 +339,8 @@ class AuthenticatedProxyForwarder:
                     return
 
                 while True:
-                    header = await asyncio.wait_for(
-                        remote_reader.readline(),
-                        timeout=request_timeout,
-                    )
+                    async with asyncio.timeout(request_timeout):
+                        header = await remote_reader.readline()
                     if not header or header in {b"\r\n", b"\n"}:
                         break
 
@@ -491,7 +483,8 @@ class AuthenticatedProxyForwarder:
         """
         while not event.is_set():
             try:
-                data = await asyncio.wait_for(reader.read(2**16), 1)
+                async with asyncio.timeout(1):
+                    data = await reader.read(2**16)
                 if not data:
                     break
                 writer.write(data)
