@@ -160,16 +160,16 @@ class Settings(BaseSettings):
         60, validation_alias="BROWSER_IDLE_REAPER_INTERVAL", ge=1
     )
     cdp_operation_timeout_seconds: float = Field(
-        30.0, validation_alias="CDP_OPERATION_TIMEOUT_SECONDS"
+        30.0, validation_alias="CDP_OPERATION_TIMEOUT_SECONDS", gt=0
     )
     execute_script_timeout_seconds: float = Field(
-        10.0, validation_alias="EXECUTE_SCRIPT_TIMEOUT_SECONDS"
+        10.0, validation_alias="EXECUTE_SCRIPT_TIMEOUT_SECONDS", gt=0
     )
     max_user_script_bytes: int = Field(
         100_000, validation_alias="MAX_USER_SCRIPT_BYTES"
     )
     browser_state_timeout_seconds: float = Field(
-        10.0, validation_alias="BROWSER_STATE_TIMEOUT_SECONDS"
+        10.0, validation_alias="BROWSER_STATE_TIMEOUT_SECONDS", gt=0
     )
     stealth_browser_debug: bool = Field(False, validation_alias="STEALTH_BROWSER_DEBUG")
     debug: bool = Field(False, validation_alias="DEBUG")

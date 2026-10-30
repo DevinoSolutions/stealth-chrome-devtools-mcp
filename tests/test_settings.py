@@ -43,6 +43,27 @@ def test_defaults_instantiate(monkeypatch):
     assert not hasattr(s, "sentry_dsn")
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        "CDP_OPERATION_TIMEOUT_SECONDS",
+        "EXECUTE_SCRIPT_TIMEOUT_SECONDS",
+        "BROWSER_STATE_TIMEOUT_SECONDS",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "-0.5"])
+def test_a_non_positive_bound_is_refused_at_load(monkeypatch, env, value):
+    """T-10690: these bounds go to ``asyncio.timeout``, which STARTS the operation
+    for a bound <= 0 and cancels it at its first await (``wait_for`` never started
+    it), so a script or input would reach Chrome while the tool reported a
+    timeout. Refused at load, naming the variable, like ``close_kill_timeout``."""
+    _clear_app_env(monkeypatch)
+    monkeypatch.setenv(env, value)
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    assert env in str(excinfo.value)
+
+
 def test_bad_value_names_the_field(monkeypatch):
     monkeypatch.setenv("STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB", "not-a-number")
     with pytest.raises(ValidationError) as excinfo:

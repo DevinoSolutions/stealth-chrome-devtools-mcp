@@ -1146,13 +1146,14 @@ class TestBounded:
 
         health = stage.health(probe=hangs)
 
-        await asyncio.wait_for(health.check_once(), timeout=5)
+        async with asyncio.timeout(5):
+            await health.check_once()
 
-        # The capture's record line (``evidence@probe1``) may or may not fall inside
-        # this round: how many loop turns an await costs differs by interpreter
-        # (3.11's ``wait_for`` spent more than ``asyncio.timeout``). The probe's own
-        # failure line is what this pins, and there is exactly one.
-        (warning,) = [w for w in log.at("warning") if "probe 1 failed" in w]
+        # the capture starts after the probe's line is logged and awaits nothing in
+        # this round, so its own record line cannot fall inside it. The bound is
+        # ``asyncio.timeout``, not ``wait_for``: 3.11's ``wait_for`` spends more loop
+        # turns, enough for the capture to finish inside the round (T-10690).
+        (warning,) = log.at("warning")
         assert "TimeoutError at evaluate" in warning
 
     async def test_a_forensics_gatherer_that_hangs_does_not_block_the_heal(

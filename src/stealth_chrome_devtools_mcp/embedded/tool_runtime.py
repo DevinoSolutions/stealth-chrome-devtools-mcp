@@ -205,7 +205,9 @@ async def _with_cdp_timeout(coro, timeout: float = 0, instance_id: str = ""):
     registration in a ``finally`` (T-8501, pinned in
     ``tests/test_cdp_reply_path.py``) — never here.
     """
-    t = timeout or CDP_OPERATION_TIMEOUT
+    # <= 0 means the default: ``asyncio.timeout(0)`` would START the operation
+    # and cancel it at its first await, after the request was already sent.
+    t = timeout if timeout > 0 else CDP_OPERATION_TIMEOUT
     try:
         async with asyncio.timeout(t):
             return await coro

@@ -38,43 +38,65 @@ WHY = (
 )
 
 
+def _is_module(owner: str, modules: set[str]) -> bool:
+    """*owner* names ``asyncio`` or ``asyncio.tasks``: a name bound to either, or
+    ``<a name bound to asyncio>.tasks``."""
+    return owner in modules or (
+        owner.endswith(".tasks") and owner.removesuffix(".tasks") in modules
+    )
+
+
 def _reaches_wait_for(node: ast.AST, modules: set[str], functions: set[str]) -> bool:
     if isinstance(node, ast.Attribute):
-        owner = ast.unparse(node.value)
-        return node.attr == "wait_for" and (
-            owner in modules or owner == "asyncio.tasks"
-        )
+        return node.attr == "wait_for" and _is_module(ast.unparse(node.value), modules)
     if isinstance(node, ast.Name):
         return node.id in functions
     return (
         isinstance(node, ast.Call)
         and ast.unparse(node.func) == "getattr"
         and len(node.args) >= 2
-        and ast.unparse(node.args[0]) in modules
+        and _is_module(ast.unparse(node.args[0]), modules)
         and isinstance(node.args[1], ast.Constant)
         and node.args[1].value == "wait_for"
     )
 
 
-def wait_for_uses(source: str) -> list[int]:
-    """Lines that reach ``asyncio.wait_for`` by any spelling: ``asyncio.wait_for``
-    (called or only referenced), the module under another name, ``wait_for``
-    imported from it, and ``asyncio.tasks.wait_for``."""
-    tree = ast.parse(source)
+def _bind_imports(tree: ast.AST) -> tuple[set[str], set[str], list[int]]:
+    """The names bound to ``asyncio`` or ``asyncio.tasks``, the names bound to
+    ``wait_for`` itself, and the lines of the latter's imports."""
     modules: set[str] = set()
     functions: set[str] = set()
     lines: list[int] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            modules |= {a.asname or a.name for a in node.names if a.name == "asyncio"}
+            for alias in node.names:
+                if alias.name == "asyncio.tasks" and alias.asname:
+                    modules.add(alias.asname)  # import asyncio.tasks as t
+                elif alias.name.split(".")[0] == "asyncio" and not alias.asname:
+                    modules.add("asyncio")  # import asyncio / import asyncio.tasks
+                elif alias.name == "asyncio":
+                    modules.add(alias.asname)  # import asyncio as aio
         elif isinstance(node, ast.ImportFrom) and node.module in (
             "asyncio",
             "asyncio.tasks",
         ):
             for alias in node.names:
+                bound = alias.asname or alias.name
                 if alias.name == "wait_for":
-                    functions.add(alias.asname or alias.name)
+                    functions.add(bound)
                     lines.append(node.lineno)
+                elif alias.name == "tasks" and node.module == "asyncio":
+                    modules.add(bound)  # from asyncio import tasks [as t]
+    return modules, functions, lines
+
+
+def wait_for_uses(source: str) -> list[int]:
+    """Lines that reach ``asyncio.wait_for`` by any spelling: ``asyncio.wait_for``
+    (called or only referenced), the module under another name, ``wait_for``
+    imported from it, and ``asyncio.tasks`` reached by ``asyncio.tasks``,
+    ``import asyncio.tasks as t`` or ``from asyncio import tasks``."""
+    tree = ast.parse(source)
+    modules, functions, lines = _bind_imports(tree)
     lines += [
         node.lineno
         for node in ast.walk(tree)
@@ -123,6 +145,30 @@ class TestTheScannerSeesEverySpelling:
     def test_getattr_on_the_module(self):
         source = "import asyncio\ngetattr(asyncio, 'wait_for')(x, 1)\n"
         assert wait_for_uses(source) == [2]
+
+    def test_the_tasks_module_imported_under_an_alias(self):
+        source = "import asyncio.tasks as t\nt.wait_for(x, 1)\n"
+        assert wait_for_uses(source) == [2]
+
+    def test_the_tasks_module_imported_from_asyncio(self):
+        source = "from asyncio import tasks\ntasks.wait_for(x, 1)\n"
+        assert wait_for_uses(source) == [2]
+
+    def test_the_tasks_module_imported_from_asyncio_under_an_alias(self):
+        source = "from asyncio import tasks as t\ngetattr(t, 'wait_for')(x, 1)\n"
+        assert wait_for_uses(source) == [2]
+
+    def test_the_tasks_module_through_an_aliased_asyncio(self):
+        source = "import asyncio as aio\naio.tasks.wait_for(x, 1)\n"
+        assert wait_for_uses(source) == [2]
+
+    def test_a_bare_import_of_the_tasks_module(self):
+        source = "import asyncio.tasks\nasyncio.tasks.wait_for(x, 1)\n"
+        assert wait_for_uses(source) == [2]
+
+    def test_an_unrelated_tasks_module_is_not_asyncios(self):
+        source = "from celery import tasks\ntasks.wait_for(x, 1)\n"
+        assert wait_for_uses(source) == []
 
     def test_nodrivers_own_wait_for_is_not_asyncios(self):
         """``tab.wait_for(...)`` is nodriver's element wait, a different thing."""

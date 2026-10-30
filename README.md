@@ -512,10 +512,10 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 | `BROWSER_IDLE_REAPER_INTERVAL` | `60` | Seconds between idle-browser sweeps (>= 1); only matters when `BROWSER_IDLE_TIMEOUT` is non-zero. |
 | `BROWSER_ORPHAN_PROFILE_MAX_AGE` | `21600` (6 h) | Seconds a stale nodriver temp profile (`uc_*` in the system temp dir) must be untouched before startup recovery removes it; `0` disables the sweep. |
 | `BROWSER_PROFILE_KEY` | unset | Fallback for `STEALTH_CHROME_PROFILE_KEY`: a stable clone key (the latter wins when both are set). |
-| `CDP_OPERATION_TIMEOUT_SECONDS` | `30` | Seconds a single CDP operation may take before it is abandoned. |
-| `EXECUTE_SCRIPT_TIMEOUT_SECONDS` | `10` | Seconds `execute_script` lets user JavaScript run, so a blocking script fails fast. |
+| `CDP_OPERATION_TIMEOUT_SECONDS` | `30` | Seconds a single CDP operation may take before it is abandoned. Must be greater than 0. |
+| `EXECUTE_SCRIPT_TIMEOUT_SECONDS` | `10` | Seconds `execute_script` lets user JavaScript run, so a blocking script fails fast. Must be greater than 0. |
 | `MAX_USER_SCRIPT_BYTES` | `100000` | Largest script `execute_script` accepts, in bytes; use `upload_file` for big payloads. |
-| `BROWSER_STATE_TIMEOUT_SECONDS` | `10` | Time budget, in seconds, for `get_instance_state`'s page-storage reads. |
+| `BROWSER_STATE_TIMEOUT_SECONDS` | `10` | Time budget, in seconds, for `get_instance_state`'s page-storage reads. Must be greater than 0. |
 | `XPOOL_SAFE_MODE` | `false` | Same as the backend's `--xpool-safe`: disables the `cdp-functions` section (tools that trigger `Runtime.enable`). |
 | `PORT` | `8000` | Default of the backend's `--port` (HTTP transport). Read only from the shell or `~/.stealth-mcp/.env`, never a project `.env`. |
 | `DEBUG` | `false` | Same as `STEALTH_BROWSER_DEBUG` and `--debug`: debug logging to stderr. Read only from the shell or `~/.stealth-mcp/.env`, never a project `.env`. |
