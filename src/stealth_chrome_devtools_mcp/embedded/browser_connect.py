@@ -154,10 +154,10 @@ the gap answers ``/json/version`` and the spawn would register ITS browser.
 confirm_ours`` asks the connected browser which process it is, before anything is
 registered.
 
-A leaf: ``nodriver``, stdlib, ``devtools_port``, ``process_exit`` and
-``spawn_budget`` (all leaves of their own). ``install()`` is called from
-``browser_manager._launch_browser``, the one function in the tree that launches
-a browser, on ``session_hygiene.install()``'s precedent of installing at the
+A leaf: ``nodriver``, stdlib, ``devtools_port``, ``process_exit``,
+``spawn_budget`` and ``tab_open`` (all leaves of their own). ``install()`` is
+called from ``browser_manager._launch_browser``, the one function in the tree that
+launches a browser, on ``session_hygiene.install()``'s precedent of installing at the
 site that needs it rather than at import time — and it is idempotent anyway.
 """
 
