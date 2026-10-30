@@ -5,17 +5,18 @@ grouping key: not a tool argument (``click_element(text_match="my password is
 swordfish")`` is raised as ``find 'my password is swordfish'``), not page content,
 not a message, and not a name the caller's own code gives its own objects (a class
 called ``my password is swordfish``, a function compiled under any file name, a
-module registered in ``sys.modules``, an attribute set on an exception). What it
-does NOT claim: ``create_python_binding``, dynamic hooks and
-``execute_python_in_browser`` run the caller's Python in THIS process, and that
-code holds the whole process. It can monkeypatch these modules or call
-``sentry_sdk.capture_message`` with any text, so defeating it is out of scope. What
-the checks below ensure is that such code's own names do not enter OUR fingerprints
-by ordinary means.
+module of its own, an attribute set on an exception). What it does NOT claim:
+``create_python_binding``, dynamic hooks and ``execute_python_in_browser`` run the
+caller's Python in THIS process, and that code holds the whole process. It can
+monkeypatch these modules, register a module in ``sys.modules`` under one of OUR
+real names (or a covered library's) before that module loads, or call
+``sentry_sdk.capture_message`` with any text; that is impersonation, and defeating
+it is out of scope like any monkeypatch. What the checks below ensure is that such
+code's own names do not enter OUR fingerprints by ordinary means.
 
 So nothing is believed because an object SAYS it is ours (its ``__module__``, its
-file name, its ``__file__``, a ``sys.modules`` entry, an attribute): all of that is
-text the caller's code can write by accident or intent. Two identity maps decide:
+file name, its ``__file__``, an attribute): all of that is text the caller's code can
+write by accident or intent. Two identity maps decide:
 
 * the CODE map: a frame is ours when its code object EQUALS one compiled from a
   source file of this package. Equality is the bytecode, constants, names, line table
@@ -28,10 +29,16 @@ text the caller's code can write by accident or intent. Two identity maps decide
   functions that share a ``co_name`` (``resolve_element.<locals>._do`` and
   ``resolve_by_text.<locals>._do``) stay two.
 * the CLASS map: a class is named when it IS (identity) a builtin exception, an
-  exception class found in the namespace of one of our modules, or one of the
-  third-party exceptions our code handles by name (``_THIRD_PARTY``, the one list,
-  each resolved to the real class object); anything else, a caller's subclass of
-  ``ToolError`` or of ``ProtocolException`` included, reads ``<external>``.
+  exception class found in the namespace of one of our modules, or an exception
+  class found in the namespace of a MODULE of a library the package handles
+  (``_STDLIB_MODULES``, ``_LIBRARY_MODULES``: the one closed list, read by module and
+  not by class, so a class the package starts to handle is covered when its module
+  is); anything else, a caller's subclass of ``ToolError`` or of ``ProtocolException``
+  included, reads ``<external>``. A library's class is named ``library.Name``
+  (``psutil.Error``, ``sqlite3.Error``, ``httpx.HTTPError``, ``urllib.HTTPError``
+  are four types, and a bare ``Error`` or ``HTTPError`` is shared by two or three
+  libraries); only builtins, our own classes and nodriver's ``ProtocolException``
+  are bare.
 
 A declared ``sentry_fingerprint`` (``forensic_errors``) is read only off an instance
 of one of OUR ``ForensicError`` classes, and only when it is made of a closed
@@ -45,16 +52,19 @@ callers; they redact what this returns before it is sent.
 from __future__ import annotations
 
 import builtins
+import importlib
+import logging
 import re
 import sys
 import threading
 from pathlib import Path
-from types import CodeType
+from types import CodeType, ModuleType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
+_log = logging.getLogger(__name__)
 _IMPORT_NAME = __package__ or __name__.rpartition(".")[0]
 _PACKAGE_DIR = Path(__file__).parent
 
@@ -76,36 +86,68 @@ _FAILURE_WORDS = 3
 #: ``id(class) -> (class, name)``: keyed by id and checked with ``is``, so no
 #: ``__hash__`` or ``__eq__`` of a caller's class ever runs. Builtins are taken at
 #: import, before any caller code can add an attribute to ``builtins``; our own
-#: classes are added as their modules load.
+#: classes and the covered modules' are added as they load.
 _classes: dict[int, tuple[type, str]] = {
     id(value): (value, value.__name__)
     for value in vars(builtins).values()
     if isinstance(value, type) and issubclass(value, BaseException)
 }
-#: The third-party exceptions our own code catches or tests by name (found by reading
-#: every ``except`` / ``isinstance`` / ``raise`` of the package for a class that is
-#: neither builtin nor ours), as ``(module, attribute)``. A probe fails with nodriver's
-#: ``ProtocolException`` or a websockets ``ConnectionClosed`` far more often than with
-#: anything else, and as ``<external>`` they would all be one issue. Each is resolved
-#: to the class object the library holds once that library is loaded, and named by
-#: that class's own ``__qualname__``: a subclass, or a class that merely carries the
-#: name, is not in the map. Add a class here when the package starts to handle one.
-_THIRD_PARTY = (
-    ("nodriver.core.connection", "ProtocolException"),
-    ("websockets.exceptions", "ConnectionClosed"),
-    ("websockets.exceptions", "ConnectionClosedError"),
-    ("websockets.exceptions", "ConnectionClosedOK"),
-    ("websockets.exceptions", "InvalidMessage"),
-    ("psutil", "Error"),
-    ("psutil", "AccessDenied"),
-    ("psutil", "NoSuchProcess"),
-    ("psutil", "TimeoutExpired"),
-    ("psutil", "ZombieProcess"),
-    ("httpx", "HTTPStatusError"),
-    ("pydantic", "ValidationError"),
-    ("requests.exceptions", "RequestException"),
+#: THE closed list of modules whose exception classes may be named, found by reading
+#: every ``except`` / ``isinstance`` / ``raise`` / tuple of classes of the package for
+#: a class that is neither builtin nor ours (``test_tool_error_fingerprint_census``
+#: repeats that read and fails on a class that no module here covers). A module, not
+#: a class: a probe fails with a ``ProtocolException``, a ``ConnectionClosed``, a
+#: ``URLError`` or a ``RemoteDisconnected`` far more often than with anything else,
+#: and as ``<external>`` they would all be one issue. Every attribute of a listed
+#: module that is an exception class of the same library (a re-export of another
+#: library's is skipped: that library's own module names it) is named, by the
+#: class's own ``__qualname__`` taken when the module is read: a subclass, or a class
+#: that merely carries the name, is not in the map. Add a module here when the package
+#: starts to handle a class that no module of this list defines.
+#:
+#: The standard library is cheap and always present, so its modules are imported when
+#: the maps are built; one a Python was built without names nothing.
+_STDLIB_MODULES = (
+    "json",
+    "json.decoder",
+    "http.client",
+    "urllib.error",
+    "asyncio",
+    "asyncio.exceptions",
+    "concurrent.futures",
+    "subprocess",
+    "struct",
+    "importlib.metadata",
+    "socket",
+    "ssl",
+    "zipfile",
+    "tarfile",
+    "shutil",
+    "sqlite3",
+    "xml.etree.ElementTree",
+    "email.errors",
+    "queue",
 )
-_third_party_pending = list(_THIRD_PARTY)
+#: A third-party library is NEVER imported for its exceptions (importing nodriver or
+#: httpx to fill a table would cost every start): a module is read once it is already
+#: in ``sys.modules`` and finished loading, which it is before any of its exceptions
+#: can reach an event.
+_LIBRARY_MODULES = (
+    "nodriver.core.connection",
+    "websockets.exceptions",
+    "psutil",
+    "httpx",
+    "pydantic_core",
+    "requests.exceptions",
+    "mcp.shared.exceptions",
+)
+#: The libraries whose classes read bare (``ProtocolException``); every other
+#: library's read ``library.Name``, because the standard library and the others define
+#: a class of the same name (``Error``, ``HTTPError``, ``TimeoutExpired``) often enough
+#: to merge two types into one issue.
+_BARE_LIBRARIES = frozenset({"nodriver"})
+_stdlib_pending = list(_STDLIB_MODULES)
+_library_pending = list(_LIBRARY_MODULES)
 #: The dotted name of every module the package's files make up, and which of them
 #: have had their classes read. Names come from the files on disk, never from
 #: ``sys.modules``, so a module a caller registers under another name is no module.
@@ -115,9 +157,13 @@ _classes_read: set[str] = set()
 #: two names (then neither is claimed).
 _code_labels: dict[CodeType, str | None] = {}
 _built = False
+#: Whether the maps have been judged (see :func:`_judge`): at most one verdict, and
+#: so at most one warning, per process.
+_judged = False
 #: One lock for the maps: whoever needs them first builds them, and a second caller
-#: waits for that build instead of making another.
-_lock = threading.Lock()
+#: waits for that build instead of making another. Re-entrant: a module imported
+#: while building can log, and a log can ask for a name.
+_lock = threading.RLock()
 _warm_lock = threading.Lock()
 _warmer: threading.Thread | None = None
 
@@ -145,6 +191,77 @@ def _build() -> None:
                 _code_labels[code] = None
 
 
+def _loaded(name: str, *, importing: bool) -> ModuleType | None:
+    """The finished module *name*, or ``None``: not loaded yet (and not to be
+    imported), half loaded, absent, or an object that does not claim to be it."""
+    try:
+        module = importlib.import_module(name) if importing else sys.modules.get(name)
+    except Exception:  # noqa: BLE001  PERMANENT(a module that fails to import names nothing; it must not fail an event)
+        return None
+    spec = getattr(module, "__spec__", None)
+    if not isinstance(module, ModuleType) or getattr(spec, "name", None) != name:
+        return None
+    return None if getattr(spec, "_initializing", False) else module
+
+
+def _record(
+    module: ModuleType, defined_here: Callable[[str], bool], prefix: str = ""
+) -> None:
+    """Name every exception class *module* holds whose ``__module__`` satisfies
+    *defined_here*: defined by the module or its library, not imported from another."""
+    for value in list(vars(module).values()):
+        if (
+            isinstance(value, type)
+            and issubclass(value, BaseException)
+            and defined_here(value.__module__)
+        ):
+            _classes.setdefault(id(value), (value, prefix + value.__qualname__))
+
+
+def _read_modules() -> None:
+    """Read the classes of every module loaded since the last read."""
+    for name in _module_names.keys() - _classes_read:
+        module = _loaded(name, importing=False)
+        if module is not None:  # not loaded yet, or half loaded: read it next time
+            _classes_read.add(name)
+            _record(module, lambda home, name=name: home == name)
+    for pending, importing in ((_stdlib_pending, True), (_library_pending, False)):
+        for name in tuple(pending):
+            module = _loaded(name, importing=importing)
+            if module is not None or importing:  # a stdlib module not there never comes
+                pending.remove(name)
+            if module is not None:
+                library = name.partition(".")[0]
+                _record(
+                    module,
+                    lambda home, library=library: home.partition(".")[0] == library,
+                    "" if library in _BARE_LIBRARIES else f"{library}.",
+                )
+
+
+def _judge() -> None:
+    """Say, once per process, that the maps came out empty. A package with no source
+    files to read (a zip or a sourceless install) names no frame and no class of
+    ours, so every fingerprint would read ``<external>`` and an event whose only
+    difference is its message would regroup by message (the original T-10034 bug)
+    with nothing to say why."""
+    global _judged  # noqa: PLW0603  PERMANENT(one verdict per process)
+    try:
+        # Ours and always present: when even this is not named, nothing of ours is.
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+    except ImportError:
+        return  # being imported right now: judge on a later pass
+    _read_modules()
+    entry = _classes.get(id(ToolError))
+    _judged = True
+    if not _code_labels or entry is None or entry[0] is not ToolError:
+        _log.warning(
+            "tool_error_fingerprint: no package source found; "
+            "Sentry fingerprints fall back to %s",
+            EXTERNAL,
+        )
+
+
 def _refresh() -> None:
     """Build on first use; afterwards read the classes of any module loaded since."""
     global _built  # noqa: PLW0603  PERMANENT(the identity maps are built once, on first use)
@@ -152,41 +269,31 @@ def _refresh() -> None:
         if not _built:
             _build()
             _built = True
-        for name in _module_names.keys() - _classes_read:
-            module = sys.modules.get(name)
-            if module is None or getattr(
-                getattr(module, "__spec__", None), "_initializing", False
-            ):
-                continue  # not loaded yet, or half loaded: read it next time
-            _classes_read.add(name)
-            for value in list(vars(module).values()):
-                if (
-                    isinstance(value, type)
-                    and issubclass(value, BaseException)
-                    and value.__module__ == name  # defined here, not imported here
-                ):
-                    _classes.setdefault(id(value), (value, value.__name__))
-        for spec in tuple(_third_party_pending):  # a library not loaded yet waits
-            kind = getattr(sys.modules.get(spec[0]), spec[1], None)
-            if isinstance(kind, type) and issubclass(kind, BaseException):
-                _classes.setdefault(id(kind), (kind, kind.__qualname__))
-                _third_party_pending.remove(spec)
+        _read_modules()
+        if not _judged:
+            _judge()
 
 
 def warm() -> threading.Thread | None:
     """Build the maps on a daemon thread, once, so no event pays for the first build
     (compiling the package's files takes about 0.4 s). Returns the thread, or
-    ``None`` when a warm-up was already started. The first use stays the fallback:
-    it and the warm-up share :func:`_refresh`'s lock, so there is one build."""
+    ``None`` when a warm-up was already started, or could not be (no thread to be
+    had). The first use stays the fallback: it and the warm-up share
+    :func:`_refresh`'s lock, so there is one build."""
     global _warmer  # noqa: PLW0603  PERMANENT(one warm-up per process)
     with _warm_lock:
         if _warmer is not None:
             return None
-        _warmer = threading.Thread(
+        thread = threading.Thread(
             target=_warm_up, name="fingerprint-warm-up", daemon=True
         )
-        _warmer.start()
-        return _warmer
+        try:
+            thread.start()
+        except Exception:  # noqa: BLE001  PERMANENT(no thread to be had leaves the first use to build, and sentry_init never raises)
+            _log.debug("tool_error_fingerprint: no warm-up thread", exc_info=True)
+            return None
+        _warmer = thread
+        return thread
 
 
 def _warm_up() -> None:
@@ -197,10 +304,11 @@ def _warm_up() -> None:
 
 
 def type_name(kind: type) -> str:
-    """*kind*'s name when it IS a builtin exception or an exception class of the
-    package; ``<external>`` for any other, including a class that only CLAIMS to be
-    one (``type("my password is swordfish", (ToolError,), {})``, or one whose
-    ``__module__`` is ``builtins``): the maps hold classes, not what they say."""
+    """*kind*'s name when it IS a builtin exception, an exception class of the
+    package or one of a covered library module (``library.Name``, see
+    ``_STDLIB_MODULES``); ``<external>`` for any other, including a class that only
+    CLAIMS to be one (``type("my password is swordfish", (ToolError,), {})``, or one
+    whose ``__module__`` is ``builtins``): the maps hold classes, not what they say."""
     _refresh()
     entry = _classes.get(id(kind))
     return entry[1] if entry is not None and entry[0] is kind else EXTERNAL
@@ -298,7 +406,7 @@ def _in_vocabulary(element: str) -> str | None:
     if not (at_a_step or (len(words) == 1 and site)) or not words[0].isidentifier():
         return None
     # An exception type: kept when it is one we know, else the one word for "not ours".
-    known = {name for _, name in _classes.values()}
+    known = {kind.__name__ for kind, _ in _classes.values()}
     return " ".join([*site, words[0] if words[0] in known else EXTERNAL, *words[1:]])
 
 

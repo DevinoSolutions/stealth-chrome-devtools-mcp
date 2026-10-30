@@ -23,12 +23,15 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import http.client
+import json
 import logging
 import pathlib
 import sys
 import threading
 import types
 import unittest.mock
+import urllib.error
 
 import pytest
 from nodriver.core.connection import ProtocolException
@@ -733,33 +736,57 @@ class TestNothingACallerCanSetIsRead:
     def test_an_exception_type_we_do_not_define_reads_external_in_a_cause(
         self, shipped_events
     ):
-        """A type that is neither builtin, ours nor one we handle reads ``<external>``."""
-        event = _log_hung(shipped_events, "i-1: x", "heal JSONDecodeError at evaluate")
-        other = _log_hung(shipped_events, "i-2: x", "relaunch-failed swordfish")
+        """A type that is neither builtin, ours nor in a library we handle reads
+        ``<external>``; one that is (``JSONDecodeError``) keeps its name."""
+        event = _log_hung(shipped_events, "i-1: x", "heal Pretend at evaluate")
+        known = _log_hung(shipped_events, "i-2: x", "heal JSONDecodeError at evaluate")
+        other = _log_hung(shipped_events, "i-3: x", "relaunch-failed swordfish")
 
         assert event["fingerprint"] == ["hung-browser", "heal <external> at evaluate"]
+        assert known["fingerprint"] == [
+            "hung-browser",
+            "heal JSONDecodeError at evaluate",
+        ]
         assert other["fingerprint"] == ["hung-browser", "relaunch-failed <external>"]
 
-    @pytest.mark.parametrize(
-        ("module", "name"),
-        tool_error_fingerprint._THIRD_PARTY,  # noqa: SLF001  PERMANENT(the allowlist IS the parametrization)
-        ids=lambda value: str(value),
-    )
-    def test_a_third_party_exception_we_handle_keeps_its_name(self, module, name):
-        kind = getattr(pytest.importorskip(module), name)
+    def test_two_websockets_handshake_failures_are_two_freeze_issues(
+        self, shipped_events
+    ):
+        """Review of e03fd55, MED: ``browser_health._describe`` writes
+        ``type(error).__name__``, and a handshake class no list named read
+        ``<external>`` for every one of them."""
+        status = _log_hung(shipped_events, "i-1: x", "heal InvalidStatus at connect")
+        uri = _log_hung(shipped_events, "i-2: x", "heal InvalidURI at connect")
 
-        assert tool_error_fingerprint.type_name(kind) == kind.__qualname__
+        assert status["fingerprint"] == [
+            "hung-browser",
+            "heal InvalidStatus at connect",
+        ]
+        assert uri["fingerprint"] == ["hung-browser", "heal InvalidURI at connect"]
 
-    def test_the_allowlist_resolves_to_exception_classes(self):
-        resolved = {
-            (module, name): getattr(pytest.importorskip(module), name)
-            for module, name in tool_error_fingerprint._THIRD_PARTY  # noqa: SLF001  PERMANENT(the allowlist under test)
-        }
-
-        assert all(issubclass(kind, BaseException) for kind in resolved.values())
-        assert resolved[("nodriver.core.connection", "ProtocolException")] is (
-            ProtocolException
+    def test_three_spawn_failures_in_one_function_are_three_issues(
+        self, shipped_events
+    ):
+        """Review of e03fd55, MED: ``browser_connect._patient`` reaches a ``ToolError``
+        with a ``URLError``, a ``RemoteDisconnected`` or a ``JSONDecodeError`` under
+        it; all three read ``<external>`` and were one issue."""
+        causes = (
+            urllib.error.URLError("refused"),
+            http.client.RemoteDisconnected("closed"),
+            json.JSONDecodeError("bad", "{", 0),
         )
+
+        events = [
+            _ship_tool_error(shipped_events, ToolError("x"), cause=cause)
+            for cause in causes
+        ]
+
+        assert [event["fingerprint"][3] for event in events] == [
+            "urllib.URLError",
+            "http.RemoteDisconnected",
+            "json.JSONDecodeError",
+        ]
+        assert len({tuple(event["fingerprint"]) for event in events}) == 3
 
     def test_protocol_exception_keeps_its_name_in_a_chain_and_a_freeze(
         self, shipped_events
@@ -1031,6 +1058,7 @@ class TestTheMapsAreWarmedOnceOffTheEventPath:
 
         for name, value in (
             ("_built", False),
+            ("_judged", True),
             ("_warmer", None),
             ("_build", build),
             ("_module_names", {}),
@@ -1079,6 +1107,34 @@ class TestTheMapsAreWarmedOnceOffTheEventPath:
             assert observability.sentry_init(warm_fingerprints=True) is True
 
         assert started == [1]
+
+    def test_a_thread_that_cannot_start_does_not_stop_sentry_init(
+        self, cold, monkeypatch, caplog
+    ):
+        """Review of e03fd55, LOW: ``Thread.start`` raises ``RuntimeError("can't start
+        new thread")`` when the process is out of threads, and ``sentry_init`` is
+        documented never to raise. The first use still builds, as the fallback."""
+        pytest.importorskip("sentry_sdk")
+        monkeypatch.delenv("STEALTH_MCP_NO_ERROR_REPORTING", raising=False)
+
+        def no_thread(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", no_thread)
+        with (
+            caplog.at_level(logging.DEBUG, logger=tool_error_fingerprint.__name__),
+            unittest.mock.patch("sentry_sdk.init", lambda **kwargs: None),
+        ):
+            assert observability.sentry_init(
+                auto_enabling_integrations=False, warm_fingerprints=True
+            )
+        cold["release"].set()
+
+        assert [record.levelno for record in caplog.records] == [logging.DEBUG]
+        assert tool_error_fingerprint._warmer is None  # noqa: SLF001  PERMANENT(no warm-up is running, and one may be asked for again)
+        assert cold["calls"] == 0
+        assert tool_error_fingerprint.type_name(KeyError) == "KeyError"
+        assert cold["calls"] == 1
 
     def test_no_warm_up_when_reporting_is_off(self, monkeypatch):
         monkeypatch.setenv("STEALTH_MCP_NO_ERROR_REPORTING", "true")
