@@ -27,7 +27,8 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-#: ``query_elements(visible_only=True)``' visibility read. A node the page
+#: THE visibility read -- ``query_elements(visible_only=True)`` and
+#: ``wait_for_element(visible=True)`` both ask it. A node the page
 #: removed but still references has an EMPTY computed style, so the three style
 #: tests alone pass for it and it listed as visible (T-10284); it is asked
 #: whether it is in a document first, through ``click_target``'s one
@@ -780,14 +781,7 @@ class DOMHandler:
                 if element:
                     if visible:
                         try:
-                            is_visible = await element.apply(
-                                """(elem) => {
-                                    var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' &&
-                                           style.visibility !== 'hidden' &&
-                                           style.opacity !== '0';
-                                }"""
-                            )
+                            is_visible = await element.apply(VISIBLE_JS)
                             if not is_visible:
                                 await asyncio.sleep(0.5)
                                 continue

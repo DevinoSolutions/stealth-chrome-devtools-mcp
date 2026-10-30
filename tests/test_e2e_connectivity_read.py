@@ -40,7 +40,11 @@ from e2e_helpers import (
     sandbox_kwargs,
     warmup_once,
 )
-from stealth_chrome_devtools_mcp.embedded import click_target, dom_handler
+from stealth_chrome_devtools_mcp.embedded import (
+    click_target,
+    dom_handler,
+    element_resolution,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 pytestmark = integration_pytestmark()
@@ -166,7 +170,7 @@ async def test_the_connectivity_read_in_real_chrome(fixture_app_server, tmp_empt
                 "connected": THREW,
                 "aim": THREW,
                 "visible": False,
-                "synthetic": click_target.SYNTHETIC_THREW,
+                "synthetic": click_target.SYNTHETIC_UNREAD,
             }, (name, thrown)
             with pytest.raises(ToolError):
                 click_target.connectivity(thrown["connected"], name)
@@ -184,5 +188,89 @@ async def test_the_connectivity_read_in_real_chrome(fixture_app_server, tmp_empt
                     click_target.CONNECTED_JS
                 )
                 assert answer == THREW, (getter, name, answer)
+    finally:
+        await close(instance_id=iid)
+
+
+#: What an ordinary page does at the top level of a script (a linked-list demo):
+#: it replaces the ``Node`` global. ``class`` makes a global LEXICAL binding that
+#: shadows ``window.Node``; the other two replace the property itself.
+_NODE_DECLARATIONS = ["class Node {}", "function Node() {}", "var Node = 1;"]
+
+
+@pytest.mark.parametrize(
+    "declaration", _NODE_DECLARATIONS, ids=["class", "function", "var"]
+)
+async def test_a_page_that_declares_its_own_node_changes_nothing(
+    fixture_app_server, tmp_empty_root, declaration
+):
+    """T-10284 review, finding 1: ``Object.getOwnPropertyDescriptor(Node.prototype,
+    'isConnected')`` is the page's own ``Node`` there, so on 1c7761e every element
+    answered ``threw`` and ``query_elements``, ``get_element_state`` and
+    ``click_element`` failed on the page (``wait_for_element`` timed out)."""
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    query_elements = get_fn("query_elements")
+    get_element_state = get_fn("get_element_state")
+    click_element = get_fn("click_element")
+    wait_for_element = get_fn("wait_for_element")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{fixture_app_server}/interactions.html")
+        tab = await runtime.browser_manager.get_tab(iid)
+        # The page's own top-level script, as Chrome runs a <script>.
+        await tab.send(cdp.runtime.evaluate(declaration))
+        broken, _ = await tab.send(
+            cdp.runtime.evaluate(
+                "(() => { try { return Object.getOwnPropertyDescriptor("
+                "Node.prototype, 'isConnected') === undefined; } "
+                "catch (e) { return true; } })()",
+                return_by_value=True,
+            )
+        )
+        assert broken.value is True, "premise: the page's Node has no isConnected"
+        assert await eval_js(iid, _SETUP) is True
+        await tab.send(cdp.dom.get_document())
+
+        live = await _answers(tab, "connected")
+        gone = await _answers(tab, "removed")
+        assert live == {
+            "connected": YES,
+            "aim": YES,
+            "visible": True,
+            "synthetic": click_target.SYNTHETIC_CLICKED,
+        }, live
+        assert gone == {
+            "connected": NO,
+            "aim": NO,
+            "visible": False,
+            "synthetic": click_target.SYNTHETIC_DETACHED,
+        }, gone
+        assert await eval_js(iid, "window.__clicks") == 1, "only the live node clicked"
+        assert await element_resolution.refresh_element(
+            tab, await _element(tab, "connected")
+        )
+        assert not await element_resolution.refresh_element(
+            tab, await _element(tab, "removed")
+        )
+
+        # The tools, on the live page: each answers as it does on any page.
+        await eval_js(
+            iid,
+            "document.getElementById('fidelity-btn').addEventListener("
+            "'click', () => { window.__fidelity = (window.__fidelity || 0) + 1; })"
+            " || true",
+        )
+        listed = await query_elements(instance_id=iid, selector="#fidelity-btn")
+        assert len(listed) == 1, listed
+        state = await get_element_state(instance_id=iid, selector="#fidelity-btn")
+        assert state["is_visible"] is True
+        assert await wait_for_element(
+            instance_id=iid, selector="#fidelity-btn", timeout=3000, visible=True
+        )
+        clicked = await click_element(instance_id=iid, selector="#fidelity-btn")
+        assert clicked["dispatch"] == "coordinate", clicked
+        assert await eval_js(iid, "window.__fidelity") == 1
     finally:
         await close(instance_id=iid)

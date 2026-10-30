@@ -235,6 +235,17 @@ class FakeClickTarget:
     (the thrown ``true`` itself, or ``None``) is not modelled -- a script that
     does not carry the fragment is not answered at all.
 
+    ``page_declares_node`` is a page with its own top-level ``class Node {}``
+    (``function Node(){}`` and ``var Node = 1`` do the same): the global ``Node``
+    is the page's, so ``Node.prototype`` has no ``isConnected``, no
+    ``getRootNode``, nothing. Which scripts that breaks is read off the script
+    text, never assumed (:func:`_reads_node_global`): a script that reads
+    ``Node.prototype`` inside the connectivity fragment's ``try`` answers its
+    ``threw`` token, one that reads it anywhere else throws uncaught (``None``
+    from ``Element.apply``), and a script that finds its members on the node's
+    own prototype chain is unaffected. The same is true on the real page
+    (``tests/test_e2e_connectivity_read.py``).
+
     The listing surface (T-10284) -- ``update``, ``tag_name``, ``text_all``,
     ``attrs``, ``children`` -- is what ``query_elements`` and
     ``get_element_state`` read off an element they hold. ``update`` is nodriver's
@@ -280,7 +291,9 @@ class FakeClickTarget:
         synthetic_answer: Any = _UNSET,
         form_controls: tuple[str, ...] = (),
         getter_throws: bool = False,
+        page_declares_node: bool = False,
     ) -> None:
+        self.page_declares_node = page_declares_node
         self.getter_throws = getter_throws
         self.form_controls = tuple(form_controls)
         self.click_throws = click_throws
@@ -351,7 +364,12 @@ class FakeClickTarget:
         ``threw`` for a getter that throws, else ``no`` for a node in no
         document and ``yes`` for one in a document.
         """
-        if _CONNECTIVITY_SHAPE not in _squash(js_function):
+        squashed = _squash(js_function)
+        if self.page_declares_node and _reads_node_global(squashed):
+            return (
+                CONNECTED_THREW if "constconnectivity=(node)=>{" in squashed else None
+            )
+        if _CONNECTIVITY_SHAPE not in squashed:
             return None
         if self.getter_throws:
             return CONNECTED_THREW
@@ -612,6 +630,13 @@ class FakeClickTarget:
             self.calls.append("synthetic")
         if self.detached:
             raise left_the_document()
+        if self.page_declares_node and _reads_node_global(
+            _squash(_CONNECTIVITY_FUNCTION.sub("", js_function))
+        ):
+            # ``Node.prototype.<member>`` is ``undefined`` on the page's own
+            # ``Node``: the read throws outside any ``try``, which
+            # ``Element.apply`` hands back as ``None``.
+            return None
         if "elementFromPoint" in js_function:
             self.calls.append("aim")
             if self._aim_answer is not _UNSET:
@@ -665,15 +690,35 @@ def _squash(text: str) -> str:
 #: runs the product's own text in real Chrome.
 _CONNECTIVITY_SHAPE = _squash(
     """const connectivity = (node) => {
+        const native = (obj, name) => {
+        for (let proto = Object.getPrototypeOf(obj); proto !== null;
+             proto = Object.getPrototypeOf(proto)) {
+            const own = Object.getOwnPropertyDescriptor(proto, name);
+            if (own !== undefined) return own.get !== undefined ? own.get : own.value;
+        }
+        return undefined;
+    };
         try {
-            const answer = Object.getOwnPropertyDescriptor(
-                Node.prototype, 'isConnected').get.call(node);
+            const answer = native(node, 'isConnected').call(node);
             if (answer === true) return "stealth.connected:yes";
             if (answer === false) return "stealth.connected:no";
         } catch (e) { return "stealth.connected:threw"; }
         return "stealth.connected:threw";
     };"""
 )
+
+
+#: The connectivity function as a script carries it, whitespace and all: what is
+#: left of a script once it is cut out is what runs OUTSIDE the fragment's ``try``.
+_CONNECTIVITY_FUNCTION = re.compile(
+    r"const connectivity = \(node\) => \{.*?return \"stealth\.connected:threw\";\s*\};",
+    re.DOTALL,
+)
+
+
+def _reads_node_global(squashed: str) -> bool:
+    """Whether a whitespace-free script reads a member off the global ``Node``."""
+    return re.search(r"(?<![\w$])Node\.prototype", squashed) is not None
 
 
 def left_the_document(
