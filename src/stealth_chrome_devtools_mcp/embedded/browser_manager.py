@@ -852,7 +852,8 @@ class BrowserManager:
                     for tab in browser.tabs[:]:
                         try:
                             close = uc.cdp.target.close_target(tab.target.target_id)
-                            await asyncio.wait_for(browser.send(close), 2.0)
+                            async with asyncio.timeout(2.0):
+                                await browser.send(close)
                         except Exception as e:
                             tab_close.log_failure("close_instance", instance_id, e)
             except Exception as tabs_err:
@@ -863,10 +864,9 @@ class BrowserManager:
                 )
 
             try:
-                import nodriver.cdp.browser as cdp_browser
-
                 # A closed socket fails the send; the handler below logs it.
-                await asyncio.wait_for(browser.send(cdp_browser.close()), timeout=2.0)
+                async with asyncio.timeout(2.0):
+                    await browser.send(uc.cdp.browser.close())
             except (TimeoutError, Exception) as cdp_err:
                 debug_logger.log_info(
                     "browser_manager",
@@ -875,7 +875,8 @@ class BrowserManager:
                 )
 
             try:
-                await asyncio.wait_for(browser.aclose(), timeout=2.0)
+                async with asyncio.timeout(2.0):
+                    await browser.aclose()
                 debug_logger.log_info(
                     "browser_manager",
                     "close_connection",
@@ -903,10 +904,10 @@ class BrowserManager:
             # -- Phase 3: blocking kill (off the loop, real timeout) ----------
             stop_coro = None
             try:
-                stop_coro = await asyncio.wait_for(
-                    asyncio.to_thread(self._blocking_teardown, instance_id, browser),
-                    timeout=self.CLOSE_KILL_TIMEOUT,
-                )
+                async with asyncio.timeout(self.CLOSE_KILL_TIMEOUT):
+                    stop_coro = await asyncio.to_thread(
+                        self._blocking_teardown, instance_id, browser
+                    )
             except TimeoutError:
                 debug_logger.log_warning(
                     "browser_manager",
@@ -922,9 +923,10 @@ class BrowserManager:
                     f"Blocking teardown failed for {instance_id}: {e}",
                 )
 
-            if stop_coro is not None:
+            if asyncio.iscoroutine(stop_coro):
                 try:
-                    await asyncio.wait_for(stop_coro, timeout=2.0)
+                    async with asyncio.timeout(2.0):
+                        await stop_coro
                 except (TimeoutError, Exception) as e:
                     debug_logger.log_warning(
                         "browser_manager",
@@ -1128,12 +1130,10 @@ class BrowserManager:
             try:
                 # The ONE navigation wait (F-881) — never `tab.get` (a 0.5 s
                 # sleep) nor `tab.wait(<event class>)` (a no-op).
-                await asyncio.wait_for(
-                    navigation_milestone.navigate(
+                async with asyncio.timeout(timeout_seconds):
+                    await navigation_milestone.navigate(
                         tab, url, wait_until, timeout_seconds, progress, referrer
-                    ),
-                    timeout=timeout_seconds,
-                )
+                    )
 
                 remaining = timeout_seconds - (time.monotonic() - start_time)
                 if remaining <= 0:
@@ -1141,9 +1141,8 @@ class BrowserManager:
 
                 # ONE round trip for both (F-882): two straddled a `meta refresh`
                 # and answered with one document's url and another's title.
-                final_url, title = await asyncio.wait_for(
-                    navigation_milestone.landing(tab), timeout=remaining
-                )
+                async with asyncio.timeout(remaining):
+                    final_url, title = await navigation_milestone.landing(tab)
 
                 await self.update_instance_state(instance_id, final_url, title)
 

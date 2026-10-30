@@ -7,6 +7,7 @@ Validates:
 - If tab.send raises, it is swallowed and the error dict is still returned.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,18 +29,31 @@ def _make_fake_tab():
     return tab
 
 
+def _hang_until_the_bound_fires(executor, monkeypatch, seconds=0.05):
+    """The script never answers and the executor's own 10 s bound is cut to
+    *seconds*; the bound itself stays the real ``asyncio.timeout``, so what fires
+    is the production one (T-10690 moved it off ``wait_for``)."""
+    real_timeout = asyncio.timeout
+
+    def shortened(delay):
+        return real_timeout(seconds if delay == 10.0 else delay)
+
+    async def hangs(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "stealth_chrome_devtools_mcp.embedded.cdp_function_executor.asyncio.timeout",
+        shortened,
+    )
+    monkeypatch.setattr(executor, "inject_and_execute_script", hangs)
+
+
 @pytest.mark.asyncio
 async def test_timeout_attempts_terminate_execution(executor, monkeypatch):
     """On timeout, tab.send(terminate_execution()) is called and message updated."""
     tab = _make_fake_tab()
 
-    async def raise_timeout(*_a, **_kw):
-        raise TimeoutError
-
-    monkeypatch.setattr(
-        "stealth_chrome_devtools_mcp.embedded.cdp_function_executor.asyncio.wait_for",
-        raise_timeout,
-    )
+    _hang_until_the_bound_fires(executor, monkeypatch)
 
     result = await executor.execute_python_in_browser(tab, "while True: pass")
 
@@ -55,13 +69,7 @@ async def test_timeout_terminate_failure_swallowed(executor, monkeypatch):
     tab = _make_fake_tab()
     tab.send = AsyncMock(side_effect=ConnectionError("websocket dead"))
 
-    async def raise_timeout(*_a, **_kw):
-        raise TimeoutError
-
-    monkeypatch.setattr(
-        "stealth_chrome_devtools_mcp.embedded.cdp_function_executor.asyncio.wait_for",
-        raise_timeout,
-    )
+    _hang_until_the_bound_fires(executor, monkeypatch)
 
     result = await executor.execute_python_in_browser(tab, "x = 1")
 

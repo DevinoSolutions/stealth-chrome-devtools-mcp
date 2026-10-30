@@ -62,7 +62,8 @@ async def target_unlisted(tab: Tab) -> bool:
     if tab_open.is_closed(browser):
         return True
     try:
-        await asyncio.wait_for(tab_open.update_targets(browser), _LISTING_TIMEOUT)
+        async with asyncio.timeout(_LISTING_TIMEOUT):
+            await tab_open.update_targets(browser)
     except Exception as exc:  # noqa: BLE001  PERMANENT(a failed confirmation means not confirmed)
         debug_logger.log_debug(
             "tab_close", "target_unlisted", f"listing failed, not confirmed: {exc!r}"
@@ -120,7 +121,7 @@ def log_failure(method: str, instance_id: str, exc: BaseException) -> bool:
 
 def _describe(exc: BaseException) -> str:
     """The failure's type and text. The type is the part that cannot be left
-    out: a ``TimeoutError`` from ``asyncio.wait_for`` has NO text, so the line
+    out: a ``TimeoutError`` from ``asyncio.timeout`` has NO text, so the line
     read ``Failed to close tab for <id>: `` and named nothing (T-5900, CI run
     39564101655)."""
     text = str(exc)

@@ -113,14 +113,12 @@ async def hold(tab: Tab) -> None:
         if current is not None:
             await _release_rediscovered(key, current)
         entry = _held[key] = _Hold(tab, now + LINGER_SECONDS)
-        await asyncio.wait_for(
-            tab.send(
+        async with asyncio.timeout(SEND_BUDGET_S):
+            await tab.send(
                 uc.cdp.page.start_screencast(
                     format_="jpeg", quality=1, every_nth_frame=_NEVER_A_FRAME
                 )
-            ),
-            SEND_BUDGET_S,
-        )
+            )
         _arm(key, entry)
     except BaseException as error:  # a cancelled start leaves no stuck entry
         # Cancelled or timed out, the start may still reach Chrome (the transport
@@ -155,7 +153,8 @@ async def _release_rediscovered(key: str, old: _Hold) -> None:
 
 async def _stop(tab: Tab, where: str) -> None:
     try:
-        await asyncio.wait_for(tab.send(uc.cdp.page.stop_screencast()), SEND_BUDGET_S)
+        async with asyncio.timeout(SEND_BUDGET_S):
+            await tab.send(uc.cdp.page.stop_screencast())
     except Exception as error:  # noqa: BLE001  PERMANENT(the tab usually closed first: nothing to release, and the timer must end either way)
         debug_logger.log_info("paint_hold", where, f"{type(error).__name__}: {error}")
 

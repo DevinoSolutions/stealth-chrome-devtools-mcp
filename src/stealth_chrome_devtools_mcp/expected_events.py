@@ -47,7 +47,7 @@ event can arrive in (see "one rule, two paths" below):
     other link is either ours or a *budget* link — ``TimeoutError`` or
     ``asyncio.CancelledError``. Nothing else in the chain is tolerated. Those
     two are what a bounded operation is made of: ``tool_runtime`` and
-    ``browser_manager`` both bound work with ``asyncio.wait_for``, which raises
+    ``browser_manager`` both bound work with ``asyncio.timeout``, which raises
     ``TimeoutError`` *from* the ``CancelledError`` it used to stop the coroutine,
     and both convert it to a ``ToolError`` the caller receives — the conversion
     is always the LAST raise, which is why "outermost" is the right test and
@@ -349,7 +349,7 @@ CALLER_REFUSAL = Kind(
     frozenset({"CallerError"}), frozenset({"stealth_chrome_devtools_mcp"})
 )
 
-#: What a bounded operation is made of: ``asyncio.wait_for`` cancels the
+#: What a bounded operation is made of: ``asyncio.timeout`` cancels the
 #: coroutine it gave up on and raises ``TimeoutError`` from that
 #: ``CancelledError``. Tolerated only BEHIND :data:`OURS` in the chain — see
 #: ``error-convention`` above for why the outermost link is the test.

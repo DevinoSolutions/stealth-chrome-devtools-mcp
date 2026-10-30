@@ -558,7 +558,7 @@ async def reconcile_launched_browser_version(tab: Tab, executable: str) -> str |
     unbounded, a diagnostic probe could wedge the spawn it must not even fail.
     ``server.py``'s ``_with_cdp_timeout`` is not reachable from here (convention
     1: no module under ``embedded/`` imports ``server``), so the bound is a local
-    ``asyncio.wait_for`` on ``_VERSION_PROBE_TIMEOUT_SECONDS`` — the same 10s the
+    ``asyncio.timeout`` on ``_VERSION_PROBE_TIMEOUT_SECONDS`` — the same 10s the
     pre-launch subprocess probe already waits for the same answer. Expiry cancels
     the pending send and degrades to ``None`` through the guard below, leaving
     the memo exactly as the pre-launch probe left it.
@@ -567,9 +567,8 @@ async def reconcile_launched_browser_version(tab: Tab, executable: str) -> str |
     phase's own budget (``spawn_budget``, F-969), not by anything here.
     """
     try:
-        version = await asyncio.wait_for(
-            tab.send(cdp.browser.get_version()), _VERSION_PROBE_TIMEOUT_SECONDS
-        )
+        async with asyncio.timeout(_VERSION_PROBE_TIMEOUT_SECONDS):
+            version = await tab.send(cdp.browser.get_version())
         product = version[1] if version and len(version) > 1 else None
         return record_launched_browser_major_version(executable, product)
     except Exception as error:  # noqa: BLE001  PERMANENT(a diagnostic probe must never fail a spawn - F-806)

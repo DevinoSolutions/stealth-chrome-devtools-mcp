@@ -377,9 +377,8 @@ async def ensure_session_restore(browser: Browser) -> bool:
     exchange_bound = PREF_TIMEOUT_SECONDS - close_share
     cut_short = False
     try:
-        return await asyncio.wait_for(
-            _set_restore_pref(browser, tab_box, stage), exchange_bound
-        )
+        async with asyncio.timeout(exchange_bound):
+            return await _set_restore_pref(browser, tab_box, stage)
     except TimeoutError:
         cut_short = True
         where = stage[-1] if stage else "starting"
@@ -405,12 +404,13 @@ async def ensure_session_restore(browser: Browser) -> bool:
             # clock that can tick a whole quantum late (Windows' is ~15.6 ms,
             # which made a stuck pair overrun the deadline). An exchange that
             # ended early leaves the rest of the deadline, never less than the
-            # share, because ``wait_for`` refuses to try a bound of zero.
+            # share, because a bound of zero would cancel the close at its first await.
             close_bound = (
                 close_share if cut_short else max(deadline - loop.time(), close_share)
             )
             try:
-                await asyncio.wait_for(tab.close(), close_bound)
+                async with asyncio.timeout(close_bound):
+                    await tab.close()
             except Exception as err:  # noqa: BLE001  PERMANENT(F-937): a tab that will not close is a warning
                 debug_logger.log_warning(
                     "login_persistence",
@@ -439,7 +439,8 @@ async def _keep_session_restore(
         user_data_dir
     ):
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(closing.wait(), FILE_SETTLE_SECONDS)
+            async with asyncio.timeout(FILE_SETTLE_SECONDS):
+                await closing.wait()
         if not closing.is_set() and _pref_is_continue(user_data_dir):
             return True
     return await ensure_session_restore(browser)

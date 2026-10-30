@@ -14,7 +14,7 @@ This is also the section the export-timeout message pin follows: the
 derived file set rather than one hard-wired module — so the guard travels with
 the code instead of passing vacuously over the file it left.
 
-The two ``asyncio.wait_for`` calls keep their ``# F-164 non-CDP`` markers
+The two ``asyncio.timeout`` blocks keep their ``# F-164 non-CDP`` markers
 verbatim; ``tests/test_cdp_timeout.py`` scans the same derived set for them.
 """
 
@@ -70,9 +70,8 @@ async def clear_debug_view() -> bool:
         # F-164 non-CDP: guards a thread-offloaded debug-logger clear (no CDP);
         # a timeout is this tool's documented ``-> bool`` False path, not a CDP
         # hang, so it is deliberately not routed through _with_cdp_timeout.
-        await asyncio.wait_for(
-            asyncio.to_thread(rt.debug_logger.clear_debug_view_safe), timeout=10.0
-        )
+        async with asyncio.timeout(10.0):
+            await asyncio.to_thread(rt.debug_logger.clear_debug_view_safe)
         return True
     except TimeoutError:
         return False
@@ -120,8 +119,8 @@ async def export_debug_logs(
         # F-164 non-CDP: guards a thread-offloaded file export (no CDP); a timeout
         # returns this tool's ``-> str`` guidance string, not a CDP-hang error, so
         # it is deliberately not routed through _with_cdp_timeout.
-        filepath = await asyncio.wait_for(
-            asyncio.to_thread(
+        async with asyncio.timeout(30.0):
+            filepath = await asyncio.to_thread(
                 rt.debug_logger.export_to_file_paginated,
                 filename,
                 max_errors if not include_all else None,
@@ -129,9 +128,7 @@ async def export_debug_logs(
                 max_info if not include_all else None,
                 format,
                 overwrite,
-            ),
-            timeout=30.0,
-        )
+            )
         return filepath
     except TimeoutError:
         return "Export timeout - file too large. Try with smaller limits or 'gzip-pickle' format."

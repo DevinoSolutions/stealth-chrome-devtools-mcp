@@ -229,6 +229,26 @@ class TestClientRootsRoundTripIsBounded:
                 == os.getcwd()
             )
 
+    async def test_a_zero_bound_sends_no_request(self, monkeypatch):
+        """T-10690: "0 disables the round trip entirely". ``asyncio.timeout(0)``
+        would start ``list_roots`` and cancel it at its first await, which has
+        already written the request; ``wait_for`` never started it."""
+        self._no_local_seed(monkeypatch)
+        monkeypatch.setattr(
+            get_settings(), "client_roots_timeout_seconds", 0.0, raising=False
+        )
+        started: list[str] = []
+
+        async def _records_the_ask():
+            started.append("roots/list")
+
+        with patch(
+            "fastmcp.server.dependencies.get_context",
+            return_value=self._context(_records_the_ask),
+        ):
+            await clone_storage._client_session_seed()
+        assert started == []
+
     def test_the_bound_is_a_typed_setting_in_the_one_env_home(self):
         # settings.py is THE env home (CLAUDE.md); the knob may not regress into
         # a bare literal or an os.environ read.

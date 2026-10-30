@@ -853,10 +853,8 @@ async def get_instance_state(instance_id: str) -> dict[str, Any] | None:
         # browser_state_timeout_seconds budget; the except paths below return an
         # honest partial record (F-746), not the generic CDP-timeout error that
         # _with_cdp_timeout raises — so this is deliberately not that wrapper.
-        state = await asyncio.wait_for(
-            rt.browser_manager.get_page_state(instance_id, tab),
-            timeout=timeout_seconds,
-        )
+        async with asyncio.timeout(timeout_seconds):
+            state = await rt.browser_manager.get_page_state(instance_id, tab)
     except TimeoutError:
         return await _partial_state(
             instance_id,

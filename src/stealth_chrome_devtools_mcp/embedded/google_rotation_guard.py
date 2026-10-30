@@ -298,7 +298,8 @@ class RotationGuard:
 
     async def _wait_settled(self) -> None:
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._settled.wait(), SETTLE_TIMEOUT_SECONDS)
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await self._settled.wait()
 
 
 async def arm(

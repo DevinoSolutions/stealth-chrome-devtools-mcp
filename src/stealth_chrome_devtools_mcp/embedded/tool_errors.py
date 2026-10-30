@@ -335,7 +335,8 @@ async def _require_landing_ok(
         return await tab.evaluate("window.location.href")
 
     try:
-        final_url = await asyncio.wait_for(_settled_url(), timeout)
+        async with asyncio.timeout(timeout):
+            final_url = await _settled_url()
     except TimeoutError as exc:
         raise ToolError(
             f"Could not tell where {target} landed: the tab did not answer "

@@ -120,8 +120,9 @@ HEAL_WAITS_FOR_CAPTURE_SECONDS = 10.0
 #: to make a hung dump quick, and a loaded host takes longer than that to run a thread.
 HEAL_WAITS_FOR_MARK_SECONDS = 10.0
 
-#: Slack on top of the dump's own budget for the heal's outer ``wait_for``, so a dump
-#: that keeps its budget says why itself and only one that does not return is cut.
+#: Slack on top of the dump's own budget for the heal's outer ``asyncio.timeout``,
+#: so a dump that keeps its budget says why itself and only one that does not
+#: return is cut.
 _DUMP_OUTER_GRACE_SECONDS = 2.0
 
 #: The bound on one whole capture (the CPU window and the fresh connection run
@@ -277,7 +278,8 @@ async def fresh_answer(answers: Callable[[], Awaitable[None]], seconds: float) -
     on a refusal and never its text (an endpoint URL carries a browser id)."""
     started = time.monotonic()
     try:
-        await asyncio.wait_for(answers(), seconds)
+        async with asyncio.timeout(seconds):
+            await answers()
     except TimeoutError:
         return f"no answer within {seconds:.1f}s"
     except Exception as error:  # noqa: BLE001  PERMANENT(F-993: every way of not answering is the finding)
@@ -491,7 +493,8 @@ async def write_minidump(  # noqa: PLR0913  PERMANENT(F-993: the budget, platfor
         _dump_running.release()
         return f"failed: {type(error).__name__}: {error}"
     try:
-        path, size = await asyncio.wait_for(done, max(deadline - loop.time(), 0.05))
+        async with asyncio.timeout(max(deadline - loop.time(), 0.05)):
+            path, size = await done
     except Exception as error:  # noqa: BLE001  PERMANENT(F-993: a failed, skipped or late dump is recorded, never raised into the health loop)
         return _explain(error, budget, final)
     return (
@@ -741,10 +744,10 @@ class Incidents:
         skip: str | None,
     ) -> str:
         try:
-            record = await asyncio.wait_for(
-                self._capture(pid=pid, label=label, answers=answers, skip_dump=skip),
-                CAPTURE_TIMEOUT_SECONDS,
-            )
+            async with asyncio.timeout(CAPTURE_TIMEOUT_SECONDS):
+                record = await self._capture(
+                    pid=pid, label=label, answers=answers, skip_dump=skip
+                )
         except Exception as error:  # noqa: BLE001  PERMANENT(F-993: evidence is best effort and must not stand between a hung browser and its heal)
             record = f"capture unavailable ({type(error).__name__})"
         self._log(f"{instance_id}: evidence@probe1({record})")
@@ -788,9 +791,8 @@ class Incidents:
             parts.append("evidence@probe1(none)")
         else:
             try:
-                record = await asyncio.wait_for(
-                    asyncio.shield(task), HEAL_WAITS_FOR_CAPTURE_SECONDS
-                )
+                async with asyncio.timeout(HEAL_WAITS_FOR_CAPTURE_SECONDS):
+                    record = await asyncio.shield(task)
             except TimeoutError:
                 waited = f"{HEAL_WAITS_FOR_CAPTURE_SECONDS:.0f}s"
                 record = f"still capturing; the heal waits {waited} and no longer"
@@ -803,21 +805,19 @@ class Incidents:
                 late = f"skipped: {problem}"
             else:
                 try:
-                    late = await asyncio.wait_for(
-                        self._dump_now(
+                    async with asyncio.timeout(
+                        HEAL_WAITS_FOR_CAPTURE_SECONDS + _DUMP_OUTER_GRACE_SECONDS
+                    ):
+                        late = await self._dump_now(
                             pid, label, budget=HEAL_WAITS_FOR_CAPTURE_SECONDS
-                        ),
-                        HEAL_WAITS_FOR_CAPTURE_SECONDS + _DUMP_OUTER_GRACE_SECONDS,
-                    )
+                        )
                 except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
                     late = f"failed: {type(error).__name__}"
             parts.append(f"minidump_at_heal({late})")
         self._last_dump.pop(instance_id, None)  # this dump is healed: spacing resets
         try:
-            kept = await asyncio.wait_for(
-                asyncio.to_thread(self._mark_healed, label),
-                HEAL_WAITS_FOR_MARK_SECONDS,
-            )
+            async with asyncio.timeout(HEAL_WAITS_FOR_MARK_SECONDS):
+                kept = await asyncio.to_thread(self._mark_healed, label)
         except Exception as error:  # noqa: BLE001  PERMANENT(F-993: nothing about the evidence may stop the heal)
             parts.append(f"dump_not_marked_healed({type(error).__name__})")
             kept = None

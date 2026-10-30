@@ -219,10 +219,8 @@ async def probe_browser(websocket_url: str, steps: list[str]) -> None:
         finally:
             if target_id is not None:
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(
-                        wire.call("Target.closeTarget", {"targetId": target_id}),
-                        _CLOSE_TARGET_TIMEOUT_SECONDS,
-                    )
+                    async with asyncio.timeout(_CLOSE_TARGET_TIMEOUT_SECONDS):
+                        await wire.call("Target.closeTarget", {"targetId": target_id})
 
 
 async def fresh_browser_version(websocket_url: str | None) -> None:
@@ -493,9 +491,8 @@ class BrowserHealth:
     ) -> Exception | None:
         """The error the direct probe failed with, or ``None`` when it passed."""
         try:
-            await asyncio.wait_for(
-                self._probe(browser.websocket_url, steps), PROBE_TIMEOUT_SECONDS
-            )
+            async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+                await self._probe(browser.websocket_url, steps)
         except Exception as error:  # noqa: BLE001  PERMANENT(F-963: every way of not answering is a failed probe)
             return error
         return None
@@ -515,7 +512,8 @@ class BrowserHealth:
             return None
         url = getattr(data["browser"], "websocket_url", None)
         try:
-            await asyncio.wait_for(self._browser_answers(url), BROWSER_ANSWER_SECONDS)
+            async with asyncio.timeout(BROWSER_ANSWER_SECONDS):
+                await self._browser_answers(url)
         except Exception as problem:  # noqa: BLE001  PERMANENT(F-1007: every way of not answering keeps the old verdict, the heal)
             debug_logger.log_debug(
                 _COMPONENT, "probe", f"not starved: {type(problem).__name__}"
@@ -756,7 +754,8 @@ class BrowserHealth:
     async def _check_own_connection(self, instance_id: str, browser: Browser) -> None:
         """The direct probe passed: is THIS backend's own connection alive too?"""
         try:
-            await asyncio.wait_for(self._own_check(browser), PROBE_TIMEOUT_SECONDS)
+            async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+                await self._own_check(browser)
         except Exception as error:  # noqa: BLE001  PERMANENT(F-963: the check is a diagnosis; any failure is the finding)
             debug_logger.log_warning(
                 _COMPONENT,
@@ -774,17 +773,15 @@ class BrowserHealth:
         asked."""
         entry = process_cleanup.browser_processes.get(instance_id) or {}
         try:
-            return await asyncio.wait_for(
-                self._forensics(
+            async with asyncio.timeout(FORENSICS_TIMEOUT_SECONDS):
+                return await self._forensics(
                     uptime_seconds=(
                         datetime.now(tz=timezone.utc) - created
                     ).total_seconds(),
                     websocket_url=getattr(browser, "websocket_url", None),
                     pid=entry.get("pid") or getattr(browser, "_process_pid", None),
                     browser_alive=browser is not None,
-                ),
-                FORENSICS_TIMEOUT_SECONDS,
-            )
+                )
         except Exception as error:  # noqa: BLE001  PERMANENT(F-963: forensics are best effort and must not stand between a hung browser and its heal)
             return f"forensics unavailable ({type(error).__name__})"
 

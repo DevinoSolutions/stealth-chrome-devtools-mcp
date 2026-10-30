@@ -376,7 +376,7 @@ class TestSessionRestoreBounded:
     ):
         """The exchange never answers AND the tab will not close: the two waits
         together may not exceed ``PREF_TIMEOUT_SECONDS``. Read from the timeouts
-        the code hands ``wait_for`` rather than from a wall clock, so a loaded
+        the code hands ``asyncio.timeout`` rather than from a wall clock, so a loaded
         runner cannot move it.
 
         The loop's clock is replaced by one that reads a Windows tick (15.6 ms)
@@ -387,11 +387,11 @@ class TestSessionRestoreBounded:
         pref = 0.2
         monkeypatch.setattr(login_persistence, "PREF_TIMEOUT_SECONDS", pref)
         granted: list[float] = []
-        real_wait_for = asyncio.wait_for
+        real_timeout = asyncio.timeout
 
-        async def spy(awaitable, timeout):
-            granted.append(timeout)
-            return await real_wait_for(awaitable, timeout)
+        def spy(delay):
+            granted.append(delay)
+            return real_timeout(delay)
 
         class LaggingClock:
             """The first read is the start; every later one is a tick short of
@@ -411,7 +411,7 @@ class TestSessionRestoreBounded:
             login_persistence,
             "asyncio",
             SimpleNamespace(
-                sleep=asyncio.sleep, wait_for=spy, get_running_loop=lambda: clock
+                sleep=asyncio.sleep, timeout=spy, get_running_loop=lambda: clock
             ),
         )
 
