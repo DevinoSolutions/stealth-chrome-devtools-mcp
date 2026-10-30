@@ -1066,24 +1066,48 @@ def _forwarder():
     return AuthenticatedProxyForwarder("http://user:pass@upstream.invalid:8080")
 
 
-@pytest.mark.asyncio
-async def test_a_forwarder_with_an_open_client_connection_closes():
-    """A client (Chrome's CONNECT tunnel) still connected when ``close`` runs: on
-    Python 3.12.1+ ``Server.wait_closed`` waits for it, so an unbounded close never
-    returns while Chrome is up. Closed clients first, so nothing is waited for."""
+async def _close_with_a_client_connected():
+    """Close a started forwarder with one idle client (Chrome's CONNECT tunnel)
+    still connected; the seconds ``close`` took."""
+    import time
+
     forwarder = _forwarder()
     await forwarder.start()
     _reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
-    await asyncio.sleep(0.2)  # let the server accept it
     try:
-        # Idle, it holds ``wait_closed`` for the 5 s request timeout (measured
-        # 4.8 s); an established CONNECT tunnel holds it for as long as it lives.
-        async with asyncio.timeout(1.5):
-            await forwarder.close()
+        await asyncio.sleep(0.2)  # let the server accept it
+        started = time.monotonic()
+        await forwarder.close()
+        elapsed = time.monotonic() - started
     finally:
         writer.close()
-
     assert forwarder.server is None
+    return elapsed
+
+
+@pytest.mark.asyncio
+async def test_a_forwarder_with_an_open_client_connection_closes_within_its_budget():
+    """On Python 3.12.1+ ``Server.wait_closed`` waits for every connection: an idle
+    one held it 4.8 s (measured), a live tunnel holds it as long as Chrome keeps it.
+    Every version closes within the budget plus a margin."""
+    from stealth_chrome_devtools_mcp.embedded import proxy_forwarder
+
+    elapsed = await _close_with_a_client_connected()
+
+    assert elapsed < proxy_forwarder.CLOSE_BUDGET_SECONDS + 1.0, elapsed
+
+
+@pytest.mark.skipif(
+    not hasattr(asyncio.Server, "close_clients"),
+    reason="Server.close_clients is Python 3.13+; older versions rely on the bound",
+)
+@pytest.mark.asyncio
+async def test_a_forwarder_drops_its_open_clients_instead_of_waiting_for_them():
+    from stealth_chrome_devtools_mcp.embedded import proxy_forwarder
+
+    elapsed = await _close_with_a_client_connected()
+
+    assert elapsed < proxy_forwarder.CLOSE_BUDGET_SECONDS - 0.5, elapsed
 
 
 @pytest.mark.asyncio
