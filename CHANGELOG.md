@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Test-only: `paint_hold` state is reset around every test (T-9542)
+
+- Test-only, no product change. `test_paint_hold.py::test_a_closed_tab_is_forgotten_and_its_timer_task_ends` failed under `-k 'login_persistence or browser_manager or spawn or profile or close'` with a leftover `T-faketab` hold: tests that drive a tool through `tab_binding.tab_for_caller` with `FakeTab` leave a hold in `paint_hold._held` (process-global), and only `test_paint_hold.py` cleaned up. `tests/conftest.py` now clears `_held` (ending the release timers) and `_browserless_caller_owned` (the caller-owned marks of a tab with no browser; T-10848 moved the others onto the tab's browser, which goes with it) before and after every test; `tests/test_paint_hold_isolation.py` runs a leaker and then a victim in one session and fails without the fixture.
+
 ## 2.1.55
 
 ### joserfc 1.7.7 in the lock: the security audit found CVE-2026-119284 in 1.7.5 (T-11363)
@@ -41,10 +47,6 @@
 - The full `-m "not integration"` run went from 996.06 s to 867.45 s, with the same 6192 passed and 22 skipped. Five `test_chrome_cold_start_probe.py` tests (10-29 s each, real-process probes) are now the slowest and are not touched here.
 
 ## 2.1.54
-
-### Test-only: `paint_hold` state is reset around every test (T-9542)
-
-- Test-only, no product change. `test_paint_hold.py::test_a_closed_tab_is_forgotten_and_its_timer_task_ends` failed under `-k 'login_persistence or browser_manager or spawn or profile or close'` with a leftover `T-faketab` hold: tests that drive a tool through `tab_binding.tab_for` with `FakeTab` leave a hold in `paint_hold._held` (process-global), and only `test_paint_hold.py` cleaned up. `tests/conftest.py` now clears `_held` (ending the release timers) and `_caller_owned` before and after every test; `tests/test_paint_hold_isolation.py` runs a leaker and then a victim in one session and fails without the fixture.
 
 ### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)
 
