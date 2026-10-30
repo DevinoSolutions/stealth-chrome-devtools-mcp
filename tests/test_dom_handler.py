@@ -15,6 +15,7 @@ zero-match still returns ``[]``. Hermetic (a fake Tab), so the fast unit lane.
 import pytest
 from nodriver.core.connection import ProtocolException
 
+from fakes import AppliesOverCdp
 from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import _MAX_RESOLVES
@@ -41,7 +42,7 @@ def _stale():
     )
 
 
-class _FakeElement:
+class _FakeElement(AppliesOverCdp):
     """Minimal nodriver-Element stand-in for the per-element loop."""
 
     def __init__(self, tag="div", text="hello", attrs=None):

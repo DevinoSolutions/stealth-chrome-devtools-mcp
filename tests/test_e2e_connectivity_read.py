@@ -42,8 +42,8 @@ from e2e_helpers import (
 )
 from stealth_chrome_devtools_mcp.embedded import (
     click_target,
-    dom_handler,
     element_resolution,
+    page_natives,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -98,7 +98,7 @@ async def _answers(tab, name: str) -> dict[str, object]:
     return {
         "connected": await held.apply(click_target.CONNECTED_JS),
         "aim": aim["connected"],
-        "visible": await held.apply(dom_handler.VISIBLE_JS),
+        "visible": await held.apply(element_resolution.VISIBLE_JS),
         "synthetic": await held.apply(click_target.SYNTHETIC_JS),
     }
 
@@ -137,7 +137,7 @@ async def test_the_connectivity_read_in_real_chrome(fixture_app_server, tmp_empt
             assert removed == {
                 "connected": NO,
                 "aim": NO,
-                "visible": False,
+                "visible": NO,
                 "synthetic": click_target.SYNTHETIC_DETACHED,
             }, removed
         assert form_live["connected"] == YES and form_live["aim"] == YES, form_live
@@ -169,7 +169,7 @@ async def test_the_connectivity_read_in_real_chrome(fixture_app_server, tmp_empt
             assert thrown == {
                 "connected": THREW,
                 "aim": THREW,
-                "visible": False,
+                "visible": THREW,
                 "synthetic": click_target.SYNTHETIC_UNREAD,
             }, (name, thrown)
             with pytest.raises(ToolError):
@@ -244,7 +244,7 @@ async def test_a_page_that_declares_its_own_node_changes_nothing(
         assert gone == {
             "connected": NO,
             "aim": NO,
-            "visible": False,
+            "visible": NO,
             "synthetic": click_target.SYNTHETIC_DETACHED,
         }, gone
         assert await eval_js(iid, "window.__clicks") == 1, "only the live node clicked"
@@ -272,5 +272,224 @@ async def test_a_page_that_declares_its_own_node_changes_nothing(
         clicked = await click_element(instance_id=iid, selector="#fidelity-btn")
         assert clicked["dispatch"] == "coordinate", clicked
         assert await eval_js(iid, "window.__fidelity") == 1
+    finally:
+        await close(instance_id=iid)
+
+
+#: Pages that STEER a prototype-chain read without replacing any built-in member
+#: (T-10284 review round 2, finding 1). Each builds ``window.__held.live`` (in
+#: the document, ``#steer-live``, a 160x40 box with a ``<span>`` filling it) and
+#: ``window.__held.gone`` (the same, removed but still held), and counts clicks in
+#: ``window.__clicks``. A first-owner walk reads the page's member; the walk that
+#: takes the farthest owner reads the browser's.
+_STEER_NODE = """
+  const build = (make) => {
+    const mk = (id) => {
+      const el = make();
+      el.setAttribute('id', id);
+      el.style.cssText = 'display:block;position:fixed;left:20px;top:20px;' +
+        'width:160px;height:40px;z-index:99999;background:#ccc';
+      el.innerHTML = '<span style="display:block;height:40px">hit</span>';
+      return el;
+    };
+    const live = document.body.appendChild(mk('steer-live'));
+    const gone = document.body.appendChild(mk('steer-gone'));
+    gone.remove();
+    window.__clicks = 0;
+    window.__overridden = false;
+    live.addEventListener('click', () => { window.__clicks++; });
+    window.__held = {live, gone};
+  };
+"""
+#: ``(setup, premise)``: the premise is evaluated after the setup and must be
+#: true, so a Chrome that stopped honouring the steering cannot pass silently.
+_STEERED_PAGES = {
+    # a custom element with its own isConnected, id (LWC reads its VM there, so
+    # it throws for any other node) and click()
+    "custom-element": (
+        _STEER_NODE
+        + """
+  class SteerX extends HTMLElement {
+    get isConnected() { return true; }
+    get id() { throw new Error('vm'); }
+    click() { window.__overridden = true; }
+  }
+  customElements.define('x-steer', SteerX);
+  build(() => document.createElement('x-steer'));
+  return true;""",
+        "window.__held.gone.isConnected === true",
+    ),
+    # an element given a prototype that defines isConnected (and a throwing id)
+    "set-prototype-of": (
+        _STEER_NODE
+        + """
+  const proto = Object.create(HTMLElement.prototype, {
+    isConnected: {configurable: true, get() { return true; }},
+    id: {configurable: true, get() { throw new Error('vm'); }},
+  });
+  build(() => Object.setPrototypeOf(document.createElement('div'), proto));
+  return true;""",
+        "window.__held.gone.isConnected === true",
+    ),
+    # a page ADDING isConnected on HTMLElement.prototype
+    "added-on-html-element": (
+        _STEER_NODE
+        + """
+  Object.defineProperty(HTMLElement.prototype, 'isConnected',
+    {configurable: true, get() { return true; }});
+  build(() => document.createElement('div'));
+  return true;""",
+        "window.__held.gone.isConnected === true",
+    ),
+    # pollution of Object.prototype, the chain's last prototype
+    "object-prototype": (
+        _STEER_NODE
+        + """
+  for (const name of ['isConnected', 'tagName', 'nodeName', 'id', 'classList']) {
+    Object.defineProperty(Object.prototype, name,
+      {configurable: true, get() { return true; }});
+  }
+  build(() => document.createElement('div'));
+  return true;""",
+        "Object.prototype.hasOwnProperty('isConnected')",
+    ),
+}
+
+
+@pytest.mark.parametrize("page", list(_STEERED_PAGES))
+async def test_a_page_that_steers_a_prototype_read_changes_nothing(
+    fixture_app_server, tmp_empty_root, page
+):
+    """T-10284 review round 2, finding 1 (MED). On ba0fa68 the walk returned the
+    FIRST owner up the chain, so a custom element's own ``get isConnected()``, a
+    ``setPrototypeOf`` or an accessor added on ``HTMLElement.prototype`` made a
+    removed node read connected (``yes``, visible, a synthetic click on it), and
+    a class with its own ``get id()`` threw on the plain ``<span>`` the aim read
+    asked it about. Now the farthest owner (the browser's) is read, and the
+    chain's last prototype is not."""
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    query_elements = get_fn("query_elements")
+    get_element_state = get_fn("get_element_state")
+    click_element = get_fn("click_element")
+    wait_for_element = get_fn("wait_for_element")
+    setup, premise = _STEERED_PAGES[page]
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{fixture_app_server}/interactions.html")
+        tab = await runtime.browser_manager.get_tab(iid)
+        assert await eval_js(iid, f"(() => {{{setup}}})()") is True
+        assert await eval_js(iid, premise) is True, "premise: the page steers"
+        await tab.send(cdp.dom.get_document())
+
+        live = await _element(tab, "live")
+        gone = await _element(tab, "gone")
+        aim = json.loads(await live.apply(click_target.AIM_JS))
+        assert aim["connected"] == YES and aim["rendered"], aim
+        assert aim["hit"]["tag"] == "span" and aim["hit_is_target"], aim
+        assert await live.apply(click_target.CONNECTED_JS) == YES
+        assert await live.apply(element_resolution.VISIBLE_JS) is True
+
+        assert await gone.apply(click_target.CONNECTED_JS) == NO
+        assert json.loads(await gone.apply(click_target.AIM_JS))["connected"] == NO
+        assert await gone.apply(element_resolution.VISIBLE_JS) == NO
+        assert await gone.apply(click_target.SYNTHETIC_JS) == (
+            click_target.SYNTHETIC_DETACHED
+        )
+        assert not await element_resolution.refresh_element(tab, gone)
+        assert await element_resolution.refresh_element(tab, live)
+        assert await eval_js(iid, "window.__clicks") == 0, "nothing was clicked yet"
+
+        # The synthetic click on the live node runs the browser's own click():
+        # a custom element's override of click() does not run (2.1.53: native).
+        assert await live.apply(click_target.SYNTHETIC_JS) == (
+            click_target.SYNTHETIC_CLICKED
+        )
+        assert await eval_js(iid, "window.__clicks") == 1
+        assert await eval_js(iid, "window.__overridden") is False
+
+        # The tools, on the live page: each answers as it does on any page.
+        listed = await query_elements(instance_id=iid, selector="#steer-live")
+        assert len(listed) == 1, listed
+        state = await get_element_state(instance_id=iid, selector="#steer-live")
+        assert state["is_visible"] is True
+        assert await wait_for_element(
+            instance_id=iid, selector="#steer-live", timeout=3000, visible=True
+        )
+        clicked = await click_element(instance_id=iid, selector="#steer-live")
+        assert clicked["dispatch"] == "coordinate", clicked
+        assert await eval_js(iid, "window.__clicks") == 2
+        assert await eval_js(iid, "window.__overridden") is False
+    finally:
+        await close(instance_id=iid)
+
+
+async def _activation(tab) -> dict[str, bool]:
+    """``navigator.userActivation`` as the page sees it, read WITHOUT a gesture."""
+    raw, _ = await tab.send(
+        cdp.runtime.evaluate(
+            "JSON.stringify({been: navigator.userActivation.hasBeenActive, "
+            "active: navigator.userActivation.isActive})",
+            return_by_value=True,
+            user_gesture=False,
+        )
+    )
+    return json.loads(raw.value)
+
+
+async def test_the_read_only_scripts_give_the_page_no_user_activation(
+    fixture_app_server, tmp_empty_root
+):
+    """T-10284 review round 2, finding 5, MEASURED (headless Chrome, this tree).
+    ``Element.apply`` sends ``Runtime.callFunctionOn`` with ``userGesture=True``,
+    and ONE connectivity read of ONE node through it gives the page transient
+    user activation (``navigator.userActivation.hasBeenActive`` turns true): that
+    is the control below. The connectivity, visibility and aim reads are sent by
+    ``page_natives.read`` (``userGesture`` false), and neither they nor the tools
+    that run them (``query_elements``, ``get_element_state``) activate the page."""
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+    query_elements = get_fn("query_elements")
+    get_element_state = get_fn("get_element_state")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        tab = await runtime.browser_manager.get_tab(iid)
+        # nodriver's own navigation, not ``navigate_and_settle``: its settle step
+        # runs ``query_elements``, which is one of the reads under test.
+        await tab.get(f"{fixture_app_server}/interactions.html")
+        await tab.sleep(1.0)
+        setup, _ = await tab.send(
+            cdp.runtime.evaluate(_SETUP, return_by_value=True, user_gesture=False)
+        )
+        assert setup.value is True
+        await tab.send(cdp.dom.get_document())
+        inactive = {"been": False, "active": False}
+        assert await _activation(tab) == inactive, "premise: a fresh page"
+
+        live = await _element(tab, "connected")
+        removed = await _element(tab, "removed")
+        for script in (
+            click_target.CONNECTED_JS,
+            element_resolution.VISIBLE_JS,
+            click_target.AIM_JS,
+        ):
+            await page_natives.read(live, script)
+            await page_natives.read(removed, script)
+        assert await _activation(tab) == inactive, "page_natives.read"
+
+        assert await query_elements(
+            instance_id=iid, selector="#fidelity-btn", visible_only=False
+        )
+        assert await query_elements(instance_id=iid, selector="#fidelity-btn")
+        assert (await get_element_state(instance_id=iid, selector="#fidelity-btn"))[
+            "is_visible"
+        ]
+        assert await _activation(tab) == inactive, "query_elements, get_element_state"
+
+        # The control: the same read through ``Element.apply`` DOES activate it.
+        assert await live.apply(click_target.CONNECTED_JS) == YES
+        assert await _activation(tab) == {"been": True, "active": True}
     finally:
         await close(instance_id=iid)

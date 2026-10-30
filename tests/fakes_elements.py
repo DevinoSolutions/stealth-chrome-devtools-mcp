@@ -148,7 +148,63 @@ class FakeTextField:
         self.value += "\n" if text == "\r" else text
 
 
-class FakeClickTarget:
+class _ApplyTab:
+    """The two CDP commands ``page_natives.read`` sends, answered by the owner's ``apply``.
+
+    The commands are the LIBRARY's own generators (``cdp.dom.resolve_node``,
+    ``cdp.runtime.call_function_on``): the request is read off them, the reply
+    is fed back through them, and the pair they return is what the product
+    unpacks. Only the page behind ``Runtime.callFunctionOn`` is the double's.
+    What the double adds to the owner is ``read_gestures``: the ``userGesture``
+    each such call carried, so a test can say it was not set.
+    """
+
+    def __init__(self, owner: Any) -> None:
+        self._owner = owner
+
+    async def send(self, command: Any) -> Any:
+        request = next(command)
+        params = request["params"]
+        if request["method"] == "DOM.resolveNode":
+            reply: dict[str, Any] = {"object": {"type": "object", "objectId": "fake"}}
+        elif request["method"] == "Runtime.callFunctionOn":
+            self._owner.read_gestures.append(params.get("userGesture"))
+            answer = await self._owner.apply(params["functionDeclaration"])
+            reply = {
+                "result": {"type": "undefined"}
+                if answer is None
+                else {"type": "object", "value": answer}
+            }
+        else:
+            raise AssertionError(f"unexpected command {request['method']}")
+        try:
+            command.send(reply)
+        except StopIteration as done:
+            return done.value
+        raise AssertionError("the command did not finish")
+
+
+class AppliesOverCdp:
+    """A fake element that is reachable the way a real ``Element`` is for a read.
+
+    ``page_natives.read`` sends a read-only script as ``element.tab.send(...)``
+    (``Element.apply`` cannot, it always sets ``userGesture``). Mixed into a
+    double whose ``apply(js_function)`` is its page, this gives it the ``tab``
+    and ``backend_node_id`` that path needs, and answers through ``apply``.
+    """
+
+    backend_node_id = cdp_dom.BackendNodeId(1)
+
+    @property
+    def tab(self) -> _ApplyTab:
+        return _ApplyTab(self)
+
+    @property
+    def read_gestures(self) -> list[Any]:
+        return self.__dict__.setdefault("_read_gestures", [])
+
+
+class FakeClickTarget(AppliesOverCdp):
     """A nodriver ``Element`` double for a CLICK target, PAGE-BACKED (F-876).
 
     ``FakeTextField``'s sibling, one interaction over. It models the two things
@@ -464,20 +520,25 @@ class FakeClickTarget:
             return None
         return state
 
-    def _visible(self, js_function: str) -> bool:
+    def _visible(self, js_function: str) -> Any:
         """``getComputedStyle``'s ``display/visibility/opacity`` test, as Chrome runs it.
 
         A removed node has an EMPTY computed style, so all three tests pass and
         the style alone says "visible" (T-10284). Whether the script gates on
         connectivity first -- and on which token -- is read off its text; a
-        gate that is not satisfied by the ``yes`` token returns false.
+        gate that is not satisfied by the ``yes`` token returns the token it
+        read (``return state``), which ``dom_handler.node_is_visible`` reads.
         """
         asked = js_function.split("getComputedStyle", maxsplit=1)[0]
         gate = re.search(
-            r'if \(connectivity\(elem\) !== "([^"]+)"\) return false;', asked
+            r"const state = connectivity\(elem\);\s*"
+            r'if \(state !== "([^"]+)"\) return state;',
+            asked,
         )
-        if gate and self._connectivity_state(asked) != gate.group(1):
-            return False
+        if gate:
+            state = self._connectivity_state(asked)
+            if state != gate.group(1):
+                return state
         if self.disconnected:
             return True
         return self.rendered and self.visibility != "hidden"
@@ -691,12 +752,14 @@ def _squash(text: str) -> str:
 _CONNECTIVITY_SHAPE = _squash(
     """const connectivity = (node) => {
         const native = (obj, name) => {
+        let found;
         for (let proto = Object.getPrototypeOf(obj); proto !== null;
              proto = Object.getPrototypeOf(proto)) {
+            if (Object.getPrototypeOf(proto) === null) break;
             const own = Object.getOwnPropertyDescriptor(proto, name);
-            if (own !== undefined) return own.get !== undefined ? own.get : own.value;
+            if (own !== undefined) found = own.get !== undefined ? own.get : own.value;
         }
-        return undefined;
+        return found;
     };
         try {
             const answer = native(node, 'isConnected').call(node);

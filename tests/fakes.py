@@ -43,6 +43,7 @@ from fakes_consts import (
     TARGET_SWAPPED_ERROR,
 )
 from fakes_elements import (
+    AppliesOverCdp,
     FakeAttachedTab,
     FakeClickTarget,
     FakeDiscoveredTarget,
@@ -106,6 +107,7 @@ __all__ = [
     "SUPERSEDED_MARK",
     "TARGET_SWAPPED_ERROR",
     "_UNSET",
+    "AppliesOverCdp",
     "FakeAttachedTab",
     "FakeBrowser",
     "FakeBrowserManager",

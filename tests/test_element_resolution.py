@@ -16,6 +16,7 @@ import pytest
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
+from fakes import AppliesOverCdp
 from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
@@ -498,7 +499,7 @@ async def test_refresh_element_takes_the_same_lock_as_a_resolution():
     """
     locked_during_update = None
 
-    class _Element:
+    class _Element(AppliesOverCdp):
         async def update(self):
             nonlocal locked_during_update
             locked_during_update = element_resolution._document_lock(tab).locked()

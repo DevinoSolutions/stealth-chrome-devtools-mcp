@@ -18,6 +18,7 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     ElementDisconnected,
     detached_element,
+    node_is_visible,
     refresh_element,
     resolve_by_text,
     resolve_element,
@@ -26,24 +27,6 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
 )
 from stealth_chrome_devtools_mcp.embedded.models import ElementInfo
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
-
-#: THE visibility read -- ``query_elements(visible_only=True)`` and
-#: ``wait_for_element(visible=True)`` both ask it. A node the page
-#: removed but still references has an EMPTY computed style, so the three style
-#: tests alone pass for it and it listed as visible (T-10284); it is asked
-#: whether it is in a document first, through ``click_target``'s one
-#: connectivity read, and only the ``yes`` token passes the gate: a ``no``, a
-#: read that threw and a value that is no token all read as not visible.
-VISIBLE_JS = """(elem) => {
-    __CONNECTIVITY__
-    if (connectivity(elem) !== "__YES__") return false;
-    var style = window.getComputedStyle(elem);
-    return style.display !== 'none' &&
-           style.visibility !== 'hidden' &&
-           style.opacity !== '0';
-}""".replace("__CONNECTIVITY__", click_target.CONNECTIVITY_JS).replace(
-    "__YES__", click_target.CONNECTED_YES
-)
 
 
 class DOMHandler:
@@ -147,9 +130,11 @@ class DOMHandler:
                     is_visible = True
                     if visible_only:
                         try:
-                            is_visible = await elem.apply(VISIBLE_JS)
+                            is_visible = await node_is_visible(elem, "the element")
                             if not is_visible:
                                 continue
+                        except ToolError:
+                            raise
                         except (
                             AttributeError,
                             RuntimeError,
@@ -781,10 +766,11 @@ class DOMHandler:
                 if element:
                     if visible:
                         try:
-                            is_visible = await element.apply(VISIBLE_JS)
-                            if not is_visible:
+                            if not await node_is_visible(element, f"'{selector}'"):
                                 await asyncio.sleep(0.5)
                                 continue
+                        except ToolError:
+                            raise
                         except (  # noqa: S110  plan_M10a
                             AttributeError,
                             RuntimeError,

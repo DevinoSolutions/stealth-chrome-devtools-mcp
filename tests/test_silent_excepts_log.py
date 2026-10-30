@@ -147,10 +147,14 @@ class TestDomHandlerSilentExcepts:
     async def test_click_element_mouse_click_fallback_logs_at_debug(
         self, captured_backend_records
     ):
+        from fakes import AppliesOverCdp
         from stealth_chrome_devtools_mcp.embedded import click_target
         from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
-        element = MagicMock()
+        class _Element(AppliesOverCdp, MagicMock):
+            """A mock the aim read (``page_natives.read``) can reach by CDP."""
+
+        element = _Element()
         element.scroll_into_view = AsyncMock()
         element.mouse_click = AsyncMock(side_effect=RuntimeError("mouse-fail"))
         element.click = AsyncMock()

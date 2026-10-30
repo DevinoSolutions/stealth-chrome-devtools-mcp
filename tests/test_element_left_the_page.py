@@ -1138,7 +1138,7 @@ async def test_the_one_connectivity_read_builds_every_script_that_asks():
     for name, js in (
         ("CONNECTED_JS", click_target.CONNECTED_JS),
         ("SYNTHETIC_JS", click_target.SYNTHETIC_JS),
-        ("VISIBLE_JS", dom_handler.VISIBLE_JS),
+        ("VISIBLE_JS", element_resolution.VISIBLE_JS),
         ("AIM_JS", click_target.AIM_JS),
     ):
         assert click_target.CONNECTIVITY_JS in js, name
@@ -1147,19 +1147,55 @@ async def test_the_one_connectivity_read_builds_every_script_that_asks():
 
 #: Any spelling of the property: single, double or back quotes, ``.isConnected``,
 #: ``["isConnected"]``, ``function (e) { return e.isConnected }`` all contain the
-#: word. The one place that may is the shared fragment.
+#: word; ``'is' + 'Connected'`` and a template literal with a literal part are
+#: folded into it first (:func:`_normalised`). The one place that may is the
+#: shared fragment.
 _IS_CONNECTED = re.compile(r"isConnected")
 
-#: A read of a DOM interface through its GLOBAL, which a page's own top-level
-#: ``class Node {}`` replaces: ``Node.prototype``, ``Node["prototype"]``,
-#: ``x instanceof ShadowRoot``.
-_INTERFACE = (
-    r"(?:Node|Element|Document|HTMLElement|ShadowRoot|DocumentFragment|EventTarget)"
-)
+_QUOTE = r"['\"`]"
+_AFFIXED = r"(?:[A-Z]\w*)?(?:Element|Node|Root|Document|Text|Fragment)"
+
+#: A DOM interface's GLOBAL by name: any capitalised identifier ending in
+#: ``Element`` / ``Node`` / ``Root`` / ``Document`` / ``Text`` / ``Fragment``
+#: (``HTMLInputElement``, ``SVGElement``, ``ShadowRoot``, ``DocumentFragment``)
+#: and those words themselves (``Node``, ``Element``, ``Document``, ``Text``),
+#: with ``EventTarget``; bare, after ``window.`` / ``globalThis.`` / ``self.``
+#: (the word boundary finds the name after the dot) or as ``window['X']``.
+_DOM_NAME = rf"(?:\b{_AFFIXED}\b|\bEventTarget\b|\[\s*{_QUOTE}{_AFFIXED}{_QUOTE}\s*\])"
+#: What a page's own ``class Node {}`` / ``var Node = 1`` breaks: reading
+#: ``prototype`` (``X.prototype``, ``X?.prototype``, ``X["prototype"]``,
+#: ``Reflect.get(X, 'prototype')``, ``const {prototype} = X``), reading a constant
+#: (``Node.ELEMENT_NODE``) and ``instanceof X`` / ``instanceof window.X``.
 _GLOBAL_INTERFACE_READ = re.compile(
-    rf"\b{_INTERFACE}\b\s*(?:\.\s*prototype\b|\[\s*['\"`]prototype)"
-    rf"|\binstanceof\s+{_INTERFACE}\b"
+    rf"{_DOM_NAME}\s*(?:\?\.|\.)\s*(?:prototype\b|[A-Z][A-Z0-9_]+\b)"
+    rf"|{_DOM_NAME}\s*(?:\?\.)?\s*\[\s*{_QUOTE}prototype"
+    rf"|\bReflect\s*\.\s*get\s*\(\s*{_DOM_NAME}\s*,\s*{_QUOTE}prototype"
+    rf"|\{{[^}}]*\bprototype\b[^}}]*\}}\s*=\s*{_DOM_NAME}"
+    rf"|\binstanceof\s+(?:(?:window|globalThis|self)\s*\.\s*)?{_DOM_NAME}"
 )
+
+#: ``'a' + 'b'`` and ``${"b"}`` are strings a script is free to build; the
+#: census reads what they build.
+_CONCATENATION = re.compile(rf"{_QUOTE}\s*\+\s*{_QUOTE}")
+_TEMPLATE_PART = re.compile(rf"\$\{{\s*{_QUOTE}([^'\"`]*){_QUOTE}\s*\}}")
+
+
+def _normalised(text: str) -> str:
+    """*text* with literal concatenations and literal template parts folded."""
+    previous = None
+    while previous != text:
+        previous = text
+        text = _TEMPLATE_PART.sub(r"\1", _CONCATENATION.sub("", text))
+    return text
+
+
+def _census_hits(text: str) -> list[str]:
+    """What the census flags in one string: every spelling of ``isConnected`` and
+    every read of a DOM interface through its global."""
+    text = _normalised(text)
+    return [m.group(0) for m in _IS_CONNECTED.finditer(text)] + [
+        m.group(0) for m in _GLOBAL_INTERFACE_READ.finditer(text)
+    ]
 
 
 async def test_the_census_sees_the_whole_package():
@@ -1180,13 +1216,14 @@ async def test_no_other_script_in_the_package_reads_is_connected():
     spelled = [
         (name, text)
         for name, _, text in _package_scripts()
-        if _IS_CONNECTED.search(text)
+        if _IS_CONNECTED.search(_normalised(text))
     ]
     assert [name for name, _ in spelled] == ["embedded/click_target.py"], [
         name for name, _ in spelled
     ]
     only = spelled[0][1]
     assert only.count("isConnected") == 1
+    assert len(_census_hits(only)) == 1
     assert "native(node, 'isConnected').call(node)" in only
     assert only.strip().startswith("const connectivity = (node) =>")
 
@@ -1198,9 +1235,9 @@ async def test_no_script_in_the_package_reads_a_dom_interface_through_its_global
     interface's): the members come from the node's own prototype chain, through
     ``page_natives.NATIVE_JS``, the one helper."""
     spelled = [
-        (name, line, _GLOBAL_INTERFACE_READ.search(text).group(0))
+        (name, line, hit)
         for name, line, text in _package_scripts()
-        if _GLOBAL_INTERFACE_READ.search(text)
+        for hit in _GLOBAL_INTERFACE_READ.findall(_normalised(text))
     ]
     assert spelled == []
     # Imported here, not at the top: the module still collects against a parent
@@ -1218,20 +1255,83 @@ async def test_no_script_in_the_package_reads_a_dom_interface_through_its_global
         assert page_natives.NATIVE_JS in js, name
 
 
+async def test_native_takes_the_farthest_owner_and_stops_before_the_last_prototype():
+    """Review finding 1 (MED). ``native`` used to return the FIRST owner up the
+    chain, so a page's custom element with its own ``get isConnected()`` /
+    ``get id()`` / ``click()``, a ``setPrototypeOf`` or an accessor added on
+    ``HTMLElement.prototype`` steered every read without replacing a built-in
+    member. The walk takes the FARTHEST owner (the interface's own member: a
+    page can only add NEARER ones) and never reads the chain's last prototype
+    (``Object.prototype``, whose own prototype is ``null``), so pollution there
+    is ignored too. What the walk does in V8 is shown in real Chrome by
+    ``tests/test_e2e_connectivity_read.py``; this pins the text, and the double
+    answers only a script carrying exactly it."""
+    from stealth_chrome_devtools_mcp.embedded import page_natives
+
+    squashed = fakes_elements._squash(page_natives.NATIVE_JS)
+    # the whole chain is walked, an owner is remembered, none is returned early
+    assert "letfound;" in squashed
+    assert "found=own.get!==undefined?own.get:own.value;" in squashed
+    assert squashed.endswith("returnfound;};")
+    assert "returnown" not in squashed
+    # the last prototype is never read
+    stop = "if(Object.getPrototypeOf(proto)===null)break;"
+    assert stop in squashed
+    assert squashed.index(stop) < squashed.index("Object.getOwnPropertyDescriptor")
+    # and the walk still starts one step up from the node
+    assert "letproto=Object.getPrototypeOf(obj);" in squashed
+    assert fakes_elements._CONNECTIVITY_SHAPE.count(squashed) == 1
+
+
+_CENSUS_SPELLINGS = [
+    "Object.getOwnPropertyDescriptor(Node.prototype, 'x').get",
+    "Element . prototype . matches",
+    "Document['prototype'].elementFromPoint",
+    "r instanceof ShadowRoot",
+    "function (e) { return e.isConnected }",
+    'e["isConnected"]',
+    "`isConnected`",
+    # Review finding 3: spellings the first census missed.
+    "elem['is' + 'Connected']",
+    'elem["is"+"Conn"+"ected"]',
+    'elem[`is${"Connected"}`]',
+    "Node?.prototype",
+    "Node?.['prototype']",
+    "Reflect.get(Node,'prototype')",
+    "const {prototype} = Element",
+    "const { prototype: p } = ShadowRoot",
+    "x instanceof window.ShadowRoot",
+    "x instanceof globalThis.Node",
+    "HTMLInputElement.prototype",
+    "SVGElement.prototype",
+    "Text.prototype",
+    "DocumentFragment.prototype",
+    "Node.ELEMENT_NODE",
+    "window['Node'].prototype",
+    "window.Node.prototype",
+    "EventTarget.prototype",
+]
+
+
+@pytest.mark.parametrize("spelling", _CENSUS_SPELLINGS)
+async def test_the_census_patterns_catch_every_spelling(spelling):
+    assert _census_hits(spelling), spelling
+
+
 @pytest.mark.parametrize(
-    "spelling",
+    "legitimate",
     [
-        "Object.getOwnPropertyDescriptor(Node.prototype, 'x').get",
-        "Element . prototype . matches",
-        "Document['prototype'].elementFromPoint",
-        "r instanceof ShadowRoot",
-        "function (e) { return e.isConnected }",
-        'e["isConnected"]',
-        "`isConnected`",
+        "Object.getPrototypeOf(obj)",
+        "document.elementFromPoint(x, y)",
+        "ElementInfo.prototype",
+        "Array.prototype.slice.call(list)",
+        "const nodeName = native(elem, 'nodeName');",
+        "nodeType.call(root) === 11",
+        "'ELEMENT_NODE'",
     ],
 )
-async def test_the_census_patterns_catch_every_spelling(spelling):
-    assert _GLOBAL_INTERFACE_READ.search(spelling) or _IS_CONNECTED.search(spelling)
+async def test_the_census_flags_nothing_legitimate(legitimate):
+    assert _census_hits(legitimate) == []
 
 
 async def test_the_census_reads_split_and_formatted_strings(tmp_path):
@@ -1391,10 +1491,11 @@ async def test_a_connectivity_script_that_stops_returning_its_token_is_a_read_er
         await refresh_element(FakeTab(), node)
 
 
-async def test_the_visibility_gate_cannot_be_satisfied_by_a_read_that_threw():
+async def test_a_visibility_read_whose_connectivity_threw_is_a_read_error():
     """The window after the refresh: the page replaces the getter with one that
-    throws, and the node is also gone. The gate only passes the ``yes`` token,
-    so the node is not listed as visible."""
+    throws, and the node is also gone. The visibility read hands back the token
+    it read, and a failed read is neither "not visible" nor a silent skip: the
+    listing fails, saying which element (review finding 2)."""
 
     class _BreaksAfterTheRefresh(FakeClickTarget):
         async def apply(self, js_function, *args, **kwargs):
@@ -1406,11 +1507,11 @@ async def test_the_visibility_gate_cannot_be_satisfied_by_a_read_that_threw():
 
     node = _BreaksAfterTheRefresh(tag="li", element_id="node", text="node")
 
-    results = await DOMHandler.query_elements(_TabOf(node), "li", visible_only=True)
+    with pytest.raises(ToolError, match=r"element 0 of 'li': could not read whether"):
+        await DOMHandler.query_elements(_TabOf(node), "li", visible_only=True)
 
-    assert results == []
     # It got as far as the visibility read: the refresh did not drop it first.
-    assert dom_handler.VISIBLE_JS in node.apply_calls
+    assert element_resolution.VISIBLE_JS in node.apply_calls
 
 
 async def test_a_cdp_failure_during_the_connectivity_read_keeps_its_old_meaning():
@@ -1689,7 +1790,7 @@ async def test_wait_for_element_visible_is_not_satisfied_by_a_removed_node(
     )
 
     assert waited is False
-    assert removed.apply_calls == [dom_handler.VISIBLE_JS]
+    assert removed.apply_calls == [element_resolution.VISIBLE_JS]
 
 
 @pytest.mark.parametrize("on_node_page", [False, True], ids=["plain", "declares-node"])
@@ -1699,7 +1800,76 @@ async def test_wait_for_element_visible_returns_for_a_connected_node(on_node_pag
     assert await DOMHandler.wait_for_element(
         _TabOf(live), "li", timeout=100, visible=True
     )
-    assert live.apply_calls == [dom_handler.VISIBLE_JS]
+    assert live.apply_calls == [element_resolution.VISIBLE_JS]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [THREW, None, "stealth.connected:maybe", 3],
+    ids=["threw-token", "none", "other-string", "number"],
+)
+async def test_wait_for_element_raises_for_a_visibility_read_that_failed(answer):
+    """Review finding 2. ``VISIBLE_JS`` answered ``false`` for a failed read, so
+    ``wait_for_element(visible=True)`` waited out its timeout and said ``False``
+    where 2.1.53 (style-only script) said ``True``. A failed read is never a
+    departure and never a silent answer: it raises, as every other tool does."""
+    node = _Answers(answer)
+
+    with pytest.raises(ToolError, match="could not read whether 'li' is"):
+        await DOMHandler.wait_for_element(
+            _TabOf(node), "li", timeout=5000, visible=True
+        )
+
+    assert node.apply_calls == [element_resolution.VISIBLE_JS]
+
+
+async def test_wait_for_element_raises_at_once_for_a_getter_that_throws():
+    """The same through the double's own model of a page whose getter throws:
+    one read, no polling to the timeout."""
+    node = FakeClickTarget(tag="li", element_id="odd", getter_throws=True)
+
+    with pytest.raises(ToolError, match="could not read whether"):
+        await DOMHandler.wait_for_element(
+            _TabOf(node), "li", timeout=5000, visible=True
+        )
+
+    assert node.apply_calls == [element_resolution.VISIBLE_JS]
+
+
+async def test_the_read_only_scripts_are_sent_without_a_user_gesture():
+    """Review finding 5, MEASURED in real Chrome (``test_e2e_connectivity_read``):
+    ``Element.apply`` sends ``userGesture=True`` and one connectivity read of one
+    node gave the page user activation. The connectivity, visibility and aim reads
+    go through ``page_natives.read`` (``userGesture`` false); the synthetic click,
+    which clicks, keeps ``Element.apply``."""
+    node = _item("node")
+
+    await refresh_element(FakeTab(), node)
+    await DOMHandler.query_elements(_TabOf(node), "li", visible_only=True)
+    await DOMHandler.wait_for_element(_TabOf(node), "li", timeout=100, visible=True)
+    await click_target.aim(node, "li")
+
+    assert node.read_gestures == [False] * 5
+    assert node.apply_calls == [
+        click_target.CONNECTED_JS,
+        click_target.CONNECTED_JS,
+        element_resolution.VISIBLE_JS,
+        element_resolution.VISIBLE_JS,
+        click_target.AIM_JS,
+    ]
+    await click_target.synthetic_click(node, "li", click_target.InputSent())
+    assert node.read_gestures == [False] * 5, "the click is not a read"
+    assert node.apply_calls[-1] == click_target.SYNTHETIC_JS
+
+
+async def test_a_read_reaches_the_page_through_the_librarys_own_commands():
+    """The double answers ``DOM.resolveNode`` and ``Runtime.callFunctionOn`` built
+    by nodriver's own generators, and the pair they return is what the product
+    unpacks: a value, ``None`` for a thrown Error, a thrown primitive as itself."""
+    from stealth_chrome_devtools_mcp.embedded import page_natives
+
+    for answer in (YES, "x", 0, False, None, {"a": [1]}):
+        assert await page_natives.read(_Answers(answer), "(elem) => 1") == answer
 
 
 async def test_wait_for_element_without_visible_asks_the_page_nothing():
@@ -1712,7 +1882,10 @@ async def test_wait_for_element_without_visible_asks_the_page_nothing():
 
 
 async def test_no_second_visibility_script_is_left_in_dom_handler():
-    """``VISIBLE_JS`` is the only script in ``dom_handler`` that tests
-    ``getComputedStyle`` for visibility."""
-    source = Path(dom_handler.__file__).read_text(encoding="utf-8")
-    assert source.count("getComputedStyle") == 1
+    """``element_resolution.VISIBLE_JS`` is the only script of the two modules
+    that tests ``getComputedStyle`` for visibility; ``dom_handler`` has none."""
+    handler = Path(dom_handler.__file__).read_text(encoding="utf-8")
+    resolution = Path(element_resolution.__file__).read_text(encoding="utf-8")
+    assert handler.count("getComputedStyle") == 0
+    assert resolution.count("getComputedStyle") == 1
+    assert "VISIBLE_JS" not in handler.replace("node_is_visible", "")
