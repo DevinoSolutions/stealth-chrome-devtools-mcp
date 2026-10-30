@@ -375,10 +375,12 @@ def declared(error: BaseException) -> list[str] | None:
         kind, forensic_errors.ForensicError
     ):
         return None
+    # Exact builtin types, not isinstance: a caller's str subclass can answer
+    # every comparison with True and would carry its own text through.
     if not (
-        isinstance(raw, tuple)
+        type(raw) is tuple
         and 0 < len(raw) <= _MAX_DECLARED
-        and all(isinstance(part, str) for part in raw)
+        and all(type(part) is str for part in raw)
         and raw[0] in forensic_errors.KINDS
     ):
         return None
