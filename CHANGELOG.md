@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.55
 
 ### A re-attach no longer adopts Chrome's own stray tab, and a cancelled close no longer leaks the proxy (T-9551)
 
