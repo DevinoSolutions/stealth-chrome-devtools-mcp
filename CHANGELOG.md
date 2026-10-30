@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.54
 
 ### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)
 
