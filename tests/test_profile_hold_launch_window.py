@@ -49,6 +49,24 @@ def hold(profile: Path):
     return profile_lock.profile_hold(profile, no_pids)
 
 
+def age_marker(profile: Path, marker: Path, since_failure: float):
+    """``hold`` with a failed launch's ``marker`` dated as if it failed
+    ``since_failure`` seconds ago. A failed launch dates its marker
+    ``LAUNCH_BUDGET - FAILED_LAUNCH_GRACE`` back, and ``hold`` reads the wall
+    clock, so the date is taken from the clock at the check, never from the
+    marker's own mtime (a slow lane between the two aged it for nothing)."""
+    dated = (
+        time.time()
+        - (
+            spawn_budget.LAUNCH_BUDGET_SECONDS
+            - profile_lock.FAILED_LAUNCH_GRACE_SECONDS
+        )
+        - since_failure
+    )
+    os.utime(marker, (dated, dated))
+    return hold(profile)
+
+
 def dead_pid() -> int:
     for pid in range(999_999, 900_000, -1):
         if not psutil.pid_exists(pid):
@@ -354,14 +372,22 @@ class TestAFailedLaunchHoldsUntilItsChromeIsReaped:
         rungs = sum(patience for _m, patience, _o in ProcessCleanup._KILL_RUNGS)
         assert rungs < grace < spawn_budget.LAUNCH_BUDGET_SECONDS / 4
         marker = tmp_path / profile_lock.LAUNCH_NAME
-        dated = marker.stat().st_mtime
 
-        def aged(by: float):
-            os.utime(marker, (dated - by, dated - by))
-            return hold(tmp_path)
+        assert age_marker(tmp_path, marker, grace - 2) is not None
+        assert age_marker(tmp_path, marker, grace + 2) is None
 
-        assert aged(grace - 2) is not None
-        assert aged(grace + 2) is None
+    async def test_a_slow_lane_between_the_write_and_the_check_does_not_age_it(
+        self, tmp_path, monkeypatch, launch_seams
+    ):
+        """``hold`` compares against the wall clock, so the ageing is dated
+        from the clock at the check, not from the marker's own mtime: a starved
+        lane that spends over 2 s between the two read ``grace - 2`` as expired."""
+        launch_seams(False)
+        await _fail_launch(tmp_path, monkeypatch, RuntimeError("boom"))
+        marker = tmp_path / profile_lock.LAUNCH_NAME
+        await asyncio.sleep(2.2)
+        grace = profile_lock.FAILED_LAUNCH_GRACE_SECONDS
+        assert age_marker(tmp_path, marker, grace - 2) is not None
 
 
 class TestTheLaunchMarker:
