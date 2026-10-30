@@ -1086,12 +1086,16 @@ async def _close_with_a_client_connected():
 
 
 @pytest.mark.asyncio
-async def test_a_forwarder_with_an_open_client_connection_closes_within_its_budget():
+async def test_a_forwarder_with_an_open_client_connection_closes_within_its_budget(
+    monkeypatch,
+):
     """On Python 3.12.1+ ``Server.wait_closed`` waits for every connection: an idle
     one held it 4.8 s (measured), a live tunnel holds it as long as Chrome keeps it.
-    Every version closes within the budget plus a margin."""
+    Every version closes within the budget plus a margin (a short budget, so the
+    margin is several times it on a slow runner)."""
     from stealth_chrome_devtools_mcp.embedded import proxy_forwarder
 
+    monkeypatch.setattr(proxy_forwarder, "CLOSE_BUDGET_SECONDS", 0.3)
     elapsed = await _close_with_a_client_connected()
 
     assert elapsed < proxy_forwarder.CLOSE_BUDGET_SECONDS + 1.0, elapsed
