@@ -28,18 +28,7 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-
-@pytest.fixture(autouse=True)
-def _instant_backoff(monkeypatch):
-    # The recovery backoff is real; zero it so the unit lane stays fast while the
-    # real asyncio.sleep(0) code path still runs.
-    monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
-    # Same for F-884's wait: zero the default budget so a pin whose fake answers
-    # a falsy value (a genuine zero-match) makes exactly ONE query, as it did
-    # when nodriver owned the polling. A pin that wants the loop asks for a
-    # budget explicitly.
-    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
+pytestmark = pytest.mark.usefixtures("instant_element_wait")
 
 
 def _stale():

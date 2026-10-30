@@ -10,6 +10,7 @@ Verifies that:
 import asyncio
 import re
 import time
+import types
 from pathlib import Path
 
 import psutil
@@ -101,21 +102,42 @@ class TestWithCdpTimeoutMechanism:
         assert elapsed < 2.0
 
     @pytest.mark.asyncio
-    async def test_zero_timeout_uses_default(self, monkeypatch):
-        """timeout=0 should fall back to CDP_OPERATION_TIMEOUT."""
-        # The real default is 30 s; patch the module constant the wrapper reads
-        # so the fall-back is exercised without sitting out the production wait.
-        monkeypatch.setattr(tool_runtime, "CDP_OPERATION_TIMEOUT", 1.5)
+    @pytest.mark.parametrize("default", [1.5, 7.25])
+    async def test_zero_timeout_uses_default(self, monkeypatch, default):
+        """timeout=0 should fall back to CDP_OPERATION_TIMEOUT, whatever it is.
+
+        Pinned on the value HANDED to the wait, under two different patched
+        defaults, so a literal fall-back (``timeout or 2.0``) cannot pass and
+        the test does not sit out the real 30 s. The wait itself is still the
+        real ``asyncio.wait_for`` (a short one, so the ToolError path runs); the
+        wait that really fires on a hang is pinned by
+        ``test_slow_coroutine_times_out``.
+        """
+        monkeypatch.setattr(tool_runtime, "CDP_OPERATION_TIMEOUT", default)
+        handed: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def recording_wait_for(awaitable, timeout):
+            handed.append(timeout)
+            return await real_wait_for(awaitable, timeout=0.05)
+
+        monkeypatch.setattr(
+            tool_runtime,
+            "asyncio",
+            types.SimpleNamespace(wait_for=recording_wait_for),
+        )
 
         async def hang():
             await asyncio.sleep(9999)
 
-        start = time.monotonic()
         with pytest.raises(Exception, match="timed out"):
             await _with_cdp_timeout(hang(), timeout=0)
-        elapsed = time.monotonic() - start
-        # Fell back to the (patched) default: not instant, and not stuck.
-        assert 1.0 < elapsed < 5.0, f"fell back after {elapsed:.1f}s, expected ~1.5s"
+        assert handed == [default]
+
+        # An explicit timeout is not replaced by the default.
+        with pytest.raises(Exception, match="timed out"):
+            await _with_cdp_timeout(hang(), timeout=3)
+        assert handed == [default, 3]
 
     @pytest.mark.asyncio
     async def test_concurrent_timeouts_independent(self):

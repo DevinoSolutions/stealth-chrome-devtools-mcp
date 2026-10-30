@@ -44,7 +44,10 @@ from stealth_chrome_devtools_mcp.embedded import (
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.usefixtures("instant_element_wait"),
+]
 
 SCRIPT = "(elem) => 1"
 CONTEXT_LOST = "Cannot find context with specified id"
@@ -63,13 +66,6 @@ def backend_log(caplog):
         yield lambda: list(dict.fromkeys(caplog.records))
     finally:
         backend.removeHandler(caplog.handler)
-
-
-@pytest.fixture(autouse=True)
-def _instant_backoff(monkeypatch):
-    monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
-    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
-    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
 
 
 class _Node(FakeClickTarget):
