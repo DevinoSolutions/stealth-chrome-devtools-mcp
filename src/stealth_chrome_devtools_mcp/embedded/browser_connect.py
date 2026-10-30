@@ -144,8 +144,8 @@ leaves ``_process`` ``None`` and only ``_process_pid`` is stamped) but which is
 every bit as fresh a Chrome — its liveness is ``process_exit.browser_is_alive``,
 the one rule for "is the process behind this browser still running", read off
 ``_process`` or the pid. ``browser_reattach``'s adoption of a browser a dead
-backend left running is an ATTACH to an already-open Chrome, reads ``main_tab``
-itself and names its own ``IndexError``; it never calls this.
+backend left running is an ATTACH to an already-open Chrome and never calls this;
+both answer "which page is the tab" with ``tab_open.initial_tab`` (T-9551).
 
 **F-1009 — an endpoint answering is not the endpoint being OURS.** nodriver picks
 the port by bind-and-release and Chrome binds it later; a sibling that takes it in
@@ -178,6 +178,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     devtools_port,
     process_exit,
     spawn_budget,
+    tab_open,
 )
 
 __all__ = [
@@ -348,4 +349,4 @@ async def first_page(browser: Browser) -> Tab:
             )
         await _sleep(POLL_SECONDS)
         await browser.update_targets()
-    return browser.main_tab
+    return tab_open.initial_tab(browser)

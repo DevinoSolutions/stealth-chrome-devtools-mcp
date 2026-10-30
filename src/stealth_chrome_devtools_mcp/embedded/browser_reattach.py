@@ -849,17 +849,17 @@ async def _attach_one(
             candidate.pid,
         )
         try:
-            # Not `browser.main_tab`: that is the NEWEST page, which after a backend
-            # death in T-9479's first-launch window is the stray settings tab
-            # (T-9551).
+            # `main_tab`'s pick unless it is a page Chrome opened for itself, which
+            # after a backend death in T-9479's first-launch window is the stray
+            # settings tab (T-9551).
             tab = tab_open.initial_tab(browser)
         except IndexError as exc:
-            # How nodriver actually reports "no targets": its `main_tab` raises,
-            # it cannot return None, so a None-check here would be pinning a shape
-            # the library cannot produce (F-888 review L2), and `initial_tab` keeps
-            # that shape. Named rather than re-raised bare, and raised INSIDE the
-            # try because the handler below is what closes the connection we just
-            # opened.
+            # How `initial_tab` reports "no page" (F-888 review L2): it raises, it
+            # cannot return None, so a None-check here would pin a shape it does
+            # not produce. (nodriver's own `main_tab` raises StopIteration there,
+            # which is not what this handler ever caught before T-9551.) Named
+            # rather than re-raised bare, and raised INSIDE the try because the
+            # handler below is what closes the connection we just opened.
             raise tool_errors.ToolError(
                 f"Re-attached browser for {instance_id} reports no tab"
             ) from exc
