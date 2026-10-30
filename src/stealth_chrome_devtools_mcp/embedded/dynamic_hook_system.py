@@ -24,31 +24,15 @@ from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import (
     HookAction,
     RequestInfo,
     describe_error,
+    resource_type_named,
 )
+from stealth_chrome_devtools_mcp.embedded.network_interceptor import resource_type_of
 from stealth_chrome_devtools_mcp.embedded.tab_close import (
     is_already_gone,
     report_gone_aware,
     session_gone,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolError
-
-
-def _resource_type(name: object) -> uc.cdp.network.ResourceType | None:
-    """The CDP ``ResourceType`` a hook's ``resource_type`` names, or ``None`` for none.
-
-    The one lookup, shared by ``create_hook`` (which refuses a bad name before the hook
-    is stored, T-9478) and ``setup_interception``. The valid names are read off the
-    enum, case-insensitively, so they cannot drift from nodriver's."""
-    if name is None:
-        return None
-    members = uc.cdp.network.ResourceType.__members__
-    member = members.get(name.upper()) if isinstance(name, str) else None
-    if member is None:
-        raise CallerError(
-            f"Unknown resource_type {name!r}; valid resource types: "
-            f"{', '.join(members)} (case-insensitive)"
-        )
-    return member
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 
 def _has_response(event) -> bool:
@@ -187,14 +171,14 @@ class DynamicHookSystem:
                 if stage == "response":
                     pattern = uc.cdp.fetch.RequestPattern(
                         url_pattern=url_pattern,
-                        resource_type=_resource_type(resource_type),
+                        resource_type=resource_type_named(resource_type),
                         request_stage=uc.cdp.fetch.RequestStage.RESPONSE,
                     )
                     response_patterns.append(pattern)
                 else:
                     pattern = uc.cdp.fetch.RequestPattern(
                         url_pattern=url_pattern,
-                        resource_type=_resource_type(resource_type),
+                        resource_type=resource_type_named(resource_type),
                         request_stage=uc.cdp.fetch.RequestStage.REQUEST,
                     )
                     request_patterns.append(pattern)
@@ -396,9 +380,7 @@ class DynamicHookSystem:
                 post_data=event.request.post_data
                 if hasattr(event.request, "post_data")
                 else None,
-                resource_type=event.resource_type.value
-                if getattr(event, "resource_type", None) is not None
-                else None,
+                resource_type=resource_type_of(event, fields=("resource_type",)),
                 stage=stage,
             )
 
@@ -614,7 +596,7 @@ class DynamicHookSystem:
         """Create a new dynamic hook."""
         # T-9478: before anything is stored. An unknown resource_type used to fail
         # inside setup_interception, which swallowed it.
-        _resource_type(requirements.get("resource_type"))
+        resource_type_named(requirements.get("resource_type"))
         hook_id = str(uuid.uuid4())
         hook = DynamicHook(hook_id, name, requirements, function_code, priority)
 

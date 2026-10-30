@@ -340,7 +340,7 @@ async def test_a_bad_resource_type_is_refused_and_a_valid_one_fulfills(
                 function_code=code,
                 instance_ids=[iid],
             )
-        for valid in ("FETCH", "XHR", "SCRIPT", "DOCUMENT"):
+        for valid in ("Fetch", "XHR", "Script", "Document"):
             assert valid in str(caught.value)
         assert "could not be armed" not in str(caught.value)
         assert _find_hook_id(await list_hooks(), "fixture-bad-type") is None

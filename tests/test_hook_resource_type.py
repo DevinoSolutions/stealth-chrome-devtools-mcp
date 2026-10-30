@@ -23,7 +23,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 
 BOUND = 2.0
 GOOD = "def process_request(request):\n    return HookAction(action='continue')\n"
-VALID_NAMES = [member.name for member in uc.cdp.network.ResourceType]
+VALID_NAMES = [member.value for member in uc.cdp.network.ResourceType]
 
 
 @pytest.fixture
@@ -182,3 +182,122 @@ async def test_a_real_paused_event_reaches_a_hook_that_names_its_type():
 
     assert "continue_request" not in tab.send_calls
     assert tab.send_calls, "the hook's block action was never sent"
+
+
+def _request(resource_type):
+    from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import RequestInfo
+
+    return RequestInfo(
+        request_id="r",
+        instance_id="i",
+        url="http://x/api",
+        method="GET",
+        headers={},
+        post_data=None,
+        resource_type=resource_type,
+        stage="request",
+    )
+
+
+TWO_WORD = [m for m in uc.cdp.network.ResourceType if m.name.lower() != m.value.lower()]
+
+
+def test_the_two_word_types_differ_in_name_and_value():
+    assert len(TWO_WORD) == 6
+
+
+@pytest.mark.parametrize("member", TWO_WORD, ids=lambda m: m.name)
+@pytest.mark.parametrize("spelling", ["name", "value", "name-lower", "value-lower"])
+async def test_a_two_word_type_validates_and_matches_in_either_spelling(
+    system, member, spelling
+):
+    """``event_source`` / ``EventSource`` name one type; the CDP form is the value."""
+    written = {
+        "name": member.name,
+        "value": member.value,
+        "name-lower": member.name.lower(),
+        "value-lower": member.value.lower(),
+    }[spelling]
+    hook_id = await system.create_hook(
+        "h", {"resource_type": written}, GOOD, instance_ids=None
+    )
+
+    assert system.hooks[hook_id].matches(_request(member.value)) is True
+    assert system.hooks[hook_id].matches(_request("Document")) is False
+
+
+async def test_the_refusal_lists_the_cdp_values_not_the_member_names(
+    patched_server, system
+):
+    with pytest.raises(CallerError) as caught:
+        await _create(patched_server(), "nope")
+
+    text = str(caught.value)
+    assert (
+        "WebSocket" in text and "EventSource" in text and "CSPViolationReport" in text
+    )
+    assert "WEB_SOCKET" not in text
+
+
+def _documented_resource_types(node):
+    if isinstance(node, dict):
+        if "resource_type" in node and "examples" in node["resource_type"]:
+            yield from node["resource_type"]["examples"]
+        for value in node.values():
+            yield from _documented_resource_types(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _documented_resource_types(value)
+
+
+async def test_every_documented_resource_type_example_is_accepted(
+    patched_server, system
+):
+    from stealth_chrome_devtools_mcp.embedded.hook_learning_system import (
+        hook_learning_system,
+    )
+
+    examples = set(
+        _documented_resource_types(
+            hook_learning_system.get_requirements_documentation()
+        )
+    )
+    assert {"Document", "WebSocket"} <= examples
+    for example in examples:
+        created = await _create(patched_server(), example)
+        assert created["hook_id"] in system.hooks
+
+
+async def test_an_explicit_none_is_no_filter_in_the_matcher_and_when_stored(system):
+    from stealth_chrome_devtools_mcp.embedded.dynamic_hook_model import DynamicHook
+
+    direct = DynamicHook("h", "n", {"resource_type": None}, GOOD, 100)
+    assert direct.matches(_request("Fetch")) is True
+
+    hook_id = await system.create_hook("h", {"resource_type": None}, GOOD)
+    assert system.hooks[hook_id].matches(_request("XHR")) is True
+
+
+async def test_a_paused_event_whose_type_is_a_plain_string_still_runs_the_hook():
+    from types import SimpleNamespace
+
+    from fakes import FakeTab
+
+    system = DynamicHookSystem()
+    system.add_instance("inst")
+    block = "def process_request(request):\n    return HookAction(action='block')\n"
+    await system.create_hook(
+        "h", {"resource_type": "xhr"}, block, instance_ids=["inst"]
+    )
+    tab = FakeTab()
+    event = SimpleNamespace(
+        request_id=uc.cdp.fetch.RequestId("req-1"),
+        response_status_code=None,
+        response_error_reason=None,
+        resource_type="XHR",
+        request=SimpleNamespace(url="http://x/api", method="GET", headers={}),
+    )
+
+    await system._on_request_paused(tab, event, "inst")
+
+    assert "continue_request" not in tab.send_calls and tab.send_calls
