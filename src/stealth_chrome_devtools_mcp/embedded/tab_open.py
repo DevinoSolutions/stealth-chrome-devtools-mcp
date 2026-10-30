@@ -84,6 +84,9 @@ class _State:
     #: Target ids of tabs the backend opened for itself (``login_persistence``'s
     #: settings tab), which are never a caller's page to land on.
     internal: set[str] = field(default_factory=set)
+    #: Target ids whose caller runs a screencast of their own (``paint_hold``), kept
+    #: here so they go with the browser however it goes (closed, crashed, relaunched).
+    caller_owned: set[str] = field(default_factory=set)
 
 
 def _state(browser: Browser) -> _State:
@@ -114,6 +117,20 @@ def mark_closed(browser: Browser) -> None:
     ``devtools_port``), so a task still in flight cannot slip in between.
     """
     _state(browser).closed = True
+
+
+def set_caller_owned(browser: Browser, target_id: str, owned: bool) -> None:
+    """Record whether *target_id*'s caller runs their own screencast on it."""
+    owners = _state(browser).caller_owned
+    if owned:
+        owners.add(str(target_id))
+    else:
+        owners.discard(str(target_id))
+
+
+def is_caller_owned(browser: Browser, target_id: str) -> bool:
+    """Whether *target_id*'s caller runs their own screencast on it."""
+    return str(target_id) in _state(browser).caller_owned
 
 
 def mark_internal(browser: Browser, tab: Tab) -> None:

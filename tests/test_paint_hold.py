@@ -12,6 +12,8 @@ and a caller's own screencast is left alone.
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 
 import nodriver as uc
 import pytest
@@ -32,7 +34,7 @@ def _short_linger(monkeypatch):
     yield
     for key in list(paint_hold._held):
         paint_hold.forget(key)
-    paint_hold._caller_owned.clear()  # a caller's screencast must not leak into the next test
+    paint_hold._browserless_caller_owned.clear()  # a caller's screencast must not leak into the next test
 
 
 async def test_a_driven_tab_is_held_with_a_frame_that_never_comes():
@@ -293,7 +295,7 @@ async def test_a_failed_caller_screencast_command_does_not_take_the_tab():
     result = await executor.execute_cdp_command(tab, "Page.startScreencast", {})
     assert not result["success"]
     await paint_hold.hold(tab)
-    assert paint_hold._held == {} and "t-1" not in paint_hold._caller_owned
+    assert paint_hold._held == {} and "t-1" not in paint_hold._browserless_caller_owned
 
 
 async def test_a_stale_timer_never_releases_a_newer_hold():
@@ -305,37 +307,77 @@ async def test_a_stale_timer_never_releases_a_newer_hold():
     assert old.sent(STOP) == [] and new.sent(STOP) == []
 
 
-class _Browser:
-    """What ``_prune_caller_owned`` reads of a nodriver ``Browser``: its ``targets``
-    (nodriver drops one only on ``Target.targetDestroyed``)."""
+def _info(target_id, type_):
+    return uc.cdp.target.TargetInfo(
+        target_id=uc.cdp.target.TargetID(target_id),
+        type_=type_,
+        title="",
+        url="about:blank",
+        attached=True,
+        can_access_opener=False,
+    )
 
-    def __init__(self, *tabs):
-        self.targets = list(tabs)
+
+class _RealTab(uc.Tab):
+    """A real nodriver ``Tab`` whose ``send`` records instead of reaching Chrome."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.log = []
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        self.log.append(cdp_obj)
 
 
-async def _caller_screencast(browser, target_id):
-    tab = FakeTab(target_id=target_id)
-    tab.browser = browser
-    browser.targets.append(tab)
+def _real_browser():
+    browser = uc.Browser(uc.Config(headless=True))  # built, never started
+    browser.target = _info("browser-1", "browser")
+    return browser
+
+
+def _real_tab(browser, target_id):
+    return _RealTab(target=_info(target_id, "page"), parent=browser, auto_attach=False)
+
+
+async def _caller_screencast(tab):
     await CDPFunctionExecutor().execute_cdp_command(tab, START, {})
-    return tab
 
 
-async def test_close_instance_drops_its_callers_screencast_targets():
-    browser, other = _Browser(), _Browser()
-    await _caller_screencast(browser, "t-1")
-    await _caller_screencast(browser, "t-2")
-    kept = await _caller_screencast(other, "t-3")
-    assert set(paint_hold._caller_owned) == {"t-1", "t-2", "t-3"}
-    tab_open.mark_closed(browser)  # what close_instance and a relaunch do first
-    paint_hold.note_command(kept, uc.cdp.page.start_screencast)  # any later write
-    assert set(paint_hold._caller_owned) == {"t-3"}
+def _owned(browser, target_id):
+    return tab_open.is_caller_owned(browser, target_id)
 
 
-async def test_a_tab_the_browser_no_longer_lists_is_dropped():
-    browser = _Browser()
-    gone = await _caller_screencast(browser, "t-1")
-    await _caller_screencast(browser, "t-2")
-    browser.targets.remove(gone)  # Target.targetDestroyed: the page closed itself
-    await _caller_screencast(browser, "t-4")
-    assert set(paint_hold._caller_owned) == {"t-2", "t-4"}
+async def test_a_live_caller_screencast_on_a_live_tab_is_not_overridden():
+    browser = _real_browser()
+    tab = _real_tab(browser, "t-1")
+    await _caller_screencast(tab)
+    assert _owned(browser, "t-1")
+    sent = len(tab.log)
+    await paint_hold.hold(tab)
+    assert paint_hold._held == {} and len(tab.log) == sent  # the hold sent nothing
+
+
+async def test_close_instance_style_discard_takes_the_state_with_the_browser():
+    browser = _real_browser()
+    await _caller_screencast(_real_tab(browser, "t-1"))
+    tab_open.mark_closed(browser)  # what close_instance does first
+    ref = weakref.ref(browser)
+    del browser
+    gc.collect()
+    assert ref() is None
+
+
+async def test_crash_style_discard_leaves_nothing_behind_for_the_dead_browser():
+    """No ``mark_closed`` and no ``update_targets``: the instance was only dropped
+    (``_discard_instance_unlocked``). Its ids must no longer count as caller-owned
+    (the same id on another browser is held again) and nothing of ours may keep the
+    dead Browser alive."""
+    browser = _real_browser()
+    await _caller_screencast(_real_tab(browser, "t-1"))
+    ref = weakref.ref(browser)
+    del browser
+    gc.collect()
+    assert ref() is None
+    successor = _real_tab(_real_browser(), "t-1")
+    await paint_hold.hold(successor)
+    assert "t-1" in paint_hold._held

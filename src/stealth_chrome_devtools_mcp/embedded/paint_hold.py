@@ -69,23 +69,29 @@ class _Hold:
 #: target id -> the hold on it. Entries leave through :func:`_expire` or :func:`forget`.
 _held: dict[str, _Hold] = {}
 
-#: Targets whose caller started a screencast of their own (``execute_cdp_command``),
-#: each with the browser that owns it: Chrome has one screencast per tab, so the hold
-#: must neither replace it nor stop it. A tab that goes away any way but ``close_tab``
-#: sends this module nothing, so :func:`_prune_caller_owned` drops what is gone.
-_caller_owned: dict[str, object] = {}
+#: Targets whose caller started a screencast of their own (``execute_cdp_command``):
+#: Chrome has one screencast per tab, so the hold must neither replace it nor stop it.
+#: The state lives ON the tab's browser (``tab_open.set_caller_owned``), so it goes
+#: with the browser however it goes. This set is only for a tab with no browser (a
+#: hand-built one), removed by :func:`forget` and the caller's stop.
+_browserless_caller_owned: set[str] = set()
 
 
-def _prune_caller_owned() -> None:
-    """Drop the targets whose tab is gone: its browser was closed (``close_instance``,
-    a relaunch) or no longer lists it (``Target.targetDestroyed``: the page closed
-    itself, another tab closed it). A tab with no browser is kept: nothing says."""
-    for key, browser in list(_caller_owned.items()):
-        if browser is not None and (
-            tab_open.is_closed(browser)  # type: ignore[arg-type]
-            or key not in {str(t.target.target_id) for t in browser.targets}  # type: ignore[attr-defined]
-        ):
-            del _caller_owned[key]
+def _is_caller_owned(tab: Tab, key: str) -> bool:
+    browser = getattr(tab, "browser", None)
+    if browser is None:
+        return key in _browserless_caller_owned
+    return tab_open.is_caller_owned(browser, key)
+
+
+def _set_caller_owned(tab: Tab, key: str, owned: bool) -> None:
+    browser = getattr(tab, "browser", None)
+    if browser is not None:
+        tab_open.set_caller_owned(browser, key, owned)
+    elif owned:
+        _browserless_caller_owned.add(key)
+    else:
+        _browserless_caller_owned.discard(key)
 
 
 def _key(tab: Tab) -> str:
@@ -98,7 +104,7 @@ async def hold(tab: Tab) -> None:
     entry: _Hold | None = None
     try:
         now = asyncio.get_running_loop().time()
-        if key in _caller_owned:
+        if _is_caller_owned(tab, key):
             return
         current = _held.get(key)
         if current is not None and current.tab is tab:
@@ -156,8 +162,7 @@ async def _stop(tab: Tab, where: str) -> None:
 
 def forget(target_id: str) -> None:
     """Drop the hold on a tab that was closed: its timer ends, nothing is sent."""
-    _caller_owned.pop(str(target_id), None)
-    _prune_caller_owned()
+    _browserless_caller_owned.discard(str(target_id))
     entry = _held.pop(str(target_id), None)
     if entry is not None and entry.task is not None:
         entry.task.cancel()
@@ -174,8 +179,7 @@ def note_command(tab: Tab, method: object) -> None:
         return
     key = _key(tab)
     forget(key)
-    if started:
-        _caller_owned[key] = getattr(tab, "browser", None)
+    _set_caller_owned(tab, key, started)
 
 
 async def _expire(key: str, entry: _Hold) -> None:
