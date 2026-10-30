@@ -169,7 +169,8 @@ class DynamicHook:
             # Check resource type
             if (
                 "resource_type" in self.requirements
-                and request.resource_type != self.requirements["resource_type"]
+                and str(request.resource_type).lower()
+                != str(self.requirements["resource_type"]).lower()
             ):
                 return False
 

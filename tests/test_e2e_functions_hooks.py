@@ -309,6 +309,54 @@ async def test_dynamic_hooks_lifecycle(fixture_app_server):
         await close(instance_id=iid)
 
 
+@integration_test
+async def test_a_bad_resource_type_is_refused_and_a_valid_one_is_stored(
+    fixture_app_server,
+):
+    """T-9478: a name ``ResourceType`` does not have is the caller's error, naming the
+    valid ones, with nothing stored; a valid one (any case) is stored and listed."""
+    await warmup_once()
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    create_full = get_fn("create_dynamic_hook")
+    list_hooks = get_fn("list_dynamic_hooks")
+    remove_hook = get_fn("remove_dynamic_hook")
+    close = get_fn("close_instance")
+
+    result = await spawn(headless=True, **sandbox_kwargs())
+    iid = result["instance_id"]
+    code = (
+        "def process_request(request):\n"
+        "    return HookAction(action='fulfill', status_code=418, body='teapot')\n"
+    )
+    try:
+        await navigate_and_settle(iid, f"{base}/hooks.html")
+
+        with pytest.raises(CallerError, match="resource_type") as caught:
+            await create_full(
+                name="fixture-bad-type",
+                requirements={"url_pattern": "*/api/json", "resource_type": "fetchh"},
+                function_code=code,
+                instance_ids=[iid],
+            )
+        for valid in ("FETCH", "XHR", "SCRIPT", "DOCUMENT"):
+            assert valid in str(caught.value)
+        assert "could not be armed" not in str(caught.value)
+        assert _find_hook_id(await list_hooks(), "fixture-bad-type") is None
+
+        await create_full(
+            name="fixture-good-type",
+            requirements={"url_pattern": "*/api/json", "resource_type": "fetch"},
+            function_code=code,
+            instance_ids=[iid],
+        )
+        good_id = _find_hook_id(await list_hooks(), "fixture-good-type")
+        assert good_id, "the valid hook was not stored"
+        await remove_hook(hook_id=good_id)
+    finally:
+        await close(instance_id=iid)
+
+
 # ---------------------------------------------------------------------------
 # debugging (5): all global / env-level, no browser needed
 # ---------------------------------------------------------------------------

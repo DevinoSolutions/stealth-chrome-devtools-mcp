@@ -17,6 +17,12 @@
 
 ## 2.1.54
 
+### A bad `resource_type` in a dynamic hook is refused with the valid list (T-9478)
+
+- `create_dynamic_hook` with a `resource_type` that is not a CDP `ResourceType` (e.g. `"scripts"`) used to fail inside `setup_interception`, which swallowed it: with a tab armed the caller read the misleading "could not be armed" error, with none armed the hook was stored and never matched. It is now a `CallerError` naming all 19 valid types (read off the enum, case-insensitive), raised before the hook is stored.
+- A `resource_type` requirement never matched a real request: the request carried `str(ResourceType.FETCH)` (`ResourceType.FETCH`) while the requirement is the documented `Document` / `XHR` form. It now carries the CDP value (`Fetch`) and the comparison ignores case.
+- A bug in `create_hook` was reported twice at ERROR (our own `log_error` and FastMCP's `logger.exception`); it is now reported once.
+
 ### One Sentry issue per defect: freezes and tool errors get a stable fingerprint (T-10034)
 
 - Seven `HungBrowserError` events in the project's Sentry (STEALTH-CHROME-DEVTOOLS-MCP-ES, -EJ, -EF, -EE, -DY, -DQ, -DB) were seven issues, because the report is logged at ERROR and never raised, so it has no stack and Sentry grouped it by a message that embeds the instance id, uptime (`uptime=71999s`), process counts, `free_ram=33.11GB`, paths and step timings (`evaluate=15070ms`): the freeze rate could not be read off the issue list. `observability._scrub_event` now sets the event's `fingerprint` from the live exception (`_stable_fingerprint`): `HungBrowserError` and `FrozenCloneError` are `forensic_errors.ForensicError`s that carry their kind and the stable cause the call site passes (for the probe heal: `["hung-browser", "heal TimeoutError at evaluate"]`), so the same step and error type is one issue whatever the instance, uptime or timings, and a different step, error type or site is another. The message, the exception and the scrub are unchanged.
