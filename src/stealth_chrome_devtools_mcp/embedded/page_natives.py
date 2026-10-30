@@ -41,12 +41,37 @@ unchanged.
 one frame and one name is idempotent -- it answers the live context, and the
 context a navigation replaced -- so there is no cached context id to go stale, and
 the choice between "invalidate on ``executionContextDestroyed``" and "retry on
-``Cannot find context``" does not arise. The node's frame is found by asking:
-every script is wrapped (:data:`WRAPPER_JS`) so that it answers :data:`FOREIGN`
-unless the node's ``ownerDocument`` is the document of the world it was resolved
-in, and :func:`run` tries the page's frames in order (the main frame first, so
-the common read is one attempt). ``DOM.describeNode`` carries no frame id for an
-ordinary element, and ``DOM.resolveNode`` answers for any world.
+``Cannot find context``" does not arise.
+
+**Which frame holds the node, and the order the frames are tried in.** Nothing
+cheap names it: ``DOM.describeNode`` carries no frame id for an element or its
+document (MEASURED, headless Chrome 156, on an in-process cross-origin frame, a
+``data:`` frame and a ``srcdoc`` frame), and the object a ``DOM.resolveNode``
+gives is a stranger's until a script looks at ``ownerDocument``. So the node's
+frame is found by asking, and every frame answers ONE of two things:
+
+* *here*: the script ran (every script is wrapped, :data:`WRAPPER_JS`, so that it
+  answers :data:`FOREIGN` unless the node's ``ownerDocument`` is the document of
+  the world it was resolved in);
+* *not here*: the script answered :data:`FOREIGN`; or ``DOM.resolveNode`` in this
+  frame's world gave NO object (MEASURED: an isolated world answers a node of an
+  in-process frame of ANOTHER origin, or a ``data:`` frame, with a null object --
+  no ``objectId`` -- while a same-origin ``srcdoc`` frame's nodes resolve in the
+  main frame's world and are told apart by the script); or Chrome said the node is
+  not in this frame's document or the frame itself has gone (``_NOT_HERE_MARKERS``,
+  e.g. a sibling frame navigating between the two commands).
+
+"Not here" for a frame is never an answer about the node: the search goes on to
+the next frame. The node has left only when Chrome says so about the node itself
+(``No node with given id found``) or when every frame said "not here"
+(:class:`FrameGone`). The order: the frame that last answered for this tab first
+(a page's nodes cluster: a listing of an iframe's rows, a form in a widget), then
+the page's frames from the main one down, depth first. The common read is one
+attempt and sends no ``Page.getFrameTree`` once a frame is remembered; a node
+elsewhere costs the attempts before its frame, and the one that answers is
+remembered. Never ``-32602 Either objectId or ... must be specified``: a call
+without an object is never sent, so that reply could only be our own bug and is
+a ``ReadError``.
 
 **A failed read is a failed read.** ``exceptionDetails`` of the reply is a throw,
 and :func:`run` raises ``ToolError`` for it whatever ``result`` holds (a thrown
@@ -54,11 +79,17 @@ and :func:`run` raises ``ToolError`` for it whatever ``result`` holds (a thrown
 same: Chrome saying the node or its context is gone (:func:`departed`) is the
 departure ``detached_element`` classifies, every other failure is a
 ``ToolError``. The resolved remote object is released in an object group of the
-call, on success and on failure.
+call, on success and on failure, and the release NEVER holds the caller past the
+read's own budget (:func:`_release_inline`, :func:`_release_detached`): a read
+whose page is blocked (a ``confirm()`` in a click listener, a busy loop) is
+abandoned by its caller at ``INPUT_BUDGET_S``, and a release awaited behind the
+blocked page would turn that bound into the 30 s ``browser may have crashed``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import itertools
 from typing import TYPE_CHECKING
 
@@ -90,12 +121,46 @@ FOREIGN = "stealth.read:foreign"
 # RESOLUTION raced and re-running it is always right, these say the element a
 # caller is holding is gone, and whether re-running the caller's work is safe is
 # the caller's question (a click that may have been dispatched must not be).
+#
+# ``-32602 Either objectId or executionContextId or uniqueContextId must be
+# specified`` is NOT here (it was, in 3f9cc1d): it is what a call without an
+# ``objectId`` gets, which a null ``DOM.resolveNode`` reply produced when the node
+# lives in a frame of another origin. That is a frame saying "not here", handled
+# before a call is built; the reply itself could only be our own bug.
 _DEPARTED_MARKERS = (
     "No node with given id found",
     "Node with given id does not belong to the document",
     "Cannot find context with specified id",
-    "Either objectId or executionContextId or uniqueContextId must be specified",
 )
+
+# What Chrome says to ONE frame's attempt that is about the frame, not the node:
+# the frame is gone (``createIsolatedWorld``), or the node is not in the document
+# of the world it was just asked of / that world was replaced before the
+# resolution (``resolveNode``, e.g. a sibling frame navigating between the two
+# commands). The search goes on to the next frame. For those two commands ONLY:
+# the same words from ``callFunctionOn`` are the node's own context leaving.
+_NOT_HERE_MARKERS = (
+    "No frame for given id found",
+    "Node with given id does not belong to the document",
+    "Cannot find context with specified id",
+)
+
+#: How long a read waits for the release of its object group once it is over.
+RELEASE_WAIT_S = 1.0
+
+#: How long a release that was handed off (the read failed, or was cancelled)
+#: may take before it is abandoned.
+RELEASE_DETACHED_S = 5.0
+
+#: The releases handed off and not finished: held so they are not collected
+#: mid-flight; each takes itself out when done.
+_releasing: set[asyncio.Future[None]] = set()
+
+#: What a frame's attempt answers when the node is not in that frame.
+_NOT_HERE = object()
+
+#: The attribute of a ``Tab`` that remembers the frame that last answered for it.
+_FRAME_HINT = "_stealth_reads_frame"
 
 _groups = itertools.count(1)
 
@@ -181,40 +246,88 @@ def _frame_ids(tree: cdp.page.FrameTree) -> list[cdp.page.FrameId]:
     return ids
 
 
-async def _release(tab: Tab, group: str) -> None:
-    """Release *group*; a release that fails never masks the read's own outcome."""
+async def _release_bounded(tab: Tab, group: str, seconds: float) -> None:
+    """Release *group*, waiting at most *seconds*; it never raises and never masks.
+
+    A release that fails must not replace the read's own result or error (a
+    navigation already freed the group), and one that does not answer -- the page
+    is blocked behind a dialog or a busy loop -- must not hold the caller: it is
+    logged and abandoned.
+    """
     try:
-        await tab.send(cdp.runtime.release_object_group(group))
+        await asyncio.wait_for(
+            tab.send(cdp.runtime.release_object_group(group)), seconds
+        )
+    except TimeoutError:
+        debug_logger.log_warning(
+            "page_natives",
+            "_release_bounded",
+            f"object group {group} was not released within {seconds:g} s",
+        )
     except Exception as exc:  # noqa: BLE001  PERMANENT(a failed release must not replace the read's own result or error; a navigation already freed the group)
         debug_logger.log_warning(
             "page_natives",
-            "_release",
+            "_release_bounded",
             f"could not release object group {group}: {type(exc).__name__}",
         )
 
 
+def _release_detached(tab: Tab, group: str) -> None:
+    """Hand the release of *group* off and return at once (a failed read).
+
+    Awaiting it would hold a caller that already gave up behind the very page
+    that made it give up, and an ``await`` inside a cancelled task is not even
+    reached reliably.
+    """
+    task = asyncio.ensure_future(_release_bounded(tab, group, RELEASE_DETACHED_S))
+    _releasing.add(task)
+    task.add_done_callback(_releasing.discard)
+
+
+def _says_not_here(exc: BaseException) -> bool:
+    return isinstance(exc, ProtocolException) and any(
+        marker in str(exc) for marker in _NOT_HERE_MARKERS
+    )
+
+
 async def _in_frame(
     element: Element, frame_id: cdp.page.FrameId, script: str, user_gesture: bool
-) -> cdp.runtime.RemoteObject | None:
+) -> object:
     """One attempt: the wrapped *script* on *element*, in the world of *frame_id*.
 
-    Answers the call's ``result``; ``exceptionDetails`` is raised, never returned.
+    Answers the script's value, or :data:`_NOT_HERE` when the node is not in this
+    frame (see the module docstring); ``exceptionDetails`` is raised, never
+    returned.
     """
     tab = element.tab
-    world = await tab.send(
-        cdp.page.create_isolated_world(
-            frame_id, world_name=WORLD_NAME, grant_univeral_access=False
-        )
-    )
-    group = f"{WORLD_NAME}:{next(_groups)}"
     try:
-        remote = await tab.send(
-            cdp.dom.resolve_node(
-                backend_node_id=element.backend_node_id,
-                object_group=group,
-                execution_context_id=world,
+        world = await tab.send(
+            cdp.page.create_isolated_world(
+                frame_id, world_name=WORLD_NAME, grant_univeral_access=False
             )
         )
+    except ProtocolException as exc:
+        if _says_not_here(exc):
+            return _NOT_HERE
+        raise
+    group = f"{WORLD_NAME}:{next(_groups)}"
+    try:
+        try:
+            remote = await tab.send(
+                cdp.dom.resolve_node(
+                    backend_node_id=element.backend_node_id,
+                    object_group=group,
+                    execution_context_id=world,
+                )
+            )
+        except ProtocolException as exc:
+            if _says_not_here(exc):
+                return _NOT_HERE
+            raise
+        if remote.object_id is None:
+            # The world answers a node of a frame it cannot reach with a null
+            # object, and registers nothing in the group.
+            return _NOT_HERE
         result, thrown = await tab.send(
             cdp.runtime.call_function_on(
                 script,
@@ -224,14 +337,40 @@ async def _in_frame(
                 user_gesture=user_gesture,
             )
         )
-    finally:
-        await _release(tab, group)
+    except BaseException:
+        _release_detached(tab, group)
+        raise
+    await _release_bounded(tab, group, RELEASE_WAIT_S)
     if thrown is not None:
         raise ReadError(
             "the page-side read threw: "
             f"{(thrown.exception and thrown.exception.description) or thrown.text}"
         )
-    return result
+    value = result.value if result is not None else None
+    return _NOT_HERE if value == FOREIGN else value
+
+
+async def _search(element: Element, script: str, user_gesture: bool) -> object:
+    """The frame search: the remembered frame, then the page's frames in order."""
+    tab = element.tab
+    remembered = getattr(tab, _FRAME_HINT, None)
+    tried: list[cdp.page.FrameId] = []
+    steps = ([remembered] if remembered is not None else []) + [None]
+    for step in steps:
+        if step is None:
+            tree = await tab.send(cdp.page.get_frame_tree())
+            frames = [f for f in _frame_ids(tree) if f not in tried]
+        else:
+            frames = [step]
+        for frame_id in frames:
+            tried.append(frame_id)
+            value = await _in_frame(element, frame_id, script, user_gesture)
+            if value is not _NOT_HERE:
+                # a tab that takes no attributes remembers nothing
+                with contextlib.suppress(AttributeError):
+                    setattr(tab, _FRAME_HINT, frame_id)
+                return value
+    raise FrameGone("no frame of the page holds the node")
 
 
 async def run(
@@ -253,12 +392,7 @@ async def run(
     """
     script = WRAPPER_JS.replace("__SCRIPT__", js_function)
     try:
-        tree = await element.tab.send(cdp.page.get_frame_tree())
-        for frame_id in _frame_ids(tree):
-            result = await _in_frame(element, frame_id, script, user_gesture)
-            value = result.value if result is not None else None
-            if value != FOREIGN:
-                return value
+        return await _search(element, script, user_gesture)
     except ReadError:
         raise
     except Exception as exc:
@@ -267,4 +401,3 @@ async def run(
         raise ReadError(
             f"could not read the node: {type(exc).__name__}: {exc}"
         ) from exc
-    raise FrameGone("no frame of the page holds the node")

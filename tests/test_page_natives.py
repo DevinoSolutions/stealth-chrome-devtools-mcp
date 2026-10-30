@@ -13,13 +13,18 @@ sends and what it does with each reply:
   context is gone" replies are a departure (raised as they came, for
   ``detached_element``), anything else is the read's ``ToolError``;
 * the frame search: a node of another frame is tried in the next frame's world,
-  and a node no frame holds is a departure;
+  whatever "not here" sounds like (a script's FOREIGN, a null object, Chrome's
+  "does not belong"), and a node no frame holds is a departure -- never the first
+  frame's failure;
+* the release of the object group never holds the caller past the read's own
+  budget and never swallows a cancellation;
 * the visibility reader and ``wait_for_element`` / ``query_elements`` never turn a
   failed read into "visible".
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -55,6 +60,11 @@ def backend_log(caplog):
         yield lambda: list(dict.fromkeys(caplog.records))
     finally:
         backend.removeHandler(caplog.handler)
+
+
+async def _drain():
+    """Wait for the releases a failed read handed off (they are detached)."""
+    await asyncio.gather(*list(page_natives._releasing))
 
 
 @pytest.fixture(autouse=True)
@@ -185,6 +195,7 @@ async def test_the_object_group_is_released_after_a_failed_read(failure):
 
     with pytest.raises(Exception):  # noqa: B017, PT011  PERMANENT(every failure class is asserted by its own test below)
         await page_natives.run(node, SCRIPT)
+    await _drain()
 
     assert node.cdp_methods[-1] == "Runtime.releaseObjectGroup"
     assert node.open_groups == []
@@ -252,7 +263,6 @@ async def test_a_failed_read_is_a_tool_error():
         "No node with given id found",
         "Node with given id does not belong to the document",
         CONTEXT_LOST,
-        UNRESOLVABLE,
     ],
 )
 async def test_chromes_own_departure_replies_propagate_as_they_came(message):
@@ -333,14 +343,278 @@ async def test_the_foreign_answer_is_the_products_never_a_pages():
 
 
 # ---------------------------------------------------------------------------
+# the frame search classifies per frame, never per first failure (HIGH)
+# ---------------------------------------------------------------------------
+
+#: The order a reviewer's page lists its frames in: a same-site frame of another
+#: origin, a ``data:`` frame, a same-origin ``srcdoc`` frame.
+PAGE = ("MAIN", "OTHER-ORIGIN", "DATA", "SRCDOC")
+
+
+@pytest.mark.parametrize("other_worlds", ["object", "null", "not-belong"])
+@pytest.mark.parametrize("index", [1, 2, 3], ids=["other-origin", "data", "srcdoc"])
+async def test_a_node_of_any_frame_is_found_whatever_the_frames_before_it_say(
+    other_worlds, index
+):
+    """RED on 3f9cc1d: the main frame's world answers a null object for a node of
+    an other-origin or ``data:`` frame, the next call had no ``objectId`` and
+    failed -32602, and the search ended there as the node's departure."""
+    node = _Node(answer="in-the-frame")
+    node.frame_ids, node.frame_index, node.other_worlds = PAGE, index, other_worlds
+
+    assert await page_natives.run(node, SCRIPT) == "in-the-frame"
+
+    assert [frame for frame, _ in node.worlds] == list(PAGE[: index + 1])
+    assert node.apply_calls == [SCRIPT]  # the page ran once, where the node is
+    # a script runs where the world held an object: with "object" (a world shared
+    # with a same-origin frame) once per frame before it, FOREIGN each time
+    assert node.cdp_methods.count("Runtime.callFunctionOn") == (
+        index + 1 if other_worlds == "object" else 1
+    )
+    assert node.open_groups == []
+
+
+async def test_a_null_object_is_never_followed_by_a_call_without_an_object():
+    node = _Node()
+    node.frame_ids, node.frame_index, node.other_worlds = PAGE, 2, "null"
+
+    await page_natives.run(node, SCRIPT)
+
+    # one call, in the node's own frame; the fake raises for a call with no object
+    assert node.cdp_methods.count("Runtime.callFunctionOn") == 1
+    assert node.read_gestures == [False]
+
+
+async def test_a_call_without_an_object_is_a_failed_read_not_a_departure():
+    """The reply of 3f9cc1d's departure list: only our own bug can produce it."""
+
+    error = ProtocolException({"message": UNRESOLVABLE, "code": -32602})
+    assert not page_natives.departed(error)
+    assert element_resolution.detached_element(error) is None
+    with pytest.raises(page_natives.ReadError) as caught:
+        await page_natives.run(_Node(failure=error), SCRIPT)
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.parametrize("other_worlds", ["null", "not-belong"])
+async def test_a_node_no_frame_holds_is_a_departure_whatever_each_frame_says(
+    other_worlds,
+):
+    node = _Node()
+    node.frame_ids, node.frame_index, node.other_worlds = PAGE, 9, other_worlds
+
+    with pytest.raises(page_natives.FrameGone) as caught:
+        await page_natives.run(node, SCRIPT)
+
+    assert [frame for frame, _ in node.worlds] == list(PAGE)  # every frame asked
+    assert element_resolution.detached_element(caught.value) is not None
+    assert node.apply_calls == []
+
+
+async def test_chromes_node_gone_reply_ends_the_search_at_once():
+    node = _Node()
+    node.frame_ids = PAGE
+    node.resolve_error = left_the_document()
+
+    with pytest.raises(ProtocolException) as caught:
+        await page_natives.run(node, SCRIPT)
+
+    assert page_natives.departed(caught.value)
+    assert [frame for frame, _ in node.worlds] == ["MAIN"]
+
+
+async def test_a_sibling_frame_that_left_between_the_tree_and_its_world_is_skipped():
+    """RED on 3f9cc1d: its ``No frame for given id`` ended the search as the held
+    node's departure."""
+    node = _Node(answer="in-the-last")
+    node.frame_ids, node.frame_index = ("MAIN", "GONE", "LAST"), 2
+    node.other_worlds = "null"
+    node.gone_frames = frozenset({"GONE"})
+
+    assert await page_natives.run(node, SCRIPT) == "in-the-last"
+
+
+async def test_a_context_that_left_between_the_world_and_the_resolution_is_skipped():
+    """A frame that navigates between ``createIsolatedWorld`` and ``resolveNode``
+    says so in its own words; it is that frame's news, not the node's."""
+
+    node = _Node(answer="elsewhere")
+    node.frame_ids, node.frame_index = ("MAIN", "OTHER"), 1
+    node.other_worlds = "not-belong"
+
+    assert await page_natives.run(node, SCRIPT) == "elsewhere"
+
+
+async def test_the_frame_that_answered_is_tried_first_next_time():
+    node = _Node()
+    node.frame_ids, node.frame_index, node.other_worlds = PAGE, 3, "null"
+
+    await page_natives.run(node, SCRIPT)
+    first = list(node.cdp_methods)
+    node.worlds.clear()
+    node.cdp_methods.clear()
+    await page_natives.run(node, SCRIPT)
+
+    assert "Page.getFrameTree" in first
+    assert [frame for frame, _ in node.worlds] == ["SRCDOC"]
+    assert node.cdp_methods == [
+        "Page.createIsolatedWorld",
+        "DOM.resolveNode",
+        "Runtime.callFunctionOn",
+        "Runtime.releaseObjectGroup",
+    ]
+
+
+async def test_a_remembered_frame_that_no_longer_holds_the_node_falls_back():
+    node = _Node()
+    node.frame_ids, node.frame_index, node.other_worlds = PAGE, 3, "null"
+    await page_natives.run(node, SCRIPT)
+
+    node.frame_index = 0  # the node is now in the main frame (re-resolved)
+    node.worlds.clear()
+    assert await page_natives.run(node, SCRIPT) == 1
+    assert [frame for frame, _ in node.worlds] == ["SRCDOC", "MAIN"]
+
+    node.frame_index = 9  # and then nowhere
+    with pytest.raises(page_natives.FrameGone):
+        await page_natives.run(node, SCRIPT)
+
+
+# ---------------------------------------------------------------------------
+# the release never holds the caller, never swallows a cancellation (MED)
+# ---------------------------------------------------------------------------
+
+
+class _Hangs(_Node):
+    """A page that is blocked: the script never returns (a ``confirm()``)."""
+
+    async def apply(self, js_function, *args, **kwargs):
+        self.apply_calls.append(js_function)
+        await asyncio.Event().wait()
+
+
+@pytest.fixture
+def short_releases(monkeypatch):
+    monkeypatch.setattr(page_natives, "RELEASE_WAIT_S", 0.05)
+    monkeypatch.setattr(page_natives, "RELEASE_DETACHED_S", 0.2)
+
+
+async def _ends_within(coro, seconds):
+    """The task of *coro* once it has ended, failing the test if it takes longer.
+
+    Bounded on purpose: the defect these tests pin is a hang, and a hang that is
+    awaited unbounded would hang the lane (no global pytest timeout).
+    """
+    task = asyncio.ensure_future(coro)
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if not done:
+        task.cancel()
+        pytest.fail(f"still running after {seconds} s")
+    return task
+
+
+async def test_a_release_that_never_answers_does_not_hold_a_finished_read(
+    short_releases, backend_log
+):
+    node = _Node(answer="x")
+    node.release_hangs = True
+
+    task = await _ends_within(page_natives.run(node, SCRIPT), 0.15)
+
+    assert task.result() == "x"
+    assert any("was not released" in r.getMessage() for r in backend_log())
+
+
+async def test_a_read_that_is_cut_off_returns_at_its_budget_not_behind_the_release(
+    short_releases, backend_log
+):
+    """RED on 3f9cc1d: the ``finally`` awaited the release behind the blocked
+    page, so the caller's 5 s became the 30 s ``browser may have crashed``."""
+    node = _Hangs()
+    node.release_hangs = True
+    read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.05)  # the caller's budget runs out ...
+    read.cancel()  # ... and ``wait_for`` cancels the read
+
+    await _ends_within(asyncio.wait({read}), 0.1)  # not 0.05 + the release's wait
+
+    assert read.cancelled()
+    assert len(page_natives._releasing) == 1  # handed off, not forgotten
+    await _drain()  # ... and abandoned at its own bound
+    assert page_natives._releasing == set()
+    assert any("was not released" in r.getMessage() for r in backend_log())
+
+
+async def test_a_cancellation_propagates_at_once_and_still_releases():
+    node = _Hangs()
+    task = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.01)
+    task.cancel()
+
+    await _ends_within(asyncio.wait({task}), 0.1)
+
+    assert task.cancelled()
+    await _drain()
+    assert node.cdp_methods[-1] == "Runtime.releaseObjectGroup"
+    assert node.open_groups == []
+
+
+async def test_the_synthetic_click_on_a_blocked_page_answers_within_its_budget(
+    short_releases, monkeypatch
+):
+    """The caller of 2.1.53's bound: ``INPUT_BUDGET_S``, and the ledger that makes
+    the answer "may have reached the page, so it was not repeated", not a crash."""
+    monkeypatch.setattr(click_target, "INPUT_BUDGET_S", 0.05)
+    node = _Hangs()
+    node.release_hangs = True
+    ledger = click_target.InputSent()
+
+    task = await _ends_within(
+        click_target.synthetic_click(node, "x", ledger),
+        0.15,
+    )
+
+    assert isinstance(task.exception(), TimeoutError)
+    assert ledger.sent is True
+    await _drain()
+
+
+# ---------------------------------------------------------------------------
+# one connectivity read per listed row (LOW)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_visible_listing_reads_each_row_once():
+    node = _Node(answer=True)
+    rows = await DOMHandler.query_elements(_TabOf(node), "li", visible_only=True)
+
+    assert len(rows) == 1
+    assert node.cdp_methods.count("Runtime.callFunctionOn") == 1
+
+
+async def test_an_unfiltered_listing_still_reads_connectivity_once_per_row():
+    node = _Node(answer=click_target.CONNECTED_YES)
+    rows = await DOMHandler.query_elements(_TabOf(node), "li", visible_only=False)
+
+    assert len(rows) == 1
+    assert node.cdp_methods.count("Runtime.callFunctionOn") == 1
+
+
+async def test_a_removed_node_is_dropped_from_a_visible_listing_by_its_one_read():
+    node = _Node(answer=click_target.CONNECTED_NO)
+
+    assert await DOMHandler.query_elements(_TabOf(node), "li", visible_only=True) == []
+    assert node.cdp_methods.count("Runtime.callFunctionOn") == 1
+
+
+# ---------------------------------------------------------------------------
 # the readers never turn a failed read into "visible"
 # ---------------------------------------------------------------------------
 
 
 async def test_a_departure_during_the_visibility_read_is_not_visible():
-    for message in (CONTEXT_LOST, UNRESOLVABLE):
-        node = _Node(failure=ProtocolException({"message": message}))
-        assert await element_resolution.node_is_visible(node, "the node") is False
+    node = _Node(failure=ProtocolException({"message": CONTEXT_LOST}))
+    assert await element_resolution.node_is_visible(node, "the node") is False
 
 
 async def test_an_unrelated_failure_during_the_visibility_read_raises():

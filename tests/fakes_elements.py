@@ -6,6 +6,7 @@ tests keep writing ``from fakes import ...``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -226,10 +227,30 @@ class _ApplyTab:
             }
         if method == "Page.createIsolatedWorld":
             owner.worlds.append((params["frameId"], params["worldName"]))
+            if params["frameId"] in owner.gone_frames:
+                raise ProtocolException(
+                    {"message": "No frame for given id found", "code": -32000}
+                )
             return {"executionContextId": 100 + frames.index(params["frameId"])}
         if method == "DOM.resolveNode":
+            context = params.get("executionContextId")
+            owner.resolved_contexts.append(context)
+            if owner.resolve_error is not None:
+                raise owner.resolve_error
+            if context != 100 + owner.frame_index:
+                # A world that is not the node's frame's: what Chrome measured
+                # answers for a node of an in-process frame it cannot reach.
+                if owner.other_worlds == "null":
+                    return {"object": {"type": "object", "subtype": "null"}}
+                if owner.other_worlds == "not-belong":
+                    raise ProtocolException(
+                        {
+                            "message": "Node with given id does not belong "
+                            "to the document",
+                            "code": -32000,
+                        }
+                    )
             owner.open_groups.append(params.get("objectGroup"))
-            owner.resolved_contexts.append(params.get("executionContextId"))
             return {"object": {"type": "object", "objectId": "fake"}}
         if method == "Runtime.releaseObjectGroup":
             if owner.release_error is not None:
@@ -242,6 +263,16 @@ class _ApplyTab:
     async def _call(self, request: dict[str, Any]) -> dict[str, Any]:
         owner, params = self._owner, request.get("params", {})
         owner.read_gestures.append(params.get("userGesture"))
+        if params.get("objectId") is None:
+            # What Chrome answers a call that names no object: only a defect of
+            # the product sends one.
+            raise ProtocolException(
+                {
+                    "message": "Either objectId or executionContextId or "
+                    "uniqueContextId must be specified",
+                    "code": -32602,
+                }
+            )
         # The context this call runs in is the last ``DOM.resolveNode``'s.
         if owner.resolved_contexts[-1] != 100 + owner.frame_index:
             return {"result": {"type": "string", "value": FOREIGN}}
@@ -274,6 +305,11 @@ class _ApplyTab:
         self._owner.cdp_methods.append(request["method"])
         if request["method"] == "Runtime.callFunctionOn":
             reply = await self._call(request)
+        elif request["method"] == "Runtime.releaseObjectGroup" and (
+            self._owner.release_hangs
+        ):
+            await asyncio.Event().wait()  # a page blocked behind a dialog
+            reply = {}
         else:
             reply = self._reply(request)
         try:
@@ -299,10 +335,23 @@ class AppliesOverCdp:
     frame_index = 0
     #: What ``Runtime.releaseObjectGroup`` raises (a connection that is gone).
     release_error: BaseException | None = None
+    #: A release that never answers (the page is blocked behind a dialog).
+    release_hangs = False
+    #: What ``DOM.resolveNode`` answers in a world that is not the node's frame's:
+    #: ``"object"`` (a same-origin frame shares the world; the script tells),
+    #: ``"null"`` (an object with no ``objectId``: a frame of another origin, a
+    #: ``data:`` frame) or ``"not-belong"`` (Chrome's "does not belong" reply).
+    other_worlds = "object"
+    #: What ``DOM.resolveNode`` raises, whatever the world (Chrome's node-gone).
+    resolve_error: BaseException | None = None
+    #: Frames the page lists but ``Page.createIsolatedWorld`` no longer knows.
+    gone_frames: frozenset[str] = frozenset()
 
     @property
     def tab(self) -> _ApplyTab:
-        return _ApplyTab(self)
+        # ONE tab per node, as a real ``Element`` has: what a read remembers about
+        # the page (the frame that answered) lives on it.
+        return self.__dict__.setdefault("_apply_tab", _ApplyTab(self))
 
     def _log(self, name: str) -> list[Any]:
         return self.__dict__.setdefault(f"_log_{name}", [])
