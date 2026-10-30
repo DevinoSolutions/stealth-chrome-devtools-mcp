@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from fakes import boot_log_when_settled
 from stealth_chrome_devtools_mcp.embedded import (
     backend_launch,
     backend_registry,
@@ -693,12 +694,12 @@ class TestTheLauncherScriptItself:
         )
         pid = int(pid_file.read_text(encoding="utf-8").strip())
         assert pid > 0
-        _wait_for(boot_log, "hi")
+        _wait_for(pid_file, boot_log, "hi", identity="print('hi')")
 
     def test_the_child_starts_in_the_spec_s_working_directory(self, tmp_path):
         home = tmp_path / "seed dir"
         home.mkdir()
-        _pid_file, boot_log = self._run_launcher(
+        pid_file, boot_log = self._run_launcher(
             tmp_path,
             [
                 sys.executable,
@@ -707,25 +708,22 @@ class TestTheLauncherScriptItself:
             ],
             cwd=home,
         )
-        _wait_for(boot_log, str(home))
+        _wait_for(pid_file, boot_log, str(home), identity="os.getcwd()")
 
     def test_an_import_time_crash_lands_in_the_boot_log(self, tmp_path):
         # F-303's whole point, preserved across the scheduler hand-off.
-        _pid_file, boot_log = self._run_launcher(
+        pid_file, boot_log = self._run_launcher(
             tmp_path, [sys.executable, "-c", "import nonexistent_module_xyz"]
         )
-        _wait_for(boot_log, "ModuleNotFoundError")
+        _wait_for(
+            pid_file, boot_log, "ModuleNotFoundError", identity="nonexistent_module_xyz"
+        )
 
 
-def _wait_for(path: Path, needle: str) -> None:
-    import time
-
-    deadline = time.monotonic() + 30
-    text = ""
-    while time.monotonic() < deadline:
-        if path.exists():
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if needle in text:
-                return
-        time.sleep(0.05)
-    raise AssertionError(f"{needle!r} never reached {path}: {text!r}")
+def _wait_for(pid_file: Path, boot_log: Path, needle: str, *, identity: str) -> None:
+    """*needle* reaches the boot log, or the child (its pid is in *pid_file*) exits
+    without it. One wait with the T-9675 boot-crash test: on the child's events, not a
+    fixed window (``fakes.boot_log_when_settled``)."""
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    text = boot_log_when_settled(boot_log, pid, needle, identity=identity)
+    assert needle in text, f"{needle!r} never reached {boot_log}: {text!r}"
