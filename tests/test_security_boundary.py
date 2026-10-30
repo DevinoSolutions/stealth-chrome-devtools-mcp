@@ -206,7 +206,8 @@ def test_host_python_execution_sites_are_exactly_the_declared_set():
     execution is contained — it is not, and §6 says so. What it buys is that
     the contract's list of tools running host Python cannot silently go stale.
     """
-    found = _host_exec_calls()
+    compile_only = {module for module, _ in re_mod.PACKAGE_SOURCE_COMPILE_SITES}
+    found = {(m, line) for m, line in _host_exec_calls() if m not in compile_only}
     declared_modules = {module for module, _ in re_mod.HOST_EXEC_SITES}
     found_modules = {module for module, _ in found}
     assert found_modules == declared_modules, (
@@ -219,6 +220,21 @@ def test_host_python_execution_sites_are_exactly_the_declared_set():
         f"expected {len(re_mod.HOST_EXEC_SITES)} host-exec call sites, found "
         f"{len(found)}: {sorted(found)}"
     )
+
+
+def test_package_source_compile_sites_compile_and_never_execute():
+    """A module declared as compiling only the package's own source holds
+    exactly one ``compile`` call per declaration and no ``exec``/``eval`` at
+    all, so the exemption cannot hide a host-exec site."""
+    for module, _ in re_mod.PACKAGE_SOURCE_COMPILE_SITES:
+        tree = ast.parse((PKG_ROOT / module).read_text(encoding="utf-8"))
+        names = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+        assert names.count("compile") == 1, module
+        assert "exec" not in names and "eval" not in names, module
 
 
 def test_the_declared_exec_tools_are_all_really_served():
