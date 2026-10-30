@@ -394,3 +394,23 @@ async def test_close_tab_clears_the_callers_screencast_mark_on_a_live_browser():
     tab_binding.forget_tab("iid", "t-1", browser=browser)  # what close_tab does
     await paint_hold.hold(_real_tab(browser, "t-1"))  # the id is not theirs any more
     assert "t-1" in paint_hold._held
+
+
+async def test_the_close_tab_tool_clears_the_mark_on_the_browser_it_closed(monkeypatch):
+    from stealth_chrome_devtools_mcp.embedded import tool_runtime
+    from stealth_chrome_devtools_mcp.embedded.tool_sections import tabs
+
+    browser = _real_browser()
+    await _caller_screencast(_real_tab(browser, "t-1"))
+    assert tab_open.is_caller_owned(browser, "t-1")
+
+    class _Manager:
+        async def get_browser(self, instance_id, touch_activity=False):
+            return browser
+
+        async def close_tab(self, instance_id, tab_id):
+            return True
+
+    monkeypatch.setattr(tool_runtime, "browser_manager", _Manager())
+    assert await tabs.close_tab("iid", "t-1") is True
+    assert not tab_open.is_caller_owned(browser, "t-1")
