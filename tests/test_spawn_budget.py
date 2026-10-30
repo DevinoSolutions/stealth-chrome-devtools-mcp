@@ -160,6 +160,10 @@ class StalledTab:
 
     url = "about:blank"
     type_ = "page"
+    # What ``tab_open.initial_tab`` reads, built by nodriver's own constructor (T-9551).
+    target = nodriver.cdp.target.TargetInfo(
+        nodriver.cdp.target.TargetID("stalled"), "page", "", url, True, False
+    )
 
     async def send(self, *_args, **_kwargs):
         raise RuntimeError("a version probe that fails is swallowed (F-806)")
@@ -213,6 +217,11 @@ class LaunchedChrome:
         # A launched Chrome with a tab has opened a page (F-1003 reads targets).
         self.targets = [] if tab is None else [tab]
         self.stops = 0
+
+    @property
+    def tabs(self) -> list:
+        """nodriver's ``Browser.tabs``: the targets whose type is ``page``."""
+        return [t for t in self.targets if t.target.type_ == "page"]
 
     # The Browser IS its connection since nodriver 0.50 (``browser.py``:32).
     def add_handler(self, event_type, handler) -> None:
