@@ -267,12 +267,13 @@ async def _release_bounded(tab: Tab, group: str, seconds: float) -> None:
     A release that fails must not replace the read's own result or error (a
     navigation already freed the group), and one that does not answer -- the page
     is blocked behind a dialog or a busy loop -- must not hold the caller: it is
-    logged and abandoned.
+    logged and abandoned. ``asyncio.timeout``, not ``wait_for``: on Python 3.11
+    ``wait_for`` returns the reply when a cancellation lands after it arrived,
+    and the cancellation is lost.
     """
     try:
-        await asyncio.wait_for(
-            tab.send(cdp.runtime.release_object_group(group)), seconds
-        )
+        async with asyncio.timeout(seconds):
+            await tab.send(cdp.runtime.release_object_group(group))
     except TimeoutError:
         debug_logger.log_warning(
             "page_natives",
@@ -320,8 +321,9 @@ async def _release_leftovers(tab: Tab) -> None:
     many there are. A read cancelled during that wait puts back every group whose
     release did not finish, so the next read still releases it (releasing a
     group twice is harmless; forgetting one keeps it until a navigation). They go
-    back with the order they were first left in, so however reads overlap the
-    cap drops the group left longest ago.
+    back with the order they were first left in, so the cap drops the group left
+    longest ago of those WAITING on the tab. A group another read is releasing
+    meanwhile is not counted, and can come back older than one already dropped.
     """
     left = getattr(tab, _LEFTOVERS, None)
     if not left:

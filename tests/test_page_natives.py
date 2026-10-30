@@ -679,6 +679,24 @@ async def test_groups_put_back_go_ahead_of_newer_ones_so_the_cap_drops_the_oldes
     assert len(dropped) == 1 and "old-0" in dropped[0]
 
 
+async def test_a_cancellation_that_lands_after_the_release_answered_is_kept():
+    """The review of 38dee82: on Python 3.11 ``wait_for`` returned the release's
+    reply when a cancellation landed after it, so a cancelled read went on."""
+    reply = asyncio.get_running_loop().create_future()
+
+    class _Tab:
+        async def send(self, _command):
+            return await reply
+
+    release = asyncio.ensure_future(page_natives._release_bounded(_Tab(), "g", 5.0))
+    await asyncio.sleep(0)  # sent, waiting for its reply
+    reply.set_result(None)
+    release.cancel()  # lands in the same turn as the reply (a red only on 3.11)
+    await asyncio.wait([release])
+
+    assert release.cancelled()
+
+
 async def test_a_read_cancelled_during_its_own_release_leaves_the_group():
     """The review of 3b9e890: the read had its answer, then was cancelled while
     its own release waited (behind another send on the tab); the group was
