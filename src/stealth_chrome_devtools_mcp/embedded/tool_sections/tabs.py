@@ -75,11 +75,12 @@ async def close_tab(instance_id: str, tab_id: str) -> bool:
     Returns:
         bool: True if closed successfully.
     """
+    browser = await rt.browser_manager.get_browser(instance_id)  # a pure read
     closed = await rt._with_cdp_timeout(
         rt.browser_manager.close_tab(instance_id, tab_id), instance_id=instance_id
     )
     if closed:
-        tab_binding.forget_tab(instance_id, tab_id)
+        tab_binding.forget_tab(instance_id, tab_id, browser=browser)
     return closed
 
 

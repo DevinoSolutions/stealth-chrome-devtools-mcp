@@ -44,7 +44,7 @@ from stealth_chrome_devtools_mcp.embedded import tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
-    from nodriver import Tab
+    from nodriver import Browser, Tab
 
 #: How long a tab stays held after the last tool call on it. A module constant (and
 #: the test seam), not a setting: a longer one keeps a finished tab painting.
@@ -160,9 +160,12 @@ async def _stop(tab: Tab, where: str) -> None:
         debug_logger.log_info("paint_hold", where, f"{type(error).__name__}: {error}")
 
 
-def forget(target_id: str) -> None:
-    """Drop the hold on a tab that was closed: its timer ends, nothing is sent."""
+def forget(target_id: str, browser: Browser | None = None) -> None:
+    """Drop the hold on a tab that was closed: its timer ends, nothing is sent.
+    Given the tab's *browser*, its caller-owned mark goes too."""
     _browserless_caller_owned.discard(str(target_id))
+    if browser is not None:
+        tab_open.set_caller_owned(browser, str(target_id), False)
     entry = _held.pop(str(target_id), None)
     if entry is not None and entry.task is not None:
         entry.task.cancel()
