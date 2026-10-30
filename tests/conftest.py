@@ -447,6 +447,26 @@ def tmp_empty_root(tmp_path):
 
 
 @pytest.fixture()
+def instant_element_wait(monkeypatch):
+    """Zero ``element_resolution``'s selector wait (F-884) for a module that does
+    not test it.
+
+    A ``FakeTab`` whose ``select_result`` is ``None`` is a selector that matches
+    nothing, and ``resolve_element`` then polls for the full 10 s default before
+    answering "not found" - the production wait, unchanged. A test that only
+    needs the NOT-FOUND answer (the cloner suites resolve ``styles`` on a tab
+    with no element) paid that 10 s per test. Request this with
+    ``pytestmark = pytest.mark.usefixtures("instant_element_wait")``; a test
+    that asserts the wait itself passes its own ``timeout`` or patches the
+    constants, as ``tests/test_element_resolution.py`` does.
+    """
+    from stealth_chrome_devtools_mcp.embedded import element_resolution
+
+    monkeypatch.setattr(element_resolution, "_DEFAULT_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(element_resolution, "_POLL_SECONDS", 0.0)
+
+
+@pytest.fixture()
 def call_tool():
     """The one in-process tool invoker (unwrap ``.fn``, await if awaitable)."""
     from fakes import call_tool as _call_tool

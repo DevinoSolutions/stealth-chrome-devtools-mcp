@@ -16,6 +16,7 @@ import psutil
 import pytest
 from pydantic import ValidationError
 
+from stealth_chrome_devtools_mcp.embedded import tool_runtime
 from stealth_chrome_devtools_mcp.embedded.models import NavigationOptions
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
@@ -100,8 +101,11 @@ class TestWithCdpTimeoutMechanism:
         assert elapsed < 2.0
 
     @pytest.mark.asyncio
-    async def test_zero_timeout_uses_default(self):
+    async def test_zero_timeout_uses_default(self, monkeypatch):
         """timeout=0 should fall back to CDP_OPERATION_TIMEOUT."""
+        # The real default is 30 s; patch the module constant the wrapper reads
+        # so the fall-back is exercised without sitting out the production wait.
+        monkeypatch.setattr(tool_runtime, "CDP_OPERATION_TIMEOUT", 1.5)
 
         async def hang():
             await asyncio.sleep(9999)
@@ -110,9 +114,8 @@ class TestWithCdpTimeoutMechanism:
         with pytest.raises(Exception, match="timed out"):
             await _with_cdp_timeout(hang(), timeout=0)
         elapsed = time.monotonic() - start
-        # Should use default 30s, but we don't want to wait that long
-        # Just verify it didn't use 0 (instant) or get stuck
-        assert elapsed > 1.0  # didn't fire instantly
+        # Fell back to the (patched) default: not instant, and not stuck.
+        assert 1.0 < elapsed < 5.0, f"fell back after {elapsed:.1f}s, expected ~1.5s"
 
     @pytest.mark.asyncio
     async def test_concurrent_timeouts_independent(self):
