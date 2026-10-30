@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
+#: How long `close` waits for the listener's connections to end.
+CLOSE_BUDGET_SECONDS = 2.0
 _HTTP_REQUEST_LINE_MIN_PARTS = 3
 _MAX_PORT = 65535
 _SOCKS5_AUTH_USERNAME_PASSWORD = 2
@@ -171,9 +173,26 @@ class AuthenticatedProxyForwarder:
         if self.server is None:
             return
 
-        self.server.close()
-        await self.server.wait_closed()
-        self.server = None
+        server, self.server = self.server, None
+        server.close()
+        # Python 3.12.1+: `wait_closed` waits for every connection, and Chrome's
+        # CONNECT tunnels outlive a close that was cancelled before the browser
+        # went (T-9551). Drop them (3.13+), then bound the wait. `asyncio.timeout`
+        # and not `wait_for`: 3.11's `wait_for` can swallow a late cancel.
+        close_clients = getattr(server, "close_clients", None)
+        if close_clients is not None:
+            close_clients()
+        try:
+            async with asyncio.timeout(CLOSE_BUDGET_SECONDS):
+                await server.wait_closed()
+        except TimeoutError:
+            debug_logger.log_warning(
+                "proxy_forwarder",
+                "close",
+                f"Forwarder on {self.proxy_server} was still closing after "
+                f"{CLOSE_BUDGET_SECONDS:g}s; gave up waiting",
+            )
+            return
         debug_logger.log_info(
             "proxy_forwarder",
             "close",

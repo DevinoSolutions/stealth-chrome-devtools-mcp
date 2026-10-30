@@ -1052,3 +1052,71 @@ async def test_a_close_cancelled_in_phase_two_still_closes_the_forwarder():
         await manager.close_instance("test-1")
 
     assert forwarder.closes == 1
+
+
+# T-9551: the forwarder's close is bounded, so a close that is cancelled before
+# Chrome's CONNECT tunnels are gone still finishes.
+
+
+def _forwarder():
+    from stealth_chrome_devtools_mcp.embedded.proxy_forwarder import (
+        AuthenticatedProxyForwarder,
+    )
+
+    return AuthenticatedProxyForwarder("http://user:pass@upstream.invalid:8080")
+
+
+@pytest.mark.asyncio
+async def test_a_forwarder_with_an_open_client_connection_closes():
+    """A client (Chrome's CONNECT tunnel) still connected when ``close`` runs: on
+    Python 3.12.1+ ``Server.wait_closed`` waits for it, so an unbounded close never
+    returns while Chrome is up. Closed clients first, so nothing is waited for."""
+    forwarder = _forwarder()
+    await forwarder.start()
+    _reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
+    await asyncio.sleep(0.2)  # let the server accept it
+    try:
+        # Idle, it holds ``wait_closed`` for the 5 s request timeout (measured
+        # 4.8 s); an established CONNECT tunnel holds it for as long as it lives.
+        async with asyncio.timeout(1.5):
+            await forwarder.close()
+    finally:
+        writer.close()
+
+    assert forwarder.server is None
+
+
+@pytest.mark.asyncio
+async def test_a_forwarder_whose_server_never_finishes_closing_is_given_up_on(
+    monkeypatch,
+):
+    from stealth_chrome_devtools_mcp.embedded import proxy_forwarder
+
+    monkeypatch.setattr(proxy_forwarder, "CLOSE_BUDGET_SECONDS", 0.2)
+    forwarder = _forwarder()
+
+    async def _never():
+        await asyncio.Event().wait()
+
+    forwarder.server = SimpleNamespace(close=MagicMock(), wait_closed=_never)
+
+    async with asyncio.timeout(5):
+        await forwarder.close()
+
+    assert forwarder.server is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_is_not_swallowed_by_the_forwarders_bound():
+    forwarder = _forwarder()
+
+    async def _never():
+        await asyncio.Event().wait()
+
+    forwarder.server = SimpleNamespace(close=MagicMock(), wait_closed=_never)
+    task = asyncio.ensure_future(forwarder.close())
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)

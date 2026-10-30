@@ -661,8 +661,9 @@ class TestManagerAdoption:
 
     async def _adopted_tab(self, manager, cleanup, tabs):
         """The tab the instance is stored under after a re-attach to a browser whose
-        targets are *tabs*, NEWEST FIRST -- the order a fresh attach lists them in,
-        and so the tab nodriver's own ``main_tab`` would have returned (T-9551)."""
+        pages nodriver lists as *tabs* -- ``tabs[0]`` is the one its own ``main_tab``
+        answers, and the answer to "which page is this browser's tab" is that one
+        unless Chrome opened it for itself (T-9551)."""
         browser = FakeBrowser(alive=True, pid=CHROME_PID, main_tab=tabs[0], tabs=tabs)
         with (
             patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
@@ -680,10 +681,9 @@ class TestManagerAdoption:
     async def test_a_stray_settings_tab_is_not_adopted_as_the_main_tab(
         self, manager, cleanup
     ):
-        """T-9551: the newest target is the stray ``chrome://settings`` page the
-        first-launch session-restore exchange (T-9479) opens, 4 of 4 live runs when
-        the backend died inside its 0.6-2.3 s window. The page the caller worked in
-        is the older one."""
+        """T-9551: the first target nodriver lists is the stray ``chrome://settings``
+        page the first-launch session-restore exchange (T-9479) opens, 4 of 4 live
+        runs when the backend died inside its 0.6-2.3 s window."""
         page = FakeTab(url="https://sellercentral.amazon.com/", target_id="T-page")
         settings = FakeTab(url="chrome://settings/", target_id="T-settings")
 
@@ -708,29 +708,45 @@ class TestManagerAdoption:
         assert await self._adopted_tab(manager, cleanup, [own, page]) is page
 
     @pytest.mark.asyncio
-    async def test_the_oldest_page_wins_among_a_callers_tabs(self, manager, cleanup):
-        """A multi-tab re-attach: nodriver's newest-first ``main_tab`` made the
-        instance's tab whichever page was opened LAST. The one the browser was
-        launched with is the oldest."""
-        newest = FakeTab(url="https://c.test/", target_id="T-c")
-        middle = FakeTab(url="https://b.test/", target_id="T-b")
-        oldest = FakeTab(url="https://a.test/", target_id="T-a")
+    async def test_the_tab_a_caller_switched_to_stays_the_instances_tab(
+        self, manager, cleanup
+    ):
+        """Scenario 1: ``new_tab`` B then ``switch_tab(B)`` makes B the instance's
+        stored tab, and B is the page nodriver lists first. A re-attach that picked
+        the OLDEST page would hand the caller A."""
+        switched = FakeTab(url="https://b.test/", target_id="T-b")
+        launched = FakeTab(url="https://a.test/", target_id="T-a")
 
-        assert await self._adopted_tab(manager, cleanup, [newest, middle, oldest]) is (
-            oldest
+        assert await self._adopted_tab(manager, cleanup, [switched, launched]) is (
+            switched
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_recycled_tab_is_not_swapped_for_another_callers(
+        self, manager, cleanup
+    ):
+        """Scenario 2: 25 navigates recycle the instance's tab to C while B is open
+        (``_replace_main_tab``). C is what nodriver lists first; picking the oldest
+        non-internal page would adopt B, another caller's tab."""
+        recycled = FakeTab(url="https://c.test/", target_id="T-c")
+        other = FakeTab(url="https://b.test/", target_id="T-b")
+        first = FakeTab(url="https://a.test/", target_id="T-a")
+
+        assert await self._adopted_tab(manager, cleanup, [recycled, other, first]) is (
+            recycled
         )
 
     @pytest.mark.asyncio
     async def test_a_browser_with_only_its_own_pages_is_still_adopted(
         self, manager, cleanup
     ):
-        """A browser whose only page is a Chrome-internal one is a usable browser
-        (a human can have a settings page open and nothing else); refusing it would
-        route a logged-in persistent profile to the reap. The oldest is taken."""
-        newest = FakeTab(url="chrome://settings/", target_id="T-new")
-        oldest = FakeTab(url="chrome://newtab/", target_id="T-old")
+        """A browser whose only pages are Chrome-internal is a usable browser (a
+        human can have a settings page open and nothing else); refusing it would
+        route a logged-in persistent profile to the reap. nodriver's pick stands."""
+        first = FakeTab(url="chrome://settings/", target_id="T-new")
+        second = FakeTab(url="chrome://newtab/", target_id="T-old")
 
-        assert await self._adopted_tab(manager, cleanup, [newest, oldest]) is oldest
+        assert await self._adopted_tab(manager, cleanup, [first, second]) is first
 
     @pytest.mark.asyncio
     async def test_an_already_registered_instance_is_left_alone(self, manager, cleanup):

@@ -233,14 +233,15 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
     assert profile.exists()
 
 
-async def test_a_re_attach_stores_the_original_page_not_the_newest_tab(
+async def test_a_re_attach_does_not_store_chromes_own_tab(
     fixture_app_server, tmp_empty_root, tmp_path
 ):
-    """T-9551: nodriver's ``main_tab`` is the NEWEST page, so a browser with a stray
-    ``chrome://settings`` tab (what T-9479's first-launch exchange leaves when its
-    backend dies mid-flight) and a second page was adopted onto the wrong tab. The
-    stored tab must be the page the browser was launched with, and a tool body that
-    reads it must see that page's state."""
+    """T-9551: a browser with a stray ``chrome://settings`` tab (what T-9479's
+    first-launch exchange leaves when its backend dies mid-flight) opened AFTER its
+    pages was adopted onto that tab, because nodriver's ``main_tab`` is the first
+    page it lists. The stored tab must be one of the browser's real pages. Which
+    one is nodriver's pick (the rule is "``main_tab`` unless it is Chrome's own"),
+    so this asserts that the stray is passed over and not which page was chosen."""
     manager = tool_runtime.browser_manager
     spawn = get_fn("spawn_browser")
     close = get_fn("close_instance")
@@ -253,15 +254,16 @@ async def test_a_re_attach_stores_the_original_page_not_the_newest_tab(
     adopted_here = False
     try:
         await navigate_and_settle(iid, f"{fixture_app_server}/interactions.html")
-        await eval_js(iid, "window.__t9551 = 'original'")
         browser = manager._instances[iid]["browser"]
         original = manager._instances[iid]["tab"].target.target_id
         chrome_pid = browser._process_pid
         port = browser.config.port
 
-        # Two tabs OPENED AFTER the main page: a settings page, then another page.
+        # Another page, then the stray settings page NEWEST of all.
+        second = await tab_open.open_tab(
+            browser, f"{fixture_app_server}/interactions.html"
+        )
         await tab_open.open_tab(browser, "chrome://settings/")
-        await tab_open.open_tab(browser, f"{fixture_app_server}/interactions.html")
         await tab_open.update_targets(browser)
         assert len(browser.tabs) >= 3
 
@@ -299,10 +301,10 @@ async def test_a_re_attach_stores_the_original_page_not_the_newest_tab(
         assert adopted == [iid], f"expected {iid} to be adopted, got {adopted!r}"
         adopted_here = True
         stored = manager._instances[iid]["tab"]
-        assert stored.target.target_id == original, (
-            f"re-attach stored {stored.target.url!r}, not the original page"
+        assert not str(stored.target.url).startswith("chrome://"), (
+            f"re-attach stored Chrome's own tab {stored.target.url!r}"
         )
-        assert await eval_js(iid, "window.__t9551") == "original"
+        assert stored.target.target_id in {original, second.target.target_id}
     finally:
         with contextlib.suppress(Exception):
             await close(instance_id=iid)

@@ -135,25 +135,33 @@ _BROWSER_OWN_SCHEMES = ("chrome://", "chrome-untrusted://", "devtools://")
 
 
 def initial_tab(browser: Browser) -> Tab:
-    """The page an ATTACH to a browser we did not launch should adopt as its tab
-    (T-9551); ``IndexError`` when it has no page, as nodriver's ``main_tab`` does.
+    """THE one answer to "which page is this browser's tab" for a browser we start
+    driving: a spawn's first page (``browser_connect.first_page``) and a re-attach
+    (``browser_reattach``) both read it (T-9551).
 
-    nodriver's ``main_tab`` is the first page it lists, and a fresh attach lists
-    targets NEWEST first, so it names the last page opened: measured 4 of 4 as the
-    stray ``chrome://settings`` page the first-launch session-restore exchange
-    (T-9479) opens when its backend dies inside the 0.6-2.3 s window. The page the
-    browser was launched with is the OLDEST, so this takes the oldest page that is
-    not Chrome's own (:data:`_BROWSER_OWN_SCHEMES`), and the oldest of all when
-    every page is. The registry records no target id and does not need to: the
-    answer is read off the live browser, which cannot be stale. The newest-first
-    order is observed, not contractual, and the real-Chrome pin
-    (``test_e2e_persistent_profile_reattach``) is what holds it.
+    It is nodriver's own pick, ``main_tab`` (the first page it lists), unless that
+    page is one Chrome opened for itself (:data:`_BROWSER_OWN_SCHEMES`), in which
+    case it is the first page that is not. After a backend died inside the
+    first-launch session-restore exchange (T-9479, 0.6-2.3 s) the page nodriver
+    listed first was the stray ``chrome://settings`` tab, 4 of 4 live runs. Nothing
+    here relies on the order the pages are listed in: whichever page nodriver
+    names, it is only passed over when it is Chrome's. The instance's stored tab
+    moves after a spawn (``switch_to_tab``, ``_replace_main_tab``,
+    ``_repoint_after_close``), so no creation-order rule (oldest, newest) can name
+    it; the registry records no target id either, which would go stale the same way.
+
+    A browser with only Chrome's own pages answers the first of them, as
+    ``main_tab`` would. ``IndexError`` when it lists no page at all: nodriver's own
+    ``main_tab`` raises ``StopIteration`` there, which a coroutine turns into a
+    ``RuntimeError``, so the empty case is raised here on purpose.
     """
     pages = list(browser.tabs)
-    callers = [
-        p for p in pages if not str(p.target.url).startswith(_BROWSER_OWN_SCHEMES)
-    ]
-    return (callers or pages)[-1]
+    if not pages:
+        raise IndexError("the browser lists no page")
+    return next(
+        (p for p in pages if not str(p.target.url).startswith(_BROWSER_OWN_SCHEMES)),
+        pages[0],
+    )
 
 
 def is_closed(browser: Browser) -> bool:

@@ -582,3 +582,22 @@ async def test_spawn_browser_takes_its_tab_from_first_page_not_main_tab():
 
     assert "await browser_connect.first_page(browser)" in source
     assert ".main_tab" not in source
+
+
+async def test_a_spawn_and_a_re_attach_answer_the_same_page(clock, targets, launcher):
+    """T-9551: ONE answer to "which page is this browser's tab". ``first_page`` is
+    the spawn's reader and ``tab_open.initial_tab`` the re-attach's; a browser whose
+    first listed page is Chrome's own gets the next one from both."""
+    from stealth_chrome_devtools_mcp.embedded import tab_open
+
+    settings = _target("page", 1)
+    settings.url = "chrome://settings/"
+    page = _target("page", 2)
+    targets.append((0.0, [settings, page]))
+    _process, config_factory = launcher
+    browser = await _start(config_factory)
+
+    tab = await browser_connect.first_page(browser)
+
+    assert tab.target.target_id == page.target_id
+    assert tab is tab_open.initial_tab(browser)
