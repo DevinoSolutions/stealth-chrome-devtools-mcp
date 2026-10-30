@@ -18,6 +18,8 @@ from nodriver.core.connection import ProtocolException
 
 from fakes_consts import _UNSET
 
+FOREIGN = "stealth.read:foreign"
+
 # ---------------------------------------------------------------------------
 # Fake target-listing seam (nodriver ``Browser.tabs`` entries)
 # ---------------------------------------------------------------------------
@@ -148,35 +150,132 @@ class FakeTextField:
         self.value += "\n" if text == "\r" else text
 
 
-class _ApplyTab:
-    """The two CDP commands ``page_natives.read`` sends, answered by the owner's ``apply``.
+class PageThrew(Exception):  # noqa: N818  PERMANENT(a page-side throw, not an error of the test)
+    """What a page script throws: ``value`` is the thrown JavaScript value.
 
-    The commands are the LIBRARY's own generators (``cdp.dom.resolve_node``,
-    ``cdp.runtime.call_function_on``): the request is read off them, the reply
-    is fed back through them, and the pair they return is what the product
-    unpacks. Only the page behind ``Runtime.callFunctionOn`` is the double's.
-    What the double adds to the owner is ``read_gestures``: the ``userGesture``
-    each such call carried, so a test can say it was not set.
+    Raised by a double's ``apply``; ``_ApplyTab`` answers it the way Chrome does,
+    a ``result`` holding the thrown value AND ``exceptionDetails`` (a thrown
+    ``true`` arrives as an ordinary ``true`` unless ``exceptionDetails`` is read).
+    ``error=True`` is a thrown Error object (``subtype: error``, no value).
+    """
+
+    def __init__(self, value: Any = None, *, error: bool = False) -> None:
+        super().__init__(repr(value))
+        self.value = value
+        self.error = error
+
+
+def _frame(frame_id: str) -> dict[str, Any]:
+    return {
+        "id": frame_id,
+        "loaderId": "L",
+        "url": "x",
+        "domainAndRegistry": "",
+        "securityOrigin": "x",
+        "mimeType": "text/html",
+        "secureContextType": "Secure",
+        "crossOriginIsolatedContextType": "NotIsolated",
+        "gatedAPIFeatures": [],
+    }
+
+
+def _unwrapped(script: str) -> str:
+    """The script the product wrapped for the isolated world, without the wrapper.
+
+    The wrapper is ``(elem) => { <native> ; if (<foreign>) return FOREIGN;
+    return (<SCRIPT>)(elem); }``; a script sent without it is a defect of the
+    product (it would run unguarded in a frame it was not asked about), so it
+    fails here.
+    """
+    marker = f'return "{FOREIGN}";\n    return ('
+    if marker not in script:
+        raise AssertionError("a script was sent without the page_natives wrapper")
+    inner = script.split(marker, 1)[1]
+    return inner[: inner.rindex(")(elem);")]
+
+
+class _ApplyTab:
+    """The CDP commands ``page_natives.run`` sends, answered by the owner's ``apply``.
+
+    The commands are the LIBRARY's own generators (``cdp.page.get_frame_tree``,
+    ``create_isolated_world``, ``cdp.dom.resolve_node``,
+    ``cdp.runtime.call_function_on``, ``release_object_group``): the request is
+    read off them, the reply is fed back through them, and the value they return
+    is what the product unpacks. Only the page behind ``Runtime.callFunctionOn``
+    is the double's. What the double adds to the owner is the log of what was
+    sent: ``read_gestures`` (the ``userGesture`` of each call), ``cdp_methods``
+    (every command, in order), ``open_groups`` (object groups resolved and not
+    yet released), ``worlds`` and ``resolved_contexts``.
     """
 
     def __init__(self, owner: Any) -> None:
         self._owner = owner
 
+    def _reply(self, request: dict[str, Any]) -> dict[str, Any]:
+        owner, params = self._owner, request.get("params", {})
+        frames = owner.frame_ids
+        method = request["method"]
+        if method == "Page.getFrameTree":
+            return {
+                "frameTree": {
+                    "frame": _frame(frames[0]),
+                    "childFrames": [
+                        {"frame": _frame(f), "childFrames": []} for f in frames[1:]
+                    ],
+                }
+            }
+        if method == "Page.createIsolatedWorld":
+            owner.worlds.append((params["frameId"], params["worldName"]))
+            return {"executionContextId": 100 + frames.index(params["frameId"])}
+        if method == "DOM.resolveNode":
+            owner.open_groups.append(params.get("objectGroup"))
+            owner.resolved_contexts.append(params.get("executionContextId"))
+            return {"object": {"type": "object", "objectId": "fake"}}
+        if method == "Runtime.releaseObjectGroup":
+            if owner.release_error is not None:
+                raise owner.release_error
+            if params["objectGroup"] in owner.open_groups:
+                owner.open_groups.remove(params["objectGroup"])
+            return {}
+        raise AssertionError(f"unexpected command {method}")
+
+    async def _call(self, request: dict[str, Any]) -> dict[str, Any]:
+        owner, params = self._owner, request.get("params", {})
+        owner.read_gestures.append(params.get("userGesture"))
+        # The context this call runs in is the last ``DOM.resolveNode``'s.
+        if owner.resolved_contexts[-1] != 100 + owner.frame_index:
+            return {"result": {"type": "string", "value": FOREIGN}}
+        try:
+            answer = await owner.apply(_unwrapped(params["functionDeclaration"]))
+        except PageThrew as threw:
+            result: dict[str, Any] = (
+                {"type": "object", "subtype": "error", "className": "Error"}
+                if threw.error
+                else {"type": "boolean", "value": threw.value}
+            )
+            return {
+                "result": result,
+                "exceptionDetails": {
+                    "exceptionId": 1,
+                    "text": "Uncaught",
+                    "lineNumber": 0,
+                    "columnNumber": 0,
+                    "exception": result,
+                },
+            }
+        return {
+            "result": {"type": "undefined"}
+            if answer is None
+            else {"type": "object", "value": answer}
+        }
+
     async def send(self, command: Any) -> Any:
         request = next(command)
-        params = request["params"]
-        if request["method"] == "DOM.resolveNode":
-            reply: dict[str, Any] = {"object": {"type": "object", "objectId": "fake"}}
-        elif request["method"] == "Runtime.callFunctionOn":
-            self._owner.read_gestures.append(params.get("userGesture"))
-            answer = await self._owner.apply(params["functionDeclaration"])
-            reply = {
-                "result": {"type": "undefined"}
-                if answer is None
-                else {"type": "object", "value": answer}
-            }
+        self._owner.cdp_methods.append(request["method"])
+        if request["method"] == "Runtime.callFunctionOn":
+            reply = await self._call(request)
         else:
-            raise AssertionError(f"unexpected command {request['method']}")
+            reply = self._reply(request)
         try:
             command.send(reply)
         except StopIteration as done:
@@ -187,21 +286,46 @@ class _ApplyTab:
 class AppliesOverCdp:
     """A fake element that is reachable the way a real ``Element`` is for a read.
 
-    ``page_natives.read`` sends a read-only script as ``element.tab.send(...)``
-    (``Element.apply`` cannot, it always sets ``userGesture``). Mixed into a
-    double whose ``apply(js_function)`` is its page, this gives it the ``tab``
+    ``page_natives.run`` sends a script as ``element.tab.send(...)``. Mixed into
+    a double whose ``apply(js_function)`` is its page, this gives it the ``tab``
     and ``backend_node_id`` that path needs, and answers through ``apply``.
+    ``frame_ids`` are the page's frames (the main one first) and ``frame_index``
+    the one the node's document belongs to: a script resolved in another frame's
+    world answers ``FOREIGN``, as the real wrapper does.
     """
 
     backend_node_id = cdp_dom.BackendNodeId(1)
+    frame_ids: tuple[str, ...] = ("MAIN",)
+    frame_index = 0
+    #: What ``Runtime.releaseObjectGroup`` raises (a connection that is gone).
+    release_error: BaseException | None = None
 
     @property
     def tab(self) -> _ApplyTab:
         return _ApplyTab(self)
 
+    def _log(self, name: str) -> list[Any]:
+        return self.__dict__.setdefault(f"_log_{name}", [])
+
     @property
     def read_gestures(self) -> list[Any]:
-        return self.__dict__.setdefault("_read_gestures", [])
+        return self._log("gestures")
+
+    @property
+    def cdp_methods(self) -> list[str]:
+        return self._log("methods")
+
+    @property
+    def open_groups(self) -> list[Any]:
+        return self._log("groups")
+
+    @property
+    def worlds(self) -> list[Any]:
+        return self._log("worlds")
+
+    @property
+    def resolved_contexts(self) -> list[Any]:
+        return self._log("contexts")
 
 
 class FakeClickTarget(AppliesOverCdp):
@@ -284,23 +408,11 @@ class FakeClickTarget(AppliesOverCdp):
     gets the real member. Which one the product's script does is read off the
     script text, never assumed.
 
-    ``getter_throws`` is a page that replaced ``Node.prototype.isConnected``'s
-    getter with one that throws (an Error, or ``throw true``): the product's
-    connectivity fragment catches it and answers its ``threw`` token whether or
-    not the node is in a document. What an UNGUARDED read would have answered
-    (the thrown ``true`` itself, or ``None``) is not modelled -- a script that
-    does not carry the fragment is not answered at all.
-
-    ``page_declares_node`` is a page with its own top-level ``class Node {}``
-    (``function Node(){}`` and ``var Node = 1`` do the same): the global ``Node``
-    is the page's, so ``Node.prototype`` has no ``isConnected``, no
-    ``getRootNode``, nothing. Which scripts that breaks is read off the script
-    text, never assumed (:func:`_reads_node_global`): a script that reads
-    ``Node.prototype`` inside the connectivity fragment's ``try`` answers its
-    ``threw`` token, one that reads it anywhere else throws uncaught (``None``
-    from ``Element.apply``), and a script that finds its members on the node's
-    own prototype chain is unaffected. The same is true on the real page
-    (``tests/test_e2e_connectivity_read.py``).
+    ``throws`` is a page script that THROWS (a ``PageThrew``): the double answers
+    it the way Chrome does, a ``result`` holding the thrown value together with
+    ``exceptionDetails``, and ``page_natives.run`` raises it whatever the value
+    is (a thrown ``true`` or ``false`` is a perfectly good-looking ``result``).
+    ``frame_ids`` / ``frame_index`` (``AppliesOverCdp``) put the node in an iframe.
 
     The listing surface (T-10284) -- ``update``, ``tag_name``, ``text_all``,
     ``attrs``, ``children`` -- is what ``query_elements`` and
@@ -309,7 +421,7 @@ class FakeClickTarget(AppliesOverCdp):
     ``detached`` element (Chrome dropped it from its node table) and SUCCEEDS for
     a ``disconnected`` one, the page's removed-but-referenced node, which is the
     whole of T-10284. A script's connectivity and visibility answers are
-    COMPUTED from ``disconnected``, ``getter_throws`` and the script text
+    COMPUTED from ``disconnected``, ``throws`` and the script text
     (:meth:`_connectivity_state`, :meth:`_visible`); a ``disconnected`` node has
     no box and an EMPTY computed style, so a visibility script that does not
     ask for connectivity first reads it as visible, exactly as real Chrome
@@ -346,11 +458,9 @@ class FakeClickTarget(AppliesOverCdp):
         click_throws: Any = _UNSET,
         synthetic_answer: Any = _UNSET,
         form_controls: tuple[str, ...] = (),
-        getter_throws: bool = False,
-        page_declares_node: bool = False,
+        throws: PageThrew | None = None,
     ) -> None:
-        self.page_declares_node = page_declares_node
-        self.getter_throws = getter_throws
+        self.throws = throws
         self.form_controls = tuple(form_controls)
         self.click_throws = click_throws
         self.synthetic_answer = synthetic_answer
@@ -416,19 +526,11 @@ class FakeClickTarget(AppliesOverCdp):
         """The token the script's connectivity fragment evaluates to, if it has one.
 
         ``None`` when the script does not carry the shipped fragment, so it
-        has no ``connectivity`` to call. The state itself is the page's:
-        ``threw`` for a getter that throws, else ``no`` for a node in no
-        document and ``yes`` for one in a document.
+        has no ``connectivity`` to call. The state itself is the page's: ``no``
+        for a node in no document and ``yes`` for one in a document.
         """
-        squashed = _squash(js_function)
-        if self.page_declares_node and _reads_node_global(squashed):
-            return (
-                CONNECTED_THREW if "constconnectivity=(node)=>{" in squashed else None
-            )
-        if _CONNECTIVITY_SHAPE not in squashed:
+        if _CONNECTIVITY_SHAPE not in _squash(js_function):
             return None
-        if self.getter_throws:
-            return CONNECTED_THREW
         return CONNECTED_NO if self.disconnected else CONNECTED_YES
 
     def _aim(self, js_function: str) -> Any:
@@ -662,17 +764,15 @@ class FakeClickTarget(AppliesOverCdp):
             self.disconnected = True
         state = (
             self._connectivity_state(js_function)
-            if "conststate=connectivity(elem);" in _squash(js_function)
+            if "connectivity(elem)===" in _squash(js_function)
             else None
         )
         if state is None:
             # No connectivity read ran: ``connectivity`` is undefined, the
-            # script throws a ReferenceError (an Error), uncaught -> ``None``.
-            return None
+            # script throws a ReferenceError (an Error), uncaught.
+            raise PageThrew(error=True)
         if state == script.detached_state:
             return script.detached
-        if state != script.connected_state:
-            return script.unreadable
         threw = script.threw
         clicked = script.clicked
         if self._shadowed(js_function, "click"):
@@ -691,13 +791,8 @@ class FakeClickTarget(AppliesOverCdp):
             self.calls.append("synthetic")
         if self.detached:
             raise left_the_document()
-        if self.page_declares_node and _reads_node_global(
-            _squash(_CONNECTIVITY_FUNCTION.sub("", js_function))
-        ):
-            # ``Node.prototype.<member>`` is ``undefined`` on the page's own
-            # ``Node``: the read throws outside any ``try``, which
-            # ``Element.apply`` hands back as ``None``.
-            return None
+        if self.throws is not None:
+            raise self.throws
         if "elementFromPoint" in js_function:
             self.calls.append("aim")
             if self._aim_answer is not _UNSET:
@@ -733,7 +828,6 @@ PROBE_KEY = "stealth.click.probe"
 #: keeps the two equal.
 CONNECTED_YES = "stealth.connected:yes"
 CONNECTED_NO = "stealth.connected:no"
-CONNECTED_THREW = "stealth.connected:threw"
 
 
 def _squash(text: str) -> str:
@@ -742,46 +836,17 @@ def _squash(text: str) -> str:
 
 
 #: THE fragment the product's scripts must carry, verbatim up to whitespace. A
-#: copy, not an import: a script that carries anything else -- no ``try``, a
-#: different getter, a different return -- is a script this double does not
-#: recognise and answers with nothing (``None``, as ``Element.apply`` does for a
-#: script that threw). Whether THIS text really behaves as the double says (a
-#: getter that ``throw true``s, a form that shadows the member, a removed node)
-#: is not something a double can show; ``tests/test_e2e_connectivity_read.py``
-#: runs the product's own text in real Chrome.
+#: copy, not an import: a script that carries anything else -- a different
+#: getter, a different return -- is a script this double does not recognise and
+#: answers with nothing. Whether THIS text really behaves as the double says (a
+#: form that shadows the member, a removed node, a page that replaced every
+#: prototype) is not something a double can show;
+#: ``tests/test_e2e_connectivity_read.py`` runs the product's own text in real
+#: Chrome.
 _CONNECTIVITY_SHAPE = _squash(
-    """const connectivity = (node) => {
-        const native = (obj, name) => {
-        let found;
-        for (let proto = Object.getPrototypeOf(obj); proto !== null;
-             proto = Object.getPrototypeOf(proto)) {
-            if (Object.getPrototypeOf(proto) === null) break;
-            const own = Object.getOwnPropertyDescriptor(proto, name);
-            if (own !== undefined) found = own.get !== undefined ? own.get : own.value;
-        }
-        return found;
-    };
-        try {
-            const answer = native(node, 'isConnected').call(node);
-            if (answer === true) return "stealth.connected:yes";
-            if (answer === false) return "stealth.connected:no";
-        } catch (e) { return "stealth.connected:threw"; }
-        return "stealth.connected:threw";
-    };"""
+    """const connectivity = (node) =>
+        native(Node, 'isConnected').call(node) ? "stealth.connected:yes" : "stealth.connected:no";"""
 )
-
-
-#: The connectivity function as a script carries it, whitespace and all: what is
-#: left of a script once it is cut out is what runs OUTSIDE the fragment's ``try``.
-_CONNECTIVITY_FUNCTION = re.compile(
-    r"const connectivity = \(node\) => \{.*?return \"stealth\.connected:threw\";\s*\};",
-    re.DOTALL,
-)
-
-
-def _reads_node_global(squashed: str) -> bool:
-    """Whether a whitespace-free script reads a member off the global ``Node``."""
-    return re.search(r"(?<![\w$])Node\.prototype", squashed) is not None
 
 
 def left_the_document(
@@ -810,18 +875,10 @@ class _SyntheticScript:
     """The synthetic script's decisions, read off its text."""
 
     def __init__(
-        self,
-        detached_state: str,
-        detached: Any,
-        connected_state: str,
-        unreadable: Any,
-        clicked: Any,
-        threw: Any,
+        self, detached_state: str, detached: Any, clicked: Any, threw: Any
     ) -> None:
         self.detached_state = detached_state
         self.detached = detached
-        self.connected_state = connected_state
-        self.unreadable = unreadable
         self.clicked = clicked
         self.threw = threw
 
@@ -830,25 +887,23 @@ def _synthetic_answers(js_function: str) -> _SyntheticScript:
     """The synthetic script's branches, as the script itself spells them.
 
     ``detached`` is what it returns for the state token it compares ``===``
-    (the node left); ``unreadable`` what it returns for any state that is not
-    the one it compares ``!==`` (the read did not succeed); ``clicked`` its last
-    return; and ``threw`` what it returns from a ``catch`` around
-    ``click.call(elem)`` -- ``_UNSET`` when nothing catches it, so a value the
-    page's ``click()`` throws escapes as the script's answer.
+    (the node left); ``clicked`` its last return; and ``threw`` what it returns
+    from a ``catch`` around ``click.call(elem)`` -- ``_UNSET`` when nothing
+    catches it, so a value the page's ``click()`` throws escapes as the
+    script's answer.
     """
-    left = re.search(r'if \(state === "([^"]+)"\) return ([^;]+);', js_function)
-    unreadable = re.search(r'if \(state !== "([^"]+)"\) return ([^;]+);', js_function)
+    left = re.search(
+        r'if \(connectivity\(elem\) === "([^"]+)"\) return ([^;]+);', js_function
+    )
     returns = re.findall(r"return ([^;]+);", js_function)
     caught = re.search(
         r"click\.call\(elem\);\s*\} catch \(e\) \{ return ([^;]+);", js_function
     )
-    if left is None or unreadable is None or not returns:
+    if left is None or not returns:
         raise AssertionError("not a synthetic script this double can run")
     return _SyntheticScript(
         detached_state=left.group(1),
         detached=_js_value(left.group(2)),
-        connected_state=unreadable.group(1),
-        unreadable=_js_value(unreadable.group(2)),
         clicked=_js_value(returns[-1]),
         threw=_js_value(caught.group(1)) if caught else _UNSET,
     )

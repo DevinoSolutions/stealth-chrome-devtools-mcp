@@ -107,6 +107,7 @@ class _FakeElement(AppliesOverCdp):
                 "hit": {"tag": self.tag_name, "id": "", "classes": []},
                 "hit_is_target": True,
                 "disabled": False,
+                "under_disabled": False,
                 "pointer_events": "auto",
                 "visibility": "visible",
             }

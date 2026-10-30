@@ -83,8 +83,8 @@ worse than a miss.
 A leaf: ``tool_errors`` only, and the element and tab arrive as arguments. It has NO
 error policy — the one thing it raises is "the page did not answer with the
 promised JSON", the same not-a-policy ``text_entry.entered_text`` raises, and for
-the same reason (``Element.apply`` returns ``result[0].value``, so a script that
-THREW lands there as ``None`` and must never be mistaken for a blank record).
+the same reason (a script that THREW is ``page_natives.run``'s ``ToolError``, and an
+answer that is not the promised record must never be mistaken for a blank one).
 """
 
 from __future__ import annotations
@@ -134,47 +134,31 @@ DISABLED = "disabled"
 
 #: THE page-side read of "is this node still in a document" (T-10284), and its
 #: ONE vocabulary: every script that asks (:data:`AIM_JS`, :data:`SYNTHETIC_JS`,
-#: :data:`CONNECTED_JS`, ``dom_handler``'s visibility script) is built from
+#: :data:`CONNECTED_JS`, ``element_resolution``'s visibility script) is built from
 #: :data:`CONNECTIVITY_JS`, nothing else in the package reads ``isConnected``,
 #: and :func:`connectivity` is the one reader of the answer on this side.
 #:
-#: The answer is one of three TOKENS, never a boolean. ``Element.apply`` drops
-#: ``exceptionDetails`` and hands back ``result[0].value``, so a value a getter
-#: THROWS arrives as a plain one: ``throw true`` is indistinguishable from a
-#: ``true`` that was read, and a thrown Error is ``None``, the same as "no
-#: answer". A token can only come from a script that ran to the line that
-#: returns it: the read is inside a ``try`` and a throw becomes
-#: :data:`CONNECTED_THREW`, as does any value that is not a boolean. Only
-#: ``no`` is a departure.
-#:
-#: The getter is the NATIVE ``isConnected`` accessor, found by
-#: :data:`page_natives.NATIVE_JS` on the NODE's own prototype chain (the
-#: FARTHEST owner, so a page's class or an accessor added nearer the node does
-#: not steer it): never ``elem.isConnected`` (a ``<form>`` with a control named
-#: ``isConnected`` shadows that member) and never through the ``Node`` global (a
-#: page's own top-level ``class Node {}`` replaces it, and every element then
-#: read ``threw``). The accepted boundary until T-10299 (an isolated world) is a
-#: page script that REPLACES the original accessor on the farthest prototype, or
-#: the realm's own ``Object.getOwnPropertyDescriptor`` /
-#: ``Function.prototype.call``: one that throws is read as ``threw``, one that
-#: answers a boolean is believed.
+#: The answer is one of two TOKENS, never a boolean: ``yes`` or ``no``, and only
+#: ``no`` is a departure. These scripts run in an ISOLATED WORLD
+#: (:mod:`page_natives`), where ``Node`` and every prototype are the browser's
+#: own, so the getter is ``native(Node, 'isConnected')`` and nothing a page does
+#: can steer it: a page's class, an accessor added to a prototype, a polluted
+#: ``Object.prototype``, a ``setPrototypeOf``, even a node whose chain no longer
+#: reaches ``Node.prototype`` (the world holds its own wrapper of the node). What
+#: a world does not change is the DOM object's own behaviour, so a ``<form>``
+#: with a control named ``isConnected`` still answers ``form.isConnected`` with
+#: that control; the interface's accessor is asked, never the node. A script that
+#: throws is not an answer at all: ``page_natives.run`` raises it.
 CONNECTED_YES = "stealth.connected:yes"
 CONNECTED_NO = "stealth.connected:no"
-CONNECTED_THREW = "stealth.connected:threw"
 
 CONNECTIVITY_JS = (
-    """const connectivity = (node) => {
-        __NATIVE__
-        try {
-            const answer = native(node, 'isConnected').call(node);
-            if (answer === true) return "__YES__";
-            if (answer === false) return "__NO__";
-        } catch (e) { return "__THREW__"; }
-        return "__THREW__";
-    };""".replace("__NATIVE__", page_natives.NATIVE_JS)
+    (
+        """const connectivity = (node) =>
+        native(Node, 'isConnected').call(node) ? "__YES__" : "__NO__";"""
+    )
     .replace("__YES__", CONNECTED_YES)
     .replace("__NO__", CONNECTED_NO)
-    .replace("__THREW__", CONNECTED_THREW)
 )
 
 #: The ONE read. Answers with a JSON **string** for the same reason
@@ -360,7 +344,7 @@ async def aim(element: Element, selector: str) -> dict[str, object]:
     Raises ``ToolError`` when the answer is not the promised JSON object:
     "I could not read it" and "nothing was under the point" are different facts.
     """
-    answer = await page_natives.read(element, AIM_JS)
+    answer = await page_natives.run(element, AIM_JS)
     if not isinstance(answer, str):
         raise ToolError(
             f"could not read where a click on '{selector}' would land: "
@@ -374,12 +358,42 @@ async def aim(element: Element, selector: str) -> dict[str, object]:
             f"could not read where a click on '{selector}' would land: "
             f"the {len(answer)}-character answer is not valid JSON"
         ) from None
-    if not isinstance(record, dict) or not isinstance(record.get("rect"), dict):
+    wrong = _record_problem(record)
+    if wrong is not None:
         raise ToolError(
-            f"could not read where a click on '{selector}' would land: "
-            f"the answer carries no rect field ({type(record).__name__})"
+            f"could not read where a click on '{selector}' would land: {wrong}"
         )
     return record
+
+
+#: The aim record's exact shape: every field :data:`AIM_JS` writes, and the JSON
+#: type each one must have (``None`` where the field may be ``null``). A record
+#: that lacks one, or carries another type, is not what the script returns.
+_AIM_FIELDS: dict[str, tuple[type, ...]] = {
+    "connected": (str,),
+    "rendered": (bool,),
+    "rect": (dict,),
+    "point": (dict, type(None)),
+    "target": (dict,),
+    "hit": (dict, type(None)),
+    "hit_is_target": (bool,),
+    "disabled": (bool,),
+    "under_disabled": (bool,),
+    "pointer_events": (str,),
+    "visibility": (str,),
+}
+
+
+def _record_problem(record: object) -> str | None:
+    """Why *record* is not the aim read's record, or ``None`` when it is."""
+    if not isinstance(record, dict):
+        return f"the answer is a {type(record).__name__}, not a record"
+    for name, kinds in _AIM_FIELDS.items():
+        if name not in record:
+            return f"the answer carries no {name} field"
+        if not isinstance(record[name], kinds):
+            return f"the {name} field is a {type(record[name]).__name__}"
+    return None
 
 
 def _number(raw: object) -> float:
@@ -419,7 +433,7 @@ def _shape(raw: object) -> dict[str, object] | None:
 
 #: The connectivity read ON ITS OWN, for a caller that holds an ``Element`` and
 #: has no aim to read it off (``element_resolution.refresh_element``). One
-#: token, one :func:`page_natives.read`. nodriver's ``update()`` re-resolves by
+#: token, one :func:`page_natives.run`. nodriver's ``update()`` re-resolves by
 #: backend node id and that succeeds for a node the page removed but still
 #: references, so ``update`` cannot say whether an element has left the page.
 CONNECTED_JS = (
@@ -432,9 +446,8 @@ def connectivity(answer: object, what: str) -> bool:
 
     Accepts ONLY the script's own tokens (:data:`CONNECTED_YES`,
     :data:`CONNECTED_NO`). ``False`` is the page SAYING the node left: the one
-    answer that is a departure. Everything else -- :data:`CONNECTED_THREW`, a
-    value that is no token (a ``true`` a getter threw, ``None`` from a thrown
-    Error or from a script that stopped returning its token, a shadowed
+    answer that is a departure. Everything else -- a value that is no token
+    (``None`` from a script that stopped returning its token, a boolean, an
     object) -- is a read that did not succeed, which says nothing about the
     node, so it raises ``ToolError`` naming *what* could not be read. It is
     never a departure (the caller would drop or refuse a node that may be
@@ -446,13 +459,11 @@ def connectivity(answer: object, what: str) -> bool:
             return True
         if answer == CONNECTED_NO:
             return False
-    found = (
-        "the page's connectivity read threw or answered something that is not a boolean"
-        if answer == CONNECTED_THREW
-        else f"the page answered with {type(answer).__name__}, not one of the "
-        "connectivity read's own answers"
+    raise ToolError(
+        f"could not read whether {what} is still in its document: the page "
+        f"answered with {type(answer).__name__}, not one of the connectivity "
+        "read's own answers"
     )
-    raise ToolError(f"could not read whether {what} is still in its document: {found}")
 
 
 def reason(  # noqa: PLR0911  PERMANENT(one return per measured shape, in measured order)
@@ -582,7 +593,11 @@ async def _send_mouse(
 async def _arm(element: Element, kinds: list[str]) -> None:
     try:
         await asyncio.wait_for(
-            element.apply(ARM_PROBE_JS.replace("__KINDS__", json.dumps(kinds))),
+            page_natives.run(
+                element,
+                ARM_PROBE_JS.replace("__KINDS__", json.dumps(kinds)),
+                user_gesture=True,
+            ),
             INPUT_BUDGET_S,
         )
     except BaseException:
@@ -593,7 +608,9 @@ async def _arm(element: Element, kinds: list[str]) -> None:
 
 async def _read(element: Element) -> list[dict[str, object]]:
     """Dispose the probe and answer what it saw (see :data:`READ_PROBE_JS`)."""
-    answer = await asyncio.wait_for(element.apply(READ_PROBE_JS), INPUT_BUDGET_S)
+    answer = await asyncio.wait_for(
+        page_natives.run(element, READ_PROBE_JS, user_gesture=True), INPUT_BUDGET_S
+    )
     seen = json.loads(answer) if isinstance(answer, str) else None
     if not isinstance(seen, list):
         raise ToolError(
@@ -807,17 +824,14 @@ async def _plain_click(tab: Tab, element: Element, ledger: InputSent) -> None:
     await _send_mouse(tab, "mouseReleased", *at, ledger)
 
 
-#: The synthetic script's four answers. Ours, not the page's: every page
-#: call inside the script is wrapped, so nothing the page throws or returns can
-#: become the script's answer, and ``Element.apply`` -- which hands back
-#: ``result[0].value`` and drops ``exceptionDetails``, so a THROWN value lands
-#: there as a plain one -- can only carry one of these from a script that ran.
+#: The synthetic script's three answers. Ours, not the page's: the script runs
+#: in an isolated world (:mod:`page_natives`), where the page cannot touch what it
+#: calls, and a script that throws is not an answer at all (``page_natives.run``
+#: raises it), so a value can only come from a script that ran to the line that
+#: returns it.
 SYNTHETIC_DETACHED = "stealth.click.synthetic:detached"
 SYNTHETIC_CLICKED = "stealth.click.synthetic:clicked"
 SYNTHETIC_THREW = "stealth.click.synthetic:threw"
-#: The connectivity read did not succeed, so ``click()`` never ran: not the
-#: page's click handler throwing (:data:`SYNTHETIC_THREW`), and not a departure.
-SYNTHETIC_UNREAD = "stealth.click.synthetic:unread"
 
 #: THE one synthetic sender's script (T-10034). The connectivity check and the
 #: ``el.click()`` run in ONE page-side task, so the page cannot remove the node
@@ -829,26 +843,23 @@ SYNTHETIC_UNREAD = "stealth.click.synthetic:unread"
 #: The answer is a token, never a boolean (Codex re-review HIGH): a page whose
 #: ``click()`` calls the native one and then ``throw false`` would otherwise
 #: hand back the very ``false`` that means "nothing ran", and the click would be
-#: re-run on a page that had already taken it. A page that makes
-#: ``isConnected`` read false is taken at its word: nothing is clicked here.
-#: That includes a page whose own ``isConnected`` getter clicks and then reads
-#: false: this script runs in the page's world, so it cannot tell (Codex round
-#: 4, accepted until T-10299 moves these reads into an isolated world).
+#: re-run on a page that had already taken it. In the isolated world the
+#: ``click`` that runs is the browser's own ``HTMLElement.prototype.click`` (a
+#: custom element's ``click()`` override is not called; the page's listeners
+#: still hear the click, since DOM events cross worlds), and a page cannot make
+#: ``isConnected`` lie, so the one residual of the page-world version -- a page
+#: whose own ``isConnected`` getter clicks and then reads false (Codex round 4)
+#: -- no longer exists (T-10299). ``SVGElement`` has no ``click()``: the call
+#: throws and the answer is :data:`SYNTHETIC_THREW`, as it was.
 SYNTHETIC_JS = (
     """(elem) => {
-    __NATIVE__
     __CONNECTIVITY__
-    const click = native(elem, 'click');
-    const state = connectivity(elem);
-    if (state === "__NO__") return "__DETACHED__";
-    if (state !== "__YES__") return "__UNREAD__";
+    const click = native(HTMLElement, 'click');
+    if (connectivity(elem) === "__NO__") return "__DETACHED__";
     try { click.call(elem); } catch (e) { return "__THREW__"; }
     return "__CLICKED__";
-}""".replace("__NATIVE__", page_natives.NATIVE_JS)
-    .replace("__CONNECTIVITY__", CONNECTIVITY_JS)
+}""".replace("__CONNECTIVITY__", CONNECTIVITY_JS)
     .replace("__NO__", CONNECTED_NO)
-    .replace("__YES__", CONNECTED_YES)
-    .replace("__UNREAD__", SYNTHETIC_UNREAD)
     .replace("__DETACHED__", SYNTHETIC_DETACHED)
     .replace("__CLICKED__", SYNTHETIC_CLICKED)
     .replace("__THREW__", SYNTHETIC_THREW)
@@ -858,23 +869,23 @@ SYNTHETIC_JS = (
 async def synthetic_click(element: Element, selector: str, ledger: InputSent) -> bool:
     """The ONE synthetic ``el.click()``: ``False`` when the page said it left.
 
-    Sent through ``Element.apply`` (``Runtime.callFunctionOn`` with
-    ``userGesture``, as ``Element.click`` sends it), bounded by
-    :data:`INPUT_BUDGET_S`. ONLY the exact :data:`SYNTHETIC_DETACHED` answer
-    proves ``el.click()`` never ran, so only it leaves *ledger* clear and
-    answers ``False`` for the caller to re-resolve. :data:`SYNTHETIC_CLICKED` is
-    the click. Everything else -- the page's ``click()`` throwing, any other
-    value, a failure, a timeout or a cancellation -- proves nothing about
-    whether the page took the click, so *ledger* is set and it is never re-run;
-    that includes :data:`SYNTHETIC_UNREAD`, because the page's own getter ran.
+    Sent through :func:`page_natives.run` with ``user_gesture`` (as 2.1.53 sent
+    it through ``Element.apply``), bounded by :data:`INPUT_BUDGET_S`. ONLY the
+    exact :data:`SYNTHETIC_DETACHED` answer proves ``el.click()`` never ran, so
+    only it leaves *ledger* clear and answers ``False`` for the caller to
+    re-resolve. :data:`SYNTHETIC_CLICKED` is the click. Everything else -- the
+    page's ``click()`` throwing, any other value, a failure, a timeout or a
+    cancellation -- proves nothing about whether the page took the click, so
+    *ledger* is set and it is never re-run.
 
-    Raises ``ToolError`` for :data:`SYNTHETIC_UNREAD` (the page's connectivity
-    read failed, ``click()`` never ran), for :data:`SYNTHETIC_THREW` and for any
-    answer that is not one of the script's own, the last two saying the click may
-    have reached the page.
+    Raises ``ToolError`` for :data:`SYNTHETIC_THREW` and for any answer that is
+    not one of the script's own, both saying the click may have reached the page.
     """
     try:
-        answer = await asyncio.wait_for(element.apply(SYNTHETIC_JS), INPUT_BUDGET_S)
+        answer = await asyncio.wait_for(
+            page_natives.run(element, SYNTHETIC_JS, user_gesture=True),
+            INPUT_BUDGET_S,
+        )
     except BaseException:
         ledger.sent = True
         raise
@@ -884,11 +895,6 @@ async def synthetic_click(element: Element, selector: str, ledger: InputSent) ->
     ledger.sent = True
     if token == SYNTHETIC_CLICKED:
         return True
-    if token == SYNTHETIC_UNREAD:
-        raise ToolError(
-            f"could not read whether '{selector}' is still in its document; "
-            "nothing was clicked, and it was not repeated"
-        )
     if token == SYNTHETIC_THREW:
         raise ToolError(
             f"the page's click handler for '{selector}' threw during the "
