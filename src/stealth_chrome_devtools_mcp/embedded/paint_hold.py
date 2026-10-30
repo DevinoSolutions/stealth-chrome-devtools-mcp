@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 
 import nodriver as uc
 
+from stealth_chrome_devtools_mcp.embedded import tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -68,9 +69,23 @@ class _Hold:
 #: target id -> the hold on it. Entries leave through :func:`_expire` or :func:`forget`.
 _held: dict[str, _Hold] = {}
 
-#: Targets whose caller started a screencast of their own (``execute_cdp_command``):
-#: Chrome has one screencast per tab, so the hold must neither replace it nor stop it.
-_caller_owned: set[str] = set()
+#: Targets whose caller started a screencast of their own (``execute_cdp_command``),
+#: each with the browser that owns it: Chrome has one screencast per tab, so the hold
+#: must neither replace it nor stop it. A tab that goes away any way but ``close_tab``
+#: sends this module nothing, so :func:`_prune_caller_owned` drops what is gone.
+_caller_owned: dict[str, object] = {}
+
+
+def _prune_caller_owned() -> None:
+    """Drop the targets whose tab is gone: its browser was closed (``close_instance``,
+    a relaunch) or no longer lists it (``Target.targetDestroyed``: the page closed
+    itself, another tab closed it). A tab with no browser is kept: nothing says."""
+    for key, browser in list(_caller_owned.items()):
+        if browser is not None and (
+            tab_open.is_closed(browser)  # type: ignore[arg-type]
+            or key not in {str(t.target.target_id) for t in browser.targets}  # type: ignore[attr-defined]
+        ):
+            del _caller_owned[key]
 
 
 def _key(tab: Tab) -> str:
@@ -141,7 +156,8 @@ async def _stop(tab: Tab, where: str) -> None:
 
 def forget(target_id: str) -> None:
     """Drop the hold on a tab that was closed: its timer ends, nothing is sent."""
-    _caller_owned.discard(str(target_id))
+    _caller_owned.pop(str(target_id), None)
+    _prune_caller_owned()
     entry = _held.pop(str(target_id), None)
     if entry is not None and entry.task is not None:
         entry.task.cancel()
@@ -159,7 +175,7 @@ def note_command(tab: Tab, method: object) -> None:
     key = _key(tab)
     forget(key)
     if started:
-        _caller_owned.add(key)
+        _caller_owned[key] = getattr(tab, "browser", None)
 
 
 async def _expire(key: str, entry: _Hold) -> None:

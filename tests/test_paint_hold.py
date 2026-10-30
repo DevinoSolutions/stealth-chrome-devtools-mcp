@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 
+import nodriver as uc
 import pytest
 
 from fakes import FakeTab
-from stealth_chrome_devtools_mcp.embedded import paint_hold, tab_binding
+from stealth_chrome_devtools_mcp.embedded import paint_hold, tab_binding, tab_open
 from stealth_chrome_devtools_mcp.embedded.cdp_function_executor import (
     CDPFunctionExecutor,
 )
@@ -302,3 +303,39 @@ async def test_a_stale_timer_never_releases_a_newer_hold():
     await paint_hold._expire("t-1", stale)
     assert paint_hold._held["t-1"] is newer
     assert old.sent(STOP) == [] and new.sent(STOP) == []
+
+
+class _Browser:
+    """What ``_prune_caller_owned`` reads of a nodriver ``Browser``: its ``targets``
+    (nodriver drops one only on ``Target.targetDestroyed``)."""
+
+    def __init__(self, *tabs):
+        self.targets = list(tabs)
+
+
+async def _caller_screencast(browser, target_id):
+    tab = FakeTab(target_id=target_id)
+    tab.browser = browser
+    browser.targets.append(tab)
+    await CDPFunctionExecutor().execute_cdp_command(tab, START, {})
+    return tab
+
+
+async def test_close_instance_drops_its_callers_screencast_targets():
+    browser, other = _Browser(), _Browser()
+    await _caller_screencast(browser, "t-1")
+    await _caller_screencast(browser, "t-2")
+    kept = await _caller_screencast(other, "t-3")
+    assert set(paint_hold._caller_owned) == {"t-1", "t-2", "t-3"}
+    tab_open.mark_closed(browser)  # what close_instance and a relaunch do first
+    paint_hold.note_command(kept, uc.cdp.page.start_screencast)  # any later write
+    assert set(paint_hold._caller_owned) == {"t-3"}
+
+
+async def test_a_tab_the_browser_no_longer_lists_is_dropped():
+    browser = _Browser()
+    gone = await _caller_screencast(browser, "t-1")
+    await _caller_screencast(browser, "t-2")
+    browser.targets.remove(gone)  # Target.targetDestroyed: the page closed itself
+    await _caller_screencast(browser, "t-4")
+    assert set(paint_hold._caller_owned) == {"t-2", "t-4"}
