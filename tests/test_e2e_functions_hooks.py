@@ -310,17 +310,18 @@ async def test_dynamic_hooks_lifecycle(fixture_app_server):
 
 
 @integration_test
-async def test_a_bad_resource_type_is_refused_and_a_valid_one_is_stored(
+async def test_a_bad_resource_type_is_refused_and_a_valid_one_fulfills(
     fixture_app_server,
 ):
     """T-9478: a name ``ResourceType`` does not have is the caller's error, naming the
-    valid ones, with nothing stored; a valid one (any case) is stored and listed."""
+    valid ones, with nothing stored; a valid one matches a real request and fulfills it, one for another type does not."""
     await warmup_once()
     base = fixture_app_server
     spawn = get_fn("spawn_browser")
     create_full = get_fn("create_dynamic_hook")
     list_hooks = get_fn("list_dynamic_hooks")
     remove_hook = get_fn("remove_dynamic_hook")
+    execute = get_fn("execute_script")
     close = get_fn("close_instance")
 
     result = await spawn(headless=True, **sandbox_kwargs())
@@ -344,15 +345,30 @@ async def test_a_bad_resource_type_is_refused_and_a_valid_one_is_stored(
         assert "could not be armed" not in str(caught.value)
         assert _find_hook_id(await list_hooks(), "fixture-bad-type") is None
 
-        await create_full(
-            name="fixture-good-type",
-            requirements={"url_pattern": "*/api/json", "resource_type": "fetch"},
-            function_code=code,
-            instance_ids=[iid],
-        )
-        good_id = _find_hook_id(await list_hooks(), "fixture-good-type")
-        assert good_id, "the valid hook was not stored"
-        await remove_hook(hook_id=good_id)
+        # Chrome reports a page fetch() as resource type XHR, not Fetch: the
+        # requirement is matched against what Chrome says (T-9478), any case.
+        async def fetched(label, resource_type):
+            await create_full(
+                name=label,
+                requirements={
+                    "url_pattern": "*/api/json",
+                    "resource_type": resource_type,
+                },
+                function_code=code,
+                instance_ids=[iid],
+            )
+            hook_id = _find_hook_id(await list_hooks(), label)
+            assert hook_id, f"{label} was not stored"
+            try:
+                return await execute(
+                    instance_id=iid,
+                    script="return await window.triggerFetch('/api/json')",
+                )
+            finally:
+                await remove_hook(hook_id=hook_id)
+
+        assert (await fetched("fixture-xhr", "xhr"))["result"] == 418
+        assert (await fetched("fixture-script", "script"))["result"] == 200
     finally:
         await close(instance_id=iid)
 
