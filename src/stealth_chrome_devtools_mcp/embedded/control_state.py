@@ -124,9 +124,10 @@ BY_INDEX = "index"
 MAX_OPTIONS = 2000
 
 #: The ONE option read. Answers with a JSON **string** for the same reason
-#: ``text_entry.READ_JS`` and ``click_target.AIM_JS`` do: ``Element.apply``
-#: returns ``result[0].value``, so a script that THREW lands there as ``None``
-#: and must never be mistaken for a control with no options.
+#: ``text_entry.READ_JS`` and ``click_target.AIM_JS`` do: an answer that is not
+#: the promised JSON must never be mistaken for a control with no options
+#: (``Element.apply`` returns ``result[0].value``, so a script that THREW lands
+#: there as ``None``).
 #:
 #: ``option.text`` is Chrome's COLLAPSED text, not ``textContent`` (measured: an
 #: option written over three lines answers ``"Spaced Out"``), and ``option.label``

@@ -21,6 +21,8 @@ import asyncio
 import json
 
 import pytest
+from nodriver import cdp as nodriver_cdp
+from nodriver.core import element as nodriver_element
 
 from e2e_helpers import (
     eval_js,
@@ -31,7 +33,7 @@ from e2e_helpers import (
     wait_for_js,
     warmup_once,
 )
-from stealth_chrome_devtools_mcp.embedded import click_target, tab_binding
+from stealth_chrome_devtools_mcp.embedded import click_target, page_natives, tab_binding
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as runtime
 
 pytestmark = integration_pytestmark()
@@ -197,35 +199,57 @@ async def test_arming_the_probe_twice_leaves_one_listener(
 ):
     """RED before the fix: a second arm overwrote the handle to the first handler,
     which stayed on ``window`` and logged ``composedPath`` for every later mouse
-    event. The probe is also not an own property name of ``window`` while armed."""
+    event. The probe runs in the isolated world (T-10299): it is not an own
+    property of the PAGE's ``window`` at all, so the page cannot list it, and a
+    ``composedPath`` the page replaced is not the one it calls."""
 
     async def body(iid):
+        tab = await runtime.browser_manager.get_tab(iid)
+        await tab.send(nodriver_cdp.dom.get_document())
+        remote, _ = await tab.send(
+            nodriver_cdp.runtime.evaluate("document.body", return_by_value=False)
+        )
+        node = await tab.send(
+            nodriver_cdp.dom.describe_node(object_id=remote.object_id)
+        )
+        body_el = nodriver_element.create(node, tab)
+
         arm = click_target.ARM_PROBE_JS.replace("__KINDS__", '["mousemove"]')
         read = click_target.READ_PROBE_JS
-        counted = await eval_js(
+        # Counted IN the world the probe runs in: the same script, its own
+        # ``Event.prototype.composedPath`` wrapped there.
+        counting = f"""(elem) => {{
+            const real = Event.prototype.composedPath;
+            let calls = 0;
+            Event.prototype.composedPath = function () {{
+                calls += 1;
+                return real.call(this);
+            }};
+            try {{
+                const arm = ({arm}), read = ({read});
+                arm(document.body);
+                const named = Object.getOwnPropertyNames(window)
+                    .filter((n) => n.indexOf('stealth') !== -1);
+                arm(document.body);
+                read(document.body);
+                window.dispatchEvent(new MouseEvent('mousemove'));
+                return JSON.stringify({{calls: calls, named: named}});
+            }} finally {{
+                Event.prototype.composedPath = real;
+            }}
+        }}"""
+        counted = await page_natives.run(body_el, counting, user_gesture=True)
+        parsed = json.loads(counted)
+        assert parsed["calls"] == 0, counted
+        assert parsed["named"] == [], counted
+        # ... and the page's own window never lists it.
+        listed = await eval_js(
             iid,
-            f"""(() => {{
-                const real = Event.prototype.composedPath;
-                let calls = 0;
-                Event.prototype.composedPath = function () {{
-                    calls += 1;
-                    return real.call(this);
-                }};
-                try {{
-                    const arm = ({arm}), read = ({read});
-                    arm(document.body);
-                    const named = Object.getOwnPropertyNames(window)
-                        .filter((n) => n.indexOf('stealth') !== -1);
-                    arm(document.body);
-                    read(document.body);
-                    window.dispatchEvent(new MouseEvent('mousemove'));
-                    return JSON.stringify({{calls: calls, named: named}});
-                }} finally {{
-                    Event.prototype.composedPath = real;
-                }}
-            }})()""",
+            "JSON.stringify(Object.getOwnPropertyNames(window)"
+            ".concat(Object.getOwnPropertySymbols(window).map(String))"
+            ".filter((n) => n.indexOf('stealth') !== -1))",
         )
-        assert json.loads(counted) == {"calls": 0, "named": []}, counted
+        assert json.loads(listed) == []
 
     await _in_a_page(fixture_app_server, body)
 

@@ -184,20 +184,6 @@ _STALE_NODE_MARKERS = (
     "No search session with given id found",
 )
 
-# Chrome's two answers when an element the caller already HOLDS is no longer in
-# the document (T-10034, STEALTH-…-ER and -EP). nodriver addresses a held
-# ``Element`` by its backend node id through ``DOM.resolveNode`` (``apply``,
-# ``click``, ``get_position``, ``update`` all start there): a node the page
-# removed answers the first, a node the page detached but still references
-# answers the second. Deliberately NOT in ``_STALE_NODE_MARKERS``: those say a
-# RESOLUTION raced and re-running it is always right, these say the element a
-# caller is holding is gone, and whether re-running the caller's work is safe is
-# the caller's question (a click that may have been dispatched must not be).
-_DETACHED_ELEMENT_MARKERS = (
-    "No node with given id found",
-    "Node with given id does not belong to the document",
-)
-
 # Package of the CDP event classes nodriver keys its handler table by. A KeyError
 # carrying one of these classes is nodriver's own bookkeeping race, never a
 # lookup miss in our code or a caller's.
@@ -334,7 +320,7 @@ def recoverable_race(exc: BaseException) -> str | None:
 class ElementDisconnected(ProtocolException):
     """The PAGE's own answer that a held element has left: ``isConnected`` false.
 
-    Chrome only says so (:data:`_DETACHED_ELEMENT_MARKERS`) once the node is
+    Chrome only says so (:func:`page_natives.departed`) once the node is
     gone from its node table. A node the page removed but a script still
     references -- the old button of a container whose ``innerHTML`` was just
     replaced -- keeps resolving, so a read through it SUCCEEDS and answers for
@@ -360,9 +346,7 @@ def detached_element(exc: BaseException | None) -> str | None:
     """
     if isinstance(exc, ElementDisconnected):
         return "element left the document"
-    if isinstance(exc, ProtocolException) and any(
-        marker in str(exc) for marker in _DETACHED_ELEMENT_MARKERS
-    ):
+    if page_natives.departed(exc):
         return "element left the document"
     return None
 
@@ -585,7 +569,7 @@ async def _xpath_node_ids(tab: Tab, expression: str) -> list[NodeId]:
 async def _require_connected(element: Element) -> None:
     """Raise :class:`ElementDisconnected` if the page says *element* has left.
 
-    ONE :func:`page_natives.read` of :data:`click_target.CONNECTED_JS` (T-10284),
+    ONE :func:`page_natives.run` of :data:`click_target.CONNECTED_JS` (T-10284),
     read by :func:`click_target.connectivity`: only the page's own ``no`` is a
     departure.
     A read that did not succeed -- a getter that threw, a value that is no
@@ -593,7 +577,7 @@ async def _require_connected(element: Element) -> None:
     whose getter throws would be dropped from a listing, silently) and not
     "connected" (a node the page removed would be acted on).
     """
-    answer = await page_natives.read(element, click_target.CONNECTED_JS)
+    answer = await page_natives.run(element, click_target.CONNECTED_JS)
     if not click_target.connectivity(answer, "the element"):
         raise ElementDisconnected("the element is no longer in its document")
 
@@ -685,12 +669,20 @@ async def node_is_visible(element: Element, what: str) -> bool:
     """THE reader of :data:`VISIBLE_JS`: visible, or not, and never a guess.
 
     A boolean is the page's answer for a node in a document. A node the page
-    removed (``no``) is not visible. A connectivity read that FAILED raises
-    ``ToolError`` (:func:`click_target.connectivity`): it is neither "not
-    visible" (``wait_for_element`` would time out and say ``False``) nor
-    visible, so no caller may absorb it.
+    removed (``no``), or that Chrome says has left (:func:`detached_element`,
+    which includes a navigation between the two commands of the read), is not
+    visible. A read that FAILED -- the script threw, a command failed for any
+    other reason, the answer is neither a boolean nor a connectivity token -- is
+    ``page_natives.run``'s or :func:`click_target.connectivity`'s ``ToolError``:
+    it is neither "not visible" (``wait_for_element`` would time out and say
+    ``False``) nor visible, so no caller may absorb it.
     """
-    answer = await page_natives.read(element, VISIBLE_JS)
+    try:
+        answer = await page_natives.run(element, VISIBLE_JS)
+    except ProtocolException as exc:
+        if detached_element(exc) is None:
+            raise
+        return False
     if isinstance(answer, bool):
         return answer
     click_target.connectivity(answer, what)

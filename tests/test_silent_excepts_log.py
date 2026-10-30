@@ -152,7 +152,7 @@ class TestDomHandlerSilentExcepts:
         from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 
         class _Element(AppliesOverCdp, MagicMock):
-            """A mock the aim read (``page_natives.read``) can reach by CDP."""
+            """A mock the aim read (``page_natives.run``) can reach by CDP."""
 
         element = _Element()
         element.scroll_into_view = AsyncMock()
@@ -171,6 +171,7 @@ class TestDomHandlerSilentExcepts:
                 "hit": {"tag": "button", "id": "btn", "classes": []},
                 "hit_is_target": True,
                 "disabled": False,
+                "under_disabled": False,
                 "pointer_events": "auto",
                 "visibility": "visible",
             }

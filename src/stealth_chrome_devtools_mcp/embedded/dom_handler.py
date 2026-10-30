@@ -10,6 +10,7 @@ from nodriver import Tab
 from stealth_chrome_devtools_mcp.embedded import (
     click_target,
     control_state,
+    page_natives,
     script_evaluation,
     scroll_position,
     text_entry,
@@ -129,24 +130,11 @@ class DOMHandler:
 
                     is_visible = True
                     if visible_only:
-                        try:
-                            is_visible = await node_is_visible(elem, "the element")
-                            if not is_visible:
-                                continue
-                        except ToolError:
-                            raise
-                        except (
-                            AttributeError,
-                            RuntimeError,
-                            ConnectionError,
-                            Exception,
-                        ) as e:
-                            debug_logger.log_info(
-                                "dom_handler",
-                                "query_elements",
-                                "Visibility check skipped for element: "
-                                f"{type(e).__name__}",
-                            )
+                        # A read that failed raises (``node_is_visible``): it is
+                        # not "visible", and no catch here may say it is.
+                        is_visible = await node_is_visible(elem, "the element")
+                        if not is_visible:
+                            continue
 
                     bbox = None
                     try:
@@ -378,6 +366,17 @@ class DOMHandler:
         ledger = click_target.InputSent()
         try:
             await click_target.click(tab, element, selector, aim, ledger)
+        except page_natives.ReadError as failed:
+            # A probe read (``page_natives.run``) that failed: once input went
+            # out, that is the same "may have reached the page" as any other
+            # failure here; before it, nothing was sent.
+            if ledger.sent:
+                raise ToolError(
+                    f"click on '{selector}' failed after input was sent "
+                    f"({type(failed).__name__}); it may have reached the page, "
+                    "so it was not repeated"
+                ) from failed
+            raise
         except ToolError:
             raise
         except Exception as e:
@@ -392,6 +391,12 @@ class DOMHandler:
             debug_logger.log_debug("dom_handler", "click_element", str(e))
             try:
                 clicked = await click_target.synthetic_click(element, selector, ledger)
+            except page_natives.ReadError as failed:
+                raise ToolError(
+                    f"the synthetic click on '{selector}' failed "
+                    f"({type(failed).__name__}); it may have reached the page, "
+                    "so it was not repeated"
+                ) from failed
             except ToolError:
                 raise
             except Exception as synthetic:
@@ -764,22 +769,13 @@ class DOMHandler:
                 element = await resolve_element(tab, selector, timeout=0)
 
                 if element:
-                    if visible:
-                        try:
-                            if not await node_is_visible(element, f"'{selector}'"):
-                                await asyncio.sleep(0.5)
-                                continue
-                        except ToolError:
-                            raise
-                        except (  # noqa: S110  plan_M10a
-                            AttributeError,
-                            RuntimeError,
-                            ConnectionError,
-                            Exception,
-                        ):
-                            # visibility check may fail on detached/stale
-                            # elements during wait
-                            pass
+                    if visible and not await node_is_visible(element, f"'{selector}'"):
+                        # Not visible, or gone since it was resolved
+                        # (``node_is_visible`` classifies a navigation between
+                        # the commands of the read as gone): wait on. A read
+                        # that FAILED raises, it never satisfies the wait.
+                        await asyncio.sleep(0.5)
+                        continue
 
                     if text_content:
                         text = element.text_all
