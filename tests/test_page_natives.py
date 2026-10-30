@@ -16,8 +16,9 @@ sends and what it does with each reply:
   whatever "not here" sounds like (a script's FOREIGN, a null object, Chrome's
   "does not belong"), and a node no frame holds is a departure -- never the first
   frame's failure;
-* the release of the object group never holds the caller past the read's own
-  budget and never swallows a cancellation;
+* a failed or cancelled read leaves its object group on the tab for the next
+  read to release (bounded, one wait), never spawns a task, never swallows a
+  cancellation and leaves nothing behind when the loop is shut down;
 * the visibility reader and ``wait_for_element`` / ``query_elements`` never turn a
   failed read into "visible".
 """
@@ -25,8 +26,10 @@ sends and what it does with each reply:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
+import time
 
 import pytest
 from nodriver.core.connection import ProtocolException
@@ -62,11 +65,6 @@ def backend_log(caplog):
         backend.removeHandler(caplog.handler)
 
 
-async def _drain():
-    """Wait for the releases a failed read handed off (they are detached)."""
-    await asyncio.gather(*list(page_natives._releasing))
-
-
 @pytest.fixture(autouse=True)
 def _instant_backoff(monkeypatch):
     monkeypatch.setattr(element_resolution, "_SETTLE_SECONDS", 0.0)
@@ -86,6 +84,11 @@ class _Node(FakeClickTarget):
         if self._failure is not None:
             raise self._failure
         return self._answer
+
+
+def _left(node):
+    """The object groups the failed reads of *node*'s tab left, oldest first."""
+    return getattr(node.tab, page_natives._LEFTOVERS, [])
 
 
 class _TabOf:
@@ -177,28 +180,48 @@ async def test_the_object_group_is_released_after_a_successful_read():
 
 
 @pytest.mark.parametrize(
+    "thrown",
+    [PageThrew(True), PageThrew(False), PageThrew(error=True)],
+    ids=["throw-true", "throw-false", "throw-error"],
+)
+async def test_the_object_group_of_a_script_that_threw_is_released_at_once(thrown):
+    """The call answered (with ``exceptionDetails``): the read is over, so its group
+    is released inline like a successful read's, then the failure is raised."""
+    node = _Node(failure=thrown)
+
+    with pytest.raises(page_natives.ReadError):
+        await page_natives.run(node, SCRIPT)
+
+    assert node.cdp_methods[-1] == "Runtime.releaseObjectGroup"
+    assert node.open_groups == [] and _left(node) == []
+
+
+@pytest.mark.parametrize(
     "failure",
     [
-        PageThrew(True),
-        PageThrew(False),
-        PageThrew(error=True),
         ProtocolException({"message": "Some unrelated CDP failure"}),
         left_the_document(),
         ConnectionError("socket closed"),
     ],
-    ids=["throw-true", "throw-false", "throw-error", "protocol", "departed", "socket"],
+    ids=["protocol", "departed", "socket"],
 )
-async def test_the_object_group_is_released_after_a_failed_read(failure):
-    """The leak was per row per listing, on the failing path as much as the other:
-    the release is in a ``finally``."""
+async def test_the_object_group_of_a_failed_command_is_left_for_the_next_read(failure):
+    """A failed read releases nothing and raises at once; the group is recorded on
+    the tab and the next read on that tab releases it."""
     node = _Node(failure=failure)
 
     with pytest.raises(Exception):  # noqa: B017, PT011  PERMANENT(every failure class is asserted by its own test below)
         await page_natives.run(node, SCRIPT)
-    await _drain()
 
-    assert node.cdp_methods[-1] == "Runtime.releaseObjectGroup"
-    assert node.open_groups == []
+    assert "Runtime.releaseObjectGroup" not in node.cdp_methods
+    left = list(_left(node))
+    assert len(left) == 1 and node.open_groups == left
+
+    node._failure = None  # the page recovers
+    assert await page_natives.run(node, SCRIPT) == 1
+
+    assert node.open_groups == [] and _left(node) == []
+    assert node.cdp_methods.count("Runtime.releaseObjectGroup") == 2
 
 
 async def test_each_read_has_a_group_of_its_own():
@@ -481,22 +504,29 @@ async def test_a_remembered_frame_that_no_longer_holds_the_node_falls_back():
 
 
 # ---------------------------------------------------------------------------
-# the release never holds the caller, never swallows a cancellation (MED)
+# the release never holds the caller, never swallows a cancellation, never
+# outlives the loop (MED; LOW of the review of f7734fa)
 # ---------------------------------------------------------------------------
 
 
 class _Hangs(_Node):
-    """A page that is blocked: the script never returns (a ``confirm()``)."""
+    """A page that is blocked: the script never returns (a ``confirm()``).
+
+    ``hangs`` is switched off for the read that follows (the page unblocked).
+    """
+
+    hangs = True
 
     async def apply(self, js_function, *args, **kwargs):
-        self.apply_calls.append(js_function)
-        await asyncio.Event().wait()
+        if self.hangs:
+            self.apply_calls.append(js_function)
+            await asyncio.Event().wait()
+        return await super().apply(js_function, *args, **kwargs)
 
 
 @pytest.fixture
 def short_releases(monkeypatch):
     monkeypatch.setattr(page_natives, "RELEASE_WAIT_S", 0.05)
-    monkeypatch.setattr(page_natives, "RELEASE_DETACHED_S", 0.2)
 
 
 async def _ends_within(coro, seconds):
@@ -513,6 +543,15 @@ async def _ends_within(coro, seconds):
     return task
 
 
+async def _cancelled_mid_read(node):
+    """Start a read on *node*, let it block in the page, cancel it (``wait_for``)."""
+    read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.02)
+    read.cancel()
+    await _ends_within(asyncio.wait({read}), 0.2)
+    return read
+
+
 async def test_a_release_that_never_answers_does_not_hold_a_finished_read(
     short_releases, backend_log
 ):
@@ -525,38 +564,123 @@ async def test_a_release_that_never_answers_does_not_hold_a_finished_read(
     assert any("was not released" in r.getMessage() for r in backend_log())
 
 
-async def test_a_read_that_is_cut_off_returns_at_its_budget_not_behind_the_release(
-    short_releases, backend_log
-):
-    """RED on 3f9cc1d: the ``finally`` awaited the release behind the blocked
-    page, so the caller's 5 s became the 30 s ``browser may have crashed``."""
+async def test_a_cancelled_read_releases_nothing_spawns_nothing_and_stays_cancelled():
     node = _Hangs()
+    node.release_hangs = True  # a release sent now would hang: none is sent
+    before = asyncio.all_tasks()
+
+    read = await _cancelled_mid_read(node)
+
+    assert read.cancelled()  # a CancelledError, not something it was turned into
+    assert asyncio.all_tasks() - {read} == before - {read}
+    assert "Runtime.releaseObjectGroup" not in node.cdp_methods
+    assert _left(node) == node.open_groups and len(node.open_groups) == 1
+
+
+async def test_the_next_read_releases_the_group_a_cancelled_read_left():
+    node = _Hangs()
+    await _cancelled_mid_read(node)
+    node.hangs = False
+
+    assert await page_natives.run(node, SCRIPT) == 1
+
+    assert node.open_groups == [] and _left(node) == []
+    # the leftover, then the read's own
+    assert node.cdp_methods.count("Runtime.releaseObjectGroup") == 2
+
+
+async def test_a_leftover_release_that_hangs_does_not_hold_the_next_read(
+    monkeypatch, backend_log
+):
+    """Bounded: the next read answers within its budget plus ONE release wait,
+    however many groups are waiting, and the stuck ones are dropped, not retried."""
+    node = _Hangs()
+    reads = [asyncio.ensure_future(page_natives.run(node, SCRIPT)) for _ in range(3)]
+    await asyncio.sleep(0.02)
+    for read in reads:
+        read.cancel()
+    await _ends_within(asyncio.wait(reads), 0.2)
+    assert len(_left(node)) == 3
+    node.hangs = False
     node.release_hangs = True
-    read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
-    await asyncio.sleep(0.05)  # the caller's budget runs out ...
-    read.cancel()  # ... and ``wait_for`` cancels the read
 
-    await _ends_within(asyncio.wait({read}), 0.1)  # not 0.05 + the release's wait
+    monkeypatch.setattr(page_natives, "RELEASE_WAIT_S", 0.2)  # 3 in turn: 0.6 s
+    started = time.monotonic()
 
-    assert read.cancelled()
-    assert len(page_natives._releasing) == 1  # handed off, not forgotten
-    await _drain()  # ... and abandoned at its own bound
-    assert page_natives._releasing == set()
+    task = await _ends_within(page_natives.run(node, SCRIPT), 1.0)
+
+    assert task.result() == 1
+    assert time.monotonic() - started < 0.45  # one wait, not one per group
+    assert _left(node) == []  # dropped, not kept to be retried forever
     assert any("was not released" in r.getMessage() for r in backend_log())
 
 
-async def test_a_cancellation_propagates_at_once_and_still_releases():
+async def test_a_failed_leftover_release_is_logged_and_never_the_reads_result(
+    backend_log,
+):
     node = _Hangs()
-    task = asyncio.ensure_future(page_natives.run(node, SCRIPT))
-    await asyncio.sleep(0.01)
-    task.cancel()
+    await _cancelled_mid_read(node)
+    node.hangs = False
+    node.release_error = ConnectionError("gone")
 
-    await _ends_within(asyncio.wait({task}), 0.1)
+    assert await page_natives.run(node, SCRIPT) == 1
 
-    assert task.cancelled()
-    await _drain()
-    assert node.cdp_methods[-1] == "Runtime.releaseObjectGroup"
-    assert node.open_groups == []
+    assert any("could not release" in r.getMessage() for r in backend_log())
+    assert _left(node) == []
+
+
+async def test_a_tab_whose_reads_keep_failing_keeps_a_bounded_list(backend_log):
+    node = _Hangs()
+    cap = page_natives.MAX_LEFTOVERS
+    reads = [
+        asyncio.ensure_future(page_natives.run(node, SCRIPT)) for _ in range(cap + 8)
+    ]
+    await asyncio.sleep(0.05)  # all blocked in the page together
+    assert len(node.open_groups) == cap + 8
+    for read in reads:
+        read.cancel()
+    await _ends_within(asyncio.wait(reads), 1.0)
+
+    kept = _left(node)
+    assert len(kept) == cap and len(set(kept)) == cap
+    assert set(kept) < set(node.open_groups)
+    dropped = [r for r in backend_log() if "dropped unreleased" in r.getMessage()]
+    assert len(dropped) == 8
+
+
+async def test_a_cancellation_during_shutdown_leaves_no_task_and_no_warning():
+    """The review of f7734fa: the release was handed to a task created while the
+    loop was shutting down, after ``asyncio.run`` had listed the tasks to cancel;
+    it never ran its own timeout, the closed loop kept it pending, and collection
+    said ``Task was destroyed but it is pending!`` (retaining the Tab each time)."""
+    seen: list[str] = []
+    holder: list[_Hangs] = []
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _l, ctx: seen.append(ctx["message"]))
+        node = _Hangs()
+        node.release_hangs = True
+        holder.append(node)
+        read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+        await asyncio.sleep(0.02)  # the read is blocked in the page; the loop ends
+        assert not read.done()
+
+    pending_before = {
+        id(t) for t in gc.get_objects() if isinstance(t, asyncio.Task) and not t.done()
+    }
+    await asyncio.to_thread(asyncio.run, scenario())
+    node = holder.pop()
+    gc.collect()
+
+    pending_after = [
+        t
+        for t in gc.get_objects()
+        if isinstance(t, asyncio.Task) and not t.done() and id(t) not in pending_before
+    ]
+    assert pending_after == []
+    assert [m for m in seen if "destroyed" in m] == []
+    assert _left(node) == node.open_groups and len(node.open_groups) == 1
 
 
 async def test_the_synthetic_click_on_a_blocked_page_answers_within_its_budget(
@@ -576,7 +700,7 @@ async def test_the_synthetic_click_on_a_blocked_page_answers_within_its_budget(
 
     assert isinstance(task.exception(), TimeoutError)
     assert ledger.sent is True
-    await _drain()
+    assert len(_left(node)) == 1
 
 
 # ---------------------------------------------------------------------------

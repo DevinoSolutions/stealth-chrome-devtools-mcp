@@ -942,6 +942,83 @@ async def test_a_removed_button_in_any_in_process_frame_reads_departed(
         await get_fn("close_instance")(instance_id=iid)
 
 
+class _FailsAt(_Recording):
+    """A recording tab whose *nth* command fails as a dropped connection does."""
+
+    def __init__(self, tab, nth):
+        super().__init__(tab)
+        self._nth, self._sent = nth, 0
+
+    async def send(self, command):
+        self._sent += 1
+        if self._sent == self._nth:
+            raise ConnectionError("socket closed")
+        return await super().send(command)
+
+
+async def test_a_navigation_frees_a_group_nobody_released(
+    fixture_app_server, tmp_empty_root
+):
+    """What the leftover design relies on (T-10284, review of f7734fa): a read that
+    fails leaves its object group for the tab's next read, and until then it is
+    freed by Chrome when the document navigates. MEASURED: an object resolved in a
+    group is callable until ``Page.navigate`` and not after; the control is the
+    same object, unreleased, without a navigation."""
+    close = get_fn("close_instance")
+    iid, tab = await _spawned(fixture_app_server)
+    try:
+        assert await eval_js(iid, _SETUP) is True
+        await tab.send(cdp.dom.get_document())
+        live = await _element(tab, "connected")
+        frame = (await tab.send(cdp.page.get_frame_tree())).frame.id_
+        world = await tab.send(
+            cdp.page.create_isolated_world(frame, world_name=page_natives.WORLD_NAME)
+        )
+        left = await tab.send(
+            cdp.dom.resolve_node(
+                backend_node_id=live.backend_node_id,
+                object_group="left-by-a-failed-read",
+                execution_context_id=world,
+            )
+        )
+        assert await _alive(tab, left.object_id)  # nobody released it, still there
+
+        await tab.send(cdp.page.navigate(f"{fixture_app_server}/interactions.html?3"))
+        await tab.sleep(1.0)
+
+        assert not await _alive(tab, left.object_id), "a navigation did not free it"
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_the_next_read_releases_what_a_failed_read_left_in_real_chrome(
+    fixture_app_server, tmp_empty_root
+):
+    """A read whose call fails (the connection drops on ``callFunctionOn``) raises at
+    once and releases nothing: its resolved object is still callable. The next read
+    on the same tab releases it."""
+    close = get_fn("close_instance")
+    iid, tab = await _spawned(fixture_app_server)
+    try:
+        assert await eval_js(iid, _SETUP) is True
+        await tab.send(cdp.dom.get_document())
+        live = await _element(tab, "connected")
+
+        recording = _FailsAt(tab, 4)  # frame tree, world, resolution, THE CALL
+        node = SimpleNamespace(backend_node_id=live.backend_node_id, tab=recording)
+        with pytest.raises(ToolError, match="socket closed"):
+            await page_natives.run(node, click_target.CONNECTED_JS)
+        (left,) = recording.object_ids
+        assert await _alive(tab, left), "the failed read released its group itself"
+
+        assert await page_natives.run(node, click_target.CONNECTED_JS) == YES
+        assert not await _alive(tab, left), "the next read did not release it"
+        assert len(recording.object_ids) == 2
+        assert not await _alive(tab, recording.object_ids[1])
+    finally:
+        await close(instance_id=iid)
+
+
 @pytest.mark.parametrize("blocker", ["confirm", "busy"])
 async def test_a_synthetic_click_on_a_blocked_page_is_bounded_as_in_2_1_53(
     fixture_origin_pair, tmp_empty_root, blocker

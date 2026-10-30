@@ -78,12 +78,24 @@ and :func:`run` raises ``ToolError`` for it whatever ``result`` holds (a thrown
 ``true`` arrives as a perfectly good ``true`` value). A transport failure is the
 same: Chrome saying the node or its context is gone (:func:`departed`) is the
 departure ``detached_element`` classifies, every other failure is a
-``ToolError``. The resolved remote object is released in an object group of the
-call, on success and on failure, and the release NEVER holds the caller past the
-read's own budget (:func:`_release_inline`, :func:`_release_detached`): a read
-whose page is blocked (a ``confirm()`` in a click listener, a busy loop) is
-abandoned by its caller at ``INPUT_BUDGET_S``, and a release awaited behind the
-blocked page would turn that bound into the 30 s ``browser may have crashed``.
+``ToolError``. The resolved remote object lives in an object group of the
+call. A read that FINISHED releases it at once, waiting at most
+:data:`RELEASE_WAIT_S`. A read that FAILED or was CANCELLED releases nothing and
+raises at once, unmodified (a ``CancelledError`` stays one): it records its group
+on the tab (:data:`_LEFTOVERS`) and the NEXT read on that tab releases the
+recorded groups first, together, within one :data:`RELEASE_WAIT_S` (a release that
+fails or times out is logged and dropped, never retried and never the read's own
+result). No task is spawned: a read abandoned by its caller at ``INPUT_BUDGET_S``
+because its page is blocked (a ``confirm()`` in a click listener, a busy loop)
+is not held behind that page, and nothing outlives the event loop that a
+shutdown cancelled it in. A group left by a failed read lives until the tab's
+next read, its navigation or its close; Chrome frees a document's groups on
+navigation (MEASURED, headless Chrome 156, for a same-origin and a ``data:``
+navigation: ``Runtime.callFunctionOn`` on an ``objectId`` taken in a group before
+``Page.navigate`` is callable until it and answers ``Cannot find context with
+specified id`` afterwards); a closed tab takes its contexts with it (not measured
+separately). The list is capped at :data:`MAX_LEFTOVERS` per tab, the oldest
+dropped with a warning.
 """
 
 from __future__ import annotations
@@ -123,7 +135,7 @@ FOREIGN = "stealth.read:foreign"
 # the caller's question (a click that may have been dispatched must not be).
 #
 # ``-32602 Either objectId or executionContextId or uniqueContextId must be
-# specified`` is NOT here (it was, in 3f9cc1d): it is what a call without an
+# specified`` is NOT here: it is what a call without an
 # ``objectId`` gets, which a null ``DOM.resolveNode`` reply produced when the node
 # lives in a frame of another origin. That is a frame saying "not here", handled
 # before a call is built; the reply itself could only be our own bug.
@@ -148,13 +160,13 @@ _NOT_HERE_MARKERS = (
 #: How long a read waits for the release of its object group once it is over.
 RELEASE_WAIT_S = 1.0
 
-#: How long a release that was handed off (the read failed, or was cancelled)
-#: may take before it is abandoned.
-RELEASE_DETACHED_S = 5.0
+#: How many object groups of failed reads a tab remembers for its next read to
+#: release; past it the oldest is dropped (with a warning).
+MAX_LEFTOVERS = 32
 
-#: The releases handed off and not finished: held so they are not collected
-#: mid-flight; each takes itself out when done.
-_releasing: set[asyncio.Future[None]] = set()
+#: The attribute of a ``Tab`` that holds the object groups its failed or
+#: cancelled reads left (a list: a ``Tab`` is unhashable, as with the frame hint).
+_LEFTOVERS = "_stealth_reads_leftovers"
 
 #: What a frame's attempt answers when the node is not in that frame.
 _NOT_HERE = object()
@@ -272,16 +284,38 @@ async def _release_bounded(tab: Tab, group: str, seconds: float) -> None:
         )
 
 
-def _release_detached(tab: Tab, group: str) -> None:
-    """Hand the release of *group* off and return at once (a failed read).
+def _leave(tab: Tab, group: str) -> None:
+    """Record *group* on *tab* for its next read to release (a failed read)."""
+    left = getattr(tab, _LEFTOVERS, None)
+    if left is None:
+        left = []
+        try:
+            setattr(tab, _LEFTOVERS, left)
+        except AttributeError:
+            return  # a tab that takes no attributes remembers nothing
+    left.append(group)
+    if len(left) > MAX_LEFTOVERS:
+        dropped = left.pop(0)
+        debug_logger.log_warning(
+            "page_natives",
+            "_leave",
+            f"object group {dropped} dropped unreleased: {MAX_LEFTOVERS} are waiting",
+        )
 
-    Awaiting it would hold a caller that already gave up behind the very page
-    that made it give up, and an ``await`` inside a cancelled task is not even
-    reached reliably.
+
+async def _release_leftovers(tab: Tab) -> None:
+    """Release the groups earlier failed reads of *tab* left, in one bounded wait.
+
+    They are taken off the tab first (a concurrent read does not release them
+    twice) and released together, so the wait is :data:`RELEASE_WAIT_S` however
+    many there are.
     """
-    task = asyncio.ensure_future(_release_bounded(tab, group, RELEASE_DETACHED_S))
-    _releasing.add(task)
-    task.add_done_callback(_releasing.discard)
+    left = getattr(tab, _LEFTOVERS, None)
+    if not left:
+        return
+    groups = list(left)
+    left.clear()
+    await asyncio.gather(*(_release_bounded(tab, g, RELEASE_WAIT_S) for g in groups))
 
 
 def _says_not_here(exc: BaseException) -> bool:
@@ -338,7 +372,7 @@ async def _in_frame(
             )
         )
     except BaseException:
-        _release_detached(tab, group)
+        _leave(tab, group)
         raise
     await _release_bounded(tab, group, RELEASE_WAIT_S)
     if thrown is not None:
@@ -388,9 +422,11 @@ async def run(
     any failure of the commands that is not Chrome saying the node is gone.
     Chrome's own departure replies (:func:`departed`) propagate as raised, for
     ``element_resolution.detached_element`` to classify; so does
-    :class:`FrameGone`.
+    :class:`FrameGone`. The groups an earlier failed read of the tab left are
+    released first (:func:`_release_leftovers`).
     """
     script = WRAPPER_JS.replace("__SCRIPT__", js_function)
+    await _release_leftovers(element.tab)
     try:
         return await _search(element, script, user_gesture)
     except ReadError:
