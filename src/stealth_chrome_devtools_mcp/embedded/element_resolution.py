@@ -150,7 +150,7 @@ from typing import TYPE_CHECKING, TypeVar
 from nodriver import cdp
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp.embedded import click_target
+from stealth_chrome_devtools_mcp.embedded import click_target, page_natives
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -585,14 +585,15 @@ async def _xpath_node_ids(tab: Tab, expression: str) -> list[NodeId]:
 async def _require_connected(element: Element) -> None:
     """Raise :class:`ElementDisconnected` if the page says *element* has left.
 
-    ONE ``Element.apply`` of :data:`click_target.CONNECTED_JS` (T-10284), read by
-    :func:`click_target.connectivity`: only the page's own ``no`` is a departure.
+    ONE :func:`page_natives.read` of :data:`click_target.CONNECTED_JS` (T-10284),
+    read by :func:`click_target.connectivity`: only the page's own ``no`` is a
+    departure.
     A read that did not succeed -- a getter that threw, a value that is no
     token -- raises ``ToolError`` instead. It is not "gone" (a connected node
     whose getter throws would be dropped from a listing, silently) and not
     "connected" (a node the page removed would be acted on).
     """
-    answer = await element.apply(click_target.CONNECTED_JS)
+    answer = await page_natives.read(element, click_target.CONNECTED_JS)
     if not click_target.connectivity(answer, "the element"):
         raise ElementDisconnected("the element is no longer in its document")
 
@@ -656,6 +657,44 @@ async def refresh_element(tab: Tab, element: Element | None) -> bool:
             raise
         return False
     return True
+
+
+#: THE visibility read -- ``query_elements(visible_only=True)`` and
+#: ``wait_for_element(visible=True)`` both ask it. A node the page
+#: removed but still references has an EMPTY computed style, so the three style
+#: tests alone pass for it and it listed as visible (T-10284); it is asked
+#: whether it is in a document first, through ``click_target``'s one
+#: connectivity read. It answers a boolean only for a node that is in a
+#: document; otherwise it answers the connectivity TOKEN, which
+#: :func:`node_is_visible` reads: ``no`` is "not visible", a failed read raises.
+#: Lives here with :func:`refresh_element`, the other reader of a held node.
+VISIBLE_JS = """(elem) => {
+    __CONNECTIVITY__
+    const state = connectivity(elem);
+    if (state !== "__YES__") return state;
+    var style = window.getComputedStyle(elem);
+    return style.display !== 'none' &&
+           style.visibility !== 'hidden' &&
+           style.opacity !== '0';
+}""".replace("__CONNECTIVITY__", click_target.CONNECTIVITY_JS).replace(
+    "__YES__", click_target.CONNECTED_YES
+)
+
+
+async def node_is_visible(element: Element, what: str) -> bool:
+    """THE reader of :data:`VISIBLE_JS`: visible, or not, and never a guess.
+
+    A boolean is the page's answer for a node in a document. A node the page
+    removed (``no``) is not visible. A connectivity read that FAILED raises
+    ``ToolError`` (:func:`click_target.connectivity`): it is neither "not
+    visible" (``wait_for_element`` would time out and say ``False``) nor
+    visible, so no caller may absorb it.
+    """
+    answer = await page_natives.read(element, VISIBLE_JS)
+    if isinstance(answer, bool):
+        return answer
+    click_target.connectivity(answer, what)
+    return False
 
 
 async def resolve_element(

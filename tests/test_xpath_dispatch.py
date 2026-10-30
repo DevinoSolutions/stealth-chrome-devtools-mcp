@@ -19,7 +19,7 @@ import json
 import pytest
 from nodriver.core.connection import ProtocolException
 
-from fakes import FakeSelect
+from fakes import AppliesOverCdp, FakeSelect
 from stealth_chrome_devtools_mcp.embedded import click_target, element_resolution
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
@@ -59,7 +59,7 @@ def _pop(effects):
     return effect
 
 
-class _FakeElement:
+class _FakeElement(AppliesOverCdp):
     """Minimal nodriver-Element stand-in for the tools' post-resolve work."""
 
     def __init__(self, tag="div", text="hello", attrs=None):

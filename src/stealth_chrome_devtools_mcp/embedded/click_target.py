@@ -148,13 +148,16 @@ DISABLED = "disabled"
 #: ``no`` is a departure.
 #:
 #: The getter is the NATIVE ``isConnected`` accessor, found by
-#: :data:`page_natives.NATIVE_JS` on the NODE's own prototype chain: never
-#: ``elem.isConnected`` (a ``<form>`` with a control named ``isConnected``
-#: shadows that member) and never through the ``Node`` global (a page's own
-#: top-level ``class Node {}`` replaces it, and every element then read
-#: ``threw``). A page script that REPLACES the accessor is the accepted
-#: boundary until T-10299 (an isolated world): one that throws is read as
-#: ``threw``, one that answers a boolean is believed.
+#: :data:`page_natives.NATIVE_JS` on the NODE's own prototype chain (the
+#: FARTHEST owner, so a page's class or an accessor added nearer the node does
+#: not steer it): never ``elem.isConnected`` (a ``<form>`` with a control named
+#: ``isConnected`` shadows that member) and never through the ``Node`` global (a
+#: page's own top-level ``class Node {}`` replaces it, and every element then
+#: read ``threw``). The accepted boundary until T-10299 (an isolated world) is a
+#: page script that REPLACES the original accessor on the farthest prototype, or
+#: the realm's own ``Object.getOwnPropertyDescriptor`` /
+#: ``Function.prototype.call``: one that throws is read as ``threw``, one that
+#: answers a boolean is believed.
 CONNECTED_YES = "stealth.connected:yes"
 CONNECTED_NO = "stealth.connected:no"
 CONNECTED_THREW = "stealth.connected:threw"
@@ -357,7 +360,7 @@ async def aim(element: Element, selector: str) -> dict[str, object]:
     Raises ``ToolError`` when the answer is not the promised JSON object:
     "I could not read it" and "nothing was under the point" are different facts.
     """
-    answer = await element.apply(AIM_JS)
+    answer = await page_natives.read(element, AIM_JS)
     if not isinstance(answer, str):
         raise ToolError(
             f"could not read where a click on '{selector}' would land: "
@@ -416,7 +419,7 @@ def _shape(raw: object) -> dict[str, object] | None:
 
 #: The connectivity read ON ITS OWN, for a caller that holds an ``Element`` and
 #: has no aim to read it off (``element_resolution.refresh_element``). One
-#: token, one ``Element.apply``. nodriver's ``update()`` re-resolves by
+#: token, one :func:`page_natives.read`. nodriver's ``update()`` re-resolves by
 #: backend node id and that succeeds for a node the page removed but still
 #: references, so ``update`` cannot say whether an element has left the page.
 CONNECTED_JS = (
