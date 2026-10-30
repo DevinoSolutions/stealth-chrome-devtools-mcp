@@ -165,8 +165,11 @@ RELEASE_WAIT_S = 1.0
 MAX_LEFTOVERS = 32
 
 #: The attribute of a ``Tab`` that holds the object groups its failed or
-#: cancelled reads left (a list: a ``Tab`` is unhashable, as with the frame hint).
+#: cancelled reads left (a list: a ``Tab`` is unhashable, as with the frame hint),
+#: each as ``(order, group)``, where *order* says when it was first left.
 _LEFTOVERS = "_stealth_reads_leftovers"
+
+_left_order = itertools.count(1)
 
 #: What a frame's attempt answers when the node is not in that frame.
 _NOT_HERE = object()
@@ -293,14 +296,15 @@ def _leave(tab: Tab, group: str) -> None:
             setattr(tab, _LEFTOVERS, left)
         except AttributeError:
             return  # a tab that takes no attributes remembers nothing
-    left.append(group)
+    left.append((next(_left_order), group))
     _cap(left)
 
 
-def _cap(left: list[str]) -> None:
+def _cap(left: list[tuple[int, str]]) -> None:
     """Keep the newest :data:`MAX_LEFTOVERS` of *left*; one warning per drop."""
+    left.sort()
     while len(left) > MAX_LEFTOVERS:
-        dropped = left.pop(0)
+        _, dropped = left.pop(0)
         debug_logger.log_warning(
             "page_natives",
             "_leave",
@@ -316,13 +320,13 @@ async def _release_leftovers(tab: Tab) -> None:
     many there are. A read cancelled during that wait puts back every group whose
     release did not finish, so the next read still releases it (releasing a
     group twice is harmless; forgetting one keeps it until a navigation). They go
-    back AHEAD of any group a concurrent read left meanwhile, since they are
-    older, so the cap still drops the oldest.
+    back with the order they were first left in, so however reads overlap the
+    cap drops the group left longest ago.
     """
     left = getattr(tab, _LEFTOVERS, None)
     if not left:
         return
-    groups = list(left)
+    taken = list(left)
     left.clear()
     finished: set[str] = set()
 
@@ -331,10 +335,10 @@ async def _release_leftovers(tab: Tab) -> None:
         finished.add(group)
 
     try:
-        await asyncio.gather(*(release(g) for g in groups))
+        await asyncio.gather(*(release(group) for _, group in taken))
     except asyncio.CancelledError:
-        # `left` is still the tab's list: a concurrent failed read appended to it
-        left[:0] = [group for group in groups if group not in finished]
+        # `left` is still the tab's list: concurrent failed reads appended to it
+        left.extend(entry for entry in taken if entry[1] not in finished)
         _cap(left)
         raise
 
