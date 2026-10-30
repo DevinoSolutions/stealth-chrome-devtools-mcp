@@ -56,6 +56,17 @@ HOST_EXEC_SITES: tuple[tuple[str, str], ...] = (
     ("embedded/dynamic_hook_model.py", "custom_condition"),
 )
 
+#: ``compile`` calls that are NOT host execution: they compile the package's OWN
+#: source files to code objects and never run them, and no caller text reaches
+#: them. Declared so the inventory scan stays exact instead of exempting a name:
+#: a module listed here must contain no ``exec``/``eval`` call at all.
+#: (module path relative to the package, what it compiles).
+PACKAGE_SOURCE_COMPILE_SITES: tuple[tuple[str, str], ...] = (
+    # T-10034: the Sentry fingerprint recognises our frames by code-object
+    # equality with the package's own files, compiled once (never executed).
+    ("tool_error_fingerprint.py", "the package's own .py files"),
+)
+
 #: Tools whose declared purpose is to run caller-supplied code in the BROWSER.
 #: JavaScript here reaches page contexts, not the host interpreter.
 BROWSER_EXEC_TOOLS: frozenset[str] = frozenset(
@@ -307,6 +318,9 @@ THREAT_CONTRACT: tuple[ThreatRow, ...] = (
         "TESTED as an INVENTORY, not as isolation — `::"
         "test_host_python_execution_sites_are_exactly_the_declared_set` "
         "AST-scans `src/` so a new host-exec site cannot appear unannounced. "
+        "One `compile` of the package's OWN source (the Sentry fingerprint's "
+        "code map) is declared separately as never executed, and its module is "
+        "pinned to contain no `exec`/`eval`. "
         "No test claims the execution is contained, because it is not.",
     ),
     ThreatRow(
