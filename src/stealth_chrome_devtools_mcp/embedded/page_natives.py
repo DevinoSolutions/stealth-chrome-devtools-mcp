@@ -399,7 +399,11 @@ async def _in_frame(
     except BaseException:
         _leave(tab, group)
         raise
-    await _release_bounded(tab, group, RELEASE_WAIT_S)
+    try:
+        await _release_bounded(tab, group, RELEASE_WAIT_S)
+    except asyncio.CancelledError:
+        _leave(tab, group)  # cancelled before the release went out or came back
+        raise
     if thrown is not None:
         raise ReadError(
             "the page-side read threw: "

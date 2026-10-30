@@ -679,6 +679,24 @@ async def test_groups_put_back_go_ahead_of_newer_ones_so_the_cap_drops_the_oldes
     assert len(dropped) == 1 and "old-0" in dropped[0]
 
 
+async def test_a_read_cancelled_during_its_own_release_leaves_the_group():
+    """The review of 3b9e890: the read had its answer, then was cancelled while
+    its own release waited (behind another send on the tab); the group was
+    neither released nor recorded, so no later read could release it."""
+    node = _Hangs()
+    node.hangs = False
+    node.release_hangs = True
+
+    read = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.02)  # answered; its release in flight
+    assert "Runtime.callFunctionOn" in node.cdp_methods
+    read.cancel()
+    await _ends_within(asyncio.wait([read]), 0.2)
+
+    assert read.cancelled()
+    assert _left(node) == node.open_groups and len(node.open_groups) == 1
+
+
 async def test_overlapping_releasers_cancelled_in_turn_still_drop_the_oldest(
     backend_log,
 ):
