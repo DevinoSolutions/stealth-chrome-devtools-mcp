@@ -308,14 +308,28 @@ async def _release_leftovers(tab: Tab) -> None:
 
     They are taken off the tab first (a concurrent read does not release them
     twice) and released together, so the wait is :data:`RELEASE_WAIT_S` however
-    many there are.
+    many there are. A read cancelled during that wait puts back every group whose
+    release did not finish, so the next read still releases it (releasing a
+    group twice is harmless; forgetting one keeps it until a navigation).
     """
     left = getattr(tab, _LEFTOVERS, None)
     if not left:
         return
     groups = list(left)
     left.clear()
-    await asyncio.gather(*(_release_bounded(tab, g, RELEASE_WAIT_S) for g in groups))
+    finished: set[str] = set()
+
+    async def release(group: str) -> None:
+        await _release_bounded(tab, group, RELEASE_WAIT_S)
+        finished.add(group)
+
+    try:
+        await asyncio.gather(*(release(g) for g in groups))
+    except asyncio.CancelledError:
+        for group in groups:
+            if group not in finished:
+                _leave(tab, group)
+        raise
 
 
 def _says_not_here(exc: BaseException) -> bool:
