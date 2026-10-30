@@ -154,3 +154,31 @@ async def test_a_paused_request_carries_the_cdp_value_and_the_requirement_matche
         assert hook.matches(request) is True
     other = DynamicHook("h", "n", {"resource_type": "script"}, GOOD, 100)
     assert other.matches(request) is False
+
+
+async def test_a_real_paused_event_reaches_a_hook_that_names_its_type():
+    """Through ``_on_request_paused``, as Chrome delivers it: the event's
+    ``resource_type`` is the enum, and a hook naming ``xhr`` must run for it."""
+    from types import SimpleNamespace
+
+    from fakes import FakeTab
+
+    system = DynamicHookSystem()
+    system.add_instance("inst")
+    block = "def process_request(request):\n    return HookAction(action='block')\n"
+    await system.create_hook(
+        "h", {"resource_type": "xhr"}, block, instance_ids=["inst"]
+    )
+    tab = FakeTab()
+    event = SimpleNamespace(
+        request_id=uc.cdp.fetch.RequestId("req-1"),
+        response_status_code=None,
+        response_error_reason=None,
+        resource_type=uc.cdp.network.ResourceType.XHR,
+        request=SimpleNamespace(url="http://x/api", method="GET", headers={}),
+    )
+
+    await system._on_request_paused(tab, event, "inst")
+
+    assert "continue_request" not in tab.send_calls
+    assert tab.send_calls, "the hook's block action was never sent"
