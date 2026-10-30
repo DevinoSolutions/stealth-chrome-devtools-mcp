@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import psutil
+import pytest
 from nodriver.core.util import get_registered_instances
 
 if TYPE_CHECKING:
@@ -278,3 +279,72 @@ def forbid_real_process_kills(monkeypatch):
     monkeypatch.setattr(psutil.Process, "terminate", _forbid("Process.terminate"))
     monkeypatch.setattr(psutil.Process, "kill", _forbid("Process.kill"))
     return attempts
+
+
+# ---------------------------------------------------------------------------
+# Waiting on a spawned child's boot log (T-9675)
+# ---------------------------------------------------------------------------
+
+#: The ceiling for a child that never shows its output and never exits. A slow start
+#: is NOT what it bounds (a host whose process starts took 9-12 s lost a fixed 10 s
+#: window); the wait ends on events, so a crash that was not captured fails the moment
+#: the child is gone, not at this deadline.
+CHILD_DEADLINE_SECONDS = 120
+
+
+def _read_log(boot_log: Path) -> str:
+    """The log's text, or ``""`` while it is absent. A transient ``PermissionError``
+    (an indexer or AV scan holding the file on Windows) is "not readable yet", the way
+    F-994's marker poll treats it."""
+    for _ in range(40):
+        try:
+            return boot_log.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return ""
+        except PermissionError:
+            time.sleep(0.05)
+    return boot_log.read_text(encoding="utf-8", errors="replace")
+
+
+def _our_child(pid: int, identity: str) -> psutil.Process | None:
+    """``pid``'s process if its command line carries *identity*, else ``None``.
+
+    A pid alone is not an identity on Windows: a child that exited before this ran can
+    have its pid handed to a stranger, which must be neither waited on nor killed."""
+    try:
+        child = psutil.Process(pid)
+        return child if identity in " ".join(child.cmdline()) else None
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
+
+
+def boot_log_when_settled(
+    boot_log: Path,
+    pid: int,
+    needle: str,
+    *,
+    identity: str,
+    deadline: float = CHILD_DEADLINE_SECONDS,
+) -> str:
+    """The boot log's text once *needle* is in it or the child *pid* has exited.
+
+    Both are observable events: the text appearing is success, as fast as the child
+    is; the child exiting means its output is on disk or never will be, so the final
+    read is the answer. *identity* is a string only the child's command line has; a
+    pid that is not that child counts as gone. A child that is still running at
+    *deadline* is killed before the failure, so a broken redirect leaves nothing behind.
+    """
+    end = time.monotonic() + deadline
+    child = _our_child(pid, identity)
+    while True:
+        text = _read_log(boot_log)
+        if needle in text or child is None:
+            return text
+        if time.monotonic() > end:
+            child.kill()
+            pytest.fail(f"boot-crash child {pid} still running, no {needle!r} logged")
+        try:
+            child.wait(0.05)
+            child = None  # gone: read once more, then answer
+        except psutil.TimeoutExpired:
+            pass
