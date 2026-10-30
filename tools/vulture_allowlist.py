@@ -11,7 +11,6 @@ ignore_cache  # plan_M4ph1: server.py:1662 destructured but unused
 full_page  # plan_M4ph1: server.py:2067 destructured but unused
 
 # ── plan_M7 (close_instance offload) ──────────────────────────────────────
-_close_proxy_forwarder  # plan_M7: Phase 1 pops forwarder; method kept for future callers
 close_kill_timeout  # plan_M7: pydantic Settings field read via get_settings()
 
 # ── FALSE-POSITIVE (pydantic Settings — vulture can't see pydantic field access) ─

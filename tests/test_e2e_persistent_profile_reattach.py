@@ -65,6 +65,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_pid_registry,
     browser_reattach,
+    tab_open,
     tool_runtime,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -230,6 +231,85 @@ async def test_a_live_page_survives_its_backend_and_is_re_attached(
 
     # The profile directory outlives the browser, which is guarantee (a).
     assert profile.exists()
+
+
+async def test_a_re_attach_stores_the_original_page_not_the_newest_tab(
+    fixture_app_server, tmp_empty_root, tmp_path
+):
+    """T-9551: nodriver's ``main_tab`` is the NEWEST page, so a browser with a stray
+    ``chrome://settings`` tab (what T-9479's first-launch exchange leaves when its
+    backend dies mid-flight) and a second page was adopted onto the wrong tab. The
+    stored tab must be the page the browser was launched with, and a tool body that
+    reads it must see that page's state."""
+    manager = tool_runtime.browser_manager
+    spawn = get_fn("spawn_browser")
+    close = get_fn("close_instance")
+
+    profile = tmp_path / "seller-central"
+    iid = (await spawn(headless=True, user_data_dir=str(profile), **sandbox_kwargs()))[
+        "instance_id"
+    ]
+
+    adopted_here = False
+    try:
+        await navigate_and_settle(iid, f"{fixture_app_server}/interactions.html")
+        await eval_js(iid, "window.__t9551 = 'original'")
+        browser = manager._instances[iid]["browser"]
+        original = manager._instances[iid]["tab"].target.target_id
+        chrome_pid = browser._process_pid
+        port = browser.config.port
+
+        # Two tabs OPENED AFTER the main page: a settings page, then another page.
+        await tab_open.open_tab(browser, "chrome://settings/")
+        await tab_open.open_tab(browser, f"{fixture_app_server}/interactions.html")
+        await tab_open.update_targets(browser)
+        assert len(browser.tabs) >= 3
+
+        record = tmp_path / "browser_pids.json"
+        record.write_text(
+            json.dumps(
+                {
+                    "browser_processes": {
+                        iid: {
+                            "pid": chrome_pid,
+                            "create_time": psutil.Process(chrome_pid).create_time(),
+                            "user_data_dir": str(profile),
+                            "uses_custom_data_dir": True,
+                            "auto_clone": False,
+                            "cdp_port": port,
+                            "timestamp": 0,
+                            "owner_pid": os.getpid(),
+                            "owner_create_time": None,
+                        }
+                    },
+                    "timestamp": 0,
+                }
+            )
+        )
+        await forget_instance(manager, iid)
+
+        with patch.object(
+            browser_reattach.browser_pid_registry, "is_reapable", return_value=True
+        ):
+            adopted = await asyncio.wait_for(
+                browser_reattach.run(manager, _cleanup_on(record)),
+                timeout=_ADOPT_DEADLINE,
+            )
+
+        assert adopted == [iid], f"expected {iid} to be adopted, got {adopted!r}"
+        adopted_here = True
+        stored = manager._instances[iid]["tab"]
+        assert stored.target.target_id == original, (
+            f"re-attach stored {stored.target.url!r}, not the original page"
+        )
+        assert await eval_js(iid, "window.__t9551") == "original"
+    finally:
+        with contextlib.suppress(Exception):
+            await close(instance_id=iid)
+        if not adopted_here:
+            with contextlib.suppress(Exception):
+                psutil.Process(chrome_pid).kill()
+        await released(profile)
 
 
 async def test_spawn_re_attaches_to_a_holder_with_no_record_entry(

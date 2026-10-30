@@ -31,6 +31,7 @@ from nodriver.core.connection import ProtocolException
 from stealth_chrome_devtools_mcp.embedded import (
     clone_protection,
     clone_storage,
+    login_persistence,
     process_exit,
     tab_open,
 )
@@ -967,3 +968,87 @@ async def test_the_browser_connection_is_marked_closed_before_it_is_ended():
     assert seen == [True]
     with pytest.raises(ConnectionError):
         await tab_open.update_targets(browser)
+
+
+# ---------------------------------------------------------------------------
+# T-9551: the proxy forwarder Phase 1 popped is closed on EVERY way out
+# ---------------------------------------------------------------------------
+
+
+class _Forwarder:
+    """An authenticated proxy forwarder that counts the closes it receives."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.closes = 0
+        self._fail = fail
+
+    async def close(self) -> None:
+        self.closes += 1
+        if self._fail:
+            raise OSError("socket already gone")
+
+
+def _seed_with_forwarder(manager, forwarder, instance_id: str = "test-1"):
+    browser, _ = _seed_manager(manager, instance_id)
+    manager._proxy_forwarders[instance_id] = forwarder
+    return browser
+
+
+@pytest.mark.asyncio
+async def test_a_close_that_ends_normally_closes_the_forwarder_once():
+    manager = BrowserManager()
+    forwarder = _Forwarder()
+    _seed_with_forwarder(manager, forwarder)
+
+    assert await manager.close_instance("test-1") is True
+
+    assert forwarder.closes == 1
+    assert "test-1" not in manager._proxy_forwarders
+
+
+@pytest.mark.asyncio
+async def test_a_forwarder_that_fails_to_close_does_not_fail_the_close():
+    manager = BrowserManager()
+    forwarder = _Forwarder(fail=True)
+    _seed_with_forwarder(manager, forwarder)
+
+    assert await manager.close_instance("test-1") is True
+
+    assert forwarder.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_close_cancelled_while_settling_still_closes_the_forwarder(
+    monkeypatch,
+):
+    """T-9551: ``settle_session_restore`` is the first await after Phase 1 popped
+    the forwarder, and sat outside the try whose body closed it -- a cancelled
+    close left a listening socket nothing could reach any more."""
+    manager = BrowserManager()
+    forwarder = _Forwarder()
+    _seed_with_forwarder(manager, forwarder)
+
+    async def _cancelled(_browser):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(login_persistence, "settle_session_restore", _cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.close_instance("test-1")
+
+    assert forwarder.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_close_cancelled_in_phase_two_still_closes_the_forwarder():
+    """T-9551: ``CancelledError`` is not an ``Exception``, so the graceful CDP
+    teardown's handlers let it through before the forwarder's close was reached."""
+    manager = BrowserManager()
+    forwarder = _Forwarder()
+    browser = _seed_with_forwarder(manager, forwarder)
+    browser.aclose = MagicMock(side_effect=asyncio.CancelledError)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.close_instance("test-1")
+
+    assert forwarder.closes == 1
