@@ -436,6 +436,9 @@ def parts(event: Mapping[str, object], chain: Sequence[BaseException]) -> list[s
     a race inside Chrome over one event, so neither their types nor their raise
     sites tell them apart: the chain ends at the first departure, and the frame is
     that of the link above it. The event itself still carries the whole chain.
+    ``Cannot find context with specified id`` and a ``FrameGone`` are departures
+    to that classifier in every tool, not only the click's; the tool name is the
+    element before this one, so a different tool is still a different issue.
     """
     departed = _first_departure(chain)
     if departed is None:
@@ -456,12 +459,23 @@ def parts(event: Mapping[str, object], chain: Sequence[BaseException]) -> list[s
 def _first_departure(chain: Sequence[BaseException]) -> int | None:
     """Index in *chain* (never 0, the ``ToolError`` itself) of the outermost cause
     that says a held element left the page, else ``None``. The question is
-    ``element_resolution.detached_element``'s, THE one place it is answered."""
+    ``element_resolution.detached_element``'s, THE one place it is answered. It
+    reads a cause's text only against that classifier's own fixed markers, and
+    nothing of it reaches the fingerprint."""
     # Lazily, as :func:`tool_name` does: nothing here needs the page layer loaded
     # unless a tool error is being fingerprinted.
     from stealth_chrome_devtools_mcp.embedded import element_resolution
 
     for index, link in enumerate(chain[1:], start=1):
-        if element_resolution.detached_element(link) is not None:
+        if _is_departure(element_resolution.detached_element, link):
             return index
     return None
+
+
+def _is_departure(
+    classify: Callable[[BaseException], str | None], link: BaseException
+) -> bool:
+    try:
+        return classify(link) is not None
+    except Exception:  # noqa: BLE001  PERMANENT(a cause whose own __str__ raises is not a departure, and a fingerprint is never the reason a send raises)
+        return False
