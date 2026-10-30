@@ -88,7 +88,7 @@ class _Node(FakeClickTarget):
 
 def _left(node):
     """The object groups the failed reads of *node*'s tab left, oldest first."""
-    return getattr(node.tab, page_natives._LEFTOVERS, [])
+    return [group for _, group in getattr(node.tab, page_natives._LEFTOVERS, [])]
 
 
 class _TabOf:
@@ -672,6 +672,38 @@ async def test_groups_put_back_go_ahead_of_newer_ones_so_the_cap_drops_the_oldes
     await _ends_within(asyncio.wait([read]), 0.2)
 
     assert read.cancelled()
+    assert _left(node) == [*old[1:], "newer"]
+    dropped = [
+        r.getMessage() for r in backend_log() if "dropped unreleased" in r.getMessage()
+    ]
+    assert len(dropped) == 1 and "old-0" in dropped[0]
+
+
+async def test_overlapping_releasers_cancelled_in_turn_still_drop_the_oldest(
+    backend_log,
+):
+    """The review of 941766f: read 1 takes the `cap` old groups, a newer one is
+    left, read 2 takes it; read 1 cancelled puts the old ones back, then read 2
+    cancelled put the newer one AHEAD of them and the cap evicted it."""
+    node = _Hangs()
+    cap = page_natives.MAX_LEFTOVERS
+    old = [f"old-{n}" for n in range(cap)]
+    for group in old:
+        page_natives._leave(node.tab, group)
+    node.hangs = False
+    node.release_hangs = True
+
+    first = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.02)  # the old groups' releases in flight
+    page_natives._leave(node.tab, "newer")
+    second = asyncio.ensure_future(page_natives.run(node, SCRIPT))
+    await asyncio.sleep(0.02)  # the newer group's release in flight
+    first.cancel()
+    await _ends_within(asyncio.wait([first]), 0.2)
+    second.cancel()
+    await _ends_within(asyncio.wait([second]), 0.2)
+
+    assert first.cancelled() and second.cancelled()
     assert _left(node) == [*old[1:], "newer"]
     dropped = [
         r.getMessage() for r in backend_log() if "dropped unreleased" in r.getMessage()
