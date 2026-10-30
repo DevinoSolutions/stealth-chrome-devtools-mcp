@@ -130,6 +130,32 @@ def visible_tabs(browser: Browser, excluding: str | None = None) -> list[Tab]:
     return [t for t in browser.tabs if str(t.target.target_id) not in skip]
 
 
+#: Where a page Chrome opens for itself lives, never a caller's page to land on.
+_BROWSER_OWN_SCHEMES = ("chrome://", "chrome-untrusted://", "devtools://")
+
+
+def initial_tab(browser: Browser) -> Tab:
+    """The page an ATTACH to a browser we did not launch should adopt as its tab
+    (T-9551); ``IndexError`` when it has no page, as nodriver's ``main_tab`` does.
+
+    nodriver's ``main_tab`` is the first page it lists, and a fresh attach lists
+    targets NEWEST first, so it names the last page opened: measured 4 of 4 as the
+    stray ``chrome://settings`` page the first-launch session-restore exchange
+    (T-9479) opens when its backend dies inside the 0.6-2.3 s window. The page the
+    browser was launched with is the OLDEST, so this takes the oldest page that is
+    not Chrome's own (:data:`_BROWSER_OWN_SCHEMES`), and the oldest of all when
+    every page is. The registry records no target id and does not need to: the
+    answer is read off the live browser, which cannot be stale. The newest-first
+    order is observed, not contractual, and the real-Chrome pin
+    (``test_e2e_persistent_profile_reattach``) is what holds it.
+    """
+    pages = list(browser.tabs)
+    callers = [
+        p for p in pages if not str(p.target.url).startswith(_BROWSER_OWN_SCHEMES)
+    ]
+    return (callers or pages)[-1]
+
+
 def is_closed(browser: Browser) -> bool:
     """Whether :func:`mark_closed` was called for *browser*."""
     return _state(browser).closed

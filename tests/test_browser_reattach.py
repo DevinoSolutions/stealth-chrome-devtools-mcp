@@ -659,6 +659,79 @@ class TestManagerAdoption:
         assert adopted == []
         assert "i-kept" not in manager._instances
 
+    async def _adopted_tab(self, manager, cleanup, tabs):
+        """The tab the instance is stored under after a re-attach to a browser whose
+        targets are *tabs*, NEWEST FIRST -- the order a fresh attach lists them in,
+        and so the tab nodriver's own ``main_tab`` would have returned (T-9551)."""
+        browser = FakeBrowser(alive=True, pid=CHROME_PID, main_tab=tabs[0], tabs=tabs)
+        with (
+            patch.object(cdp_attach, "config_for", return_value=SimpleNamespace()),
+            patch.object(cdp_attach, "attach", return_value=browser),
+            patch.object(
+                browser_reattach,
+                "adoptable_for",
+                return_value=_classified(**{"i-kept": _adoptable_record()}),
+            ),
+        ):
+            assert await browser_reattach.run(manager, cleanup) == ["i-kept"]
+        return await manager.get_tab("i-kept")
+
+    @pytest.mark.asyncio
+    async def test_a_stray_settings_tab_is_not_adopted_as_the_main_tab(
+        self, manager, cleanup
+    ):
+        """T-9551: the newest target is the stray ``chrome://settings`` page the
+        first-launch session-restore exchange (T-9479) opens, 4 of 4 live runs when
+        the backend died inside its 0.6-2.3 s window. The page the caller worked in
+        is the older one."""
+        page = FakeTab(url="https://sellercentral.amazon.com/", target_id="T-page")
+        settings = FakeTab(url="chrome://settings/", target_id="T-settings")
+
+        assert await self._adopted_tab(manager, cleanup, [settings, page]) is page
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "own_url",
+        [
+            "chrome://settings/",
+            "chrome://newtab/",
+            "chrome-untrusted://new-tab-page/",
+            "devtools://devtools/bundled/inspector.html",
+        ],
+    )
+    async def test_every_page_chrome_opens_for_itself_is_passed_over(
+        self, manager, cleanup, own_url
+    ):
+        page = FakeTab(url="about:blank", target_id="T-page")
+        own = FakeTab(url=own_url, target_id="T-own")
+
+        assert await self._adopted_tab(manager, cleanup, [own, page]) is page
+
+    @pytest.mark.asyncio
+    async def test_the_oldest_page_wins_among_a_callers_tabs(self, manager, cleanup):
+        """A multi-tab re-attach: nodriver's newest-first ``main_tab`` made the
+        instance's tab whichever page was opened LAST. The one the browser was
+        launched with is the oldest."""
+        newest = FakeTab(url="https://c.test/", target_id="T-c")
+        middle = FakeTab(url="https://b.test/", target_id="T-b")
+        oldest = FakeTab(url="https://a.test/", target_id="T-a")
+
+        assert await self._adopted_tab(manager, cleanup, [newest, middle, oldest]) is (
+            oldest
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_browser_with_only_its_own_pages_is_still_adopted(
+        self, manager, cleanup
+    ):
+        """A browser whose only page is a Chrome-internal one is a usable browser
+        (a human can have a settings page open and nothing else); refusing it would
+        route a logged-in persistent profile to the reap. The oldest is taken."""
+        newest = FakeTab(url="chrome://settings/", target_id="T-new")
+        oldest = FakeTab(url="chrome://newtab/", target_id="T-old")
+
+        assert await self._adopted_tab(manager, cleanup, [newest, oldest]) is oldest
+
     @pytest.mark.asyncio
     async def test_an_already_registered_instance_is_left_alone(self, manager, cleanup):
         """Idempotence at the second door: ``app_lifespan`` may drive this more

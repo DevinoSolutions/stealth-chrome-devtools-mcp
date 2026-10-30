@@ -233,13 +233,6 @@ class BrowserManager:
             f"Removed stale browser instance {instance_id}: {reason}",
         )
 
-    async def _close_proxy_forwarder(self, instance_id: str) -> None:
-        """Close and forget any authenticated proxy forwarder for an instance."""
-        proxy_forwarder = self._proxy_forwarders.pop(instance_id, None)
-        if proxy_forwarder is None:
-            return
-        await proxy_forwarder.close()
-
     def _blocking_teardown(self, instance_id: str, browser: Browser) -> object | None:
         """Synchronous kill work, run in a worker thread via asyncio.to_thread.
 
@@ -848,11 +841,11 @@ class BrowserManager:
 
         browser = data["browser"]
         instance = data["instance"]
-        await login_persistence.settle_session_restore(browser)  # T-9479
-        instance.state = BrowserState.CLOSED
-        tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
 
         try:
+            await login_persistence.settle_session_restore(browser)  # T-9479
+            instance.state = BrowserState.CLOSED
+            tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
             # -- Phase 2: graceful CDP teardown (on loop, bounded) ------------
             try:
                 if hasattr(browser, "tabs") and browser.tabs:
@@ -893,15 +886,6 @@ class BrowserManager:
                     "browser_manager",
                     "close_connection",
                     f"connection disconnect failed or timed out: {e}",
-                )
-
-            try:
-                await self._close_proxy_forwarder_ref(proxy_forwarder)
-            except Exception as proxy_err:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "close_instance",
-                    f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
                 )
 
             # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
@@ -952,6 +936,17 @@ class BrowserManager:
         except Exception as e:
             debug_logger.log_error("browser_manager", "close_instance", e)
             return False
+        finally:
+            # T-9551: Phase 1 popped it, so only this closes it, on a close
+            # cancelled while settling or in Phase 2 too (not an `Exception`).
+            try:
+                await self._close_proxy_forwarder_ref(proxy_forwarder)
+            except Exception as proxy_err:
+                debug_logger.log_warning(
+                    "browser_manager",
+                    "close_instance",
+                    f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
+                )
 
     @staticmethod
     async def _close_proxy_forwarder_ref(
