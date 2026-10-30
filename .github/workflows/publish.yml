@@ -47,7 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download the gated dist artifact (no rebuild)
-        uses: DevinoSolutions/artifact/download@5bb08e7b807a41e73a152fc4170880fa90cbdf44 # v1.2.1 + OIDC/STS retry budget (artifact#6)
+        uses: DevinoSolutions/artifact/download@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
         with:
           name: dist
 
