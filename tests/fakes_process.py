@@ -341,7 +341,11 @@ def boot_log_when_settled(
         if needle in text or child is None:
             return text
         if time.monotonic() > end:
-            child.kill()
+            with contextlib.suppress(psutil.Error):  # it may have exited just now
+                child.kill()
+            text = _read_log(boot_log)
+            if needle in text:
+                return text
             pytest.fail(f"boot-crash child {pid} still running, no {needle!r} logged")
         try:
             child.wait(0.05)
