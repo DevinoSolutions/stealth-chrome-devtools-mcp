@@ -869,16 +869,22 @@ def _tree(root: Path) -> dict[str, bytes] | None:
     }
 
 
-def _read_the_target_at_every_sleep(monkeypatch, target: Path) -> list:
+def _read_the_target_at_every_sleep(
+    monkeypatch, target: Path, slept: list[float] | None = None
+) -> list:
     """Give ``profile_copy`` a clock whose ``sleep`` READS *target* and returns
     what it found, so a test can assert on the tree a concurrent reader would
-    have seen at each pause."""
-
+    have seen at each pause. The requested durations go to *slept* when given;
+    nothing really sleeps."""
     seen: list = []
+
+    def _sleep(seconds: float) -> None:
+        seen.append(_tree(target))
+        if slept is not None:
+            slept.append(seconds)
+
     monkeypatch.setattr(
-        profile_copy,
-        "time",
-        SimpleNamespace(sleep=lambda _s: seen.append(_tree(target)), time=time.time),
+        profile_copy, "time", SimpleNamespace(sleep=_sleep, time=time.time)
     )
     return seen
 
@@ -937,3 +943,114 @@ class TestTheTargetIsNeverAbsentWhileAnythingSleeps:
 
         with pytest.raises(PermissionError):
             _copy_onto(seed_layout, idle_clone)
+
+
+class TestOneRetryBudgetPerCall:
+    """Codex round 3, MED. The move-aside had its own three attempts inside each
+    of the publish's three: a move-aside failing twice then passing, with every
+    publish failing, was 9 move-asides, 3 publishes and 1.2 s of pauses. The
+    bound is ONE budget for the call: ``RENAME_ATTEMPTS`` transient failures in
+    all, whichever step fails, and the pauses 0.1 s + 0.2 s in total."""
+
+    @pytest.mark.parametrize("displace_failures", [0, 1, 2, 3])
+    def test_the_budget_is_shared_by_both_steps(
+        self, displace_failures, seed_layout, idle_clone, monkeypatch
+    ):
+        monkeypatch.setattr(profile_copy, "RENAME_BACKOFF_SECONDS", 0.1)
+        slept: list[float] = []
+        seen = _read_the_target_at_every_sleep(monkeypatch, idle_clone, slept)
+        old = _tree(idle_clone)
+        displaced = fail_a_rename(
+            monkeypatch,
+            "displace",
+            PermissionError(13, "Access is denied"),
+            times=displace_failures,
+        )
+        published = fail_a_rename(
+            monkeypatch, "publish", PermissionError(13, "Access is denied")
+        )
+
+        refused = _copy_onto(seed_layout, idle_clone)
+
+        assert refused is not None
+        assert len(displaced) + len(published) == profile_copy.RENAME_ATTEMPTS == 3
+        # the settle between the two copy passes, then exactly two pauses
+        assert slept == [profile_copy.RETRY_SETTLE_SECONDS, 0.1, 0.2]
+        assert sum(slept[1:]) == pytest.approx(0.3)
+        assert all(tree == old for tree in seen)
+        assert _login(idle_clone) == STALE_LOGIN
+        assert _scratch_in(seed_layout["sessions"]) == []
+
+    def test_a_move_aside_that_recovers_still_leaves_the_publish_its_share(
+        self, seed_layout, idle_clone, monkeypatch
+    ):
+        """Two move-aside failures spend two of the three; the publish that
+        follows may fail once more and is then reported, not retried."""
+        displaced = fail_a_rename(
+            monkeypatch, "displace", PermissionError(13, "denied"), times=2
+        )
+        published = fail_a_rename(monkeypatch, "publish", PermissionError(13, "denied"))
+
+        refused = _copy_onto(seed_layout, idle_clone)
+
+        assert (len(displaced), len(published)) == (2, 1)
+        assert refused.code == profile_copy.PUBLISH_FAILED
+
+
+class TestARefusalSaysOnlyWhatWasObserved:
+    """Codex round 3, MED. ``profile_lock saw no browser holding it`` was said
+    even when no check had run: an initial seed refresh has no snapshot, so the
+    holder check is skipped, and the sentence then described an observation
+    nobody made."""
+
+    SAW = "profile_lock saw no browser holding it"
+
+    def _spy_on_the_holder_check(self, monkeypatch) -> list[Path]:
+        asked: list[Path] = []
+        real = clone_storage._profile_hold
+
+        def _spy(profile_dir):
+            asked.append(profile_dir)
+            return real(profile_dir)
+
+        monkeypatch.setattr(clone_storage, "_profile_hold", _spy)
+        return asked
+
+    def test_an_ordinary_copy_says_the_check_found_nobody(
+        self, seed_layout, idle_clone, monkeypatch
+    ):
+        asked = self._spy_on_the_holder_check(monkeypatch)
+        fail_a_rename(monkeypatch, "publish", PermissionError(13, "denied"))
+
+        refused = _copy_onto(seed_layout, idle_clone)
+
+        assert idle_clone in asked, "the check never ran, so the claim is unearned"
+        assert self.SAW in refused.detail
+
+    def test_an_initial_seed_refresh_says_nothing_about_holders(
+        self, seed_layout, monkeypatch
+    ):
+        monkeypatch.setattr(profile_copy, "RENAME_BACKOFF_SECONDS", 0)
+        shutil.rmtree(seed_layout["snapshot"])
+        asked = self._spy_on_the_holder_check(monkeypatch)
+        fail_a_rename(monkeypatch, "publish", PermissionError(13, "denied"))
+
+        result = clone_storage._refresh_master_snapshot_if_safe("test")
+
+        assert seed_layout["snapshot"] not in asked, "an absent path was asked about"
+        assert result["seed_refreshed"] is False
+        assert result["seed_error"].startswith(profile_copy.PUBLISH_FAILED)
+        assert "profile_lock" not in result["seed_error"]
+        assert "holding" not in result["seed_error"]
+        assert "The same call can be retried" in result["seed_error"]
+
+    def test_a_target_that_does_not_exist_never_claims_a_check(
+        self, seed_layout, monkeypatch
+    ):
+        monkeypatch.setattr(profile_copy, "RENAME_BACKOFF_SECONDS", 0)
+        fail_a_rename(monkeypatch, "publish", OSError(5, "I/O error"))
+
+        refused = _copy_onto(seed_layout, seed_layout["sessions"] / "brand-new")
+
+        assert refused.code == profile_copy.PUBLISH_FAILED
+        assert "profile_lock" not in refused.detail

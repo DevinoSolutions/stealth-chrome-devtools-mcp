@@ -383,12 +383,13 @@ def _copy_profile_tree(
     consumer tests ``exists()``, which an empty directory passes (F-925)."""
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
-    hold = _profile_hold(target) if target.exists() else None
-    if hold is not None:
+    checked = target.exists()  # no directory yet, no holder to ask about
+    if checked and (hold := _profile_hold(target)) is not None:
         return profile_copy.Refusal(TARGET_IN_USE, f"a browser holds it: {hold.reason}")
     return profile_copy.replace_tree(
         source,
         target,
+        checked_free=checked,
         stamp=lambda staged: profile_seed.write_marker(
             staged,
             source=source,
