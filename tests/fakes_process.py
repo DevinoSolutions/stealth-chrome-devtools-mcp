@@ -202,6 +202,40 @@ def held_profile(profile_dir: Path) -> Path:
     return write_singleton(profile_dir, f"{socket.gethostname()}-{os.getpid()}")
 
 
+def fail_a_rename(
+    monkeypatch: Any, step: str, error: OSError, times: int | None = None
+) -> list[str]:
+    """Make ONE of ``replace_tree``'s two renames raise *error*: ``"displace"``
+    (target -> ``*.stealth-previous``) or ``"publish"`` (staging -> target).
+
+    ``times`` is how many calls fail before the real rename runs again, None for
+    every one. Returns the names of the failed calls, so a test can count the
+    attempts. It raises ``AssertionError`` past 10 so an unbounded retry loop
+    fails the test instead of hanging the lane. The rollback's rename (previous
+    -> target) matches neither step and keeps working for real."""
+    from pathlib import Path
+
+    from stealth_chrome_devtools_mcp.embedded import profile_copy
+
+    attempts: list[str] = []
+    real_replace = Path.replace
+
+    def _replace(self, dest):
+        if step == "publish":
+            hit = profile_copy.STAGING_SUFFIX in self.name
+        else:
+            hit = Path(dest).name.endswith(profile_copy.PREVIOUS_SUFFIX)
+        if hit and (times is None or len(attempts) < times):
+            attempts.append(self.name)
+            if len(attempts) > 10:
+                raise AssertionError("the rename is retried without a bound")
+            raise error
+        return real_replace(self, dest)
+
+    monkeypatch.setattr(Path, "replace", _replace)
+    return attempts
+
+
 @contextlib.contextmanager
 def a_zombie():
     """The pid of a REAL zombie (F-998): a child that has exited and that its

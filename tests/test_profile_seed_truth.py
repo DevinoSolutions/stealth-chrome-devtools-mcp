@@ -25,6 +25,7 @@ from fakes import FakeBrowserManager, held_profile
 from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     desktop_launch,
+    profile_copy,
     profile_seed,
 )
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
@@ -268,7 +269,9 @@ class TestRefusedRefreshIsNotSuccess:
         back is an empty directory the caller is told is their profile."""
         assert clone_storage._require_copied(None, tmp_path) is None
         with pytest.raises(ToolError, match="refused"):
-            clone_storage._require_copied(clone_storage.TARGET_IN_USE, tmp_path)
+            clone_storage._require_copied(
+                profile_copy.Refusal(clone_storage.TARGET_IN_USE, "held"), tmp_path
+            )
 
     def test_every_copy_site_either_reports_or_guards(self):
         """No third site may discard the answer. Exactly one call to
@@ -318,7 +321,7 @@ class TestRefusedRefreshIsNotSuccess:
         refused = clone_storage._copy_profile_tree(
             real_layout_root["master"], target, real_layout_root["sessions"], "test"
         )
-        assert refused == clone_storage.TARGET_IN_USE
+        assert refused.code == clone_storage.TARGET_IN_USE
         assert not (target / MARKER).exists()
 
 

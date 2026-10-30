@@ -364,11 +364,10 @@ SEED_IN_USE = "seed-in-use"
 
 def _copy_profile_tree(
     source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
-) -> str | None:
-    """Copy *source* over *target*, and report whether the copy actually RAN:
-    None when it did, ``TARGET_IN_USE`` when a live browser holds the target,
-    when the tree there could not be moved aside, or when the publish rename
-    raised and the displaced tree was put back.
+) -> profile_copy.Refusal | None:
+    """Copy *source* over *target*; None when the copy RAN, else the ``Refusal``
+    saying why: ``TARGET_IN_USE`` for a live browser, or ``profile_copy``'s
+    ``TARGET_LOCKED`` / ``PUBLISH_FAILED``, which no browser causes (T-10522).
 
     Refusing is right — rewriting a directory a Chrome is writing to would be
     the harm — but it is not success, and the bare ``return`` it used to be let
@@ -384,9 +383,10 @@ def _copy_profile_tree(
     consumer tests ``exists()``, which an empty directory passes (F-925)."""
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
-    if target.exists() and _profile_has_running_browser(target):
-        return TARGET_IN_USE
-    published = profile_copy.replace_tree(
+    hold = _profile_hold(target) if target.exists() else None
+    if hold is not None:
+        return profile_copy.Refusal(TARGET_IN_USE, f"a browser holds it: {hold.reason}")
+    return profile_copy.replace_tree(
         source,
         target,
         stamp=lambda staged: profile_seed.write_marker(
@@ -398,10 +398,9 @@ def _copy_profile_tree(
             ),
         ),
     )
-    return None if published else TARGET_IN_USE
 
 
-def _require_copied(refusal: str | None, target: Path) -> None:
+def _require_copied(refusal: profile_copy.Refusal | None, target: Path) -> None:
     """A copy these callers cannot have refused (F-893 review m4): both copy
     into a directory they have just found free, with no ``await`` in between.
     One inserted ``await`` makes it reachable, and what it would hand back is an
@@ -436,7 +435,9 @@ def _refresh_master_snapshot_if_safe(reason: str) -> dict[str, Any]:
         if refused is None:
             result["seed_refreshed"] = True
         else:
-            result["seed_error"] = SEED_IN_USE
+            result["seed_error"] = (
+                SEED_IN_USE if refused.code == TARGET_IN_USE else str(refused)
+            )
     except Exception as exc:
         result["seed_error"] = f"{type(exc).__name__}: {exc}"
     return result
