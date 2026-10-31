@@ -486,3 +486,58 @@ async def test_a_failed_spawn_marks_its_browser_closed_before_stopping_it(monkey
     )
 
     assert seen == [True]
+
+
+# ---------------------------------------------------------------------------
+# T-11911: the reap WARNING says which TCP ports the launched Chrome listened on
+# ---------------------------------------------------------------------------
+
+
+def reap_with_listeners(table, monkeypatch, *, listening, net_connections=None):
+    """Reap a launched Chrome through ``reap_launched_browsers`` and return
+    ``(reaped, events)``: the WARNINGs and the kill, in the order they happened."""
+    attempt = spawn_leak.Attempt()
+    chrome = table.launch(4242, "/profile", attempt=attempt)
+    chrome.listening = listening
+    if net_connections is not None:
+        monkeypatch.setattr(type(chrome), "net_connections", net_connections)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        spawn_leak.debug_logger,
+        "log_warning",
+        lambda component, op, message, *a, **k: events.append(("warning", message)),
+    )
+    real_kill = process_cleanup._kill_process_by_pid
+
+    def recording_kill(pid, instance_id):
+        events.append(("kill", str(pid)))
+        return real_kill(pid, instance_id)
+
+    monkeypatch.setattr(process_cleanup, "_kill_process_by_pid", recording_kill)
+    reaped = spawn_leak.reap_launched_browsers(
+        process_cleanup, "/profile", attempt, "i-failed"
+    )
+    return reaped, events
+
+
+def test_the_reap_warning_names_the_ports_read_before_the_kill(table, monkeypatch):
+    reaped, events = reap_with_listeners(table, monkeypatch, listening=(9222,))
+
+    assert reaped == [4242]
+    kinds = [kind for kind, _ in events]
+    assert kinds.index("warning") < kinds.index("kill"), events
+    warning = next(text for kind, text in events if kind == "warning")
+    assert "listening on TCP ports: 9222" in warning, warning
+
+
+def test_a_port_probe_that_raises_never_skips_the_kill(table, monkeypatch):
+    def broken(self, kind="inet"):
+        raise RuntimeError("proc_pidinfo failed")
+
+    reaped, events = reap_with_listeners(
+        table, monkeypatch, listening=(9222,), net_connections=broken
+    )
+
+    assert reaped == [4242]
+    warning = next(text for kind, text in events if kind == "warning")
+    assert "listening on TCP ports: unknown" in warning, warning
