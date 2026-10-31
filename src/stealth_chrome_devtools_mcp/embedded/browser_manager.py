@@ -815,7 +815,7 @@ class BrowserManager:
                     )
             return [data["instance"] for data in self._instances.values()]
 
-    async def close_instance(self, instance_id: str) -> bool:  # noqa: C901,PLR0912,PLR0915  DEBT(F-702)
+    async def close_instance(self, instance_id: str) -> bool:
         """Close and remove an instance; four steps keep the event loop responsive:
         Phase 1 (claim) — pop shared state under lock, the in-memory-storage
             entry included (F-899: it must not outlive the pop).
@@ -847,86 +847,28 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
             tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
             # -- Phase 2: graceful CDP teardown (on loop, bounded) ------------
-            with process_exit.finish_on_cancel(
-                instance_id, browser, self._KILL_RETRIES, self._run_in_background
-            ):
-                try:
-                    if hasattr(browser, "tabs") and browser.tabs:
-                        for tab in browser.tabs[:]:
-                            try:
-                                close = uc.cdp.target.close_target(tab.target.target_id)
-                                async with asyncio.timeout(2.0):
-                                    await browser.send(close)
-                            except Exception as e:
-                                tab_close.log_failure("close_instance", instance_id, e)
-                except Exception as tabs_err:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "close_instance",
-                        f"Failed to close tabs for {instance_id}: {tabs_err}",
-                    )
+            try:
+                await process_exit.graceful_close(instance_id, browser)
 
-                await process_exit.ask_to_close(instance_id, browser)
-
-                try:
-                    async with asyncio.timeout(2.0):
-                        await browser.aclose()
-                    debug_logger.log_info(
-                        "browser_manager",
-                        "close_connection",
-                        "closed websocket connection",
-                    )
-                except (TimeoutError, Exception) as e:
-                    debug_logger.log_info(
-                        "browser_manager",
-                        "close_connection",
-                        f"connection disconnect failed or timed out: {e}",
-                    )
-
-            # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
-            # The graceful close above STARTS Chrome's shutdown, which COMMITS the
-            # cookie store; terminating mid-flush loses the login just made. The
-            # grace, its measurement and a cancelled close are `process_exit.settle`'s;
-            # Phase 3 keeps its whole budget (this is its own await).
-            await process_exit.settle(
-                instance_id,
-                getattr(browser, "_process", None),
-                getattr(browser, "_process_pid", None),
-                self._KILL_RETRIES,
-            )
+                # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
+                # The graceful close above STARTS Chrome's shutdown, which COMMITS the
+                # cookie store; terminating mid-flush loses the login just made. The
+                # grace and its measurement are `process_exit.settle`'s; Phase 3 keeps
+                # its whole budget (this is its own await). A cancel in here or in
+                # Phase 2 re-raises at once and finishes in the background (T-10842).
+                await process_exit.settle(
+                    instance_id,
+                    getattr(browser, "_process", None),
+                    getattr(browser, "_process_pid", None),
+                )
+            except asyncio.CancelledError:
+                self._run_in_background(
+                    self._finish_close(instance_id, browser), "close_instance"
+                )
+                raise
 
             # -- Phase 3: blocking kill (off the loop, real timeout) ----------
-            stop_coro = None
-            try:
-                async with asyncio.timeout(self.CLOSE_KILL_TIMEOUT):
-                    stop_coro = await asyncio.to_thread(
-                        self._blocking_teardown, instance_id, browser
-                    )
-            except TimeoutError:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "close_instance",
-                    f"Chrome kill for {instance_id} exceeded "
-                    f"{self.CLOSE_KILL_TIMEOUT}s; worker thread continues "
-                    f"in background, orphan will be reaped by process_cleanup",
-                )
-            except Exception as e:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "close_instance",
-                    f"Blocking teardown failed for {instance_id}: {e}",
-                )
-
-            if asyncio.iscoroutine(stop_coro):
-                try:
-                    async with asyncio.timeout(2.0):
-                        await stop_coro
-                except (TimeoutError, Exception) as e:
-                    debug_logger.log_warning(
-                        "browser_manager",
-                        "close_instance",
-                        f"browser.stop() coroutine failed for {instance_id}: {e}",
-                    )
+            await self._end_browser(instance_id, browser)
 
             return True
         except Exception as e:
@@ -944,6 +886,52 @@ class BrowserManager:
                     "close_instance",
                     f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
                 )
+
+    async def _end_browser(self, instance_id: str, browser: Browser) -> None:
+        """Phase 3: the blocking kill off the loop under ``CLOSE_KILL_TIMEOUT``, then
+        ``browser.stop()``'s coroutine. A normal close and a cancelled one (T-10842)
+        end the browser through this one call."""
+        stop_coro = None
+        try:
+            async with asyncio.timeout(self.CLOSE_KILL_TIMEOUT):
+                stop_coro = await asyncio.to_thread(
+                    self._blocking_teardown, instance_id, browser
+                )
+        except TimeoutError:
+            debug_logger.log_warning(
+                "browser_manager",
+                "close_instance",
+                f"Chrome kill for {instance_id} exceeded "
+                f"{self.CLOSE_KILL_TIMEOUT}s; worker thread continues "
+                f"in background, orphan will be reaped by process_cleanup",
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "browser_manager",
+                "close_instance",
+                f"Blocking teardown failed for {instance_id}: {e}",
+            )
+
+        if asyncio.iscoroutine(stop_coro):
+            try:
+                async with asyncio.timeout(2.0):
+                    await stop_coro
+            except (TimeoutError, Exception) as e:
+                debug_logger.log_warning(
+                    "browser_manager",
+                    "close_instance",
+                    f"browser.stop() coroutine failed for {instance_id}: {e}",
+                )
+
+    async def _finish_close(self, instance_id: str, browser: Browser) -> None:
+        """What a close cancelled in Phase 2 or 2b still owes the browser it claimed
+        (T-10842): ask it to leave and give it its own exit, then Phase 3, so it ends
+        as a normal close ends it. Never raises (it runs in the background)."""
+        try:
+            await process_exit.finish_close(instance_id, browser)
+        finally:
+            with contextlib.suppress(Exception):
+                await self._end_browser(instance_id, browser)
 
     async def get_spawn_diagnostics(self, instance_id: str) -> dict[str, Any] | None:
         """Get spawn diagnostics for an instance."""

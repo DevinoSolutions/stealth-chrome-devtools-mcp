@@ -186,7 +186,7 @@ def is_closed(browser: Browser) -> bool:
     return _state(browser).closed
 
 
-def _dropped(browser: Browser) -> bool:
+def dropped(browser: Browser) -> bool:
     """Whether the socket is gone or closed — the state 0.50's ``send`` never
     repairs (``connection.py``:397 looks only at ``attached`` and ``socket``)."""
     if not hasattr(browser, "socket"):
@@ -209,7 +209,7 @@ async def reattach(browser: Browser) -> None:
     async with _state(browser).reattaching:
         if is_closed(browser):
             raise ConnectionError(_CLOSED_TEXT)
-        if not _dropped(browser):
+        if not dropped(browser):
             return
         handlers = {kind: list(each) for kind, each in browser.handlers.items()}
         target, session_id = browser.target, browser.session_id
@@ -248,7 +248,7 @@ async def _live(browser: Browser, call: Callable[[], Awaitable[_T]]) -> _T:
     """
     if is_closed(browser):
         raise ConnectionError(_CLOSED_TEXT)
-    if _dropped(browser):
+    if dropped(browser):
         await reattach(browser)
     try:
         return await call()

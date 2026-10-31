@@ -924,14 +924,11 @@ def test_a_process_asyncio_has_already_collected_is_never_waited_on():
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_grace_still_kills_the_browser(monkeypatch):
-    """F-910 S2: a client that disconnects mid-grace must not strand a Chrome.
-
-    Phase 2b sits inside a ``try`` whose handler is ``except Exception``, and
-    ``CancelledError`` is not one — so without this arm the grace would newly
-    make a cancelled close likelier to leave a live browser for the orphan
-    reaper, by the width of the ceiling (up to 5 s for a wedged one).
-    """
+async def test_a_cancelled_grace_does_not_kill_the_browser(monkeypatch):
+    """T-10842 (was F-910 S2, which killed here): the grace runs after
+    ``Browser.close`` went out, while Chrome commits its cookie store, so a terminate
+    on a caller giving up is the login loss. ``settle`` re-raises and kills nothing;
+    ``close_instance`` finishes the close in the background (the matrix below)."""
 
     async def _cancelled(pid, timeout=process_exit.EXIT_GRACE_SECONDS):
         raise asyncio.CancelledError
@@ -942,9 +939,10 @@ async def test_a_cancelled_grace_still_kills_the_browser(monkeypatch):
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await process_exit.settle("cancel-1", process, None, 2)
+        await process_exit.settle("cancel-1", process, None)
 
-    process.terminate.assert_called_once_with()
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1055,14 +1053,16 @@ async def test_a_close_cancelled_in_phase_two_still_closes_the_forwarder():
 
 
 def _cancelled_close_world(manager, monkeypatch, *, blocks_at: str, exits: bool):
-    """A browser whose ``blocks_at`` step ("close_target", "close", "aclose") hangs
-    the FIRST time it is reached, so a cancel lands there. ``events`` is the one
-    ordered record of what the close did to it; the grace is a short sleep that
-    answers *exits* (Chrome left on its own) or not."""
+    """A browser whose ``blocks_at`` step ("close_target", "close", "aclose", "grace")
+    hangs the FIRST time it is reached, so a cancel lands there. ``events`` is the
+    one ordered record of what the close did to it. The grace is a short sleep that
+    answers *exits* (Chrome left on its own, which sets its ``returncode``) or not;
+    ``aclose`` empties the socket the way nodriver's does."""
     browser, _ = _seed_manager(manager)
     events: list[str] = []
     reached = asyncio.Event()
     hung: set[str] = set()
+    browser.socket = SimpleNamespace(close_code=None)
     browser._process.returncode = None
     browser._process.terminate = MagicMock(
         side_effect=lambda: events.append("terminate")
@@ -1070,24 +1070,27 @@ def _cancelled_close_world(manager, monkeypatch, *, blocks_at: str, exits: bool)
     browser.tabs = [SimpleNamespace(target=SimpleNamespace(target_id="tab-1"))]
 
     async def _step(name: str) -> None:
-        events.append(name)
         if name == blocks_at and name not in hung:
             hung.add(name)
             reached.set()
             await asyncio.Event().wait()
+        events.append(name)
 
     async def _send(command):
         await _step(command.gi_code.co_name)
 
     async def _aclose():
+        if blocks_at == "aclose":
+            browser.socket = None  # nodriver empties it, then the cancel lands
         await _step("aclose")
+        browser.socket = None
 
     async def _grace(pid, timeout=process_exit.EXIT_GRACE_SECONDS):
         await asyncio.sleep(0.05)
-        events.append("grace")
-        return process_exit.Exited(
-            pid, exits, 0.05, "exited" if exits else "still-running"
-        )
+        await _step("grace")
+        if exits:
+            browser._process.returncode = 0
+        return process_exit.Exited(pid, exits, 0.0, "exited" if exits else "running")
 
     browser.send = _send
     browser.aclose = _aclose
@@ -1099,16 +1102,19 @@ def _cancelled_close_world(manager, monkeypatch, *, blocks_at: str, exits: bool)
 @pytest.mark.parametrize(
     "exits", [True, False], ids=["exits-in-grace", "still-running"]
 )
-@pytest.mark.parametrize("blocks_at", ["close_target", "close", "aclose"])
-async def test_a_close_cancelled_in_phase_two_gives_chrome_its_exit_before_any_kill(
+@pytest.mark.parametrize("blocks_at", ["close_target", "close", "aclose", "grace"])
+async def test_a_close_cancelled_before_phase_three_gives_chrome_its_exit_first(
     monkeypatch, blocks_at, exits
 ):
     """T-10842: Phase 1 popped the instance, so a close cancelled in Phase 2 (the tab
-    loop, the ``Browser.close`` send, ``aclose``) left a Chrome nothing tracked. But
-    once ``Browser.close`` is out Chrome is committing its cookie store, so a
-    terminate there loses the login (F-910): the cancellation propagates AT ONCE,
-    and a background task sends ``Browser.close``, gives Chrome the grace, and
-    terminates only a Chrome that is still running after it."""
+    loop, the ``Browser.close`` send, ``aclose``) or in Phase 2b's wait left a Chrome
+    nothing tracked. But once ``Browser.close`` is out Chrome is committing its
+    cookie store, so a terminate there loses the login (F-910): the cancellation
+    propagates AT ONCE and a background task asks Chrome to leave (unless the socket
+    is already gone, so a cancel in or after ``aclose`` sends nothing more), gives it
+    the grace, and only then runs Phase 3, which kills a Chrome still running."""
+    from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+
     manager = BrowserManager()
     events, reached = _cancelled_close_world(
         manager, monkeypatch, blocks_at=blocks_at, exits=exits
@@ -1120,20 +1126,26 @@ async def test_a_close_cancelled_in_phase_two_gives_chrome_its_exit_before_any_k
     with pytest.raises(asyncio.CancelledError):
         await closing
 
-    assert "grace" not in events and "terminate" not in events, events
+    assert "terminate" not in events and "grace" not in events, events  # at once
     await asyncio.gather(*manager._background_tasks)
-    assert events.count("close") == (1 if blocks_at == "close_target" else 2), events
+    # A hung step is not recorded: ONE "close" is the background's (cancelled before
+    # or during the first send) or Phase 2's (cancelled in or after `aclose`, when
+    # the socket is gone and a second send would reopen it).
+    assert events.count("close") == 1, events
     assert events.index("grace") > max(i for i, e in enumerate(events) if e == "close")
     assert ("terminate" in events) is (not exits), events
     if not exits:
         assert events.index("terminate") > events.index("grace"), events
+    process_cleanup.kill_browser_process.assert_called_once_with("test-1")  # Phase 3
     assert "test-1" not in manager._instances
 
 
 @pytest.mark.asyncio
 async def test_a_failure_while_finishing_a_cancelled_close_never_escapes(monkeypatch):
     """The background half never raises: not out of the task, and not in place of the
-    ``CancelledError`` the caller is owed."""
+    ``CancelledError`` the caller is owed; Phase 3 still ends the browser."""
+    from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+
     manager = BrowserManager()
     _events, reached = _cancelled_close_world(
         manager, monkeypatch, blocks_at="close_target", exits=False
@@ -1153,6 +1165,7 @@ async def test_a_failure_while_finishing_a_cancelled_close_never_escapes(monkeyp
     (background,) = manager._background_tasks
     await background
     assert background.exception() is None
+    process_cleanup.kill_browser_process.assert_called_once_with("test-1")
 
 
 # T-9551: the forwarder's close is bounded, so a close that is cancelled before

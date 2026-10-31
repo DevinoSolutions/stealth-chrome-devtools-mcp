@@ -196,13 +196,14 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # into a `finally` that also covers the settle (-9 inline block and its blank, +11
     # `finally:`, comment and the same block), and the unused `_close_proxy_forwarder`
     # method (-7, with its blank) is removed. Cap == actual.
-    # T-10842 ratchets down to 1412: `Browser.close`'s bounded send (-9, with its
-    # blank) moved to `process_exit.ask_to_close`, which the cancelled-close's
-    # background task also uses, and `_close_proxy_forwarder_ref` (-8, with its blank),
-    # a two-line helper with one caller, is inlined; the `with
-    # process_exit.finish_on_cancel` around Phase 2 is +3. Cap == actual.
+    # T-10842 ratchets down to 1400: Phase 2 (the tab loop, `Browser.close`, the socket)
+    # is `process_exit.graceful_close` (-33), `_close_proxy_forwarder_ref`, a
+    # two-line helper with one caller, is inlined (-8), the `except
+    # asyncio.CancelledError` arm that hands a cancelled close to the background
+    # (+5) and `_finish_close` (+8) are added, and Phase 3 became `_end_browser`, which
+    # a normal and a cancelled close share (+5). Cap == actual.
     "embedded/browser_manager.py": (
-        1412,
+        1400,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
         " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939"
         " - F-940 - F-962 - F-963 + F-964 (paid, net 0) - F-965 - F-969 - F-996"
