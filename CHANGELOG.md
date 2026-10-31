@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.58
 
 ### A seedless disposable clone retries a failed launch like a seeded one (T-11911)
 
