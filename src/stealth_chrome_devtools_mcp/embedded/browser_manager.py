@@ -853,8 +853,8 @@ class BrowserManager:
                 # The graceful close above STARTS Chrome's shutdown, which COMMITS the
                 # cookie store; terminating mid-flush loses the login just made. The
                 # grace and its measurement are `process_exit.settle`'s; Phase 3 keeps
-                # its whole budget (this is its own await). A cancel anywhere in it
-                # re-raises at once and finishes in the background (T-10842, T-11521).
+                # its whole budget (its own await). A cancel in this try (the exchange
+                # wait, Phase 2, 2b) re-raises at once, ends in background (T-10842).
                 await process_exit.settle(
                     instance_id,
                     getattr(browser, "_process", None),
