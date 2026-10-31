@@ -15,6 +15,7 @@ from typing import Any
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
     browser_pid_registry,
     browser_reattach,
     reap_guard,
@@ -223,9 +224,8 @@ class ProcessCleanup:
         # `cmdline` for the whole process table is the dominant cost on Windows
         # (one PEB read per process). Pull cmdline lazily for the handful of
         # browser-named processes only.
-        for process in psutil.process_iter(["name"]):
+        for process, process_name in browser_cmdline.named_processes():
             try:
-                process_name = process.info.get("name") or ""
                 if not self._is_browser_process_name(process_name):
                     continue
                 cmdline = process.cmdline() or []
@@ -250,17 +250,16 @@ class ProcessCleanup:
             return set()
 
         matching_pids: set[int] = set()
-        # See _get_active_browser_profile_dirs: enumerate cheap `name`/`pid`
-        # only and read the expensive `cmdline` lazily for browser processes.
-        for process in psutil.process_iter(["pid", "name"]):
+        # See _get_active_browser_profile_dirs: enumerate cheap `name` only and
+        # read the expensive `cmdline` lazily for browser processes.
+        for process, process_name in browser_cmdline.named_processes():
             try:
-                process_name = process.info.get("name") or ""
                 if not self._is_browser_process_name(process_name):
                     continue
                 cmdline = process.cmdline() or []
                 profile_dir = self._extract_profile_dir_from_cmdline(cmdline)
                 if profile_dir == normalized_profile_dir:
-                    matching_pids.add(process.info["pid"])
+                    matching_pids.add(process.pid)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
             except Exception as error:

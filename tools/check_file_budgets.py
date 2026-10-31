@@ -271,9 +271,9 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # signatures and two docstrings cost more than the duplication they removed.
     # Caps ratchet DOWN only; this one is the ruff-clean file measured.
     "embedded/process_cleanup.py": (
-        1006,
+        1005,
         "plan_M11a_M15 + plan_M7 + plan_F808 + plan_F809 + plan_F856 + F-888"
-        " - F-917/F-918 - F-922",
+        " - F-917/F-918 - F-922 - T-11618",
     ),
     # 1004 (pre-M7) + 7 (plan_M7 step M7-4: best-effort terminate_execution
     # + honest message + debug_logger.log_info on failure) + 1 (plan_M4ph1

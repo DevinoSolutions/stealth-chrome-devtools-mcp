@@ -352,3 +352,75 @@ def boot_log_when_settled(
             child = None  # gone: read once more, then answer
         except psutil.TimeoutExpired:
             pass
+
+
+# ---------------------------------------------------------------------------
+# psutil's process walk, as psutil does it (T-11618)
+# ---------------------------------------------------------------------------
+
+
+class PsutilProc:
+    """A ``psutil.Process`` double whose reads fail the way the real ones do.
+
+    ``name_error`` / ``cmdline_error`` are raised from the read itself, which
+    is where macOS raised ``SystemError`` ("proc_cmdline returned a result with
+    an exception set"). ``as_dict`` is psutil 7's own: it absorbs
+    ``AccessDenied`` and ``ZombieProcess`` into ``ad_value`` and lets anything
+    else out, ``NoSuchProcess`` and ``SystemError`` included.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        pid: int = 1,
+        cmdline: list[str] | None = None,
+        name_error: BaseException | None = None,
+        cmdline_error: BaseException | None = None,
+    ) -> None:
+        self.pid = pid
+        self._name = name
+        self._cmdline = cmdline if cmdline is not None else [name]
+        self._name_error = name_error
+        self._cmdline_error = cmdline_error
+
+    def name(self) -> str:
+        if self._name_error is not None:
+            raise self._name_error
+        return self._name
+
+    def cmdline(self) -> list[str]:
+        if self._cmdline_error is not None:
+            raise self._cmdline_error
+        return list(self._cmdline)
+
+    def as_dict(self, attrs: list[str], ad_value: Any = None) -> dict[str, Any]:
+        info: dict[str, Any] = {}
+        for attr in attrs:
+            try:
+                value = getattr(self, attr)
+                info[attr] = value() if callable(value) else value
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                info[attr] = ad_value
+        return info
+
+
+def psutil_process_iter(procs: list[PsutilProc]) -> Any:
+    """``psutil.process_iter`` over *procs*, built the way psutil 7 builds it.
+
+    A GENERATOR that reads the requested ``attrs`` while it iterates, so a read
+    that raises something ``as_dict`` does not absorb ends the walk for the
+    caller, who cannot resume it. That is the property a hand-written list-
+    returning double lacks and why one passed over the defect.
+    """
+
+    def process_iter(attrs: list[str] | None = None, ad_value: Any = None) -> Any:
+        for proc in procs:
+            if attrs is not None:
+                try:
+                    proc.info = proc.as_dict(attrs, ad_value)
+                except psutil.NoSuchProcess:
+                    continue
+            yield proc
+
+    return process_iter
