@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import psutil
 import pytest
 from nodriver.core.util import get_registered_instances
+from psutil._ntuples import addr, pconn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +71,9 @@ class LaunchedBrowser:
 class FakeChrome:
     """A ``psutil.Process`` double for one Chromium-family process (F-919)."""
 
-    def __init__(self, pid, user_data_dir, create_time, *, stubborn=False):
+    def __init__(
+        self, pid, user_data_dir, create_time, *, stubborn=False, listening=()
+    ):
         self.pid = pid
         self.info = {"pid": pid, "name": "chrome.exe"}
         self._cmdline = ["chrome.exe", f"--user-data-dir={user_data_dir}", "--headless"]
@@ -78,6 +81,7 @@ class FakeChrome:
         self.stubborn = stubborn
         self.alive = True
         self.terminate_calls = 0
+        self.listening = tuple(listening)
 
     def _check(self):
         if not self.alive:
@@ -94,6 +98,22 @@ class FakeChrome:
     def children(self, recursive=False):
         # F-1009: ``devtools_port.owned_pids`` asks who is below the launched pid.
         return []
+
+    def net_connections(self, kind="inet"):
+        """The TCP sockets this process LISTENs on (T-11911), built from psutil's
+        own ``pconn``/``addr`` types so a reader gets the shape the library gives."""
+        self._check()
+        return [
+            pconn(
+                -1,
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                addr("127.0.0.1", port),
+                (),
+                psutil.CONN_LISTEN,
+            )
+            for port in self.listening
+        ]
 
     def create_time(self):
         self._check()

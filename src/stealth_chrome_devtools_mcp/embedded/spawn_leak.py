@@ -277,6 +277,21 @@ def reap_launched_browsers(
     return []
 
 
+def _listening(pid: int) -> str:
+    """The TCP ports *pid* LISTENs on, for the reap's WARNING (T-11911): a launch
+    whose Chrome listens on none never opened its debugging port. ``unknown``
+    when the OS will not say (``AccessDenied``, a pid already gone)."""
+    try:
+        ports = {
+            c.laddr.port
+            for c in psutil.Process(pid).net_connections(kind="tcp")
+            if c.status == psutil.CONN_LISTEN and c.laddr
+        }
+    except (psutil.Error, OSError):
+        return "unknown"
+    return ",".join(map(str, sorted(ports))) or "none"
+
+
 def _kill(
     cleanup: ProcessCleanup, pid: int, user_data_dir: str, instance_id: str
 ) -> list[int]:
@@ -285,7 +300,8 @@ def _kill(
         "spawn_leak",
         "reap",
         f"Failed spawn {instance_id} left browser pid {pid} running on "
-        f"{user_data_dir}; killing it (F-860)",
+        f"{user_data_dir} (listening on TCP ports: {_listening(pid)}); "
+        f"killing it (F-860)",
     )
     try:
         if cleanup._kill_process_by_pid(pid, instance_id):
