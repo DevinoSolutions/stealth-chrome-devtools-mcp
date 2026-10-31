@@ -553,10 +553,13 @@ async def test_a_release_that_never_answers_does_not_hold_a_finished_read(
     node = _Node(answer="x")
     node.release_hangs = True
 
-    task = await _ends_within(page_natives.run(node, SCRIPT), 0.15)
+    task = await _ends_within(page_natives.run(node, SCRIPT), 10.0)  # a hang guard
 
     assert task.result() == "x"
-    assert any("was not released" in r.getMessage() for r in backend_log())
+    # abandoned after ONE RELEASE_WAIT_S: the warning names the bound it applied
+    assert any(
+        "was not released within 0.05 s" in r.getMessage() for r in backend_log()
+    )
 
 
 async def test_a_cancelled_read_releases_nothing_spawns_nothing_and_stays_cancelled():
@@ -590,7 +593,7 @@ async def test_a_leftover_release_that_hangs_does_not_hold_the_next_read(
     """Bounded: the next read answers however many groups are waiting, the leftovers
     wait TOGETHER (one wait, not one after another) and the stuck ones are dropped,
     not retried. Counted as releases in flight at once, not as elapsed time: a loaded
-    runner stretches every wait (0.684 s measured against a 0.4 s baseline)."""
+    runner stretches the waits (0.684 s measured against a 0.4 s baseline)."""
     node = _Hangs()
     reads = [asyncio.ensure_future(page_natives.run(node, SCRIPT)) for _ in range(3)]
     await asyncio.sleep(0.02)
@@ -603,10 +606,12 @@ async def test_a_leftover_release_that_hangs_does_not_hold_the_next_read(
 
     monkeypatch.setattr(page_natives, "RELEASE_WAIT_S", 0.05)
     waiting = peak = 0
+    bounds: list[float] = []
     release = page_natives._release_bounded
 
     async def counted(tab, group, seconds):
         nonlocal waiting, peak
+        bounds.append(seconds)
         waiting += 1
         peak = max(peak, waiting)
         try:
@@ -620,6 +625,8 @@ async def test_a_leftover_release_that_hangs_does_not_hold_the_next_read(
 
     assert task.result() == 1
     assert peak == 3  # the three leftovers wait together, not one after another
+    # one RELEASE_WAIT_S each, once each: the three leftovers, then the read's own
+    assert bounds == [page_natives.RELEASE_WAIT_S] * 4
     assert _left(node) == []  # dropped, not kept to be retried forever
     assert any("was not released" in r.getMessage() for r in backend_log())
 
@@ -822,7 +829,7 @@ async def test_the_synthetic_click_on_a_blocked_page_answers_within_its_budget(
 
     task = await _ends_within(
         click_target.synthetic_click(node, "x", ledger),
-        0.15,
+        1.0,  # a hang guard, well under the production 5.0 s budget
     )
 
     assert isinstance(task.exception(), TimeoutError)
