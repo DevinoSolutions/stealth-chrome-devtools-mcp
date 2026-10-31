@@ -976,25 +976,25 @@ async def _fallback_profile_selection(
         return dict(previous_selection)
     if role not in ("clone", shared):
         return None
-
     snapshot = master_snapshot_dir()
+    live = previous_selection.get(LIVE_SEED_KEY)
+    source: profile_source.SeedSource | None = profile_source.SeedSource(
+        snapshot,
+        "default-seed-final" if attempt > 0 else "default-seed-retry",
+        profile_target.still_driven_source(live, driven),
+    )
     # F-952: a configured seed session needs no snapshot, and wins over it.
     if not snapshot.exists():
         configured = await profile_offload.run(
             fleet_session.clone_seed, _seed_source, driven
         )
         if configured[0] is None:
-            return None
-    final = attempt > 0
+            if role != "clone":  # T-11911: a seedless clone retries too
+                return None
+            source = None
     return await resolve_profile_selection(
         None,
-        override=profile_source.SeedSource(
-            snapshot,
-            "default-seed-final" if final else "default-seed-retry",
-            profile_target.still_driven_source(
-                previous_selection.get(LIVE_SEED_KEY), driven
-            ),
-        ),
-        clone_suffix="seed" if final else "retry",
+        override=source,
+        clone_suffix="seed" if attempt > 0 else "retry",
         driven=driven,
     )

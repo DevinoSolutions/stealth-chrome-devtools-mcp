@@ -139,21 +139,18 @@ class TestFallbackProfileSelection:
             assert await clone_storage._fallback_profile_selection(previous, 0) is None
             assert await clone_storage._fallback_profile_selection(previous, 5) is None
 
-    async def test_clone_with_no_snapshot_returns_none(self, tmp_empty_root):
-        # A clone selection retries from the master snapshot; with no snapshot on
-        # disk (tmp_empty_root), both the first and final attempts yield None.
-        assert (
-            await clone_storage._fallback_profile_selection(
-                {"profile_role": "clone"}, 0
+    async def test_clone_with_no_snapshot_retries_from_a_fresh_seedless_clone(
+        self, tmp_empty_root
+    ):
+        # With no snapshot and no configured seed (tmp_empty_root) a clone is
+        # re-selected like the first one was, onto a fresh directory (T-11911;
+        # this used to answer None, so a seedless clone got ONE launch attempt).
+        for attempt in (0, 1):
+            selection = await clone_storage._fallback_profile_selection(
+                {"profile_role": "clone"}, attempt
             )
-            is None
-        )
-        assert (
-            await clone_storage._fallback_profile_selection(
-                {"profile_role": "clone"}, 1
-            )
-            is None
-        )
+            assert selection is not None and selection["profile_role"] == "clone"
+            clone_storage._release_clone_dir(selection["user_data_dir"])
 
 
 # ===========================================================================

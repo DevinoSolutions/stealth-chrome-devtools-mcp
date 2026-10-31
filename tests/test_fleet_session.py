@@ -757,11 +757,9 @@ class TestTheDefaultSeedSetting:
 
         retry = await clone_storage._fallback_profile_selection(previous, 0)
 
-        if snapshot:
-            assert retry is not None
-            assert "does not exist" in retry["seed_warning"]
-        else:
-            assert retry is None
+        # With no snapshot either it is a seedless clone (T-11911), not None.
+        assert retry is not None
+        assert "does not exist" in retry["seed_warning"]
 
     def test_the_warning_reaches_the_top_level_of_the_answer(self):
         merged = fleet_session.seed_warning(
