@@ -90,9 +90,15 @@ that is merely SLOW costs nothing extra: the grace spends the time
 anyway, which is why the measured close is indistinguishable either way
 (0.128-0.319 s plain, 0.129-0.165 s waited).
 
-A leaf: ``psutil`` + stdlib. Every input is a primitive or an
-``asyncio.subprocess.Process``; it knows nothing about instances, records or
-profiles. **Neither wait here raises** — an unreadable process is a process we
+It imports ``psutil``, ``nodriver`` (``cdp``, and ``Browser`` for the types),
+``tab_open`` and the debug logger, and nothing that owns instances, records or
+profiles: ``instance_id`` is only the label of a log line. The wait and the kill
+(``browser_pid``, ``wait_for_exit``, ``terminate``) take a primitive or an
+``asyncio.subprocess.Process``; the close's own steps (``ask_to_close``,
+``close_connection``, ``finish_close``, T-10842) take the nodriver ``Browser``,
+because they talk to it before they wait on it.
+
+**Neither wait here raises** — an unreadable process is a process we
 did not wait for, which resolves onto the behaviour that shipped before F-910 —
 and ``report`` does not either, because a close must not fail over a log line.
 ``terminate`` deliberately keeps no such blanket: each rung catches what the
@@ -119,11 +125,12 @@ from typing import TYPE_CHECKING
 import psutil
 from nodriver import cdp
 
+from stealth_chrome_devtools_mcp.embedded import tab_close, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # the ladder's rungs are callables, typed but never imported
     import ctypes
-    from collections.abc import Callable, Coroutine, Iterator
+    from collections.abc import Callable
 
     from nodriver import Browser
 
@@ -326,39 +333,30 @@ async def settle(
     instance_id: str,
     process: object | None,
     fallback_pid: int | None,
-    retries: int,
 ) -> Exited:
-    """The whole of a close's grace: wait, report, and never leave it alive.
+    """The whole of a close's grace: wait for Chrome's own exit and report it.
 
     One call rather than four lines at the call site, and in THIS home rather
     than in ``browser_manager``, for the reason this module exists: the wait
     and the kill it gates belong together.
 
-    **The ``CancelledError`` arm is what the grace costs and how it is paid.**
-    A close's caller can give up while we are waiting — a client disconnect
-    cancels the whole tool call — and Phase 2b sits inside a ``try`` whose
-    handler is ``except Exception``, which a ``BaseException`` walks straight
-    past. Normally that window is the 0.13 s the browser takes to leave; for a
-    WEDGED browser it is the full ceiling, so the grace would newly make a
-    cancelled close likelier to leave a live Chrome for the orphan reaper. So
-    the kill runs HERE, synchronously, before the cancellation is re-raised:
-    the browser this close claimed is dealt with on that path too, and the
-    cancellation still propagates, so nothing about the caller's answer
-    changes. F-899's move of the state pop to Phase 1 is what makes this the
-    only remaining harm worth closing.
+    **It does not kill on a ``CancelledError``, and that is deliberate (T-10842).**
+    The wait runs after ``Browser.close`` went out, while Chrome commits its cookie
+    store, so a terminate on a caller giving up is the F-910 login loss. The
+    cancellation propagates; ``close_instance`` hands the browser to
+    :func:`finish_close` and Phase 3, which kill only after the grace.
     """
-    try:
-        waited = await wait_for_exit_async(browser_pid(process, fallback_pid))
-    except asyncio.CancelledError:
-        terminate(instance_id, process, fallback_pid, retries)
-        raise
+    waited = await wait_for_exit_async(browser_pid(process, fallback_pid))
     report(instance_id, waited)
     return waited
 
 
 async def ask_to_close(instance_id: str, browser: Browser) -> None:
     """Send ``Browser.close`` (the START of Chrome's shutdown), bounded; a failure
-    is logged, never raised: a closed socket fails the send."""
+    is logged, never raised. Not sent over a socket that is gone: nodriver's ``send``
+    would reopen it to a Chrome that is leaving (T-10842)."""
+    if tab_open.dropped(browser):
+        return
     try:
         async with asyncio.timeout(_CLOSE_SEND_SECONDS):
             await browser.send(cdp.browser.close())
@@ -370,40 +368,56 @@ async def ask_to_close(instance_id: str, browser: Browser) -> None:
         )
 
 
-async def finish_close(instance_id: str, browser: Browser, retries: int) -> None:
-    """What a close its caller gave up on still owes the browser it claimed: ask it
-    to leave (it may already have been asked), give it its own exit (:func:`settle`),
-    and terminate it only if it is still running after that. Never raises."""
+async def close_connection(browser: Browser) -> None:
+    """Close the browser's CDP socket, bounded; a failure is logged, never raised."""
+    try:
+        async with asyncio.timeout(_CLOSE_SEND_SECONDS):
+            await browser.aclose()
+        debug_logger.log_info(
+            "process_exit", "close_connection", "closed websocket connection"
+        )
+    except (TimeoutError, Exception) as e:  # noqa: BLE001  PERMANENT(a close goes on)
+        debug_logger.log_info(
+            "process_exit",
+            "close_connection",
+            f"connection disconnect failed or timed out: {e}",
+        )
+
+
+async def graceful_close(instance_id: str, browser: Browser) -> None:
+    """Phase 2 of a close: every tab, then ``Browser.close``, then the CDP socket.
+    Each step is bounded and logged, none raises (a ``CancelledError`` aside)."""
+    try:
+        if hasattr(browser, "tabs") and browser.tabs:
+            for tab in browser.tabs[:]:
+                try:
+                    close = cdp.target.close_target(tab.target.target_id)
+                    async with asyncio.timeout(_CLOSE_SEND_SECONDS):
+                        await browser.send(close)
+                except Exception as e:  # noqa: BLE001  PERMANENT(a close goes on)
+                    tab_close.log_failure("close_instance", instance_id, e)
+    except Exception as tabs_err:  # noqa: BLE001  PERMANENT(a close goes on)
+        debug_logger.log_warning(
+            "browser_manager",
+            "close_instance",
+            f"Failed to close tabs for {instance_id}: {tabs_err}",
+        )
+    await ask_to_close(instance_id, browser)
+    await close_connection(browser)
+
+
+async def finish_close(instance_id: str, browser: Browser) -> None:
+    """What a close its caller gave up on owes a browser before Phase 3 ends it: ask
+    it to leave (:func:`ask_to_close`, skipped once the socket is gone) and give it
+    its own exit (:func:`settle`). It kills nothing; the kill is Phase 3's. Never
+    raises."""
     with contextlib.suppress(Exception):
         await ask_to_close(instance_id, browser)
-    process = getattr(browser, "_process", None)
-    pid = getattr(browser, "_process_pid", None)
-    with contextlib.suppress(Exception):
-        if not (await settle(instance_id, process, pid, retries)).exited:
-            terminate(instance_id, process, pid, retries)
-
-
-@contextlib.contextmanager
-def finish_on_cancel(
-    instance_id: str,
-    browser: Browser,
-    retries: int,
-    spawn: Callable[[Coroutine[object, object, object], str], object],
-) -> Iterator[None]:
-    """A ``close_instance`` cancelled in its graceful teardown still ends the browser
-    it claimed (T-10842), WITHOUT killing it first.
-
-    Phase 1 popped the instance and ``CancelledError`` is not an ``Exception``, so
-    nothing else would. But the cancellation may land after ``Browser.close`` went
-    out, when Chrome is committing its cookie store (F-910): a terminate there
-    loses the login. So the cancellation is re-raised AT ONCE and the rest is
-    handed to *spawn* (``BrowserManager._run_in_background``, which holds the task
-    and logs a failure): :func:`finish_close`, whose only kill is after the grace."""
-    try:
-        yield
-    except asyncio.CancelledError:
-        spawn(finish_close(instance_id, browser, retries), "close_instance")
-        raise
+        await settle(
+            instance_id,
+            getattr(browser, "_process", None),
+            getattr(browser, "_process_pid", None),
+        )
 
 
 def terminate(
