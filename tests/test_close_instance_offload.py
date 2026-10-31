@@ -1054,6 +1054,37 @@ async def test_a_close_cancelled_in_phase_two_still_closes_the_forwarder():
     assert forwarder.closes == 1
 
 
+@pytest.mark.asyncio
+async def test_a_close_cancelled_in_the_tab_loop_still_ends_the_browser():
+    """T-10842: Phase 1 popped the instance, so a close cancelled in Phase 2 before
+    ``Browser.close`` was sent left a Chrome nothing tracked any more (and, since
+    T-9551, without its proxy). It is handed to ``process_exit.terminate`` -- the
+    kill ``settle``'s cancelled grace uses -- and the cancellation propagates."""
+    manager = BrowserManager()
+    browser, _ = _seed_manager(manager)
+    browser._process.returncode = None
+    browser.tabs = [SimpleNamespace(target=SimpleNamespace(target_id="tab-1"))]
+    in_tab_loop = asyncio.Event()
+    sent = []
+
+    async def _stuck(command):
+        sent.append(command)
+        in_tab_loop.set()
+        await asyncio.Event().wait()
+
+    browser.send = _stuck
+    closing = asyncio.create_task(manager.close_instance("test-1"))
+    await in_tab_loop.wait()
+    closing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert len(sent) == 1  # the tab's close_target; Browser.close was never sent
+    browser._process.terminate.assert_called_once_with()
+    assert "test-1" not in manager._instances
+
+
 # T-9551: the forwarder's close is bounded, so a close that is cancelled before
 # Chrome's CONNECT tunnels are gone still finishes.
 

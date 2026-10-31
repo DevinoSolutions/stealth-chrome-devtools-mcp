@@ -196,14 +196,17 @@ GRANDFATHER: dict[str, tuple[int, str]] = {
     # into a `finally` that also covers the settle (-9 inline block and its blank, +11
     # `finally:`, comment and the same block), and the unused `_close_proxy_forwarder`
     # method (-7, with its blank) is removed. Cap == actual.
+    # T-10842 ratchets down to 1419: the `with process_exit.kill_on_cancel` around
+    # Phase 2 (+1) is paid for by inlining `_close_proxy_forwarder_ref` (-8, with its
+    # blank), which had one caller and was two lines. Cap == actual.
     "embedded/browser_manager.py": (
-        1425,
+        1419,
         "DEBT(F-702) + plan_M10a + plan_M7 + plan_M4ph1 + F-860 + F-869 + F-881"
         " + F-882 + F-888 + F-834b - F-910 - F-919 + F-935 + F-936 - F-937 + F-939"
         " - F-940 - F-962 - F-963 + F-964 (paid, net 0) - F-965 - F-969 - F-996"
         " + F-1008 (paid, net 0) + F-1011 (paid, net 0) + F-1012 (paid, net 0)"
         " - T-8944 - T-9117 (the targetDestroyed listener replaced close_tab's cancel)"
-        " - T-9479 - T-9551 - T-10690",
+        " - T-9479 - T-9551 - T-10690 - T-10842",
     ),
     # plan_F808 Task 10 (F-808 fratricide), in two ratchets against one file:
     # 1054 -> 966 (step 10a) when the browser_pids.json schema, its lock and its
