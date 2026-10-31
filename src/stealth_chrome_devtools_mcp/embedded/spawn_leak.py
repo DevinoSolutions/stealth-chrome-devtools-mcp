@@ -289,7 +289,10 @@ def _listening(pid: int) -> str:
             for c in psutil.Process(pid).net_connections(kind="tcp")
             if c.status == psutil.CONN_LISTEN and c.laddr
         }
-    except Exception:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
+        debug_logger.log_debug(
+            "spawn_leak", "listening", f"pid {pid} unreadable: {exc!r}"
+        )
         return "unknown"
     return ",".join(map(str, sorted(ports))) or "none"
 
