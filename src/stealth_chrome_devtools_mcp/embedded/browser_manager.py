@@ -847,7 +847,9 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
             tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
             # -- Phase 2: graceful CDP teardown (on loop, bounded) ------------
-            with process_exit.kill_on_cancel(instance_id, browser, self._KILL_RETRIES):
+            with process_exit.finish_on_cancel(
+                instance_id, browser, self._KILL_RETRIES, self._run_in_background
+            ):
                 try:
                     if hasattr(browser, "tabs") and browser.tabs:
                         for tab in browser.tabs[:]:
@@ -864,16 +866,7 @@ class BrowserManager:
                         f"Failed to close tabs for {instance_id}: {tabs_err}",
                     )
 
-                try:
-                    # A closed socket fails the send; the handler below logs it.
-                    async with asyncio.timeout(2.0):
-                        await browser.send(uc.cdp.browser.close())
-                except (TimeoutError, Exception) as cdp_err:
-                    debug_logger.log_info(
-                        "browser_manager",
-                        "close_instance",
-                        f"CDP browser.close() skipped for {instance_id}: {cdp_err}",
-                    )
+                await process_exit.ask_to_close(instance_id, browser)
 
                 try:
                     async with asyncio.timeout(2.0):
