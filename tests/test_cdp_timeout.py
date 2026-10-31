@@ -129,22 +129,22 @@ class TestWithCdpTimeoutMechanism:
         Pinned on the value HANDED to the wait, under two different patched
         defaults, so a literal fall-back (``timeout or 2.0``) cannot pass and
         the test does not sit out the real 30 s. The wait itself is still the
-        real ``asyncio.wait_for`` (a short one, so the ToolError path runs); the
+        real ``asyncio.timeout`` (a short one, so the ToolError path runs); the
         wait that really fires on a hang is pinned by
         ``test_slow_coroutine_times_out``.
         """
         monkeypatch.setattr(tool_runtime, "CDP_OPERATION_TIMEOUT", default)
         handed: list[float] = []
-        real_wait_for = asyncio.wait_for
+        real_timeout = asyncio.timeout
 
-        async def recording_wait_for(awaitable, timeout):
-            handed.append(timeout)
-            return await real_wait_for(awaitable, timeout=0.05)
+        def recording_timeout(delay):
+            handed.append(delay)
+            return real_timeout(0.05)
 
         monkeypatch.setattr(
             tool_runtime,
             "asyncio",
-            types.SimpleNamespace(wait_for=recording_wait_for),
+            types.SimpleNamespace(timeout=recording_timeout),
         )
 
         async def hang():
