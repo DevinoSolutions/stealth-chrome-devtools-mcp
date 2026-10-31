@@ -474,22 +474,27 @@ async def settle_session_restore(browser: Browser) -> None:
     cancelled, the connection marked closed, and the cancellation re-raised at once;
     ``close_instance`` hands the browser it already claimed to the held background
     task of T-10842, which asks Chrome to leave, gives it its own exit and only then
-    runs Phase 3."""
+    runs Phase 3 (after :func:`wind_down`)."""
     state = getattr(browser, _STATE_ATTR, None)
     if not isinstance(state, _Pending) or state.task.done():
         return
     state.closing.set()
     try:
-        _, pending = await asyncio.wait(
-            {state.task}, timeout=PREF_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS
-        )
-        if not pending:
+        if not await _still_running(
+            state.task, PREF_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS
+        ):
             return
         state.task.cancel()
-        await asyncio.wait({state.task}, timeout=_CANCEL_GRACE_SECONDS)
+        await _still_running(state.task, _CANCEL_GRACE_SECONDS)
     except asyncio.CancelledError:  # in either wait: the second one used to leak
         state.task.cancel()
         tab_open.mark_closed(browser)
+        debug_logger.log_warning(
+            "login_persistence",
+            "settle_session_restore",
+            f"the close was cancelled while {RESTORE_PREF} was being set, so this "
+            "profile's session cookies may not survive the close",
+        )
         raise
     debug_logger.log_warning(
         "login_persistence",
@@ -498,3 +503,22 @@ async def settle_session_restore(browser: Browser) -> None:
         f"{PREF_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS:g}s; cancelled it to close "
         "the browser, so this profile's session cookies may not survive the close",
     )
+
+
+async def _still_running(task: asyncio.Task[bool], timeout: float) -> bool:  # noqa: ASYNC109  PERMANENT(a bound on a wait, not a cancel scope)
+    """Wait up to *timeout* for *task*; whether it is still running. The one seam the
+    settle's waits go through, so a test replaces it rather than ``asyncio.wait``."""
+    _, pending = await asyncio.wait({task}, timeout=timeout)
+    return bool(pending)
+
+
+async def wind_down(browser: Browser) -> None:
+    """After a close was cancelled mid-wait: give the exchange it cancelled the
+    grace the uncancelled path gives it (``_CANCEL_GRACE_SECONDS``) to close its
+    ``chrome://settings`` tab, so ``Browser.close`` does not find the page open and
+    Chrome does not save a session with it (the T-9479 stray tab). Bounded, never
+    raises (a ``CancelledError`` aside); no-op when nothing is pending."""
+    state = getattr(browser, _STATE_ATTR, None)
+    if isinstance(state, _Pending) and not state.task.done():
+        with contextlib.suppress(Exception):
+            await _still_running(state.task, _CANCEL_GRACE_SECONDS)

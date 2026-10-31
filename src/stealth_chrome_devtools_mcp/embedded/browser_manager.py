@@ -853,9 +853,8 @@ class BrowserManager:
                 # The graceful close above STARTS Chrome's shutdown, which COMMITS the
                 # cookie store; terminating mid-flush loses the login just made. The
                 # grace and its measurement are `process_exit.settle`'s; Phase 3 keeps
-                # its whole budget (this is its own await). A cancel in here, in
-                # Phase 2 or while the session-restore exchange is awaited re-raises
-                # at once and finishes in the background (T-10842, T-11521).
+                # its whole budget (this is its own await). A cancel anywhere in it
+                # re-raises at once and finishes in the background (T-10842, T-11521).
                 await process_exit.settle(
                     instance_id,
                     getattr(browser, "_process", None),
@@ -924,11 +923,12 @@ class BrowserManager:
                 )
 
     async def _finish_close(self, instance_id: str, browser: Browser) -> None:
-        """What a close cancelled in Phase 2 or 2b still owes the browser it claimed
-        (T-10842): ask it to leave and give it its own exit, then Phase 3, so it ends
-        as a normal close ends it. Never raises (it runs in the background). A cancel of
-        this task (a shutdown) during the grace kills nothing: Chrome was asked to leave
-        and is committing its cookies, and recovery reaps what it leaves."""
+        """What a cancelled close still owes the browser it claimed (T-10842): the
+        session-restore exchange winds down, the browser is asked to leave and given its
+        own exit, then Phase 3, as a normal close ends it. Never raises (background). A
+        cancel of this task (a shutdown) during the grace kills nothing: Chrome was
+        asked to leave and is committing its cookies; recovery reaps what it leaves."""
+        await login_persistence.wind_down(browser)
         await process_exit.finish_close(instance_id, browser)
         with contextlib.suppress(Exception):
             await self._end_browser(instance_id, browser)
