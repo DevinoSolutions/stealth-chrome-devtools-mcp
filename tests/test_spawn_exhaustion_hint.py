@@ -33,8 +33,9 @@ import nodriver.core.browser
 import psutil
 import pytest
 
-from fakes import assert_no_default_paths
+from fakes import PsutilProc, assert_no_default_paths, psutil_process_iter
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
     spawn_budget,
     spawn_exhaustion,
     spawn_leak,
@@ -55,39 +56,33 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 # reasoning). At the third, these move into tests/fakes.py — THE harness home —
 # because a second hand-rolled copy of a process double would be the defect.
 #
-# Built to psutil's ACTUAL shape (an object exposing `.info` as a mapping)
-# rather than to our assumption about it: a double that copies the production
-# guess keeps a permanent defect green. T15 pins that shape against real psutil.
+# Built to psutil's ACTUAL shape (``fakes.PsutilProc`` / ``psutil_process_iter``:
+# a generator that reads requested attrs while it iterates) rather than to our
+# assumption about it: a double that copies the production guess keeps a
+# permanent defect green. T15 pins that shape against real psutil.
 # ---------------------------------------------------------------------------
 
 
-class FakeProc:
+class FakeProc(PsutilProc):
+    """A process that answers its name and fails the test if asked for its argv."""
+
     def __init__(self, name):
-        self._name = name
+        super().__init__(
+            name,
+            cmdline_error=AssertionError("the count must never read cmdline"),
+        )
 
-    @property
-    def info(self):
-        return {"name": self._name}
 
+class DeniedProc(PsutilProc):
+    """A process whose name read fails the way a protected one does."""
 
-class DeniedProc:
-    """A process whose attribute read fails the way a protected one does."""
-
-    @property
-    def info(self):
-        raise psutil.AccessDenied(pid=1)
+    def __init__(self):
+        super().__init__("denied", name_error=psutil.AccessDenied(pid=1))
 
 
 def install_process_table(monkeypatch, procs):
     """Point psutil.process_iter at a fixed list of doubles."""
-
-    def fake_process_iter(attrs=None):
-        assert attrs == ["name"], (
-            f"the helper must ask for name only, never cmdline; got {attrs}"
-        )
-        return list(procs)
-
-    monkeypatch.setattr(psutil, "process_iter", fake_process_iter)
+    monkeypatch.setattr(psutil, "process_iter", psutil_process_iter(list(procs)))
 
 
 def chrome_procs(count, name="chrome.exe"):
@@ -190,6 +185,19 @@ def test_process_iter_dying_mid_walk_degrades_to_none(monkeypatch, pid_file):
 def test_per_process_access_denied_is_skipped_not_fatal(monkeypatch, pid_file):
     procs = [DeniedProc(), *chrome_procs(THRESHOLD)]
     install_process_table(monkeypatch, procs)
+    assert spawn_exhaustion.exhaustion_hint(pid_file) is not None
+
+
+@pytest.mark.parametrize("error", [SystemError("proc_cmdline"), OSError("EIO")])
+def test_a_process_whose_name_cannot_be_read_does_not_end_the_count(
+    monkeypatch, pid_file, error
+):
+    """T-11618: macOS psutil 7.2.2 raised ``SystemError`` from ``name()`` (its
+    truncated-name fallback reads ``cmdline``). Asked for inside ``process_iter``
+    that ended the generator, so ONE unreadable process lost the whole count."""
+    procs = [PsutilProc("unreadable", name_error=error), *chrome_procs(THRESHOLD)]
+    install_process_table(monkeypatch, procs)
+    assert spawn_exhaustion.live_chromium_processes() == THRESHOLD
     assert spawn_exhaustion.exhaustion_hint(pid_file) is not None
 
 
@@ -641,12 +649,12 @@ async def test_a_real_cap_with_a_pegged_cpu_reports_both_end_to_end(
 # ---------------------------------------------------------------------------
 
 
-def test_psutil_process_iter_still_yields_info_dicts():
+def test_psutil_process_iter_still_yields_readable_processes():
     """The ONE test that calls real psutil. Read-only, spawns nothing.
 
     Without it a psutil API change would leave every pin above green over a
     helper that counts nothing — the "mocked fakes can encode the bug" mode.
     """
-    first = next(iter(psutil.process_iter(["name"])), None)
+    first = next(iter(browser_cmdline.named_processes()), None)
     assert first is not None, "no processes visible — psutil is not working here"
-    assert "name" in first.info
+    assert isinstance(first[1], str)

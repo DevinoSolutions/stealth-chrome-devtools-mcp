@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 import psutil
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Collection
+    from collections.abc import Collection, Iterator
 
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 
@@ -57,6 +57,32 @@ def arguments(pid: int) -> list[str]:
         return list(psutil.Process(pid).cmdline())
     except (psutil.Error, OSError, ValueError):
         return []
+
+
+def named_processes() -> Iterator[tuple[psutil.Process, str]]:
+    """Every live process with its name, skipping any psutil cannot read.
+
+    THE one walk of the process table. ``psutil.process_iter(["name"])`` reads
+    the name INSIDE the generator, so an exception from that read ends the
+    generator and no ``try`` around the loop body can see it: on macOS
+    ``name()`` falls back to ``cmdline()`` for a truncated name and psutil 7.2.2
+    raised ``SystemError`` ("proc_cmdline returned a result with an exception
+    set"), which failed the whole scan and, through ``profile_lock``, the spawn
+    (T-11618). Here the generator reads nothing; the name is read per process in
+    a ``try`` that skips that one process and goes on.
+
+    Still the cheap field only, one read per process: ``cmdline`` for the whole
+    table is one PEB read per process on Windows, so a caller reads it lazily
+    from the process this yields, for the few browser-named ones. ``psutil.Error``
+    covers a process that vanished or is not ours, ``OSError`` a failed system
+    call, ``SystemError`` the macOS binding's error with an exception set.
+    """
+    for process in psutil.process_iter():
+        try:
+            name = process.name() or ""
+        except (psutil.Error, OSError, SystemError):
+            continue
+        yield process, name
 
 
 def flag_value(cmdline: list[str], flag: str) -> str | None:

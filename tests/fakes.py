@@ -82,12 +82,14 @@ from fakes_process import (
     FakeChrome,
     LaunchedBrowser,
     ProcessTable,
+    PsutilProc,
     a_zombie,
     boot_log_when_settled,
     fail_a_rename,
     forbid_real_process_kills,
     held_profile,
     nodriver_registry,
+    psutil_process_iter,
     write_singleton,
 )
 from fakes_tab import (
@@ -123,6 +125,7 @@ __all__ = [
     "JsPromise",
     "LaunchedBrowser",
     "ProcessTable",
+    "PsutilProc",
     "ScrollingTab",
     "_is_path_param",
     "_public_functions",
@@ -150,6 +153,7 @@ __all__ = [
     "nodriver_registry",
     "normalize_golden",
     "pretend_display_context",
+    "psutil_process_iter",
     "v2_record",
     "write_singleton",
 ]

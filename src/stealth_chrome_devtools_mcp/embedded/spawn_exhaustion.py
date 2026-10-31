@@ -41,9 +41,9 @@ The verdict is made ONLY for a launch that failed on its DevTools deadline
 setup, hooks) says nothing about load, whatever the CPU reads. And a process count AT
 the limit is never relabelled: it keeps the capacity answer, with the CPU added.
 
-A leaf module: ``psutil``, ``debug_logger``, ``browser_pid_registry``,
-``spawn_budget`` and ``spawn_leak`` only. Never ``process_cleanup``, never
-``singleton``, never ``server``.
+A leaf module: ``psutil``, ``debug_logger``, ``browser_cmdline``,
+``browser_pid_registry``, ``spawn_budget`` and ``spawn_leak`` only. Never
+``process_cleanup``, never ``singleton``, never ``server``.
 
 The module is NOT named ``spawn_diagnostics``: ``browser_manager.spawn_browser``
 and ``server.spawn_browser`` each bind a local of that name inside the very
@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
     browser_pid_registry,
     spawn_budget,
     spawn_leak,
@@ -107,8 +108,6 @@ _BROWSER_NAMES = frozenset(
 # macOS spells the family with a bundle name and a role in parentheses.
 _BROWSER_PREFIXES = ("google chrome", "chromium helper", "chromium")
 
-_SKIPPABLE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
-
 
 def _is_browser_name(name: str) -> bool:
     """Whether a process name is a Chromium browser process (see ``_BROWSER_NAMES``)."""
@@ -119,7 +118,7 @@ def _is_browser_name(name: str) -> bool:
 def live_chromium_processes() -> int:
     """Machine-wide count of live Chromium-family BROWSER processes.
 
-    ``process_iter(["name"])`` asks for the name and nothing else: reading
+    ``browser_cmdline.named_processes`` asks for the name and nothing else: reading
     ``cmdline`` for the whole process table costs one PEB read per process on
     Windows and this question never needs it. The names are matched exactly
     (:func:`_is_browser_name`), covering every platform's spelling — ``chrome.exe`` /
@@ -127,19 +126,12 @@ def live_chromium_processes() -> int:
     ``chrome_crashpad_handler``, ``Google Chrome Helper (Renderer)`` — and nothing
     that merely contains "chrom" (F-1024).
 
-    A process that dies mid-walk (``/proc`` entries vanish) or belongs to
-    another user (``AccessDenied`` on macOS) is skipped, not fatal: both are
-    normal and neither is a reason to lose the count.
+    A process that dies mid-walk (``/proc`` entries vanish), belongs to another
+    user (``AccessDenied`` on macOS) or whose name psutil cannot read (macOS
+    ``SystemError``, T-11618) is skipped by ``named_processes``, not fatal: all
+    are normal and none is a reason to lose the count.
     """
-    live = 0
-    for proc in psutil.process_iter(["name"]):
-        try:
-            name = proc.info.get("name") or ""
-        except _SKIPPABLE:
-            continue
-        if _is_browser_name(name):
-            live += 1
-    return live
+    return sum(_is_browser_name(name) for _, name in browser_cmdline.named_processes())
 
 
 def missed_devtools_deadline(error: BaseException) -> bool:

@@ -15,8 +15,10 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import psutil
 import pytest
 
+from fakes import PsutilProc, psutil_process_iter
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 
@@ -587,3 +589,54 @@ class TestFallbackPidIdentity:
                     )
 
         assert 55557 in killed
+
+
+# ---------------------------------------------------------------------------
+# The two process-table scans survive a process psutil cannot read (T-11618)
+# ---------------------------------------------------------------------------
+
+
+class TestScansSurviveAnUnreadableProcess:
+    """macOS psutil 7.2.2 raised ``SystemError`` from ``name()`` for a process
+    whose name it read from ``cmdline`` (CI run 41175641204). Read inside
+    ``process_iter`` that ended the generator, so one such process failed the
+    scan, and through ``profile_lock`` the whole ``spawn_browser``."""
+
+    UNREADABLE = SystemError("<built-in function proc_cmdline> returned a result")
+
+    def _scan(self, monkeypatch, tmp_path, *others):
+        profile = tmp_path / "profile"
+        mine = PsutilProc(
+            "chrome",
+            pid=4242,
+            cmdline=["chrome", f"--user-data-dir={profile}"],
+        )
+        monkeypatch.setattr(
+            psutil, "process_iter", psutil_process_iter([*others, mine])
+        )
+        pc = ProcessCleanup.__new__(ProcessCleanup)
+        return pc, str(profile), pc._normalize_path(str(profile))
+
+    @pytest.mark.parametrize("failing", ["name", "cmdline"])
+    def test_pids_for_profile_still_finds_the_other_processes(
+        self, monkeypatch, tmp_path, failing
+    ):
+        broken = PsutilProc(
+            "chrome",
+            pid=7,
+            **{f"{failing}_error": self.UNREADABLE},
+        )
+        pc, profile, _ = self._scan(monkeypatch, tmp_path, broken)
+        assert pc._get_browser_pids_for_profile(profile) == {4242}
+
+    @pytest.mark.parametrize("failing", ["name", "cmdline"])
+    def test_active_profiles_still_find_the_other_processes(
+        self, monkeypatch, tmp_path, failing
+    ):
+        broken = PsutilProc(
+            "chrome",
+            pid=7,
+            **{f"{failing}_error": self.UNREADABLE},
+        )
+        pc, _, normalized = self._scan(monkeypatch, tmp_path, broken)
+        assert pc._get_active_browser_profile_dirs() == {normalized}
