@@ -32,7 +32,15 @@ On the FIRST other miss of an incident, one ERROR line records, counts and state
 
 The record is kept in :attr:`CloneProbe.records` until the clone answers again or is
 gone, and is the ERROR line's text. A probe that passes ends the incident
-(``answers probes again`` at INFO). The whole round is bounded by
+(``answers probes again after N min`` at INFO). **T-11617:** an incident that goes on
+is not silent: the record also counts the consecutive failed rounds, and from the
+:data:`ROUNDS_BEFORE_REPEAT`-th one logs ``still unresponsive since HH:MM:SS`` at
+ERROR, again every :data:`REPEAT_SECONDS` while it lasts, with no new capture and no
+extra CDP call. A round the starvation excuse covers advances nothing. Every failure
+the judgement does not excuse counts, not only a dead browser process: the judgement
+already is the starvation test, and the page-level hang the owner sees is one too (the
+first miss's record says which). :meth:`CloneProbe.open_incidents` is what
+``list_instances`` shows. The whole round is bounded by
 :data:`ROUND_SECONDS`, so frozen clones cannot hold up the next persistent probe; a
 clone the round never reached is probed FIRST in the next one (then the least recently
 started), so a fleet larger than one round covers is rotated, not starved; one it cut
@@ -41,9 +49,11 @@ off mid-probe keeps its place in that order. No URL, title or cookie is ever rea
 
 import asyncio
 import contextlib
+import dataclasses
 import itertools
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from typing import Protocol
 
 from nodriver import Browser
@@ -67,6 +77,15 @@ PROBES_AT_ONCE = 4
 #: capture), so twelve frozen clones fit in one round; more are rotated (see
 #: :meth:`CloneProbe.check`). Healthy ones take milliseconds.
 ROUND_SECONDS = 70.0
+
+#: Consecutive failed rounds, the first included, before an open incident says it is
+#: still going: one more than the two a persistent browser gets before its heal, so a
+#: blip is never reported twice, and ~4 min at the 120 s round.
+ROUNDS_BEFORE_REPEAT = 3
+
+#: How often an incident that goes on says so again: often enough that a hang of hours
+#: is a handful of lines, rare enough that the Sentry issue is not a stream.
+REPEAT_SECONDS = 1800.0
 
 #: What :func:`listener_state` says when the attribute it reads is not there.
 _NO_LISTENER_ATTRIBUTE = "unknown(no _listener_task)"
@@ -109,6 +128,20 @@ def listener_state(browser: Connection) -> str:
     return f"browser={state} socket={wire} tabs={running}/{len(tabs)}"
 
 
+@dataclasses.dataclass
+class Incident:
+    """One clone's open incident: what the first miss captured, and how it goes on."""
+
+    record: str  # the first miss's capture: the ERROR line's text
+    since: datetime  # wall clock of the first miss (aware), for display
+    started: float  # ``clock()`` of the first miss, for how long
+    rounds: int = 1  # consecutive failed rounds the excuse did not cover
+    said: float | None = None  # ``clock()`` of the last "still unresponsive" line
+
+    def minutes(self, now: float) -> str:
+        return f"{(now - self.started) / 60:.0f} min"
+
+
 class CloneProbe:
     """Probes disposable clones and records the first failure of each incident."""
 
@@ -134,12 +167,25 @@ class CloneProbe:
         self._fresh_check = fresh_check
         self._own_check = own_check
         self._paused = paused
+        self._clock = clock
         self._excuses = scheduling_lag.ExcuseBudget(clock)
         self._slots = asyncio.Semaphore(PROBES_AT_ONCE)
         self._ticks = itertools.count(1)
         self._started: dict[str, int] = {}  # instance id -> tick of its last start
-        #: instance id -> the record taken at its current incident's first miss.
-        self.records: dict[str, str] = {}
+        #: instance id -> its current incident (the record taken at its first miss).
+        self.records: dict[str, Incident] = {}
+
+    def open_incidents(self) -> dict[str, dict[str, object]]:
+        """What ``list_instances`` adds to the entry of a clone that is failing now."""
+        return {
+            iid: {
+                "unresponsive_since": incident.since.astimezone(UTC).isoformat(
+                    timespec="seconds"
+                ),
+                "failed_rounds": incident.rounds,
+            }
+            for iid, incident in self.records.items()
+        }
 
     async def check(
         self,
@@ -191,16 +237,23 @@ class CloneProbe:
         failure, starved = await self._judge(data, steps, canary)
         if failure is None:
             self._excuses.reset(instance_id)
-            if self.records.pop(instance_id, None) is not None:
+            if (over := self.records.pop(instance_id, None)) is not None:
                 debug_logger.log_info(
-                    _COMPONENT, "probe", f"{instance_id} answers probes again"
+                    _COMPONENT,
+                    "probe",
+                    f"{instance_id} answers probes again after "
+                    f"{over.minutes(self._clock())} unresponsive "
+                    f"({over.rounds} rounds)",
                 )
             return
-        if instance_id in self.records:
-            return  # the incident is already on record
         if await self._manager.get_instance(instance_id) is not data:
             return  # closed while we probed: no verdict on a browser that is gone
-        if starved and (spent := self._excuses.grant(instance_id)) is not None:
+        spent = self._excuses.grant(instance_id) if starved else None
+        if (incident := self.records.get(instance_id)) is not None:
+            if spent is None:  # a round the excuse covers advances nothing
+                self._goes_on(instance_id, incident, failure)
+            return  # the incident is already on record: no second capture
+        if spent is not None:
             debug_logger.log_warning(
                 _COMPONENT,
                 "probe",
@@ -210,13 +263,35 @@ class CloneProbe:
             )
             return
         record = await self._capture(instance_id, browser, steps)
-        self.records[instance_id] = record
+        self.records[instance_id] = Incident(record, datetime.now(UTC), self._clock())
         debug_logger.log_error(
             _COMPONENT,
             "probe",
             FrozenCloneError(
                 f"{instance_id}: clone probe failed ({failure}); {record}",
                 f"probe {failure}",
+            ),
+        )
+
+    def _goes_on(self, instance_id: str, incident: Incident, failure: str) -> None:
+        """T-11617: count one more failed round of an open incident and, from the
+        :data:`ROUNDS_BEFORE_REPEAT`-th, say so, then every :data:`REPEAT_SECONDS`."""
+        incident.rounds += 1
+        now = self._clock()
+        if incident.rounds < ROUNDS_BEFORE_REPEAT:
+            return
+        if incident.said is not None and now - incident.said < REPEAT_SECONDS:
+            return
+        incident.said = now
+        since = incident.since.astimezone().strftime("%H:%M:%S")  # the log's own zone
+        debug_logger.log_error(
+            _COMPONENT,
+            "probe",
+            FrozenCloneError(
+                f"{instance_id} still unresponsive since {since} "
+                f"({incident.minutes(now)}, {incident.rounds} rounds); "
+                f"last probe failed ({failure})",
+                "still-unresponsive",
             ),
         )
 

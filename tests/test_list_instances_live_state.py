@@ -341,3 +341,58 @@ class TestLastNavigatedCache:
 
         assert instance.last_navigated_url == "https://old.test/"
         assert instance.last_navigated_title == "New"
+
+
+async def test_an_open_incident_is_on_its_instances_entry_and_only_there(
+    patched_server, monkeypatch
+):
+    """T-11617: the clone whose browser process is hung is told apart in the
+    listing, with the same two keys ``clone_probe`` counts; the other entry is
+    byte-for-byte what it was."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from stealth_chrome_devtools_mcp.embedded import browser_health
+    from stealth_chrome_devtools_mcp.embedded.clone_probe import CloneProbe, Incident
+
+    tabs = {
+        i: FakeTab(url=f"https://{i}.test/", target_id=f"T-{i}") for i in ("a", "b")
+    }
+    srv = _seeded(
+        patched_server,
+        instances=[fake_instance(i, "active", "https://x.test/", "X") for i in tabs],
+        tabs=tabs,
+        browsers={i: FakeBrowser(tabs=[tab]) for i, tab in tabs.items()},
+    )
+    [before_a, before_b] = await call_tool(srv, "list_instances")
+    clones = CloneProbe(None, None, None, None)
+    clones.records["a"] = Incident(
+        "record", datetime(2026, 10, 30, 23, 22, 37, tzinfo=UTC), 0.0, rounds=55
+    )
+    monkeypatch.setattr(browser_health, "_health", SimpleNamespace(_clones=clones))
+
+    [after_a, after_b] = await call_tool(srv, "list_instances")
+
+    assert after_a == {
+        **before_a,
+        "unresponsive_since": "2026-10-30T23:22:37+00:00",
+        "failed_rounds": 55,
+    }
+    assert after_b == before_b  # no null keys on an instance with no incident
+
+
+async def test_no_health_loop_leaves_the_entries_unchanged(patched_server, monkeypatch):
+    from stealth_chrome_devtools_mcp.embedded import browser_health
+
+    live = FakeTab(url="https://live.test/", target_id="T-live")
+    srv = _seeded(
+        patched_server,
+        instances=[fake_instance("i1", "active", "https://live.test/", "Home")],
+        tabs={"i1": live},
+        browsers={"i1": FakeBrowser(tabs=[live])},
+    )
+    monkeypatch.setattr(browser_health, "_health", None)
+
+    [entry] = await call_tool(srv, "list_instances")
+
+    assert "unresponsive_since" not in entry and "failed_rounds" not in entry
