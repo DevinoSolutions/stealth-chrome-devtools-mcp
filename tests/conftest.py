@@ -295,7 +295,7 @@ def _tool_errors_departed_stores_hygiene():
 def _paint_hold_hygiene():
     """No test may leave a screencast hold, or a caller-owned target, for the next (T-9542).
 
-    ``paint_hold._held`` / ``_caller_owned`` are module globals that live as long as
+    ``paint_hold._held`` / ``_browserless_caller_owned`` are module globals that live as long as
     the process, and every tool driven through ``tab_binding.tab_for_caller`` with a
     ``FakeTab`` writes to them under the default target ``T-faketab``.
     ``test_paint_hold`` cleaned up only inside its own file, so its closed-tab pin
@@ -310,7 +310,7 @@ def _paint_hold_hygiene():
     def clear() -> None:
         for key in list(paint_hold._held):
             paint_hold.forget(key)
-        paint_hold._caller_owned.clear()
+        paint_hold._browserless_caller_owned.clear()
 
     clear()
     yield
