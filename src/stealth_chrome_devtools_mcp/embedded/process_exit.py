@@ -117,12 +117,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import psutil
+from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # the ladder's rungs are callables, typed but never imported
     import ctypes
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Coroutine, Iterator
+
+    from nodriver import Browser
 
 # How long a browser we have asked to close may take to go on its own before we
 # terminate it. 5.0 s is ~30x the slowest unaided exit measured here (0.169 s),
@@ -149,6 +152,9 @@ _CHILD_MARKER = "--type="
 # adds to a close: 0.02 s against a measured 0.100-0.169 s exit, i.e. at most
 # one extra poll's worth of wall clock on the common path.
 _POLL_SECONDS = 0.02
+
+# How long ``Browser.close`` may take to be sent before the close goes on without it.
+_CLOSE_SEND_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -350,25 +356,53 @@ async def settle(
     return waited
 
 
-@contextlib.contextmanager
-def kill_on_cancel(instance_id: str, browser: object, retries: int) -> Iterator[None]:
-    """A close the caller gives up on still ends the browser it claimed (T-10842).
+async def ask_to_close(instance_id: str, browser: Browser) -> None:
+    """Send ``Browser.close`` (the START of Chrome's shutdown), bounded; a failure
+    is logged, never raised: a closed socket fails the send."""
+    try:
+        async with asyncio.timeout(_CLOSE_SEND_SECONDS):
+            await browser.send(cdp.browser.close())
+    except (TimeoutError, Exception) as cdp_err:  # noqa: BLE001  PERMANENT(a close goes on)
+        debug_logger.log_info(
+            "process_exit",
+            "ask_to_close",
+            f"CDP browser.close() skipped for {instance_id}: {cdp_err}",
+        )
 
-    ``close_instance``'s Phase 1 pops the instance, so a ``CancelledError`` in the
-    graceful CDP teardown (not an ``Exception``; the handlers there let it by)
-    would leave a Chrome nothing tracks, and nothing would close its proxy. The
-    kill is :func:`terminate`, the one ``settle`` and ``settle_session_restore``
-    already run on a cancelled grace, synchronous and bounded by *retries*; the
-    cancellation is re-raised, so the caller's answer is unchanged."""
+
+async def finish_close(instance_id: str, browser: Browser, retries: int) -> None:
+    """What a close its caller gave up on still owes the browser it claimed: ask it
+    to leave (it may already have been asked), give it its own exit (:func:`settle`),
+    and terminate it only if it is still running after that. Never raises."""
+    with contextlib.suppress(Exception):
+        await ask_to_close(instance_id, browser)
+    process = getattr(browser, "_process", None)
+    pid = getattr(browser, "_process_pid", None)
+    with contextlib.suppress(Exception):
+        if not (await settle(instance_id, process, pid, retries)).exited:
+            terminate(instance_id, process, pid, retries)
+
+
+@contextlib.contextmanager
+def finish_on_cancel(
+    instance_id: str,
+    browser: Browser,
+    retries: int,
+    spawn: Callable[[Coroutine[object, object, object], str], object],
+) -> Iterator[None]:
+    """A ``close_instance`` cancelled in its graceful teardown still ends the browser
+    it claimed (T-10842), WITHOUT killing it first.
+
+    Phase 1 popped the instance and ``CancelledError`` is not an ``Exception``, so
+    nothing else would. But the cancellation may land after ``Browser.close`` went
+    out, when Chrome is committing its cookie store (F-910): a terminate there
+    loses the login. So the cancellation is re-raised AT ONCE and the rest is
+    handed to *spawn* (``BrowserManager._run_in_background``, which holds the task
+    and logs a failure): :func:`finish_close`, whose only kill is after the grace."""
     try:
         yield
     except asyncio.CancelledError:
-        terminate(
-            instance_id,
-            getattr(browser, "_process", None),
-            getattr(browser, "_process_pid", None),
-            retries,
-        )
+        spawn(finish_close(instance_id, browser, retries), "close_instance")
         raise
 
 

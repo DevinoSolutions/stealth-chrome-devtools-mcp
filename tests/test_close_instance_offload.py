@@ -1054,35 +1054,105 @@ async def test_a_close_cancelled_in_phase_two_still_closes_the_forwarder():
     assert forwarder.closes == 1
 
 
-@pytest.mark.asyncio
-async def test_a_close_cancelled_in_the_tab_loop_still_ends_the_browser():
-    """T-10842: Phase 1 popped the instance, so a close cancelled in Phase 2 before
-    ``Browser.close`` was sent left a Chrome nothing tracked any more (and, since
-    T-9551, without its proxy). It is handed to ``process_exit.terminate`` -- the
-    kill ``settle``'s cancelled grace uses -- and the cancellation propagates."""
-    manager = BrowserManager()
+def _cancelled_close_world(manager, monkeypatch, *, blocks_at: str, exits: bool):
+    """A browser whose ``blocks_at`` step ("close_target", "close", "aclose") hangs
+    the FIRST time it is reached, so a cancel lands there. ``events`` is the one
+    ordered record of what the close did to it; the grace is a short sleep that
+    answers *exits* (Chrome left on its own) or not."""
     browser, _ = _seed_manager(manager)
+    events: list[str] = []
+    reached = asyncio.Event()
+    hung: set[str] = set()
     browser._process.returncode = None
+    browser._process.terminate = MagicMock(
+        side_effect=lambda: events.append("terminate")
+    )
     browser.tabs = [SimpleNamespace(target=SimpleNamespace(target_id="tab-1"))]
-    in_tab_loop = asyncio.Event()
-    sent = []
 
-    async def _stuck(command):
-        sent.append(command)
-        in_tab_loop.set()
-        await asyncio.Event().wait()
+    async def _step(name: str) -> None:
+        events.append(name)
+        if name == blocks_at and name not in hung:
+            hung.add(name)
+            reached.set()
+            await asyncio.Event().wait()
 
-    browser.send = _stuck
+    async def _send(command):
+        await _step(command.gi_code.co_name)
+
+    async def _aclose():
+        await _step("aclose")
+
+    async def _grace(pid, timeout=process_exit.EXIT_GRACE_SECONDS):
+        await asyncio.sleep(0.05)
+        events.append("grace")
+        return process_exit.Exited(
+            pid, exits, 0.05, "exited" if exits else "still-running"
+        )
+
+    browser.send = _send
+    browser.aclose = _aclose
+    monkeypatch.setattr(process_exit, "wait_for_exit_async", _grace)
+    return events, reached
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exits", [True, False], ids=["exits-in-grace", "still-running"]
+)
+@pytest.mark.parametrize("blocks_at", ["close_target", "close", "aclose"])
+async def test_a_close_cancelled_in_phase_two_gives_chrome_its_exit_before_any_kill(
+    monkeypatch, blocks_at, exits
+):
+    """T-10842: Phase 1 popped the instance, so a close cancelled in Phase 2 (the tab
+    loop, the ``Browser.close`` send, ``aclose``) left a Chrome nothing tracked. But
+    once ``Browser.close`` is out Chrome is committing its cookie store, so a
+    terminate there loses the login (F-910): the cancellation propagates AT ONCE,
+    and a background task sends ``Browser.close``, gives Chrome the grace, and
+    terminates only a Chrome that is still running after it."""
+    manager = BrowserManager()
+    events, reached = _cancelled_close_world(
+        manager, monkeypatch, blocks_at=blocks_at, exits=exits
+    )
     closing = asyncio.create_task(manager.close_instance("test-1"))
-    await in_tab_loop.wait()
+    await reached.wait()
     closing.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await closing
 
-    assert len(sent) == 1  # the tab's close_target; Browser.close was never sent
-    browser._process.terminate.assert_called_once_with()
+    assert "grace" not in events and "terminate" not in events, events
+    await asyncio.gather(*manager._background_tasks)
+    assert events.count("close") == (1 if blocks_at == "close_target" else 2), events
+    assert events.index("grace") > max(i for i, e in enumerate(events) if e == "close")
+    assert ("terminate" in events) is (not exits), events
+    if not exits:
+        assert events.index("terminate") > events.index("grace"), events
     assert "test-1" not in manager._instances
+
+
+@pytest.mark.asyncio
+async def test_a_failure_while_finishing_a_cancelled_close_never_escapes(monkeypatch):
+    """The background half never raises: not out of the task, and not in place of the
+    ``CancelledError`` the caller is owed."""
+    manager = BrowserManager()
+    _events, reached = _cancelled_close_world(
+        manager, monkeypatch, blocks_at="close_target", exits=False
+    )
+
+    async def _broken(*_args, **_kwargs):
+        raise RuntimeError("settle broke")
+
+    monkeypatch.setattr(process_exit, "settle", _broken)
+    closing = asyncio.create_task(manager.close_instance("test-1"))
+    await reached.wait()
+    closing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    (background,) = manager._background_tasks
+    await background
+    assert background.exception() is None
 
 
 # T-9551: the forwarder's close is bounded, so a close that is cancelled before
