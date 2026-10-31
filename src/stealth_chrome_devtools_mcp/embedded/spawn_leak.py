@@ -279,15 +279,17 @@ def reap_launched_browsers(
 
 def _listening(pid: int) -> str:
     """The TCP ports *pid* LISTENs on, for the reap's WARNING (T-11911): a launch
-    whose Chrome listens on none never opened its debugging port. ``unknown``
-    when the OS will not say (``AccessDenied``, a pid already gone)."""
+    whose Chrome listens on none never opened its debugging port. ``unknown`` when
+    the OS will not say. Never raises: older macOS psutil raised ``RuntimeError``
+    from ``proc_pidinfo``, and this runs before the kill. On the loop, beside the
+    profile walk ``reap_launched_browsers`` already does there."""
     try:
         ports = {
             c.laddr.port
             for c in psutil.Process(pid).net_connections(kind="tcp")
             if c.status == psutil.CONN_LISTEN and c.laddr
         }
-    except (psutil.Error, OSError):
+    except Exception:  # noqa: BLE001  PERMANENT(a probe inside a failure handler must not raise)
         return "unknown"
     return ",".join(map(str, sorted(ports))) or "none"
 
