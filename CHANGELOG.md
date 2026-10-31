@@ -2,6 +2,10 @@
 
 ## 2.1.55
 
+### joserfc 1.7.7 in the lock: the security audit found CVE-2026-119284 in 1.7.5 (T-11363)
+- The security audit (pip-audit 2.10.1 over the `uv export` of `uv.lock`) failed on the 2.1.55 release PR with one known vulnerability: joserfc 1.7.5, CVE-2026-119284, fixed in 1.7.6. joserfc is not a direct dependency; fastmcp-slim and authlib pull it in.
+- `uv lock --upgrade-package joserfc`, run with uv 0.13.6, moves only joserfc (to 1.7.7, the latest); `uv.lock` is the only file that changes besides this entry. The same audit over the new lock reports no known vulnerabilities.
+
 ### A re-attach no longer adopts Chrome's own stray tab, and a cancelled close no longer leaks the proxy (T-9551)
 
 - A re-attach (a new backend taking over a persistent-profile browser a dead one left running) stored `browser.main_tab` as the instance's tab, which is the first page nodriver lists. When a backend died inside the first-launch session-restore exchange's 0.6-2.3 s window (T-9479), that was the stray `chrome://settings` page Chrome had just opened (4 of 4 live runs), and every tool that acts on the stored tab ran against it. `tab_open.initial_tab` now answers nodriver's own pick unless that page is Chrome's (`chrome://`, `chrome-untrusted://`, `devtools://`), in which case it is the first page that is not; a browser with only Chrome's pages still answers its first. It does not depend on the order pages are listed in, and a tab the caller switched to, or one `navigate` recycled to, stays the instance's tab. Spawn's `browser_connect.first_page` now reads the same helper, so there is one answer to "which page is this browser's tab". `browser_pids.json` records no target id and its schema is unchanged. Pinned by 8 unit nodes in `tests/test_browser_reattach.py` and one in `tests/test_browser_connect.py`, and by a real-headless-Chrome node, `test_a_re_attach_does_not_store_chromes_own_tab`.
