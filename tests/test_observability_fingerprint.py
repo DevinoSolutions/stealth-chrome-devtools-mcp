@@ -1052,7 +1052,7 @@ class TestEveryCauseIsProgramControlled:
 
     def test_the_call_sites_are_found(self):
         assert len(_forensic_calls(_HEALTH)) == 6
-        assert len(_forensic_calls(_CLONE_PROBE)) == 1
+        assert len(_forensic_calls(_CLONE_PROBE)) == 2  # T-11617: + still-unresponsive
 
     @pytest.mark.parametrize("path", [_HEALTH, _CLONE_PROBE], ids=lambda p: p.name)
     def test_each_cause_is_a_constant_or_a_program_controlled_value(self, path):

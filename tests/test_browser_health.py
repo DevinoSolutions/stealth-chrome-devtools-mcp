@@ -762,8 +762,10 @@ class TestScope:
         assert stage.probes == [INSTANCE_ID] * 3
         assert stage.closes == [] and stage.launches == [] and stage.captures == []
         assert log.at("error") == [] and log.at("warning") == []
-        (error,) = recorder.at("error")  # one-shot: the first miss only
+        # one capture (the first miss); T-11617: the third failed round says it goes on
+        error, again = recorder.at("error")
         assert error.startswith("FrozenCloneError") and "paused_fetch: 0" in error
+        assert "still unresponsive since " in again and "3 rounds" in again
 
     async def test_frozen_clones_never_hold_up_a_persistent_probe(
         self, stage, log, monkeypatch

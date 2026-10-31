@@ -14,7 +14,9 @@ here, not silently in production).
 
 import asyncio
 import contextlib
+import re
 import time
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import nodriver as uc
@@ -291,7 +293,7 @@ class TestTheFirstMissIsCaptured:
             "frozen-clone",
             "probe TimeoutError at evaluate",
         )
-        assert probe.records[CLONE] in error
+        assert probe.records[CLONE].record in error
 
     async def test_a_dead_backend_connection_reads_as_fresh_answers_own_does_not(
         self, log
@@ -309,12 +311,14 @@ class TestTheFirstMissIsCaptured:
         assert "browser=died(KeyError)" in error
 
     async def test_it_is_one_shot_per_incident(self, log):
+        # T-11617: the THIRD failed round says "still unresponsive" (section 4);
+        # the capture itself is still once
         rig = _Rig()
         rig.add(_browser())
-        rig.misses[CLONE] = [True, True, True]
+        rig.misses[CLONE] = [True, True]
         probe = rig.probe()
 
-        for _ in range(3):
+        for _ in range(2):
             await probe.check([CLONE], rig.canary)
 
         assert len(log.at("error")) == 1
@@ -329,7 +333,9 @@ class TestTheFirstMissIsCaptured:
         await probe.check([CLONE], rig.canary)
         await probe.check([CLONE], rig.canary)  # passes
         assert CLONE not in probe.records
-        assert log.at("info") == [f"{CLONE} answers probes again"]
+        assert log.at("info") == [
+            f"{CLONE} answers probes again after 0 min unresponsive (1 rounds)"
+        ]
         await probe.check([CLONE], rig.canary)  # a second incident
 
         assert len(log.at("error")) == 2
@@ -440,7 +446,8 @@ class TestAStarvedHostIsNotAFrozenClone:
         await probe.check([CLONE], rig.canary)
 
         (error,) = log.at("error")
-        assert error.startswith("FrozenCloneError") and probe.records[CLONE] in error
+        assert error.startswith("FrozenCloneError")
+        assert probe.records[CLONE].record in error
 
     async def test_an_unstarved_miss_is_the_error_capture(self, log):
         rig = _Rig()
@@ -704,3 +711,155 @@ class TestPausedFetchCount:
         await probe.check([CLONE], rig.canary)
 
         assert "paused_fetch: 7" in log.at("error")[0]
+
+
+# ---------------------------------------------------------------------------
+# 4. T-11617: an incident that goes on is not silent
+# ---------------------------------------------------------------------------
+
+STEP = 120.0  # the health loop's round, on the rig's clock
+
+
+async def _rounds(rig, probe, count, *, first=0.0):
+    """*count* rounds, one every :data:`STEP` s on the rig's clock, the first at
+    *first*."""
+    for index in range(count):
+        rig.now = first + index * STEP
+        await probe.check([CLONE], rig.canary)
+
+
+class TestAnIncidentThatGoesOn:
+    """2026-10-30: the 'lawsuit' clone logged ONE ERROR at 19:22:37 and then nothing
+    for 1 h 49 min while Windows showed it Not Responding."""
+
+    async def test_it_says_so_at_the_third_failed_round_and_not_before(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True] * 5
+        probe = rig.probe()
+
+        await _rounds(rig, probe, 2)
+        assert len(log.at("error")) == 1  # the first miss's capture, nothing more
+
+        await _rounds(rig, probe, 1, first=2 * STEP)
+
+        _captured, again = log.at("error")
+        assert again.startswith("FrozenCloneError: i-clone still unresponsive since ")
+        assert re.search(r"since \d\d:\d\d:\d\d \(4 min, 3 rounds\)", again)
+        assert "last probe failed (TimeoutError at evaluate)" in again
+        # a different Sentry issue from the first miss's, and not one per message
+        assert log.errors[1].sentry_fingerprint == (
+            "frozen-clone",
+            "still-unresponsive",
+        )
+        assert len(rig.fresh_asked) == 1 and len(rig.own_asked) == 1  # no re-capture
+
+    async def test_the_since_time_is_the_logs_local_wall_clock(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True] * 3
+        await _rounds(rig, rig.probe(), 3)
+
+        [shown] = re.findall(r"since (\d\d:\d\d:\d\d)", log.at("error")[1])
+
+        def seconds(moment: datetime) -> int:
+            return moment.hour * 3600 + moment.minute * 60 + moment.second
+
+        gap = seconds(datetime.now()) - seconds(datetime.strptime(shown, "%H:%M:%S"))
+        assert abs((gap + 43200) % 86400 - 43200) < 120  # now, not UTC, not epoch
+
+    async def test_it_repeats_at_the_interval_and_not_every_round(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True] * 40
+        probe = rig.probe()
+
+        await _rounds(rig, probe, 17)  # t = 0 .. 1920 s: the third round spoke at 240
+        assert len(log.at("error")) == 2  # the capture, and the third round's line
+
+        await _rounds(rig, probe, 1, first=17 * STEP)  # t = 2040 = 240 + 1800
+        assert len(log.at("error")) == 3
+        assert "still unresponsive" in log.at("error")[2]
+        assert "(34 min, 18 rounds)" in log.at("error")[2]
+
+        await _rounds(rig, probe, 2, first=18 * STEP)
+        assert len(log.at("error")) == 3  # quiet again for another interval
+        assert clone_probe.REPEAT_SECONDS == 15 * STEP  # the 2040 s above
+
+    async def test_a_starved_round_advances_nothing(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True] * 10
+        probe = rig.probe()
+        await _rounds(rig, probe, 1)  # t=0: the capture, round 1
+        rig.starved = "idle canary ran 9.0x slow"
+        await _rounds(rig, probe, 3, first=STEP)  # t=120..360: excused, not counted
+        rig.starved = None
+
+        await _rounds(rig, probe, 1, first=4 * STEP)  # t=480: round 2
+        assert len(log.at("error")) == 1
+
+        await _rounds(rig, probe, 1, first=5 * STEP)  # t=600: round 3
+        assert len(log.at("error")) == 2
+        assert "(10 min, 3 rounds)" in log.at("error")[1]
+
+    async def test_a_starved_round_past_the_ceiling_counts(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True] * 10
+        probe = rig.probe()
+        await _rounds(rig, probe, 1)  # t=0: round 1
+        rig.starved = "idle canary ran 9.0x slow"
+        await _rounds(rig, probe, 1, first=STEP)  # t=120: the run's first excuse
+        rig.now = STEP + backend_eviction.STARVED_CEILING_SECONDS + 1
+        await probe.check([CLONE], rig.canary)  # past it: round 2
+        assert len(log.at("error")) == 1
+
+        rig.now += STEP
+        await probe.check([CLONE], rig.canary)  # round 3
+
+        assert "3 rounds" in log.at("error")[1]
+
+    async def test_a_pass_says_for_how_long_it_was_unresponsive_and_clears(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True, True, True, False]
+        probe = rig.probe()
+
+        await _rounds(rig, probe, 4)
+
+        assert log.at("info") == [
+            f"{CLONE} answers probes again after 6 min unresponsive (3 rounds)"
+        ]
+        assert probe.records == {}
+
+    async def test_the_next_incident_counts_from_one(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True, True, True, False, True, True]
+        probe = rig.probe()
+
+        await _rounds(rig, probe, 6)
+
+        # capture, "still unresponsive", then ONLY the second incident's capture:
+        # its second round is not the third
+        assert len(log.at("error")) == 3
+        assert "still unresponsive" not in log.at("error")[2]
+
+    async def test_the_open_incident_is_reported_with_its_start_and_rounds(self, log):
+        rig = _Rig()
+        rig.add(_browser())
+        rig.misses[CLONE] = [True, True, False]
+        probe = rig.probe()
+        assert probe.open_incidents() == {}
+        before = datetime.now(UTC).replace(microsecond=0)
+
+        await _rounds(rig, probe, 2)
+
+        [(iid, shown)] = probe.open_incidents().items()
+        assert iid == CLONE and shown["failed_rounds"] == 2
+        since = datetime.fromisoformat(shown["unresponsive_since"])
+        assert since.utcoffset() == timedelta(0)  # UTC, ISO-8601
+        assert before <= since <= datetime.now(UTC)
+        await _rounds(rig, probe, 1, first=2 * STEP)
+        assert probe.open_incidents() == {}

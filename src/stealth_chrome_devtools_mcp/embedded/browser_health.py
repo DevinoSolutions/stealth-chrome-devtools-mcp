@@ -965,15 +965,18 @@ _task: asyncio.Task[None] | None = None
 _health: BrowserHealth | None = None
 
 
+def open_incidents() -> dict[str, dict[str, object]]:
+    """T-11617: each failing clone's open incident, for ``list_instances``."""
+    return _health._clones.open_incidents() if _health else {}
+
+
 def start(manager: BrowserManager, *, close: Closer, arm_interception: Armer) -> None:
     """Start the loop beside the idle reaper; a no-op while one is running."""
     global _task, _health  # noqa: PLW0603  PERMANENT(F-963: one loop per process, like the reaper's single task)
     if _task is not None and not _task.done():
         return
-    health = _health = BrowserHealth(
-        manager, close=close, arm_interception=arm_interception
-    )
-    _task = asyncio.create_task(health.run())
+    _health = BrowserHealth(manager, close=close, arm_interception=arm_interception)
+    _task = asyncio.create_task(_health.run())
     debug_logger.log_info(
         _COMPONENT,
         "start",

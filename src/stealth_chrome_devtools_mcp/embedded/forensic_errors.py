@@ -33,6 +33,7 @@ SITES = frozenset(
         "relaunch-cooldown",
         "relaunch-failed",
         "relaunch-probe-fails",
+        "still-unresponsive",  # T-11617: an open clone incident that goes on
     }
 )
 #: The probe steps ``browser_health._describe`` can end a failure at.

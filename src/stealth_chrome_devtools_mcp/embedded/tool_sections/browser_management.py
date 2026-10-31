@@ -724,13 +724,13 @@ async def list_instances() -> list[dict[str, Any]]:
     List all active browser instances.
 
     Returns:
-        List[Dict[str, Any]]: One record per instance. An ``active`` record
-        carries the LIVE ``current_url``/``title`` of the instance's active tab
-        (the same answer ``get_active_tab`` gives) and ``partial: False``; if
-        that read failed it carries ``partial: True``, ``detail_error`` and the
-        last navigation's values as ``last_navigated_url``/
-        ``last_navigated_title`` instead. A ``stored`` record has no live browser
-        to read at all, so it only ever carries the ``last_navigated_*`` pair.
+        List[Dict[str, Any]]: One record per instance. An ``active`` record carries the
+        LIVE ``current_url``/``title`` of the active tab (as ``get_active_tab`` answers)
+        and ``partial: False``; on a failed read it carries ``partial: True``,
+        ``detail_error`` and the last navigation's ``last_navigated_url``/
+        ``last_navigated_title`` instead. A ``stored`` record has no live browser, so
+        it only carries ``last_navigated_*``. A clone failing its health probe also
+        carries ``unresponsive_since`` (ISO-8601 UTC) and ``failed_rounds``.
     """
     memory_instances = await rt.browser_manager.list_instances()
     storage_instances = rt.in_memory_storage.list_instances()
@@ -740,6 +740,8 @@ async def list_instances() -> list[dict[str, Any]]:
     result = list(
         await asyncio.gather(*(_live_instance_record(i) for i in memory_instances))
     )
+    incidents = rt.browser_health.open_incidents()  # T-11617
+    result = [{**r, **incidents.get(r["instance_id"], {})} for r in result]
     memory_ids = {inst.instance_id for inst in memory_instances}
     for instance_id, inst_data in storage_instances.get("instances", {}).items():
         if instance_id not in memory_ids:
