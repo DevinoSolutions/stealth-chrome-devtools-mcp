@@ -1,23 +1,27 @@
 """THE one home for what a RUNNING browser's own command line says about it.
 
-Four facts, and they exist because a browser that outlived the backend which
-spawned it (F-888) has nothing else left to describe it: the process that knew
-which of its processes was the browser, its port, its headlessness and the proxy
-it was dialling through has exited, and the record that process wrote may never
-have existed — the stranded Seller Central Chrome (pid 115652) has no entry at
-all, because the successor backend rewrote ``browser_pids.json`` without it.
+Four facts about one browser, and a fifth job (:func:`named_processes`, the one
+walk of the process table). The four exist because a browser that outlived the
+backend which spawned it (F-888) has nothing else left to describe it: the
+process that knew which of its processes was the browser, its port, its
+headlessness and the proxy it was dialling through has exited, and the record
+that process wrote may never have existed — the stranded Seller Central Chrome
+(pid 115652) has no entry at all, because the successor backend rewrote
+``browser_pids.json`` without it.
 
-So the argv IS the record for these three, and each one is read the same way:
+So the argv IS the record for these facts, and each one is read the same way:
 ``psutil`` gives a LIST, never a command string, so quoting is a non-issue, and
 both spellings of a flag are accepted because a caller's args reach Chrome
 through ``merge_browser_args`` while nodriver appends its own with ``=``.
 
-A leaf: ``psutil``, stdlib ``socket``, and ``browser_pid_registry`` for the two
-things it must not re-spell — what a usable port is, and how two paths are
-compared. It states FACTS and decides nothing: every judgement is
-``browser_reattach``'s and ``profile_lock``'s, its two consumers since F-931
+A leaf: ``psutil``, stdlib ``socket``, ``debug_logger`` (a skipped process is
+logged) and ``browser_pid_registry`` for the two things it must not re-spell —
+what a usable port is, and how two paths are compared. It states FACTS and
+decides nothing: every judgement is ``browser_reattach``'s and
+``profile_lock``'s, its two consumers of the argv facts since F-931
 (``command_line_is_gone`` is the last of them, and it is a fact about the
-command line too).
+command line too). The process walk is read by ``process_cleanup``'s two scans
+and ``spawn_exhaustion.live_chromium_processes`` (T-11618).
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Collection, Iterator
 
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 DEBUG_PORT_FLAG = "--remote-debugging-port"
 
@@ -68,19 +73,35 @@ def named_processes() -> Iterator[tuple[psutil.Process, str]]:
     ``name()`` falls back to ``cmdline()`` for a truncated name and psutil 7.2.2
     raised ``SystemError`` ("proc_cmdline returned a result with an exception
     set"), which failed the whole scan and, through ``profile_lock``, the spawn
-    (T-11618). Here the generator reads nothing; the name is read per process in
-    a ``try`` that skips that one process and goes on.
+    (T-11618). Here the generator reads no attributes; the name is read per
+    process in a ``try`` that skips that one process and goes on. What can still
+    end the walk is psutil's own bookkeeping, not a name: listing the pids, and
+    ``Process(pid)`` reading the creation time (which absorbs only
+    ``AccessDenied``, ``ZombieProcess`` and ``NoSuchProcess``).
 
     Still the cheap field only, one read per process: ``cmdline`` for the whole
     table is one PEB read per process on Windows, so a caller reads it lazily
     from the process this yields, for the few browser-named ones. ``psutil.Error``
     covers a process that vanished or is not ours, ``OSError`` a failed system
     call, ``SystemError`` the macOS binding's error with an exception set.
+
+    A skip is never silent unless it is the ordinary kind (a process that
+    vanished, or one that is not ours): any other is logged with the pid and the
+    exception type, because a skipped process reads as "not running" and a
+    holder dropping out of a scan must leave a trace.
     """
     for process in psutil.process_iter():
         try:
             name = process.name() or ""
-        except (psutil.Error, OSError, SystemError):
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except (psutil.Error, OSError, SystemError) as error:
+            debug_logger.log_warning(
+                "browser_cmdline",
+                "named_processes",
+                f"Skipping pid {process.pid}: its name could not be read "
+                f"({type(error).__name__}: {error})",
+            )
             continue
         yield process, name
 

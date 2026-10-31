@@ -11,6 +11,7 @@ that premise against the real library so the doubles cannot drift from it.
 """
 
 import os
+from unittest.mock import MagicMock
 
 import psutil
 import pytest
@@ -86,3 +87,32 @@ def test_an_empty_name_is_an_empty_string(monkeypatch):
     procs = [PsutilProc("", pid=1)]
     monkeypatch.setattr(psutil, "process_iter", psutil_process_iter(procs))
     assert [name for _, name in browser_cmdline.named_processes()] == [""]
+
+
+@pytest.mark.parametrize(
+    ("error", "logged"),
+    [
+        (SystemError("proc_cmdline"), True),
+        (OSError("EIO"), True),
+        (psutil.TimeoutExpired(1), True),
+        (psutil.AccessDenied(pid=2), False),
+        (psutil.NoSuchProcess(2), False),
+        (psutil.ZombieProcess(2), False),
+    ],
+    ids=lambda value: type(value).__name__ if not isinstance(value, bool) else "",
+)
+def test_only_an_unusual_skip_leaves_a_trace(monkeypatch, error, logged):
+    """A skipped process reads as "not running", so a skip that is not the
+    ordinary kind (gone, not ours) is logged with its pid and exception type."""
+    log = MagicMock()
+    monkeypatch.setattr(browser_cmdline, "debug_logger", log)
+    procs = [PsutilProc("broken", pid=2, name_error=error)]
+    monkeypatch.setattr(psutil, "process_iter", psutil_process_iter(procs))
+    assert list(browser_cmdline.named_processes()) == []
+    if not logged:
+        log.log_warning.assert_not_called()
+        return
+    log.log_warning.assert_called_once()
+    message = log.log_warning.call_args.args[2]
+    assert "pid 2" in message
+    assert type(error).__name__ in message

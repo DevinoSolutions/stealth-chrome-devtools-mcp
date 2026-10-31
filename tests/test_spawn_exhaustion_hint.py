@@ -59,7 +59,8 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 # Built to psutil's ACTUAL shape (``fakes.PsutilProc`` / ``psutil_process_iter``:
 # a generator that reads requested attrs while it iterates) rather than to our
 # assumption about it: a double that copies the production guess keeps a
-# permanent defect green. T15 pins that shape against real psutil.
+# permanent defect green. ``test_named_processes.py`` pins that shape against
+# real psutil (``test_real_as_dict_lets_a_system_error_out_of_the_walk``).
 # ---------------------------------------------------------------------------
 
 
