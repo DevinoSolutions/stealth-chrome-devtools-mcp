@@ -93,7 +93,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from nodriver import Browser
 
-from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock, tab_open
+from stealth_chrome_devtools_mcp.embedded import profile_lock, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -167,9 +167,6 @@ _CANCEL_GRACE_SECONDS = 2.0
 #: this long, read again; a close that comes sooner does not wait it out, it runs
 #: the exchange, which reads the live value.
 FILE_SETTLE_SECONDS = 20.0
-
-#: The kill ladder a CANCELLED close runs on a browser (``close_instance``'s own).
-_KILL_RETRIES = 3
 
 #: Where :func:`start_session_restore` keeps its state: on the browser it belongs to,
 #: which is what ``tab_open`` does with its per-browser state, so it lives and dies
@@ -470,11 +467,14 @@ async def settle_session_restore(browser: Browser) -> None:
     goes on. Call it BEFORE the connection is marked closed, because the exchange
     needs the connection. No-op when nothing is pending.
 
-    **A close that is cancelled while it waits still ends the browser**, the way
-    ``process_exit.settle``'s cancelled grace does: the instance is already
-    claimed, so nothing else would, and a browser left behind is one this backend
-    no longer knows. The exchange is cancelled, the connection marked closed, the
-    process ended, and the cancellation re-raised."""
+    **A close that is cancelled while it waits kills nothing** (T-11521), the way
+    ``process_exit.settle``'s cancelled grace does not: this runs on a profile the
+    caller named, whose cookie store Chrome is still committing, and a terminate
+    before Chrome was ever asked to leave is the F-910 login loss. The exchange is
+    cancelled, the connection marked closed, and the cancellation re-raised at once;
+    ``close_instance`` hands the browser it already claimed to the held background
+    task of T-10842, which asks Chrome to leave, gives it its own exit and only then
+    runs Phase 3."""
     state = getattr(browser, _STATE_ATTR, None)
     if not isinstance(state, _Pending) or state.task.done():
         return
@@ -483,20 +483,14 @@ async def settle_session_restore(browser: Browser) -> None:
         _, pending = await asyncio.wait(
             {state.task}, timeout=PREF_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS
         )
-    except asyncio.CancelledError:
+        if not pending:
+            return
+        state.task.cancel()
+        await asyncio.wait({state.task}, timeout=_CANCEL_GRACE_SECONDS)
+    except asyncio.CancelledError:  # in either wait: the second one used to leak
         state.task.cancel()
         tab_open.mark_closed(browser)
-        process_exit.terminate(
-            "settle_session_restore",
-            getattr(browser, "_process", None),
-            getattr(browser, "_process_pid", None),
-            _KILL_RETRIES,
-        )
         raise
-    if not pending:
-        return
-    state.task.cancel()
-    await asyncio.wait({state.task}, timeout=_CANCEL_GRACE_SECONDS)
     debug_logger.log_warning(
         "login_persistence",
         "settle_session_restore",

@@ -471,25 +471,75 @@ class TestACloseWaitsForAPendingExchange:
         )
         assert waited[0] >= 17.0
 
-    async def test_a_close_cancelled_while_it_waits_still_ends_the_browser(self):
+    @pytest.mark.parametrize(
+        "exits", [True, False], ids=["exits-in-grace", "still-running"]
+    )
+    @pytest.mark.parametrize("where", ["exchange", "cancel-grace"])
+    async def test_a_close_cancelled_while_it_waits_gives_chrome_its_exit_before_any_kill(
+        self, monkeypatch, where, exits
+    ):
+        """T-11521: the exchange runs on a NAMED profile (a login worth keeping) and
+        the wait comes BEFORE ``Browser.close``, but a terminate there is still the
+        first thing that happens to a browser we were asked to close: its cookie store
+        is mid-commit (F-910). The cancellation propagates AT ONCE and the held
+        background task of T-10842 asks Chrome to leave, gives it the grace, and only
+        then runs Phase 3, which kills a Chrome still running."""
         log: list[str] = []
         browser = _Closing(log, returncode=None)
+        browser._process.terminate = MagicMock(
+            side_effect=lambda: log.append("terminate")
+        )
         manager = BrowserManager()
         _seed(manager, browser)
         task = _exchange(browser, log, asyncio.Event())
+        reached = asyncio.Event()
+
+        async def _grace(pid, timeout=process_exit.EXIT_GRACE_SECONDS):
+            await asyncio.sleep(0.02)
+            log.append("grace")
+            if exits:
+                browser._process.returncode = 0
+            return process_exit.Exited(
+                pid, exits, 0.0, "exited" if exits else "running"
+            )
+
+        monkeypatch.setattr(process_exit, "wait_for_exit_async", _grace)
+        if where == "cancel-grace":
+            # The exchange's own cancel is slow: the close is cancelled in the second
+            # wait, after the first one gave up. (The patch is on the shared module.)
+            real_wait, calls = asyncio.wait, []
+
+            async def wait(fs, *, timeout=None, **kwargs):
+                calls.append(timeout)
+                if len(calls) == 1:
+                    return await real_wait(fs, timeout=SHORT / 4, **kwargs)
+                reached.set()
+                return await _never()
+
+            monkeypatch.setattr(login_persistence.asyncio, "wait", wait)
+        else:
+            reached.set()
 
         closing = asyncio.create_task(manager.close_instance(IID))
+        await reached.wait()
         await asyncio.sleep(0.05)
         assert not closing.done()
         closing.cancel()
         with pytest.raises(asyncio.CancelledError):
             await closing
-        await asyncio.sleep(0)
+
+        assert "terminate" not in log and "grace" not in log, log  # at once
+        await asyncio.gather(*manager._background_tasks)
         assert task.cancelled(), "the exchange outlived its browser"
         assert tab_open.is_closed(browser), (
             "the connection was left open for a lingerer"
         )
-        assert browser._process.terminate.called, "the claimed browser was orphaned"
+        assert log.index("browser.close sent") < log.index("grace"), log
+        assert ("terminate" in log) is (not exits), log
+        if not exits:
+            assert log.index("terminate") > log.index("grace"), log
+        process_cleanup.kill_browser_process.assert_called_once_with(IID)  # Phase 3
+        assert IID not in manager._instances
 
     async def test_a_cancelled_exchange_still_closes_its_settings_tab(
         self, monkeypatch

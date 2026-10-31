@@ -843,19 +843,19 @@ class BrowserManager:
         instance = data["instance"]
 
         try:
-            await login_persistence.settle_session_restore(browser)  # T-9479
-            instance.state = BrowserState.CLOSED
-            tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
-            # -- Phase 2: graceful CDP teardown (on loop, bounded) ------------
             try:
+                await login_persistence.settle_session_restore(browser)  # T-9479
+                instance.state = BrowserState.CLOSED
+                tab_open.mark_closed(browser)  # before any aclose: no reopening
+                # -- Phase 2: graceful CDP teardown (on loop, bounded) ---------
                 await process_exit.graceful_close(instance_id, browser)
-
                 # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
                 # The graceful close above STARTS Chrome's shutdown, which COMMITS the
                 # cookie store; terminating mid-flush loses the login just made. The
                 # grace and its measurement are `process_exit.settle`'s; Phase 3 keeps
-                # its whole budget (this is its own await). A cancel in here or in
-                # Phase 2 re-raises at once and finishes in the background (T-10842).
+                # its whole budget (this is its own await). A cancel in here, in
+                # Phase 2 or while the session-restore exchange is awaited re-raises
+                # at once and finishes in the background (T-10842, T-11521).
                 await process_exit.settle(
                     instance_id,
                     getattr(browser, "_process", None),
