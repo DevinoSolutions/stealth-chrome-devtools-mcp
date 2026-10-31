@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.56
 
 ### Test-only: `paint_hold` state is reset around every test (T-9542)
 
