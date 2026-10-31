@@ -1141,6 +1141,40 @@ async def test_a_close_cancelled_before_phase_three_gives_chrome_its_exit_first(
 
 
 @pytest.mark.asyncio
+async def test_a_shutdown_during_the_background_grace_kills_nothing(monkeypatch):
+    """T-10842: the background task is cancelled by a backend shutdown while Chrome
+    is still leaving. Chrome was asked to close and is committing its cookies, so
+    neither Phase 3 nor a terminate may run; recovery reaps what it leaves."""
+    from stealth_chrome_devtools_mcp.embedded.process_cleanup import process_cleanup
+
+    manager = BrowserManager()
+    events, reached = _cancelled_close_world(
+        manager, monkeypatch, blocks_at="close_target", exits=False
+    )
+    in_grace = asyncio.Event()
+
+    async def _waits_for_chrome(pid, timeout=process_exit.EXIT_GRACE_SECONDS):
+        in_grace.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(process_exit, "wait_for_exit_async", _waits_for_chrome)
+    closing = asyncio.create_task(manager.close_instance("test-1"))
+    await reached.wait()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    (background,) = manager._background_tasks
+    await in_grace.wait()
+
+    background.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await background
+
+    assert "terminate" not in events, events
+    process_cleanup.kill_browser_process.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_a_failure_while_finishing_a_cancelled_close_never_escapes(monkeypatch):
     """The background half never raises: not out of the task, and not in place of the
     ``CancelledError`` the caller is owed; Phase 3 still ends the browser."""
