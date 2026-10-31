@@ -29,7 +29,6 @@ import asyncio
 import gc
 import json
 import logging
-import time
 
 import pytest
 from nodriver.core.connection import ProtocolException
@@ -588,8 +587,10 @@ async def test_the_next_read_releases_the_group_a_cancelled_read_left():
 async def test_a_leftover_release_that_hangs_does_not_hold_the_next_read(
     monkeypatch, backend_log
 ):
-    """Bounded: the next read answers within its budget plus ONE release wait,
-    however many groups are waiting, and the stuck ones are dropped, not retried."""
+    """Bounded: the next read answers however many groups are waiting, the leftovers
+    wait TOGETHER (one wait, not one after another) and the stuck ones are dropped,
+    not retried. Counted as releases in flight at once, not as elapsed time: a loaded
+    runner stretches every wait (0.684 s measured against a 0.4 s baseline)."""
     node = _Hangs()
     reads = [asyncio.ensure_future(page_natives.run(node, SCRIPT)) for _ in range(3)]
     await asyncio.sleep(0.02)
@@ -600,13 +601,25 @@ async def test_a_leftover_release_that_hangs_does_not_hold_the_next_read(
     node.hangs = False
     node.release_hangs = True
 
-    monkeypatch.setattr(page_natives, "RELEASE_WAIT_S", 0.2)  # 3 in turn: 0.6 s
-    started = time.monotonic()
+    monkeypatch.setattr(page_natives, "RELEASE_WAIT_S", 0.05)
+    waiting = peak = 0
+    release = page_natives._release_bounded
 
-    task = await _ends_within(page_natives.run(node, SCRIPT), 1.0)
+    async def counted(tab, group, seconds):
+        nonlocal waiting, peak
+        waiting += 1
+        peak = max(peak, waiting)
+        try:
+            return await release(tab, group, seconds)
+        finally:
+            waiting -= 1
+
+    monkeypatch.setattr(page_natives, "_release_bounded", counted)
+
+    task = await _ends_within(page_natives.run(node, SCRIPT), 10.0)  # a hang guard
 
     assert task.result() == 1
-    assert time.monotonic() - started < 0.45  # one wait, not one per group
+    assert peak == 3  # the three leftovers wait together, not one after another
     assert _left(node) == []  # dropped, not kept to be retried forever
     assert any("was not released" in r.getMessage() for r in backend_log())
 
