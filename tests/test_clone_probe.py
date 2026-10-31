@@ -334,7 +334,7 @@ class TestTheFirstMissIsCaptured:
         await probe.check([CLONE], rig.canary)  # passes
         assert CLONE not in probe.records
         assert log.at("info") == [
-            f"{CLONE} answers probes again after 0 min unresponsive (1 rounds)"
+            f"{CLONE} answers probes again after 0 min unresponsive (1 round)"
         ]
         await probe.check([CLONE], rig.canary)  # a second incident
 

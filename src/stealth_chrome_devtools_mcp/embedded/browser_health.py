@@ -966,7 +966,7 @@ _health: BrowserHealth | None = None
 
 
 def open_incidents() -> dict[str, dict[str, object]]:
-    """T-11617: each failing clone's open incident, for ``list_instances``."""
+    """T-11617: each clone's open incident as of the last round, for list_instances."""
     return _health._clones.open_incidents() if _health else {}
 
 
