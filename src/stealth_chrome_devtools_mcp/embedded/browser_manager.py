@@ -847,47 +847,48 @@ class BrowserManager:
             instance.state = BrowserState.CLOSED
             tab_open.mark_closed(browser)  # before any aclose: nothing may reopen it
             # -- Phase 2: graceful CDP teardown (on loop, bounded) ------------
-            try:
-                if hasattr(browser, "tabs") and browser.tabs:
-                    for tab in browser.tabs[:]:
-                        try:
-                            close = uc.cdp.target.close_target(tab.target.target_id)
-                            async with asyncio.timeout(2.0):
-                                await browser.send(close)
-                        except Exception as e:
-                            tab_close.log_failure("close_instance", instance_id, e)
-            except Exception as tabs_err:
-                debug_logger.log_warning(
-                    "browser_manager",
-                    "close_instance",
-                    f"Failed to close tabs for {instance_id}: {tabs_err}",
-                )
+            with process_exit.kill_on_cancel(instance_id, browser, self._KILL_RETRIES):
+                try:
+                    if hasattr(browser, "tabs") and browser.tabs:
+                        for tab in browser.tabs[:]:
+                            try:
+                                close = uc.cdp.target.close_target(tab.target.target_id)
+                                async with asyncio.timeout(2.0):
+                                    await browser.send(close)
+                            except Exception as e:
+                                tab_close.log_failure("close_instance", instance_id, e)
+                except Exception as tabs_err:
+                    debug_logger.log_warning(
+                        "browser_manager",
+                        "close_instance",
+                        f"Failed to close tabs for {instance_id}: {tabs_err}",
+                    )
 
-            try:
-                # A closed socket fails the send; the handler below logs it.
-                async with asyncio.timeout(2.0):
-                    await browser.send(uc.cdp.browser.close())
-            except (TimeoutError, Exception) as cdp_err:
-                debug_logger.log_info(
-                    "browser_manager",
-                    "close_instance",
-                    f"CDP browser.close() skipped for {instance_id}: {cdp_err}",
-                )
+                try:
+                    # A closed socket fails the send; the handler below logs it.
+                    async with asyncio.timeout(2.0):
+                        await browser.send(uc.cdp.browser.close())
+                except (TimeoutError, Exception) as cdp_err:
+                    debug_logger.log_info(
+                        "browser_manager",
+                        "close_instance",
+                        f"CDP browser.close() skipped for {instance_id}: {cdp_err}",
+                    )
 
-            try:
-                async with asyncio.timeout(2.0):
-                    await browser.aclose()
-                debug_logger.log_info(
-                    "browser_manager",
-                    "close_connection",
-                    "closed websocket connection",
-                )
-            except (TimeoutError, Exception) as e:
-                debug_logger.log_info(
-                    "browser_manager",
-                    "close_connection",
-                    f"connection disconnect failed or timed out: {e}",
-                )
+                try:
+                    async with asyncio.timeout(2.0):
+                        await browser.aclose()
+                    debug_logger.log_info(
+                        "browser_manager",
+                        "close_connection",
+                        "closed websocket connection",
+                    )
+                except (TimeoutError, Exception) as e:
+                    debug_logger.log_info(
+                        "browser_manager",
+                        "close_connection",
+                        f"connection disconnect failed or timed out: {e}",
+                    )
 
             # -- Phase 2b: let Chrome finish leaving (F-910) -------------------
             # The graceful close above STARTS Chrome's shutdown, which COMMITS the
@@ -942,21 +943,14 @@ class BrowserManager:
             # T-9551: Phase 1 popped it, so only this closes it, on a close
             # cancelled while settling or in Phase 2 too (not an `Exception`).
             try:
-                await self._close_proxy_forwarder_ref(proxy_forwarder)
+                if proxy_forwarder is not None:
+                    await proxy_forwarder.close()
             except Exception as proxy_err:
                 debug_logger.log_warning(
                     "browser_manager",
                     "close_instance",
                     f"Proxy forwarder close failed for {instance_id}: {proxy_err}",
                 )
-
-    @staticmethod
-    async def _close_proxy_forwarder_ref(
-        proxy_forwarder: AuthenticatedProxyForwarder | None,
-    ) -> None:
-        """Close a captured proxy forwarder reference (Phase 2 helper)."""
-        if proxy_forwarder is not None:
-            await proxy_forwarder.close()
 
     async def get_spawn_diagnostics(self, instance_id: str) -> dict[str, Any] | None:
         """Get spawn diagnostics for an instance."""

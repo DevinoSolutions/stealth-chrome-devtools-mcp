@@ -122,7 +122,7 @@ from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # the ladder's rungs are callables, typed but never imported
     import ctypes
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 # How long a browser we have asked to close may take to go on its own before we
 # terminate it. 5.0 s is ~30x the slowest unaided exit measured here (0.169 s),
@@ -348,6 +348,28 @@ async def settle(
         raise
     report(instance_id, waited)
     return waited
+
+
+@contextlib.contextmanager
+def kill_on_cancel(instance_id: str, browser: object, retries: int) -> Iterator[None]:
+    """A close the caller gives up on still ends the browser it claimed (T-10842).
+
+    ``close_instance``'s Phase 1 pops the instance, so a ``CancelledError`` in the
+    graceful CDP teardown (not an ``Exception``; the handlers there let it by)
+    would leave a Chrome nothing tracks, and nothing would close its proxy. The
+    kill is :func:`terminate`, the one ``settle`` and ``settle_session_restore``
+    already run on a cancelled grace, synchronous and bounded by *retries*; the
+    cancellation is re-raised, so the caller's answer is unchanged."""
+    try:
+        yield
+    except asyncio.CancelledError:
+        terminate(
+            instance_id,
+            getattr(browser, "_process", None),
+            getattr(browser, "_process_pid", None),
+            retries,
+        )
+        raise
 
 
 def terminate(
