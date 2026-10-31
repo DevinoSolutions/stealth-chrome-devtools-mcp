@@ -926,12 +926,12 @@ class BrowserManager:
     async def _finish_close(self, instance_id: str, browser: Browser) -> None:
         """What a close cancelled in Phase 2 or 2b still owes the browser it claimed
         (T-10842): ask it to leave and give it its own exit, then Phase 3, so it ends
-        as a normal close ends it. Never raises (it runs in the background)."""
-        try:
-            await process_exit.finish_close(instance_id, browser)
-        finally:
-            with contextlib.suppress(Exception):
-                await self._end_browser(instance_id, browser)
+        as a normal close ends it. Never raises (it runs in the background). A cancel of
+        this task (a shutdown) during the grace kills nothing: Chrome was asked to leave
+        and is committing its cookies, and recovery reaps what it leaves."""
+        await process_exit.finish_close(instance_id, browser)
+        with contextlib.suppress(Exception):
+            await self._end_browser(instance_id, browser)
 
     async def get_spawn_diagnostics(self, instance_id: str) -> dict[str, Any] | None:
         """Get spawn diagnostics for an instance."""

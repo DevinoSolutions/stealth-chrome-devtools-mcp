@@ -91,11 +91,12 @@ anyway, which is why the measured close is indistinguishable either way
 (0.128-0.319 s plain, 0.129-0.165 s waited).
 
 It imports ``psutil``, ``nodriver`` (``cdp``, and ``Browser`` for the types),
-``tab_open`` and the debug logger, and nothing that owns instances, records or
-profiles: ``instance_id`` is only the label of a log line. The wait and the kill
-(``browser_pid``, ``wait_for_exit``, ``terminate``) take a primitive or an
-``asyncio.subprocess.Process``; the close's own steps (``ask_to_close``,
-``close_connection``, ``finish_close``, T-10842) take the nodriver ``Browser``,
+``tab_close``, ``tab_open`` and the debug logger, and nothing that owns
+instances, records or profiles: ``instance_id`` is only the label of a log line.
+The wait and the kill (``browser_pid``, ``wait_for_exit``, ``terminate``) take a
+primitive or an ``asyncio.subprocess.Process``; the close's own steps
+(``ask_to_close``, ``close_connection``, ``finish_close``, T-10842) take the
+nodriver ``Browser``,
 because they talk to it before they wait on it.
 
 **Neither wait here raises** — an unreadable process is a process we
@@ -356,6 +357,11 @@ async def ask_to_close(instance_id: str, browser: Browser) -> None:
     is logged, never raised. Not sent over a socket that is gone: nodriver's ``send``
     would reopen it to a Chrome that is leaving (T-10842)."""
     if tab_open.dropped(browser):
+        debug_logger.log_info(
+            "process_exit",
+            "ask_to_close",
+            f"CDP browser.close() skipped for {instance_id}: socket already closed",
+        )
         return
     try:
         async with asyncio.timeout(_CLOSE_SEND_SECONDS):
