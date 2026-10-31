@@ -141,6 +141,9 @@ class Incident:
     def minutes(self, now: float) -> str:
         return f"{(now - self.started) / 60:.0f} min"
 
+    def counted(self) -> str:
+        return f"{self.rounds} round{'' if self.rounds == 1 else 's'}"
+
 
 class CloneProbe:
     """Probes disposable clones and records the first failure of each incident."""
@@ -176,7 +179,8 @@ class CloneProbe:
         self.records: dict[str, Incident] = {}
 
     def open_incidents(self) -> dict[str, dict[str, object]]:
-        """What ``list_instances`` adds to the entry of a clone that is failing now."""
+        """What ``list_instances`` adds to the entry of a clone that was failing as of
+        the last probe round (so for up to one round after it recovers)."""
         return {
             iid: {
                 "unresponsive_since": incident.since.astimezone(UTC).isoformat(
@@ -243,7 +247,7 @@ class CloneProbe:
                     "probe",
                     f"{instance_id} answers probes again after "
                     f"{over.minutes(self._clock())} unresponsive "
-                    f"({over.rounds} rounds)",
+                    f"({over.counted()})",
                 )
             return
         if await self._manager.get_instance(instance_id) is not data:
@@ -289,7 +293,7 @@ class CloneProbe:
             "probe",
             FrozenCloneError(
                 f"{instance_id} still unresponsive since {since} "
-                f"({incident.minutes(now)}, {incident.rounds} rounds); "
+                f"({incident.minutes(now)}, {incident.counted()}); "
                 f"last probe failed ({failure})",
                 "still-unresponsive",
             ),
