@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.59
+
+### Dependencies: pydantic 2.14.2, pydantic-settings 2.16.2, starlette 1.10.0, websockets 17.4, pytest 9.2.0, pytest-asyncio 1.4.1, ruff 0.17.3, ty 0.0.95 (T-12695)
+
+- Takes Dependabot #389's `minor-and-patch` group unchanged. The four runtime pins move: pydantic 2.14.1 -> 2.14.2 (with pydantic-core 2.50.1 -> 2.50.2), pydantic-settings 2.16.1 -> 2.16.2, starlette 1.9.0 -> 1.10.0, websockets 17.3 -> 17.4. pydantic 2.14.2 fixes GHSA-qpmf-fgh3-ff25 and GHSA-3r8g-cqwr-jr29; in `model_validate_json` a key that matches only an unused alias or field name now counts as extra data. The only JSON validation on our path is mcp's `JSONRPCMessage`, whose models have no aliases, and `settings.py` is validated from a dict, so neither changes. websockets 17.4 fails a message split into more than 4096 frames (`TooManyFragments`, close code 1009, adjustable through `WEBSOCKETS_MAX_FRAGMENTS`) even with `max_size=None`, and a `ConnectionClosed` now carries the exception that dropped the connection as its `__cause__`, which can change the Sentry grouping of a `ToolError` raised over one (`tool_error_fingerprint` reads the cause types); nothing catches it by anything but its class. Nothing in starlette 1.10.0's form-parser rewrite, multidict equality or handled-exception traceback clearing is on our path: `backend_token`'s middleware is pure ASGI and always sends `headers`, and no exception handler is registered.
+- Dev only: pytest 9.2.0 makes `indirect`, `ids` and `scope` keyword-only in `parametrize` (none of the 389 calls in `tests/` passes them positionally); pass, skip and deselect counts in every lane the PR ran equal main's run 41237157732. ruff 0.17.3 adds no stable rule; ty 0.0.95 reports the same 173 warnings as 0.0.91.
+- Dependabot's single-package updates of fastmcp, fastmcp-slim and mcp could not be resolved (fastmcp 3.4.11 requires mcp < 2.0) and are not part of this release.
+
 ## 2.1.58
 
 ### A seedless disposable clone retries a failed launch like a seeded one (T-11911)
