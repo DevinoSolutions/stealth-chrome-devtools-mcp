@@ -86,7 +86,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.11
         run: uv python install 3.11
       - name: Install dependencies
@@ -171,7 +171,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
@@ -236,7 +236,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
@@ -310,7 +310,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
@@ -557,7 +557,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
@@ -748,7 +748,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
@@ -842,7 +842,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Build the distribution (the ONLY build in this run)
@@ -1050,7 +1050,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
@@ -1195,7 +1195,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
