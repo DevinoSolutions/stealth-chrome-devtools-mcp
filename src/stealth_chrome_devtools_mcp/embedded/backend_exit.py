@@ -18,11 +18,20 @@ ANOTHER proxy launched, or one we adopted, is not in the table and is waited on
 exactly as before. A backend that is merely slow is alive, so it still gets the whole
 deadline: nothing here ever times anything out.
 
-**An exit stays recorded** until the next :func:`spawn` for the port replaces it or
-:func:`ready` clears it. It is not consumed by being read: the lock-holder's wait, the
-first poll and every heal attempt that follows all have to see it, because the one that
-reads it first is not the one that can act on it (a heal that cannot take the lock
-spawns nothing and would otherwise wait out a deadline for a process that is gone).
+**An exit stays recorded** until the next :func:`spawn` for the port replaces it,
+:func:`ready` clears it, or :func:`forget` drops it. It is not consumed by being read:
+the lock-holder's wait, the first poll and every heal attempt that follows all have to
+see it, because the one that reads it first is not the one that can act on it (a heal
+that cannot take the lock spawns nothing and would otherwise wait out a deadline for a
+process that is gone).
+
+**But an exit is decisive only about a port NOTHING answers on.** Our dead child cannot
+be listening, so a poll that got any HTTP status, or connected and then timed out, met
+someone else's backend on that port (another proxy won the lock and is booting one):
+the waiter calls :func:`forget` and keeps its whole deadline, and the stale record can
+no longer abort a wait on a backend we did not launch. Only a refused connection asks
+:func:`check`. ``_wait_for_server`` is the same by construction: a listening socket
+returns True before it ever asks :func:`exited`.
 
 **The cause comes from the boot log, bounded and attributed.** ``backend-boot.log`` is
 one file shared by every boot (it is rolled by size, not per backend), so the size it
@@ -37,8 +46,10 @@ for the usual secret names, URL credentials, long opaque tokens).
 
 **Telling the client.** :func:`latest` is what ``proxy_selfheal`` answers the client's
 queued calls with while no backend exists, so the ImportError reaches the tool call
-that failed and not just a file. It stands until :func:`ready` or the next
-:func:`spawn`.
+that failed and not just a file. It stands until :func:`ready` or :func:`forget`, or
+the next :func:`check` that finds the exit it describes; a new :func:`spawn` does NOT
+clear it, so the retry wait that follows a spawn still refuses with the last cause
+until that spawn is itself known ready or known exited.
 
 A leaf: ``psutil`` and (lazily, for the one spawn) ``backend_launch``. Imported lazily
 by ``backend_probe`` and ``proxy_selfheal``, so the stdio proxy's cold start does not
@@ -80,7 +91,8 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 #: that loses a word is a smaller loss than one that prints a credential.
 _SECRET_VALUE = re.compile(
     r"(?i)([A-Za-z0-9_]*?(?:token|secret|passw(?:or)?d|cookie|api[_-]?key|dsn"
-    r"|authori[sz]ation))(\s*[=:]\s*)(?:bearer\s+)?\S+"
+    r"|authori[sz]ation))(\s*[=:]\s*)(?:bearer\s+)?"
+    r"""(?:"[^"]*"|'[^']*'|\S+)"""
 )
 _URL_CREDENTIALS = re.compile(r"(?<=://)[^/\s@]+@")
 _OPAQUE_TOKEN = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
@@ -92,6 +104,7 @@ class Failure(NamedTuple):
     exit_code: int | None
     cause: str | None
     boot_log: Path | None
+    port: int | None = None
 
     def describe(self) -> str:
         """The one sentence for this: the proxy log's ERROR and the client's error."""
@@ -136,10 +149,11 @@ def spawn(
     except psutil.NoSuchProcess:
         proc = None  # exited before we could look: the fastest crash there is
     except psutil.Error:
+        with _lock:
+            _watched.pop(port, None)  # an OLD exit must not condemn THIS launch
         return launched  # cannot watch it; it is waited on as it always was
     with _lock:
         _watched[port] = _Launch(proc, boot_log, offset)
-        _verdict["failure"] = None  # a new launch is a new story
     return launched
 
 
@@ -149,6 +163,18 @@ def ready(port: int | None) -> None:
         if port is not None:
             _watched.pop(port, None)
         _verdict["failure"] = None
+
+
+def forget(port: int | None) -> None:
+    """Something that is not our child answered on ``port``: drop our record of it and
+    the verdict, if it names this port. What answered is waited on as any backend is."""
+    with _lock:
+        if port is None:
+            return
+        _watched.pop(port, None)
+        said = _verdict["failure"]
+        if said is not None and said.port == port:
+            _verdict["failure"] = None
 
 
 def exited(port: int | None) -> bool:
@@ -170,7 +196,8 @@ def check(port: int | None) -> Failure | None:
     gone, code = _exit_of(watched.proc)
     if not gone:
         return None
-    failure = Failure(code, _cause(watched.boot_log, watched.offset), watched.boot_log)
+    cause = _cause(watched.boot_log, watched.offset)
+    failure = Failure(code, cause, watched.boot_log, port)
     with _lock:
         if _watched.get(port) is watched:
             _verdict["failure"] = failure

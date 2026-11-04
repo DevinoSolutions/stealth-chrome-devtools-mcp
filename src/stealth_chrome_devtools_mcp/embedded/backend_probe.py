@@ -387,6 +387,7 @@ async def await_ready(
         timeout=httpx.Timeout(_POLL_ATTEMPT_SECONDS)
     ) as client:
         while time.monotonic() < deadline:
+            refused = False
             try:
                 resp = await client.post(
                     url, json=_request(client_name), headers=_headers()
@@ -399,16 +400,35 @@ async def await_ready(
                     )
                     backend_exit.ready(port)
                     return True
-            except Exception:
+            except Exception as exc:
                 _logger.debug("backend readiness probe attempt failed", exc_info=True)
                 _note(url, VERDICT_DEAD)
-            exited = backend_exit.check(port)
-            if exited is not None:
-                _logger.error("%s", exited.describe())
+                refused = isinstance(exc, httpx.ConnectError)
+            if _launched_backend_is_gone(port, refused=refused):
                 return False
             await anyio.sleep(interval)
             interval = min(interval * 1.5, _POLL_MAX_SECONDS)
     return False
+
+
+def _launched_backend_is_gone(port: int | None, *, refused: bool) -> bool:
+    """T-14185: after a failed poll, is the backend THIS process launched for ``port``
+    gone for good? Logs the cause once if so.
+
+    Decisive only when nothing is listening (``refused``): our dead child cannot be,
+    so a poll that was ANSWERED (any status) or connected and timed out met someone
+    else's backend, and the stale record is dropped (``backend_exit.forget``) rather
+    than allowed to abort a wait on it."""
+    from stealth_chrome_devtools_mcp.embedded import backend_exit
+
+    if not refused:
+        backend_exit.forget(port)
+        return False
+    gone = backend_exit.check(port)
+    if gone is None:
+        return False
+    _logger.error("%s", gone.describe())
+    return True
 
 
 def _discard_session(

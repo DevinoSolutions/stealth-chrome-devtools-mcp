@@ -40,6 +40,7 @@ import pytest
 from stealth_chrome_devtools_mcp.embedded import (
     backend_exit,
     backend_launch,
+    backend_probe,
     proxy_selfheal,
     singleton,
 )
@@ -150,6 +151,15 @@ def stub():
     backend.server.server_close()
 
 
+async def _wait_until(predicate, seconds: float = 15.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        await anyio.sleep(0.05)
+    return True
+
+
 async def _timed(coro) -> tuple[object, float]:
     started = time.monotonic()
     result = await coro
@@ -209,24 +219,93 @@ class TestALaunchedBackendThatExitsEndsTheWait:
         assert IMPORT_ERROR in "\n".join(r.getMessage() for r in caplog.records)
         assert backend_exit.latest() is not None
 
-    async def test_a_new_spawn_replaces_the_record_and_ready_clears_it(
+    async def test_a_new_spawn_keeps_the_verdict_until_it_is_known_ready_or_gone(
         self, state, children, stub
     ):
-        port = stub.port
+        port = _closed_port()
         singleton._start_server_process(port)
         died, _ = await _timed(singleton._await_backend_http(_url(port), 10.0))
         assert died is False
-        assert backend_exit.latest() is not None
+        said = backend_exit.latest()
+        assert said is not None
 
         children["code"] = _ALIVE
-        singleton._start_server_process(port)  # a new launch is a new story
+        singleton._start_server_process(port)  # the retry's spawn
+        assert backend_exit.latest() == said, "the retry wait still refuses with why"
+        assert backend_exit.exited(port) is False  # the record is the NEW child's
+
+        stub.serving.set()  # any ready backend ends the story
+        ready, _ = await _timed(singleton._await_backend_http(_url(stub.port), 10.0))
+        assert ready is True
         assert backend_exit.latest() is None
+
+    async def test_a_stale_exit_does_not_abort_a_wait_on_a_backend_we_did_not_launch(
+        self, state, children, stub, caplog
+    ):
+        """Our child crashed on P; another proxy then brought a good backend up on P.
+        While it boots it answers 503, and the stale record must not read that as
+        "our child is gone" - nothing the wait saw proves it, and under load nothing
+        else would ever clear the record."""
+        singleton._start_server_process(stub.port)  # a crashed child, on P
+        assert await _wait_until(lambda: backend_exit.exited(stub.port))
+        stub.serve_after(1.5)  # P answers 503 until then, then 200
+
+        with caplog.at_level(logging.ERROR, logger="stealth.proxy"):
+            ready, took = await _timed(
+                singleton._await_backend_http(_url(stub.port), 15.0)
+            )
+
+        assert ready is True
+        assert took >= 1.0
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert backend_exit.latest() is None, "nothing may be refused"
+
+    async def test_a_poll_that_connected_and_timed_out_is_someone_elses_too(
+        self, state, children, monkeypatch
+    ):
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(5)  # accepts at the kernel and never answers: a read timeout
+        port = silent.getsockname()[1]
+        try:
+            singleton._start_server_process(port)
+            assert await _wait_until(lambda: backend_exit.exited(port))
+            monkeypatch.setattr(backend_probe, "_POLL_ATTEMPT_SECONDS", 0.3)
+
+            ready, took = await _timed(singleton._await_backend_http(_url(port), 2.5))
+
+            assert ready is False
+            assert took >= 2.0, "it kept its deadline instead of blaming our child"
+            assert backend_exit.exited(port) is False  # the stale record was dropped
+        finally:
+            silent.close()
+
+    def test_a_spawn_that_cannot_be_watched_drops_the_old_record(
+        self, state, children, monkeypatch
+    ):
+        port = _closed_port()
+        singleton._start_server_process(port)
+        deadline = time.monotonic() + 10
+        while not backend_exit.exited(port) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert backend_exit.exited(port)
+
+        def denied(_pid):
+            raise psutil.AccessDenied(_pid)
+
+        monkeypatch.setattr(psutil, "Process", denied)
+        children["code"] = _ALIVE
+        singleton._start_server_process(port)
+
         assert backend_exit.exited(port) is False
 
-        stub.serving.set()
-        ready, _ = await _timed(singleton._await_backend_http(_url(port), 10.0))
-        assert ready is True
-        assert backend_exit.exited(port) is False
+    def test_forget_drops_only_the_verdict_that_names_its_port(self):
+        backend_exit._verdict["failure"] = backend_exit.Failure(1, "x", None, 5)
+
+        backend_exit.forget(6)
+        assert backend_exit.latest() is not None
+        backend_exit.forget(5)
+        assert backend_exit.latest() is None
 
     async def test_the_cold_start_lock_wait_gives_up_when_the_child_is_gone(
         self, state, children, monkeypatch
@@ -301,6 +380,8 @@ class TestTheCauseIsBoundedAndScrubbed:
             ("RuntimeError: API_TOKEN=abc123 was rejected", "abc123"),
             ("RuntimeError: DB_PASSWORD=hunter2", "hunter2"),
             ("RuntimeError: Authorization: Bearer shorttok", "shorttok"),
+            ('RuntimeError: token = "a b c" was bad', "b c"),
+            ("RuntimeError: secret='two words' was bad", "words"),
             ("RuntimeError: sentry dsn: https://k@o.example/1", "k@o.example"),
         ],
     )
@@ -424,6 +505,23 @@ class TestWaitRefusing:
         assert "'tools/list'" in answered[2]
 
 
+async def _drain_cold_start_threads(seconds: float = 60.0) -> bool:
+    """Wait until every ``_start_backend_holding_lock`` thread the test caused is done.
+
+    They hold the cold-start lock and then spawn; one that reaches
+    ``_start_server_process`` after monkeypatch is undone spawns a real backend and
+    writes the developer's real ``server.json``. True iff none is left."""
+
+    def live() -> list[threading.Thread]:
+        return [
+            t
+            for t in threading.enumerate()
+            if getattr(t, "_target", None) is singleton._start_backend_holding_lock
+        ]
+
+    return await _wait_until(lambda: not live(), seconds)
+
+
 class TestTheClientIsTold:
     async def test_the_first_refusal_arrives_within_one_heal_attempt(
         self, state, children, monkeypatch, tmp_path
@@ -437,18 +535,18 @@ class TestTheClientIsTold:
         with. Only ``backend_launch.spawn`` and the paths are replaced.
 
         Deadlines are shrunk (a refused connect to a closed port costs ~2 s on
-        Windows, so a fast build still needs ~15 s here), and bounded: on a1d54126 the refusal comes after more
+        Windows, so a fast build still needs ~15 s here: the bound is 4x that), and bounded: on a1d54126 the refusal comes after more
         than one heal attempt, so the ``< HEAL`` assertion is the RED, with a
         ``fail_after`` so a build that never answers cannot hang the suite."""
         from mcp.shared.message import SessionMessage
         from mcp.types import JSONRPCMessage, JSONRPCRequest
 
-        heal_attempt = 30.0
+        heal_attempt = 60.0
         monkeypatch.setattr(singleton, "STATE_DIR", tmp_path)
         monkeypatch.setattr(singleton, "LOCK_FILE", tmp_path / "singleton.lock")
         monkeypatch.setattr(singleton, "_clear_stale_backend", lambda _port: [])
         # Default arguments are bound at definition: STARTUP_TIMEOUT 30, READY 120.
-        monkeypatch.setattr(singleton._wait_for_server, "__defaults__", (40,))
+        monkeypatch.setattr(singleton._wait_for_server, "__defaults__", (70,))
         monkeypatch.setattr(
             singleton._await_backend_http, "__defaults__", (heal_attempt,)
         )
@@ -487,9 +585,13 @@ class TestTheClientIsTold:
                 refusal = (await p2c_rx.receive()).message.root
             took = time.monotonic() - started
             tg.cancel_scope.cancel()
+        drained = await _drain_cold_start_threads()
 
         assert refusal.id == 2
         assert IMPORT_ERROR in refusal.error.message
         assert "exited with code 1" in refusal.error.message
         assert "'tools/call' was not run" in refusal.error.message
         assert took < heal_attempt, f"first refusal after {took:.1f}s"
+        assert drained, (
+            "a cold-start thread outlived the test: it would spawn a REAL backend"
+        )
