@@ -9,28 +9,40 @@ whole ``BACKEND_READY_TIMEOUT`` (120 s) for a process that had been dead since t
 second after it was spawned, and logged only ``backend did not become ready``. What
 the client saw was a call that never answered.
 
-**One wait, one extra question.** The wait is still ``backend_probe.await_ready``;
-what it gained is "…and the process I spawned for this port has not exited". The
-process is one this module started and nothing else: :func:`spawn` is the one
-spawn that records it, so a backend ANOTHER proxy launched, or one we adopted, is not
-in the table and is waited on exactly as before. A backend that is merely slow is
-alive, so it still gets the whole deadline: nothing here ever times anything out.
+**One wait, one extra question, asked by both waits.** The waits are still
+``backend_probe.await_ready`` and ``singleton._wait_for_server`` (the cold-start
+lock's own, which holds the lock until the backend is up); what they gained is "…and
+the process I spawned for this port has not exited". The process is one this module
+started and nothing else: :func:`spawn` is the one spawn that records it, so a backend
+ANOTHER proxy launched, or one we adopted, is not in the table and is waited on
+exactly as before. A backend that is merely slow is alive, so it still gets the whole
+deadline: nothing here ever times anything out.
+
+**An exit stays recorded** until the next :func:`spawn` for the port replaces it or
+:func:`ready` clears it. It is not consumed by being read: the lock-holder's wait, the
+first poll and every heal attempt that follows all have to see it, because the one that
+reads it first is not the one that can act on it (a heal that cannot take the lock
+spawns nothing and would otherwise wait out a deadline for a process that is gone).
 
 **The cause comes from the boot log, bounded and attributed.** ``backend-boot.log`` is
 one file shared by every boot (it is rolled by size, not per backend), so the size it
 had BEFORE the spawn is kept and only the bytes written after it are read, the last
 :data:`TAIL_BYTES` of them: an old crash is not blamed for a new exit. The last
-exception line in that window is the cause. It is an exception MESSAGE from the
-backend's own stderr, so it is capped at :data:`CAUSE_MAX_CHARS`, stripped of control
-characters, and scrubbed of the shapes a secret takes in one (``key=value`` for the
-usual secret names, URL credentials, long opaque tokens).
+exception line in that window is the cause. Attribution is best-effort: sibling
+proxies share the file, and a log that was rolled since the spawn (smaller than the
+offset) is another boot's output, so it yields no cause. It is an exception MESSAGE
+from the backend's own stderr, so it is capped at :data:`CAUSE_MAX_CHARS`, stripped of
+control characters, and scrubbed of the shapes a secret takes in one (``key=value``
+for the usual secret names, URL credentials, long opaque tokens).
 
 **Telling the client.** :func:`latest` is what ``proxy_selfheal`` answers the client's
 queued calls with while no backend exists, so the ImportError reaches the tool call
-that failed and not just a file. It is cleared by :func:`begin_wait` (a new wait is a
-new verdict) and :func:`ready`.
+that failed and not just a file. It stands until :func:`ready` or the next
+:func:`spawn`.
 
-A leaf: ``psutil`` and (lazily, for the one spawn) ``backend_launch``.
+A leaf: ``psutil`` and (lazily, for the one spawn) ``backend_launch``. Imported lazily
+by ``backend_probe`` and ``proxy_selfheal``, so the stdio proxy's cold start does not
+pay for ``psutil`` before a wait needs it.
 """
 
 from __future__ import annotations
@@ -67,8 +79,8 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 #: What a secret looks like inside an error message. Deliberately blunt: a cause
 #: that loses a word is a smaller loss than one that prints a credential.
 _SECRET_VALUE = re.compile(
-    r"(?i)\b(token|secret|passw(?:or)?d|cookie|dsn|api[_-]?key|authorization|bearer)"
-    r"(\s*[=:]\s*)\S+"
+    r"(?i)([A-Za-z0-9_]*?(?:token|secret|passw(?:or)?d|cookie|api[_-]?key|dsn"
+    r"|authori[sz]ation))(\s*[=:]\s*)(?:bearer\s+)?\S+"
 )
 _URL_CREDENTIALS = re.compile(r"(?<=://)[^/\s@]+@")
 _OPAQUE_TOKEN = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
@@ -127,13 +139,8 @@ def spawn(
         return launched  # cannot watch it; it is waited on as it always was
     with _lock:
         _watched[port] = _Launch(proc, boot_log, offset)
+        _verdict["failure"] = None  # a new launch is a new story
     return launched
-
-
-def begin_wait() -> None:
-    """A new wait for readiness begins: the last verdict is not this one's."""
-    with _lock:
-        _verdict["failure"] = None
 
 
 def ready(port: int | None) -> None:
@@ -144,26 +151,28 @@ def ready(port: int | None) -> None:
         _verdict["failure"] = None
 
 
+def exited(port: int | None) -> bool:
+    """Has the backend THIS process launched for ``port`` exited? A cheap peek: no
+    log is read and nothing is recorded. False for any backend we did not launch."""
+    with _lock:
+        watched = _watched.get(port) if port is not None else None
+    return watched is not None and _exit_of(watched.proc)[0]
+
+
 def check(port: int | None) -> Failure | None:
     """The :class:`Failure` iff the backend THIS process launched for ``port`` has
-    exited; ``None`` while it runs and for any backend we did not launch.
-
-    Consuming: the launch is dropped once its exit is reported, so a later wait on
-    that port (a backend another process started by then) is not blamed for it.
-    """
-    if port is None:
-        return None
+    exited; ``None`` while it runs and for any backend we did not launch. Not
+    consuming (see the module doc); it also becomes :func:`latest`."""
     with _lock:
-        watched = _watched.get(port)
+        watched = _watched.get(port) if port is not None else None
     if watched is None:
         return None
-    exited, code = _exit_of(watched.proc)
-    if not exited:
+    gone, code = _exit_of(watched.proc)
+    if not gone:
         return None
     failure = Failure(code, _cause(watched.boot_log, watched.offset), watched.boot_log)
     with _lock:
         if _watched.get(port) is watched:
-            del _watched[port]
             _verdict["failure"] = failure
     return failure
 
@@ -180,10 +189,10 @@ def _exit_of(proc: psutil.Process | None) -> tuple[bool, int | None]:
         return True, None
     try:
         return True, proc.wait(0)
-    except psutil.TimeoutExpired:
-        return False, None
-    except psutil.Error:
+    except psutil.NoSuchProcess:  # ZombieProcess is one too
         return True, None
+    except psutil.Error:  # still running (TimeoutExpired), or not ours to know
+        return False, None
 
 
 def _size(path: Path | None) -> int:
@@ -200,8 +209,9 @@ def _cause(boot_log: Path | None, offset: int) -> str | None:
     try:
         with boot_log.open("rb") as handle:
             size = handle.seek(0, 2)
-            # An offset past the end means the log was rolled since: all of it is ours.
-            start = max(offset if offset <= size else 0, size - TAIL_BYTES)
+            if size < offset:
+                return None  # rolled since the spawn: that file is another boot's
+            start = max(offset, size - TAIL_BYTES)
             handle.seek(start)
             text = handle.read(TAIL_BYTES).decode("utf-8", errors="replace")
     except OSError:
