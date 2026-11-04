@@ -28,6 +28,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_client,
     backend_env,
     backend_eviction,
+    backend_exit,
     backend_liveness,
     backend_probe,
     backend_registry,
@@ -429,7 +430,7 @@ def _start_server_process(port: int):
     # F-303/F-503: stdout/stderr used to be DEVNULL, hiding every backend
     # crash - an import-time crash dies before configure_logging installs
     # itself, so only a raw redirect of the child's handles captures it.
-    from stealth_chrome_devtools_mcp.embedded import backend_launch, logging_setup
+    from stealth_chrome_devtools_mcp.embedded import logging_setup
 
     boot_log = None
     try:
@@ -459,7 +460,7 @@ def _start_server_process(port: int):
     # job this proxy sits in must not be inherited by the backend every other
     # session shares. The reuse gate, adoption order and cold-start lock stay
     # here; only the spawn moved.
-    launched = backend_launch.spawn(cmd, child_env, boot_log)
+    launched = backend_exit.spawn(port, cmd, child_env, boot_log)
 
     _ensure_state_dir()
     PORT_FILE.write_text(str(port))
@@ -816,7 +817,7 @@ async def _proxy_streams(client_read, client_write, port: int) -> None:
     to_backend_tx, to_backend_rx = anyio.create_memory_object_stream(1024)
     init_request_id = {"value": None}
     init_message = {"value": None, "initialized": None}
-    pending = proxy_selfheal.PendingCalls()
+    pending = proxy_selfheal.PendingCalls(to_backend_rx)
 
     async def pump_client():
         try:
