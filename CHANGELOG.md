@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### A backend that crashes at start-up is reported, and its calls are answered, instead of waited out for 120 s (T-14185)
+
+- After a reboot on 2026-11-04 every cold start of the shared backend died at import time (`ImportError: MemoryStore requires py-key-value-aio[memory]`, then `ImportError: FastMCP server support is not installed`), 83 times. The cause was in `~/.stealth-mcp/logs/backend-boot.log` and nowhere else: each stdio proxy waited the whole `BACKEND_READY_TIMEOUT` (120 s) for a process that had exited a second after its spawn, logged only `backend did not become ready within 120s` and `backend unhealable after N attempts`, and answered no call, so the client saw a tool call that never returned.
+- `singleton._start_server_process` now spawns through `backend_exit.spawn`, which is `backend_launch.spawn` plus a record of the process it made. `backend_probe.await_ready` asks `backend_exit.check` after each failed poll and ends the wait, False and at once, when the process THIS proxy launched for that port has exited. A backend that is merely slow is alive and keeps the whole deadline; a backend this process did not launch (adopted, or started by another proxy) is not in the record and is waited on as before.
+- It logs one ERROR in the proxy log: the exit code (or `unknown`), the last exception line the backend wrote to `backend-boot.log` since it was spawned, and the boot log's path. The boot log is shared by every boot, so its size before the spawn is kept and only later bytes are read (at most the last 64 KiB): an older crash is never blamed for a new exit, and an exit that wrote nothing says `no exception line`. The line is capped at 300 characters, stripped of control characters, and `key=value` secrets, URL credentials and long opaque tokens in it are redacted.
+- While no backend exists, `proxy_selfheal.PendingCalls.wait_refusing` replaces the plain sleep between retries (the queue the client's messages wait in is now handed to `PendingCalls`). When the last wait ended on such an exit, every call the client sends is answered at once with a JSON-RPC error that names the cause (`'tools/call' was not run: the backend this proxy launched exited with code 1 before it was ready: ImportError: ... (boot log: ...)`), instead of hanging until the next retry. The retries go on, and a call after the backend returns works. With no known exit nothing changes: the calls wait for the backend as before.
+- `tests/test_backend_exit_before_ready.py` pins it: the early return and the ERROR's content, an older crash not blamed, the report being once-only, a slow-but-alive backend and a backend we did not launch keeping the deadline, the cap and the redaction, and the client's call answered through the real `_proxy_streams` wiring.
+
 ## 2.1.59
 
 ### Dependencies: pydantic 2.14.2, pydantic-settings 2.16.2, starlette 1.10.0, websockets 17.4, pytest 9.2.0, pytest-asyncio 1.4.1, ruff 0.17.3, ty 0.0.95 (T-12695)

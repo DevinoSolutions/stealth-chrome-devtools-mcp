@@ -80,12 +80,13 @@ import logging
 import time
 from typing import TYPE_CHECKING, Protocol
 
-from stealth_chrome_devtools_mcp.embedded import backend_probe
+from stealth_chrome_devtools_mcp.embedded import backend_exit, backend_probe
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from anyio import CancelScope, Event
+    from anyio.streams.memory import MemoryObjectReceiveStream
 
 # One stream: the heal is part of the proxy's story, so it writes to the proxy
 # log configure_logging("proxy") already owns (same logger name as singleton).
@@ -283,9 +284,14 @@ class PendingCalls:
     the session it was sent on no longer exists there, so the backend never ran
     it. It is resent once, on the fresh session the next generation opens; a
     second 404 goes to the client as it is.
+
+    ``queue`` is the stream the client's messages wait in until a backend reads
+    them. It is read here only by :meth:`wait_refusing`, which runs while NO
+    generation is bridged, so nothing else is reading it then.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, queue: MemoryObjectReceiveStream[object] | None = None) -> None:
+        self._queue = queue
         self._inflight: dict[str | int, str] = {}
         self._messages: dict[str | int, object] = {}
         self._retried: set[str | int] = set()
@@ -362,6 +368,59 @@ class PendingCalls:
         """The calls to resend, oldest first, handed over exactly once."""
         retries, self._retry = self._retry, []
         return retries
+
+    async def wait_refusing(
+        self, client_write: _MessageSink, seconds: float, failure: str | None
+    ) -> None:
+        """Wait ``seconds`` while no backend exists, answering the client's calls.
+
+        With no ``failure`` that is a plain sleep: calls wait in the queue for the
+        backend to return, as they always did. With one (T-14185: the backend this
+        proxy launched exited, and ``backend_exit`` knows why) every request that
+        arrives is answered at once with that cause, because the retry may be a
+        minute off and a call that hangs that long says nothing. The client's
+        ``initialize`` is already answered and replayed by ``drive``, and
+        notifications owe no answer, so both are dropped.
+        """
+        import anyio
+
+        if failure is None or self._queue is None:
+            await anyio.sleep(seconds)
+            return
+        deadline = anyio.current_time() + seconds
+        with anyio.move_on_after(seconds):
+            async for message in self._queue:
+                await self._refuse(message, client_write, failure)
+        await anyio.sleep(max(0.0, deadline - anyio.current_time()))
+
+    async def _refuse(
+        self, message: object, client_write: _MessageSink, failure: str
+    ) -> None:
+        """Answer one queued request with ``failure``; shielded, so a request taken
+        off the queue is always answered even if the wait ends meanwhile."""
+        import anyio
+        from mcp.shared.message import SessionMessage
+        from mcp.types import ErrorData, JSONRPCError, JSONRPCMessage, JSONRPCRequest
+
+        inner = getattr(getattr(message, "message", None), "root", None)
+        if not isinstance(inner, JSONRPCRequest) or inner.method == "initialize":
+            return
+        error = JSONRPCError(
+            jsonrpc="2.0",
+            id=inner.id,
+            error=ErrorData(
+                code=_BACKEND_DIED_CODE,
+                message=(
+                    f"'{inner.method}' was not run: {failure}. The proxy keeps "
+                    "retrying the backend; reissue the call once it is fixed"
+                ),
+            ),
+        )
+        with anyio.CancelScope(shield=True):
+            try:
+                await client_write.send(SessionMessage(message=JSONRPCMessage(error)))
+            except Exception:
+                _logger.debug("could not refuse a queued call", exc_info=True)
 
     async def fail_all(
         self, client_write: _MessageSink, port: int, cause: str | None
@@ -626,8 +685,6 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     backoff reports carry it too, so an unreachable line says how much recovery
     preceded it. Nothing in the loop's decisions reads it.
     """
-    import anyio
-
     current: int = port
     resend: object = None
     streak = 0
@@ -695,7 +752,10 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                     delay=delay,
                     hint=hint,
                 )
-            await anyio.sleep(delay)
+            exited = backend_exit.latest()
+            await pending.wait_refusing(
+                client_write, delay, None if exited is None else exited.describe()
+            )
             # The wait IS the flap remedy, so the streak has been served.
             streak = 0
             healed = await heal_backend(

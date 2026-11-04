@@ -68,10 +68,15 @@ fail-closed contract: a probe error reads as "not ready" and never propagates,
 and the CALLER decides when repeated failures are worth a WARNING. DEBUG here,
 because both of these fire routinely during an ordinary cold start.
 
+**A launched backend that exits ends the wait** (T-14185). :func:`await_ready` asks
+``backend_exit`` whether the process this proxy spawned for the URL's port is
+still there, after each failed poll, and gives up at once with the cause when it
+is not; ``backend_exit`` owns the question and what it reads, this module only asks.
+
 A leaf: ``httpx`` and ``mcp.types`` (imported lazily, inside the functions, so
 the stdio proxy's cold start does not pay for them before it needs them) and
-nothing of ours. The URL arrives as an argument, so nothing here decides which
-backend is being asked about.
+nothing of ours but the two leaves ``backend_token`` and ``backend_exit``. The URL
+arrives as an argument, so nothing here decides which backend is being asked about.
 """
 
 from __future__ import annotations
@@ -81,7 +86,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import backend_token
+from stealth_chrome_devtools_mcp.embedded import backend_exit, backend_token
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -361,10 +366,19 @@ class Heartbeat:
 async def await_ready(
     url: str, deadline_seconds: float, *, client_name: str = READINESS_CLIENT
 ) -> bool:
-    """Poll ``url`` until it answers an ``initialize`` 200, or the deadline."""
+    """Poll ``url`` until it answers an ``initialize`` 200, or the deadline.
+
+    Also ends, False and at once, when the backend THIS process launched for the
+    URL's port has exited (T-14185): no later poll can succeed, and the cause is
+    logged here, once, at ERROR. A backend we did not launch gets the deadline.
+    """
+    from urllib.parse import urlsplit
+
     import anyio
     import httpx
 
+    port = urlsplit(url).port
+    backend_exit.begin_wait()
     deadline = time.monotonic() + deadline_seconds
     interval = _POLL_START_SECONDS
     async with httpx.AsyncClient(
@@ -381,10 +395,15 @@ async def await_ready(
                     await _discard_session_async(
                         client.delete, url, resp.headers.get("mcp-session-id")
                     )
+                    backend_exit.ready(port)
                     return True
             except Exception:
                 _logger.debug("backend readiness probe attempt failed", exc_info=True)
                 _note(url, VERDICT_DEAD)
+            exited = backend_exit.check(port)
+            if exited is not None:
+                _logger.error("%s", exited.describe())
+                return False
             await anyio.sleep(interval)
             interval = min(interval * 1.5, _POLL_MAX_SECONDS)
     return False
