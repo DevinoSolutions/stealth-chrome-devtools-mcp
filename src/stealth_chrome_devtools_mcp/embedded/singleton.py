@@ -456,10 +456,8 @@ def _start_server_process(port: int):
         # any code runs, so the backend's Chrome children never inherit it.
         child_env["__PYVENV_LAUNCHER__"] = sys.executable
 
-    # F-867: HOW the process is created is backend_launch's one job - the client
-    # job this proxy sits in must not be inherited by the backend every other
-    # session shares. The reuse gate, adoption order and cold-start lock stay
-    # here; only the spawn moved.
+    # F-867: HOW the process is created is backend_launch's job (the client's job
+    # object must not be inherited); backend_exit.spawn adds T-14185's exit record.
     launched = backend_exit.spawn(port, cmd, child_env, boot_log)
 
     _ensure_state_dir()
@@ -473,6 +471,8 @@ def _wait_for_server(port: int, timeout: int = STARTUP_TIMEOUT) -> bool:
     while time.monotonic() < deadline:
         if _server_is_healthy(port):
             return True
+        if backend_exit.exited(port):  # T-14185: the child we spawned is gone
+            return False
         time.sleep(interval)
         interval = min(interval * 1.5, 2.0)
     return False

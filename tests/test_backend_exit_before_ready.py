@@ -34,6 +34,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import anyio
+import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
@@ -190,16 +191,57 @@ class TestALaunchedBackendThatExitsEndsTheWait:
         assert "no exception line" in said
         assert STALE_CRASH not in said
 
-    async def test_the_exit_is_reported_once_and_does_not_blame_a_later_wait(
+    async def test_the_exit_stays_recorded_for_every_wait_that_follows(
+        self, state, children, caplog
+    ):
+        """A heal that cannot take the lock spawns nothing, so the wait it runs next
+        must still see the exit the FIRST wait consumed under a1d54126."""
+        port = _closed_port()
+        singleton._start_server_process(port)
+        first, _ = await _timed(singleton._await_backend_http(_url(port), 10.0))
+
+        with caplog.at_level(logging.ERROR, logger="stealth.proxy"):
+            second, took = await _timed(singleton._await_backend_http(_url(port), 10.0))
+
+        assert first is False
+        assert second is False
+        assert took < 5.0
+        assert IMPORT_ERROR in "\n".join(r.getMessage() for r in caplog.records)
+        assert backend_exit.latest() is not None
+
+    async def test_a_new_spawn_replaces_the_record_and_ready_clears_it(
         self, state, children, stub
     ):
-        singleton._start_server_process(stub.port)
-        first, _ = await _timed(singleton._await_backend_http(_url(stub.port), 10.0))
-        assert first is False  # the stub is not serving yet and our child is dead
+        port = stub.port
+        singleton._start_server_process(port)
+        died, _ = await _timed(singleton._await_backend_http(_url(port), 10.0))
+        assert died is False
+        assert backend_exit.latest() is not None
 
-        stub.serve_after(1.0)  # another proxy's backend is coming up on that port
-        second, _ = await _timed(singleton._await_backend_http(_url(stub.port), 10.0))
-        assert second is True
+        children["code"] = _ALIVE
+        singleton._start_server_process(port)  # a new launch is a new story
+        assert backend_exit.latest() is None
+        assert backend_exit.exited(port) is False
+
+        stub.serving.set()
+        ready, _ = await _timed(singleton._await_backend_http(_url(port), 10.0))
+        assert ready is True
+        assert backend_exit.exited(port) is False
+
+    async def test_the_cold_start_lock_wait_gives_up_when_the_child_is_gone(
+        self, state, children, monkeypatch
+    ):
+        """``_wait_for_server`` holds the cold-start lock; it used to sit out the whole
+        ``STARTUP_TIMEOUT`` for a process that had already exited."""
+        port = _closed_port()
+        singleton._start_server_process(port)
+
+        ready, took = await _timed(
+            anyio.to_thread.run_sync(singleton._wait_for_server, port, 20)
+        )
+
+        assert ready is False
+        assert took < 8.0, f"held the lock {took:.1f}s of 20s for a dead backend"
 
 
 class TestOtherBackendsKeepTheWholeDeadline:
@@ -253,6 +295,40 @@ class TestTheCauseIsBoundedAndScrubbed:
         assert "hunter2" not in cause
         assert "abc123" not in cause
 
+    @pytest.mark.parametrize(
+        ("line", "secret"),
+        [
+            ("RuntimeError: API_TOKEN=abc123 was rejected", "abc123"),
+            ("RuntimeError: DB_PASSWORD=hunter2", "hunter2"),
+            ("RuntimeError: Authorization: Bearer shorttok", "shorttok"),
+            ("RuntimeError: sentry dsn: https://k@o.example/1", "k@o.example"),
+        ],
+    )
+    def test_upper_snake_and_bearer_secret_shapes_are_redacted(
+        self, tmp_path, line, secret
+    ):
+        log = tmp_path / "boot.log"
+        log.write_text(f"Traceback (most recent call last):\n{line}\n")
+
+        cause = backend_exit._cause(log, 0)
+
+        assert cause is not None
+        assert cause.startswith("RuntimeError:")
+        assert secret not in cause
+        assert "<redacted>" in cause
+
+    def test_the_import_error_text_survives_the_scrub(self, tmp_path):
+        log = tmp_path / "boot.log"
+        log.write_text(f"Traceback (most recent call last):\n{IMPORT_ERROR}\n")
+
+        assert backend_exit._cause(log, 0) == IMPORT_ERROR
+
+    def test_a_log_rolled_since_the_spawn_names_no_cause(self, tmp_path):
+        log = tmp_path / "boot.log"
+        log.write_text(f"{STALE_CRASH}\n")  # a new, shorter file: another boot's
+
+        assert backend_exit._cause(log, offset=10_000) is None
+
     def test_only_the_tail_of_a_huge_log_is_read(self, tmp_path):
         log = tmp_path / "boot.log"
         log.write_bytes(
@@ -260,6 +336,36 @@ class TestTheCauseIsBoundedAndScrubbed:
         )
 
         assert backend_exit._cause(log, 0) is None
+
+
+class _Proc:
+    """A ``psutil.Process`` whose ``wait(0)`` does what the test says."""
+
+    def __init__(self, outcome):
+        self.outcome = outcome
+
+    def wait(self, _timeout):
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class TestWhatCountsAsExited:
+    @pytest.mark.parametrize(
+        ("outcome", "gone"),
+        [
+            (7, True),
+            (psutil.NoSuchProcess(1), True),
+            (psutil.ZombieProcess(1), True),
+            (psutil.TimeoutExpired(0), False),
+            (psutil.AccessDenied(1), False),
+            (psutil.Error(), False),
+        ],
+    )
+    def test_only_a_wait_that_ended_or_a_missing_process_is_an_exit(
+        self, outcome, gone
+    ):
+        assert backend_exit._exit_of(_Proc(outcome))[0] is gone
 
 
 def _request(req_id, method):
@@ -319,20 +425,34 @@ class TestWaitRefusing:
 
 
 class TestTheClientIsTold:
-    async def test_a_call_made_while_the_backend_keeps_crashing_is_answered_with_why(
-        self, state, children, monkeypatch
+    async def test_the_first_refusal_arrives_within_one_heal_attempt(
+        self, state, children, monkeypatch, tmp_path
     ):
-        """The whole path, ``_proxy_streams`` included: the proxy launched a backend
-        that dies at import time, every heal relaunches the same crash, and the
-        client's ``tools/call`` - which used to wait for ever - gets the ImportError.
+        """The REAL wiring, ``ensure_server_running`` included: the cold-start lock,
+        its daemon thread and ``_wait_for_server`` are where a1d54126 lost its "at
+        once". The holder sat in ``_wait_for_server`` for ``STARTUP_TIMEOUT`` with
+        the lock, so the first heal spawned nothing, found no record (the first wait
+        had consumed it) and waited out a whole heal attempt blind - and
+        ``begin_wait`` cleared the verdict, so the retry loop had nothing to refuse
+        with. Only ``backend_launch.spawn`` and the paths are replaced.
 
-        Bounded: on a build without the fix the call is never answered, so the
-        ``fail_after`` below is the RED, 20 s and not the 120 s deadline."""
+        Deadlines are shrunk (a refused connect to a closed port costs ~2 s on
+        Windows, so a fast build still needs ~15 s here), and bounded: on a1d54126 the refusal comes after more
+        than one heal attempt, so the ``< HEAL`` assertion is the RED, with a
+        ``fail_after`` so a build that never answers cannot hang the suite."""
         from mcp.shared.message import SessionMessage
         from mcp.types import JSONRPCMessage, JSONRPCRequest
 
-        port = _closed_port()
-        monkeypatch.setattr(proxy_selfheal, "HEAL_ATTEMPT_SECONDS", 3.0)
+        heal_attempt = 30.0
+        monkeypatch.setattr(singleton, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(singleton, "LOCK_FILE", tmp_path / "singleton.lock")
+        monkeypatch.setattr(singleton, "_clear_stale_backend", lambda _port: [])
+        # Default arguments are bound at definition: STARTUP_TIMEOUT 30, READY 120.
+        monkeypatch.setattr(singleton._wait_for_server, "__defaults__", (40,))
+        monkeypatch.setattr(
+            singleton._await_backend_http, "__defaults__", (heal_attempt,)
+        )
+        monkeypatch.setattr(proxy_selfheal, "HEAL_ATTEMPT_SECONDS", heal_attempt)
         monkeypatch.setattr(proxy_selfheal, "HEAL_BACKOFF_SECONDS", 0.05)
         monkeypatch.setattr(proxy_selfheal, "RETRY_BASE_SECONDS", 0.05)
         monkeypatch.setattr(proxy_selfheal, "RETRY_MAX_SECONDS", 0.2)
@@ -342,12 +462,8 @@ class TestTheClientIsTold:
 
         monkeypatch.setattr(singleton, "_watch_backend_liveness", never_stale)
 
-        def relaunch(dead_port):
-            singleton._start_server_process(dead_port)
-            return dead_port
-
-        monkeypatch.setattr(singleton, "ensure_server_running", relaunch)
-        singleton._start_server_process(port)  # the launch run_stdio_proxy made
+        # What run_stdio_proxy does at boot: the lock thread spawns and waits.
+        port = singleton.ensure_server_running(_closed_port())
 
         c2p_tx, c2p_rx = anyio.create_memory_object_stream(50)
         p2c_tx, p2c_rx = anyio.create_memory_object_stream(50)
@@ -361,16 +477,19 @@ class TestTheClientIsTold:
                 "clientInfo": {"name": "t", "version": "1"},
             },
         )
+        started = time.monotonic()
         async with anyio.create_task_group() as tg:
             tg.start_soon(singleton._proxy_streams, c2p_rx, p2c_tx, port)
             await c2p_tx.send(SessionMessage(message=JSONRPCMessage(init)))
-            with anyio.fail_after(20):
+            with anyio.fail_after(heal_attempt * 2):
                 assert (await p2c_rx.receive()).message.root.id == 1  # local answer
                 await c2p_tx.send(_request(2, "tools/call"))
                 refusal = (await p2c_rx.receive()).message.root
+            took = time.monotonic() - started
             tg.cancel_scope.cancel()
 
         assert refusal.id == 2
         assert IMPORT_ERROR in refusal.error.message
         assert "exited with code 1" in refusal.error.message
         assert "'tools/call' was not run" in refusal.error.message
+        assert took < heal_attempt, f"first refusal after {took:.1f}s"

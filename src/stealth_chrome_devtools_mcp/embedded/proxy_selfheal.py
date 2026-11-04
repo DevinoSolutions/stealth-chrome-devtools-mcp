@@ -80,7 +80,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Protocol
 
-from stealth_chrome_devtools_mcp.embedded import backend_exit, backend_probe
+from stealth_chrome_devtools_mcp.embedded import backend_probe
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -122,6 +122,9 @@ HEAL_STREAK_RESET_SECONDS = 300.0
 RETRY_BASE_SECONDS = 2.0
 RETRY_MAX_SECONDS = 60.0
 RETRY_JITTER = 0.25
+
+# How long one refusal may take to reach a stalled client before it is dropped.
+_REFUSAL_SEND_SECONDS = 5.0
 
 # JSON-RPC "Internal error" — the only reserved code that fits "the server this
 # call was sent to stopped existing".
@@ -381,6 +384,10 @@ class PendingCalls:
         minute off and a call that hangs that long says nothing. The client's
         ``initialize`` is already answered and replayed by ``drive``, and
         notifications owe no answer, so both are dropped.
+
+        The refusal stands for the whole wait, so while a verdict stands calls are
+        refused for up to ``RETRY_MAX_SECONDS`` even if another proxy or the CLI has
+        brought a backend up meanwhile; the next retry finds it and re-bridges.
         """
         import anyio
 
@@ -416,7 +423,7 @@ class PendingCalls:
                 ),
             ),
         )
-        with anyio.CancelScope(shield=True):
+        with anyio.CancelScope(shield=True), anyio.move_on_after(_REFUSAL_SEND_SECONDS):
             try:
                 await client_write.send(SessionMessage(message=JSONRPCMessage(error)))
             except Exception:
@@ -685,6 +692,8 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     backoff reports carry it too, so an unreachable line says how much recovery
     preceded it. Nothing in the loop's decisions reads it.
     """
+    from stealth_chrome_devtools_mcp.embedded import backend_exit
+
     current: int = port
     resend: object = None
     streak = 0

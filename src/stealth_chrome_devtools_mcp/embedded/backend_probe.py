@@ -75,7 +75,8 @@ is not; ``backend_exit`` owns the question and what it reads, this module only a
 
 A leaf: ``httpx`` and ``mcp.types`` (imported lazily, inside the functions, so
 the stdio proxy's cold start does not pay for them before it needs them) and
-nothing of ours but the two leaves ``backend_token`` and ``backend_exit``. The URL
+nothing of ours but the leaf ``backend_token`` (and ``backend_exit``, imported inside
+:func:`await_ready` for the same cold-start reason). The URL
 arrives as an argument, so nothing here decides which backend is being asked about.
 """
 
@@ -86,7 +87,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import backend_exit, backend_token
+from stealth_chrome_devtools_mcp.embedded import backend_token
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -377,8 +378,9 @@ async def await_ready(
     import anyio
     import httpx
 
+    from stealth_chrome_devtools_mcp.embedded import backend_exit
+
     port = urlsplit(url).port
-    backend_exit.begin_wait()
     deadline = time.monotonic() + deadline_seconds
     interval = _POLL_START_SECONDS
     async with httpx.AsyncClient(
