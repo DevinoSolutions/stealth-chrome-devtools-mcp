@@ -515,6 +515,11 @@ def build_arg_parser():
         action="store_true",
         help="Disable the advisory session lock tools",
     )
+    parser.add_argument(
+        "--disable-captcha",
+        action="store_true",
+        help="Disable the captcha auto-click tools",
+    )
 
     parser.add_argument(
         "--minimal",
@@ -566,6 +571,7 @@ if __name__ == "__main__":
             "debugging": "Debug and system tools",
             "dynamic-hooks": "AI-powered network hook system",
             "session-lock": "Advisory lease on a shared session",
+            "captcha": "Automatic captcha checkbox clicking",
         }
         print("Available tool sections:")
         for section, tools in SECTION_TOOLS.items():
@@ -589,6 +595,7 @@ if __name__ == "__main__":
                 "debugging",
                 "dynamic-hooks",
                 "session-lock",
+                "captcha",
             ]
         )
 
@@ -616,6 +623,8 @@ if __name__ == "__main__":
         DISABLED_SECTIONS.add("dynamic-hooks")
     if args.disable_session_lock:
         DISABLED_SECTIONS.add("session-lock")
+    if args.disable_captcha:
+        DISABLED_SECTIONS.add("captcha")
 
     if args.xpool_safe:
         DISABLED_SECTIONS.add("cdp-functions")

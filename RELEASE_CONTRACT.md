@@ -14,11 +14,11 @@ ledger, and the matrix from the required cells of the
 `release-evidence/v1` aggregate. Nothing here is hand-typed, and no
 prose document — plan, finding, or README — can qualify anything.
 
-> **At the release SHA recorded in the ledger, this gate qualifies 3 of the 97 served MCP tools**, on the cells each
+> **At the release SHA recorded in the ledger, this gate qualifies 3 of the 100 served MCP tools**, on the cells each
 > row names.
 
 **Read that number carefully, in both directions.** It does *not* say
-94 tools are untested. Every served tool
+97 tools are untested. Every served tool
 is driven against **real Chrome** by the E2E suite — a set-equality
 tripwire keeps that coverage complete, and §5 shows each tool's actual
 evidence. What those tools lack is a *per-tool* assertion over the
@@ -161,9 +161,9 @@ version. Installing over an existing installation is unqualified.
 
 ## 5. The served tool surface
 
-- served by the registry: **97**
+- served by the registry: **100**
 - `release-qualified-success`: **3**
-- `served-unqualified`: **94**
+- `served-unqualified`: **97**
 - `not-served`: **0**
 
 A tool is `release-qualified-success` only when a row names the precise
@@ -202,6 +202,9 @@ exists at this SHA.
 | `navigate` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `reload_page` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `spawn_browser` | browser-management | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `disable_captcha_auto_click` | captcha | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
+| `enable_captcha_auto_click` | captcha | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
+| `get_captcha_status` | captcha | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
 | `call_javascript_function` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |
 | `create_persistent_function` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `create_python_binding` | cdp-functions | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | TRUST-BOUNDARY |

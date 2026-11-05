@@ -808,10 +808,10 @@ async def close_instance(
     if success:
         await rt.network_interceptor.clear_instance_data(instance_id)
         rt.dynamic_hook_system.remove_instance(instance_id)
+        rt.captcha_clicker.monitor.cleanup(instance_id)
         # Instance is gone — lift sweep protection for its disposable clone so the
-        # storage cap can reclaim it later if the on-close delete was deferred.
-        # A discard released it already, and the directory may since belong to a NEW
-        # spawn, so releasing again would unprotect that one.
+        # storage cap can reclaim it later if the on-close delete was deferred. A
+        # discard released it already, and the directory may belong to a NEW spawn.
         if discarded is None:
             clone_protection.release_selection(profile_selection)
             tool_errors.claim_exited(instance_id)  # drop a stale record of this id

@@ -29,6 +29,7 @@ silently.
 
 from stealth_chrome_devtools_mcp.embedded.tool_sections import (
     browser_management,
+    captcha,
     cdp_functions,
     cookies_storage,
     debugging,
@@ -66,4 +67,5 @@ SECTION_MODULES = (
     cdp_functions,
     dynamic_hooks,
     session_lock,
+    captcha,
 )

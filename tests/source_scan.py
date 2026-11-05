@@ -37,8 +37,8 @@ from pathlib import Path
 #: (``browser_management``) to 12. Slice 11 (``element_interaction``) is the
 #: last section to move and takes it to its FINAL value, 13: ``server.py`` +
 #: ``tool_runtime.py`` + all eleven section modules. From here the floor only
-#: changes if a section is added or removed: F-952 added ``session_lock``, so 14.
-MIN_TOOL_SOURCE_FILES = 14
+#: changes if a section is added or removed: F-952 added ``session_lock``, so 14, and ``captcha`` makes it 15.
+MIN_TOOL_SOURCE_FILES = 15
 
 
 def collect_tool_source_files(server_mod, runtime_mod, section_modules, floor):
