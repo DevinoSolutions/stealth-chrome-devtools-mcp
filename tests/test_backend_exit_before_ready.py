@@ -26,6 +26,7 @@ replaced), and the readiness target is a stdlib HTTP stub or a closed port.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -71,14 +72,136 @@ def _clean_exit_table(monkeypatch):
     monkeypatch.setattr(backend_exit, "_verdict", {"failure": None})
 
 
+def _cold_start_threads() -> list[threading.Thread]:
+    """Every ``_start_backend_holding_lock`` thread still running: each holds the
+    cold-start lock, then reaches ``_start_server_process``."""
+    return [
+        t
+        for t in threading.enumerate()
+        if getattr(t, "_target", None) is singleton._start_backend_holding_lock
+    ]
+
+
+#: How long teardown waits for the cold-start threads a test caused. A thread is
+#: bounded by ``_wait_for_server``'s deadline plus the reuse gate's patience, so this
+#: is a ceiling a healthy run never reaches.
+_DRAIN_SECONDS = 120.0
+
+
+class _Pinned:
+    """Patches that stay in force until nothing the test started can still use them.
+
+    ``monkeypatch`` undoes at teardown whatever has happened to the threads a test
+    caused, and ``ensure_server_running`` starts a daemon thread per call (one per
+    heal attempt). A thread that outlives the test then runs the REAL
+    ``_start_server_process`` against the REAL ``~/.stealth-mcp``: it launches a real
+    ``python -m stealth_chrome_devtools_mcp`` backend, which logs to the real
+    ``backend-<pid>.log`` and writes the real ``heartbeat-<port>.json``. Three such
+    backends were found after this branch's test runs. So everything a cold start
+    reaches is pinned here, undone only after the threads are gone, and left in place
+    (the test then errors) when one is not."""
+
+    def __init__(self) -> None:
+        self.plan = {"code": _CRASH}
+        self.procs: list[subprocess.Popen] = []
+        self.closed = threading.Event()
+        self.gate = threading.Lock()
+        self.entered = 0  # ``ensure_server_running`` calls not yet returned
+        self._undo: list = []
+
+    def setattr(self, target, name, value) -> None:
+        old = getattr(target, name)
+        setattr(target, name, value)
+        self._undo.append(lambda: setattr(target, name, old))
+
+    def setenv(self, name: str, value: str) -> None:
+        old = os.environ.get(name)
+        os.environ[name] = value
+        self._undo.append(
+            lambda: (
+                os.environ.pop(name, None)
+                if old is None
+                else os.environ.__setitem__(name, old)
+            )
+        )
+
+    def restore(self) -> None:
+        while self._undo:
+            self._undo.pop()()
+
+
+@pytest.fixture(autouse=True)
+def pinned(tmp_path):
+    """Every test of this file launches backends only through a fake ``spawn``, over
+    paths under ``tmp_path``, and neither is undone while a thread can still reach it.
+
+    The fake RAISES once teardown has waited for the threads, so a spawn that arrives
+    later starts nothing."""
+    pin = _Pinned()
+    real_spawn = backend_launch.spawn
+
+    def fake_spawn(_cmd, _env, boot_log):
+        if pin.closed.is_set():
+            raise RuntimeError("a backend spawn was reached after the test ended")
+        with boot_log.open("ab") as out:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", pin.plan["code"]],
+                stdout=out,
+                stderr=out,
+                stdin=subprocess.DEVNULL,
+            )
+        pin.procs.append(proc)
+        return backend_launch.Launched(proc.pid, "test")
+
+    pin.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path / "logs"))
+    pin.setattr(singleton, "STATE_DIR", tmp_path)
+    pin.setattr(singleton, "LOCK_FILE", tmp_path / "singleton.lock")
+    pin.setattr(singleton, "PORT_FILE", tmp_path / "server.port")
+    pin.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
+    pin.setattr(singleton, "_ensure_state_dir", lambda: None)
+    pin.setattr(singleton, "_server_version", lambda: "1.2.1")
+    pin.setattr(backend_launch, "spawn", fake_spawn)
+
+    real_ensure = singleton.ensure_server_running
+
+    def counted_ensure(*args, **kwargs):
+        """A heal calls this from a worker thread, and it is what STARTS a cold-start
+        thread: counted, so teardown can tell "none left" from "one about to start"."""
+        with pin.gate:
+            if pin.closed.is_set():
+                raise RuntimeError("a backend start was requested after the test ended")
+            pin.entered += 1
+        try:
+            return real_ensure(*args, **kwargs)
+        finally:
+            with pin.gate:
+                pin.entered -= 1
+
+    pin.setattr(singleton, "ensure_server_running", counted_ensure)
+    yield pin
+    deadline = time.monotonic() + _DRAIN_SECONDS
+    while time.monotonic() < deadline:
+        with pin.gate:
+            if not pin.entered and not _cold_start_threads():
+                break
+        time.sleep(0.1)
+    with pin.gate:
+        pin.closed.set()  # from here a late spawn or start raises instead of acting
+    leaked = _cold_start_threads() or pin.entered
+    for proc in pin.procs:
+        proc.kill()
+        proc.wait(10)
+    if not leaked:
+        pin.restore()  # nothing can reach any of it any more
+    assert not leaked, (
+        "a cold-start thread outlived the test (every patch left in place)"
+    )
+    assert backend_launch.spawn is real_spawn
+
+
 @pytest.fixture()
-def state(tmp_path, monkeypatch):
-    """``_start_server_process`` with every side effect diverted into ``tmp_path``."""
-    monkeypatch.setenv("STEALTH_MCP_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setattr(singleton, "PORT_FILE", tmp_path / "server.port")
-    monkeypatch.setattr(singleton, "SERVER_STATE_FILE", tmp_path / "server.json")
-    monkeypatch.setattr(singleton, "_ensure_state_dir", lambda: None)
-    monkeypatch.setattr(singleton, "_server_version", lambda: "1.2.1")
+def state(tmp_path, pinned):
+    """The boot log ``_start_server_process`` writes to, holding an older boot's crash."""
     boot_log = tmp_path / "logs" / "backend-boot.log"
     boot_log.parent.mkdir()
     boot_log.write_text(f"Traceback (most recent call last):\n{STALE_CRASH}\n")
@@ -86,27 +209,9 @@ def state(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def children(monkeypatch):
-    """``backend_launch.spawn`` replaced by "run this python source into the boot log"."""
-    procs: list[subprocess.Popen] = []
-    plan = {"code": _CRASH}
-
-    def fake_spawn(_cmd, _env, boot_log):
-        with boot_log.open("ab") as out:
-            proc = subprocess.Popen(
-                [sys.executable, "-c", plan["code"]],
-                stdout=out,
-                stderr=out,
-                stdin=subprocess.DEVNULL,
-            )
-        procs.append(proc)
-        return backend_launch.Launched(proc.pid, "test")
-
-    monkeypatch.setattr(backend_launch, "spawn", fake_spawn)
-    yield plan
-    for proc in procs:
-        proc.kill()
-        proc.wait(10)
+def children(pinned):
+    """The fake backend's source (``pinned``'s ``plan``): "run this into the boot log"."""
+    return pinned.plan
 
 
 def _url(port: int) -> str:
@@ -505,26 +610,128 @@ class TestWaitRefusing:
         assert "'tools/list'" in answered[2]
 
 
+class TestNothingRealCanBeStartedFromThisFile:
+    """The seams ``pinned`` puts in place are the ones a cold start would use."""
+
+    def test_the_spawn_seam_is_the_fake_and_every_path_is_under_tmp_path(
+        self, tmp_path, pinned
+    ):
+        assert backend_launch.spawn.__name__ == "fake_spawn"
+        for path in (
+            singleton.STATE_DIR,
+            singleton.LOCK_FILE,
+            singleton.PORT_FILE,
+            singleton.SERVER_STATE_FILE,
+        ):
+            assert tmp_path in path.parents or path == tmp_path
+        from stealth_chrome_devtools_mcp.embedded import logging_setup
+
+        assert tmp_path in logging_setup.resolve_log_dir().parents
+
+    def test_a_spawn_or_a_start_after_teardown_raises(self, tmp_path, pinned):
+        pinned.closed.set()
+
+        with pytest.raises(RuntimeError, match="after the test ended"):
+            backend_launch.spawn(["x"], {}, tmp_path / "boot.log")
+        with pytest.raises(RuntimeError, match="after the test ended"):
+            singleton.ensure_server_running(_closed_port())
+        assert pinned.procs == []
+        pinned.closed.clear()  # the fixture's own teardown still has to drain
+
+
+class TestTheRefusalIsPortScoped:
+    """``drive`` refuses the client's calls with the exit only when it is the exit of
+    the port the last heal actually waited on."""
+
+    DEAD = 41901  # the port our launched backend died on
+    MOVED = 41902  # where the heal went instead (``_select_backend_port``'s fallback)
+
+    async def _drive_one_retry_wait(self, monkeypatch, *, heal_port):
+        """``drive`` with a dead generation, a heal that waits on ``heal_port`` and
+        never finds it ready, and the verdict standing on ``DEAD``; one ``tools/call``
+        queued. Returns ``(sink, queue)`` after a few retry waits."""
+        monkeypatch.setattr(proxy_selfheal, "HEAL_BACKOFF_SECONDS", 0.01)
+        monkeypatch.setattr(proxy_selfheal, "RETRY_BASE_SECONDS", 0.05)
+        monkeypatch.setattr(proxy_selfheal, "RETRY_MAX_SECONDS", 0.1)
+        backend_exit._verdict["failure"] = backend_exit.Failure(
+            1, IMPORT_ERROR, None, self.DEAD
+        )
+        tx, rx = anyio.create_memory_object_stream(8)
+        await tx.send(_request(5, "tools/call"))
+        sink = _Sink()
+
+        async def connect(_url, _replay, _armed):
+            return  # never ready: the generation ends at once
+
+        async def watch(_port):
+            return
+
+        async def never_ready(_url, _seconds):
+            return False
+
+        with anyio.move_on_after(1.0):
+            await proxy_selfheal.drive(
+                port=self.DEAD,
+                url_for=lambda p: f"http://127.0.0.1:{p}/mcp/",
+                connect=connect,
+                watch=watch,
+                confirm_alive=lambda _port: False,
+                replay=lambda: None,
+                pending=proxy_selfheal.PendingCalls(rx),
+                client_write=sink,
+                ensure_running=lambda _dead: heal_port,
+                await_ready=never_ready,
+            )
+        return sink, rx
+
+    async def test_a_verdict_for_another_port_refuses_nothing(self, monkeypatch):
+        sink, rx = await self._drive_one_retry_wait(monkeypatch, heal_port=self.MOVED)
+
+        assert sink.sent == [], "the heal moved on: P's exit says nothing about P2"
+        assert rx.receive_nowait().message.root.id == 5  # still queued for the backend
+
+    async def test_a_verdict_for_the_port_the_heal_waited_on_refuses(self, monkeypatch):
+        sink, _rx = await self._drive_one_retry_wait(monkeypatch, heal_port=self.DEAD)
+
+        assert [m.message.root.id for m in sink.sent] == [5]
+        assert IMPORT_ERROR in sink.sent[0].message.root.error.message
+
+    async def test_a_heal_that_found_no_port_refuses_nothing(self, monkeypatch):
+        sink, _rx = await self._drive_one_retry_wait(monkeypatch, heal_port=None)
+
+        assert sink.sent == []
+
+    async def test_heal_backend_reports_the_port_it_waits_on(self):
+        told: list[int | None] = []
+        waited: list[str] = []
+
+        async def never_ready(url, _seconds):
+            waited.append(url)
+            return False
+
+        healed = await proxy_selfheal.heal_backend(
+            self.DEAD,
+            ensure_running=lambda _dead: self.MOVED,
+            await_ready=never_ready,
+            url_for=lambda p: f"http://127.0.0.1:{p}/mcp/",
+            on_port=told.append,
+        )
+
+        assert healed is None
+        assert told[0] is None  # a heal starts with no port waited on
+        assert told[1:] == [self.MOVED] * proxy_selfheal.HEAL_ATTEMPTS
+        assert all(str(self.MOVED) in url for url in waited)
+
+
 async def _drain_cold_start_threads(seconds: float = 60.0) -> bool:
-    """Wait until every ``_start_backend_holding_lock`` thread the test caused is done.
-
-    They hold the cold-start lock and then spawn; one that reaches
-    ``_start_server_process`` after monkeypatch is undone spawns a real backend and
-    writes the developer's real ``server.json``. True iff none is left."""
-
-    def live() -> list[threading.Thread]:
-        return [
-            t
-            for t in threading.enumerate()
-            if getattr(t, "_target", None) is singleton._start_backend_holding_lock
-        ]
-
-    return await _wait_until(lambda: not live(), seconds)
+    """Wait until every cold-start thread the test caused is done - while the test's
+    patches are still in force. True iff none is left."""
+    return await _wait_until(lambda: not _cold_start_threads(), seconds)
 
 
 class TestTheClientIsTold:
     async def test_the_first_refusal_arrives_within_one_heal_attempt(
-        self, state, children, monkeypatch, tmp_path
+        self, state, children, pinned, monkeypatch
     ):
         """The REAL wiring, ``ensure_server_running`` included: the cold-start lock,
         its daemon thread and ``_wait_for_server`` are where a1d54126 lost its "at
@@ -535,21 +742,19 @@ class TestTheClientIsTold:
         with. Only ``backend_launch.spawn`` and the paths are replaced.
 
         Deadlines are shrunk (a refused connect to a closed port costs ~2 s on
-        Windows, so a fast build still needs ~15 s here: the bound is 4x that), and bounded: on a1d54126 the refusal comes after more
-        than one heal attempt, so the ``< HEAL`` assertion is the RED, with a
-        ``fail_after`` so a build that never answers cannot hang the suite."""
+        Windows, so a fast build still needs ~15 s here: the bound is 4x that), and
+        bounded: on a1d54126 the refusal comes after more than one heal attempt, so
+        the ``< HEAL`` assertion is the RED, with a ``fail_after`` so a build that
+        never answers cannot hang the suite. The drain runs in a ``finally``, with
+        its own bound, so it also runs when that ``fail_after`` fires."""
         from mcp.shared.message import SessionMessage
         from mcp.types import JSONRPCMessage, JSONRPCRequest
 
         heal_attempt = 60.0
-        monkeypatch.setattr(singleton, "STATE_DIR", tmp_path)
-        monkeypatch.setattr(singleton, "LOCK_FILE", tmp_path / "singleton.lock")
-        monkeypatch.setattr(singleton, "_clear_stale_backend", lambda _port: [])
+        pinned.setattr(singleton, "_clear_stale_backend", lambda _port: [])
         # Default arguments are bound at definition: STARTUP_TIMEOUT 30, READY 120.
-        monkeypatch.setattr(singleton._wait_for_server, "__defaults__", (70,))
-        monkeypatch.setattr(
-            singleton._await_backend_http, "__defaults__", (heal_attempt,)
-        )
+        pinned.setattr(singleton._wait_for_server, "__defaults__", (70,))
+        pinned.setattr(singleton._await_backend_http, "__defaults__", (heal_attempt,))
         monkeypatch.setattr(proxy_selfheal, "HEAL_ATTEMPT_SECONDS", heal_attempt)
         monkeypatch.setattr(proxy_selfheal, "HEAL_BACKOFF_SECONDS", 0.05)
         monkeypatch.setattr(proxy_selfheal, "RETRY_BASE_SECONDS", 0.05)
@@ -558,7 +763,7 @@ class TestTheClientIsTold:
         async def never_stale(*_a, **_k):
             await anyio.sleep_forever()
 
-        monkeypatch.setattr(singleton, "_watch_backend_liveness", never_stale)
+        pinned.setattr(singleton, "_watch_backend_liveness", never_stale)
 
         # What run_stdio_proxy does at boot: the lock thread spawns and waits.
         port = singleton.ensure_server_running(_closed_port())
@@ -576,16 +781,21 @@ class TestTheClientIsTold:
             },
         )
         started = time.monotonic()
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(singleton._proxy_streams, c2p_rx, p2c_tx, port)
-            await c2p_tx.send(SessionMessage(message=JSONRPCMessage(init)))
-            with anyio.fail_after(heal_attempt * 2):
-                assert (await p2c_rx.receive()).message.root.id == 1  # local answer
-                await c2p_tx.send(_request(2, "tools/call"))
-                refusal = (await p2c_rx.receive()).message.root
-            took = time.monotonic() - started
-            tg.cancel_scope.cancel()
-        drained = await _drain_cold_start_threads()
+        drained = False
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(singleton._proxy_streams, c2p_rx, p2c_tx, port)
+                await c2p_tx.send(SessionMessage(message=JSONRPCMessage(init)))
+                with anyio.fail_after(heal_attempt * 2):
+                    assert (await p2c_rx.receive()).message.root.id == 1  # local
+                    await c2p_tx.send(_request(2, "tools/call"))
+                    refusal = (await p2c_rx.receive()).message.root
+                took = time.monotonic() - started
+                tg.cancel_scope.cancel()
+        finally:
+            # Also when the body FAILED or timed out: this is the path that leaked.
+            with anyio.CancelScope(shield=True):
+                drained = await _drain_cold_start_threads()
 
         assert refusal.id == 2
         assert IMPORT_ERROR in refusal.error.message

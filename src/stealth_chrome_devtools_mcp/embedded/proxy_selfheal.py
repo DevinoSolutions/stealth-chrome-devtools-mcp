@@ -475,6 +475,7 @@ async def heal_backend(
     ensure_running: Callable[[int], int | None],
     await_ready: Callable[..., Awaitable[bool]],
     url_for: Callable[[int], str],
+    on_port: Callable[[int | None], None] | None = None,
 ) -> int | None:
     """Get this proxy a live backend again, or ``None`` when it cannot.
 
@@ -484,12 +485,20 @@ async def heal_backend(
     it. ``ensure_running`` blocks (socket probes, and the reuse gate's
     ``initialize``), so it is driven off-thread — run inline it would freeze the
     stdio pump this whole module exists to keep alive.
+
+    ``on_port`` is told ``None`` at the start and then the port ``ensure_running``
+    chose before each wait on it, so a caller can tell which port the last attempt
+    actually waited on (``drive``'s refusal is scoped to it).
     """
     import anyio
 
+    if on_port is not None:
+        on_port(None)
     for attempt in range(1, HEAL_ATTEMPTS + 1):
         try:
             port = await anyio.to_thread.run_sync(ensure_running, dead_port)
+            if on_port is not None:
+                on_port(port)
             if port is not None and await await_ready(
                 url_for(port), HEAL_ATTEMPT_SECONDS
             ):
@@ -694,6 +703,12 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
     """
     from stealth_chrome_devtools_mcp.embedded import backend_exit
 
+    waited_on: dict[str, int | None] = {"port": None}
+
+    def note_port(port: int | None) -> None:
+        """``heal_backend`` reports each port it is about to wait on (None: none)."""
+        waited_on["port"] = port
+
     current: int = port
     resend: object = None
     streak = 0
@@ -730,6 +745,7 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                 ensure_running=ensure_running,
                 await_ready=await_ready,
                 url_for=url_for,
+                on_port=note_port,
             )
         episode_started = time.monotonic()
         while healed is None:
@@ -761,10 +777,17 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                     delay=delay,
                     hint=hint,
                 )
+            # Only an exit of the port the last heal actually waited on: a verdict
+            # naming P while the heal moved to P2 says nothing about what P2 is doing.
             exited = backend_exit.latest()
-            await pending.wait_refusing(
-                client_write, delay, None if exited is None else exited.describe()
-            )
+            refusal = None
+            if (
+                exited is not None
+                and exited.port is not None
+                and exited.port == waited_on["port"]
+            ):
+                refusal = exited.describe()
+            await pending.wait_refusing(client_write, delay, refusal)
             # The wait IS the flap remedy, so the streak has been served.
             streak = 0
             healed = await heal_backend(
@@ -772,6 +795,7 @@ async def drive(  # noqa: PLR0913  PERMANENT(function interface)
                 ensure_running=ensure_running,
                 await_ready=await_ready,
                 url_for=url_for,
+                on_port=note_port,
             )
         if attempt:
             # The episode closed. Without this point every outage that recovered
