@@ -553,6 +553,14 @@ E2E_EXEMPT: dict[str, str] = {
     "acquire_session_lock": "no browser involved; tests/test_session_lease.py, tests/test_e2e_fleet_session.py",
     "release_session_lock": "no browser involved; tests/test_session_lease.py, tests/test_e2e_fleet_session.py",
     "get_session_lock_status": "no browser involved; tests/test_session_lease.py, tests/test_e2e_fleet_session.py",
+    # The captcha tools drive third-party widgets (Cloudflare, Google), so the
+    # real-Chrome gate cannot depend on them: tests/test_captcha_clicker.py pins
+    # the detection and the click hermetically, and
+    # tests/test_captcha_integration.py runs them against the providers' own
+    # always-pass test keys outside the gate.
+    "enable_captcha_auto_click": "needs a live captcha provider; tests/test_captcha_clicker.py, tests/test_captcha_integration.py",
+    "disable_captcha_auto_click": "needs a live captcha provider; tests/test_captcha_clicker.py, tests/test_captcha_integration.py",
+    "get_captcha_status": "needs a live captcha provider; tests/test_captcha_clicker.py, tests/test_captcha_integration.py",
 }
 
 
@@ -560,7 +568,7 @@ def test_e2e_coverage_manifest():
     """The E2E suite covers every registered section tool (partition tripwire)."""
     assert server_mod is not None, "server module failed to load"
     all_names = {name for names in server_mod.SECTION_TOOLS.values() for name in names}
-    assert len(all_names) == 97
+    assert len(all_names) == 100
 
     covered = set(E2E_COVERED)
     exempt = set(E2E_EXEMPT)

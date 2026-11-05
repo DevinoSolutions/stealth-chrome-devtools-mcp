@@ -435,11 +435,11 @@ spawn_browser(headless=True, browser_args=["--enable-automation"])
 | `list_network_requests` | View intercepted network traffic |
 | `get_cookies` / `set_cookie` | Manage browser cookies |
 
-**97 tools** across 12 sections — the count is derived from the live tool registry,
+**100 tools** across 13 sections — the count is derived from the live tool registry,
 never hand-maintained. [See the full navigation map →](NAVMAP.md).
 
 That is what the server **serves**, which is not the same as what the release
-gate **proves**. At the release SHA in the evidence ledger, 3 of those 97 are
+gate **proves**. At the release SHA in the evidence ledger, 3 of those 100 are
 release-qualified: asserted end-to-end over the real stdio transport a client
 actually speaks. The rest are driven against real Chrome by the E2E suite but
 through an in-process seam, so they are `served-unqualified` at the wire — tested,
