@@ -416,9 +416,15 @@ def _launched_backend_is_gone(port: int | None, *, refused: bool) -> bool:
     gone for good? Logs the cause once if so.
 
     Decisive only when nothing is listening (``refused``): our dead child cannot be,
-    so a poll that was ANSWERED (any status) or connected and timed out met someone
-    else's backend, and the stale record is dropped (``backend_exit.forget``) rather
-    than allowed to abort a wait on it."""
+    so a poll that was ANSWERED (any status) or connected and then timed out met
+    someone else's backend, and the stale record is dropped (``backend_exit.forget``)
+    rather than allowed to abort a wait on it. A ``ConnectTimeout`` is a connect that
+    never completed: nothing answered and nothing was refused, so it is not a
+    refusal either, and takes the same path (the record dropped, the full deadline
+    kept), which is fail-safe because the wait is only ever longer. Two cases cost
+    one retry at most: a sibling backend still importing (nothing listens yet, so it
+    reads as our child's refusal) and, on Windows, a full listen backlog (a refusal
+    that is not one)."""
     from stealth_chrome_devtools_mcp.embedded import backend_exit
 
     if not refused:
