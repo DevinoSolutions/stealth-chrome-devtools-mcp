@@ -37,7 +37,7 @@ import psutil
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Collection, Iterator
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, zombie
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 DEBUG_PORT_FLAG = "--remote-debugging-port"
@@ -324,7 +324,7 @@ def command_line_is_gone(pid: int) -> bool:
     one we cannot ask about (``AccessDenied``) stays HELD, never called dead."""
     try:
         process = psutil.Process(pid)
-        if process.status() == psutil.STATUS_ZOMBIE:
+        if zombie.is_zombie(process):
             return True
         return _EXE_WITNESS and not process.cmdline() and _exe_is_gone(pid)
     except psutil.NoSuchProcess:  # incl. ZombieProcess: reaped or reaping

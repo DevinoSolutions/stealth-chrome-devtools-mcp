@@ -43,6 +43,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     clone_storage,
     profile_lock,
     profile_seed,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     resolve_profile_selection,
@@ -167,7 +168,9 @@ class TestProfileHold:
         """A pid that ``pid_exists`` lists and whose ``status``/``cmdline`` reads
         answer (or raise) what is given. ``exe`` is what reading its
         ``/proc/<pid>/exe`` link does -- an exception to raise, or the target to
-        return -- and ``linux`` whether this platform has that witness at all."""
+        return -- and ``linux`` whether this platform has that witness at all.
+        The answers are POSIX's, zombies included, on any runner."""
+        monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
         monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
         monkeypatch.setattr(browser_cmdline, "_EXE_WITNESS", linux)
 

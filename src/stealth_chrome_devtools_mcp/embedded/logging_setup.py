@@ -878,10 +878,11 @@ def bootstrap_backend_process_logging() -> Path:
     # hard crash, so sharing the RotatingFileHandler's file would add a second
     # open handle across the SAME path it may later os.rename() during
     # rotation (Windows WinError 32 risk, plan_M3 risk #1).
-    fault_log_path = log_path.with_name(f"{log_path.stem}-fault.log")
+    # ``loop_stall`` keeps the handle: its stall dumps land in the same file.
+    from stealth_chrome_devtools_mcp.embedded import loop_stall
+
     with contextlib.suppress(OSError):
-        fault_log = fault_log_path.open("a", encoding="utf-8")
-        faulthandler.enable(file=fault_log)
+        faulthandler.enable(file=loop_stall.open_fault_log(log_path))
 
     # Affirmative proof of boot, independent of any error occurring: without
     # this the structured log stays EMPTY until the first error/warning/info

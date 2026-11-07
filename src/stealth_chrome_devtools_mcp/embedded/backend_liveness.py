@@ -239,11 +239,17 @@ async def beat(
     0.1 s, and the event loop this exists to demonstrate is turning must not be
     the thing blocked to demonstrate it. The loop is still the thing being
     measured — it has to schedule the hand-off and be resumed afterwards.
+
+    Each beat also re-arms ``loop_stall``'s dump, before the hand-off: the beat
+    that does not come is the moment the stacks are worth having.
     """
     import anyio
 
+    from stealth_chrome_devtools_mcp.embedded import loop_stall
+
     every = HEARTBEAT_INTERVAL_SECONDS if interval is None else interval
     while True:
+        loop_stall.arm()
         await anyio.to_thread.run_sync(stamp, path, port, pid)
         await anyio.sleep(every)
 

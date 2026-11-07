@@ -126,7 +126,7 @@ from typing import TYPE_CHECKING
 import psutil
 from nodriver import cdp
 
-from stealth_chrome_devtools_mcp.embedded import tab_close, tab_open
+from stealth_chrome_devtools_mcp.embedded import tab_close, tab_open, zombie
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # the ladder's rungs are callables, typed but never imported
@@ -192,7 +192,7 @@ def browser_is_alive(browser: object) -> bool:
     if pid:
         try:
             proc = psutil.Process(int(pid))
-            return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+            return proc.is_running() and not zombie.is_zombie(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
             return False
 
@@ -263,7 +263,7 @@ def _has_exited(proc: psutil.Process) -> bool:
     """
     if not proc.is_running():
         return True
-    return proc.status() == psutil.STATUS_ZOMBIE
+    return zombie.is_zombie(proc)  # never a status() read on Windows: see ``zombie``
 
 
 def wait_for_exit(pid: int | None, timeout: float = EXIT_GRACE_SECONDS) -> Exited:
