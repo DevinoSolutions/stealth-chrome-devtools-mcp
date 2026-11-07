@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import tab_open
+from stealth_chrome_devtools_mcp.embedded import tab_open, zombie
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -155,7 +155,7 @@ def _running(pid: int) -> bool:
     """Is *pid* a live process? One pid, not a scan; unreadable counts as not."""
     try:
         process = psutil.Process(pid)
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        return process.is_running() and not zombie.is_zombie(process)
     except psutil.Error:
         return False
 
@@ -309,6 +309,11 @@ async def _ask(browser: Browser, launched_pid: int) -> None:
         if not browser_pids:
             continue
         named = True
+        # The launched pid IS the browser on every direct launch, and owns itself;
+        # only a wrapper's descendants need the walk, which is a whole-machine
+        # snapshot taken on the event loop with the GIL held (see ``zombie``).
+        if launched_pid in browser_pids:
+            continue
         if not set(browser_pids) & owned_pids(launched_pid):
             raise _refusal(browser_pids[0], launched_pid)
     if not named:

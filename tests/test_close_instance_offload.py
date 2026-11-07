@@ -34,6 +34,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     login_persistence,
     process_exit,
     tab_open,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -884,7 +885,9 @@ def test_a_zombie_is_an_exited_browser(monkeypatch):
     ``psutil`` name rather than a real process. A zombie has exited — its
     cookie store is committed — and calling that a timeout would spend the
     whole 5 s grace and then kill an already-dead pid on every POSIX close.
+    The platform is POSIX's too, so the zombie question is asked on any runner.
     """
+    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
     monkeypatch.setattr(
         process_exit,
         "psutil",
