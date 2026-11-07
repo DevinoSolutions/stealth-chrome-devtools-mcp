@@ -1,10 +1,15 @@
 """Captcha auto-click against the providers' own always-pass test widgets (real Chrome, real network).
 
-Cloudflare publishes ``1x00000000000000000000AA`` and Google
-``6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI`` as site keys whose widgets always
+Cloudflare publishes ``1x00000000000000000000AA``, Google
+``6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI``, and hCaptcha
+``10000000-ffff-ffff-ffff-000000000001`` as site keys whose widgets always
 pass, so a click is all they ask for. Each node serves a page with ONE such
-widget from a local HTTP server, turns the monitor on and waits for the page's
-response field to carry a token.
+widget from a local HTTP server, turns the monitor on and checks the result.
+
+For Turnstile and reCAPTCHA the test waits for a response token. For hCaptcha
+the test asserts that the monitor **clicked the checkbox** (the click log has an
+entry of type ``hcaptcha``); whether hCaptcha's test widget also produces a
+token is not asserted, because the job of the monitor is to click, not to solve.
 
 These nodes need the open internet (the widget scripts are the providers') and a
 browser, so they are ``integration`` and outside both the pre-push lane and the
@@ -74,6 +79,26 @@ RECAPTCHA_PAGE = """<!DOCTYPE html>
 </html>
 """
 
+HCAPTCHA_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+</head>
+<body>
+  <form>
+    <div class="h-captcha" data-sitekey="10000000-ffff-ffff-ffff-000000000001"
+         data-callback="onSuccess"></div>
+  </form>
+  <div id="result"></div>
+  <script>
+    function onSuccess(token) {
+      document.getElementById('result').textContent = 'CAPTCHA_PASSED';
+    }
+  </script>
+</body>
+</html>
+"""
+
 #: (page, the response field the provider fills in, where its script comes from)
 WIDGETS = {
     "turnstile": (
@@ -85,6 +110,11 @@ WIDGETS = {
         RECAPTCHA_PAGE,
         'textarea[name="g-recaptcha-response"]',
         "https://www.google.com/recaptcha/api.js",
+    ),
+    "hcaptcha": (
+        HCAPTCHA_PAGE,
+        'textarea[name="h-captcha-response"]',
+        "https://js.hcaptcha.com/1/api.js",
     ),
 }
 
@@ -166,6 +196,19 @@ async def _wait_for_token(iid: str, field: str) -> str:
     return token
 
 
+async def _wait_for_click(iid: str, kind: str) -> list[dict]:
+    """Poll the monitor status until at least one click of *kind* appears."""
+    status = get_fn("get_captcha_status")
+    deadline = time.monotonic() + WAIT_SECONDS
+    while time.monotonic() < deadline:
+        after = await status(instance_id=iid)
+        clicks = [c for c in after.get("clicks", []) if c["type"] == kind]
+        if clicks:
+            return clicks
+        await asyncio.sleep(0.5)
+    return []
+
+
 @pytest.mark.parametrize("kind", list(WIDGETS))
 async def test_the_monitor_gets_the_widget_to_pass(tmp_path, pages, kind):
     field = WIDGETS[kind][1]
@@ -176,20 +219,29 @@ async def test_the_monitor_gets_the_widget_to_pass(tmp_path, pages, kind):
 
         enabled = await enable(instance_id=iid, interval_seconds=0.5)
         assert enabled["enabled"] is True
-        token = await _wait_for_token(iid, field)
 
-        after = await status(instance_id=iid)
-        assert after["active"] is True
-        assert token, f"{kind}: no token in {field} within {WAIT_SECONDS:g} s: {after}"
-        assert (
-            await eval_js(iid, "return document.getElementById('result').textContent;")
-            == "CAPTCHA_PASSED"
-        )
-        if kind == "recaptcha-v2":
-            # Google asks for the click; Cloudflare's test widget may pass by itself.
-            assert after["clicks"], after
-        for click in after["clicks"]:
-            assert click["type"] == kind
+        if kind == "hcaptcha":
+            clicks = await _wait_for_click(iid, kind)
+            assert clicks, f"hcaptcha: no click within {WAIT_SECONDS:g} s"
+            assert all(c["type"] == "hcaptcha" for c in clicks)
+        else:
+            token = await _wait_for_token(iid, field)
+            after = await status(instance_id=iid)
+            assert after["active"] is True
+            assert token, (
+                f"{kind}: no token in {field} within {WAIT_SECONDS:g} s: {after}"
+            )
+            assert (
+                await eval_js(
+                    iid,
+                    "return document.getElementById('result').textContent;",
+                )
+                == "CAPTCHA_PASSED"
+            )
+            if kind == "recaptcha-v2":
+                assert after["clicks"], after
+            for click in after["clicks"]:
+                assert click["type"] == kind
 
 
 async def test_a_solved_widget_is_not_clicked_again(tmp_path, pages):
