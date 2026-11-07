@@ -78,6 +78,16 @@ from it would spawn a second backend beside it). A backend silent past the
 ceiling, one that never stamped, and one that owns no browser are evicted exactly
 as before.
 
+**Slow is also not "lagging for five minutes" (T-15386).** On 2026-11-07 a backend
+kept stamping every few seconds while every await on its loop took seconds, so its
+silence never passed the ceiling: the rule above spared it on every cold start
+and the proxies logged "backend unhealable" 325 times until it was killed by
+hand. The witness is now ``backend_liveness.unusable_for`` — the longer of its
+silence and how long its own stamps have reported a loop lag past
+``backend_liveness.UNUSABLE_LAG_SECONDS`` — against the same ceiling. A persistent
+profile's browser survives that eviction and is re-attached by F-888; a clone does
+not, which is the price of a backend nobody could use anyway.
+
 A leaf: ``browser_pid_registry`` (the record's own home, for its own reader) and
 psutil. Every other collaborator arrives as an argument — the backend-identity
 check, the pid liveness checks, the reuse gate and the record's own entry are
@@ -118,8 +128,10 @@ TERMINATE_GRACE_SECONDS = 5
 PORT_RELEASE_SECONDS = 5
 PORT_RELEASE_POLL_SECONDS = 0.1
 
-#: How long a backend of our own identity may have been silent (no loop stamp) and
-#: still be read as busy rather than wedged, while it owns a live browser. Far
+#: How long a backend of our own identity may have been silent (no loop stamp), or
+#: reporting its own loop lagging past ``backend_liveness.UNUSABLE_LAG_SECONDS``
+#: (T-15386), and still be read as busy rather than wedged, while it owns a live
+#: browser. Far
 #: past the ~106 s the F-967 incident froze a loop for, and short enough that a
 #: truly dead loop — which stamps never again — is evicted within minutes. Past
 #: it, or with no stamp at all, the old rule applies unchanged.
@@ -253,9 +265,12 @@ def protected(  # noqa: PLR0913  PERMANENT(function interface)
        terminating a wedged backend of our own is the recovery both the
        ``restart`` verb and the cold-start lock exist to perform. Protecting it
        would turn a wedge into a permanent one. **Unless ``silence`` is given
-       (F-967, the KILL site only) and says it was heard from within**
-       :data:`STARVED_CEILING_SECONDS`: slow, not wedged, so it falls through to
-       conditions 3 and 4 like a stranger. ``None`` from it is no evidence;
+       (F-967, the KILL site only) and says it has been unusable by its own
+       account for no more than** :data:`STARVED_CEILING_SECONDS`: slow, not
+       wedged, so it falls through to conditions 3 and 4 like a stranger.
+       ``singleton`` binds it to ``backend_liveness.unusable_for`` (T-15386):
+       silence, or a self-reported loop lag, whichever has lasted longer.
+       ``None`` from it is no evidence;
     3. its recorded pid is a live backend OF OURS (``is_ours``, the same
        predicate eviction already trusts to never touch the wrong process). A
        record naming a dead or recycled pid describes nothing that can be

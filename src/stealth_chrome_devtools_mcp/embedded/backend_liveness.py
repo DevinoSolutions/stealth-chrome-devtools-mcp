@@ -35,12 +35,21 @@ DEAD, i.e. is its record residue": :func:`survey`, :func:`dead_entries` and
 :func:`forget_dead`. Deciding death is a liveness sentence and belongs here; the
 WRITE that follows is ``backend_registry.forget_entries``', because the record's
 schema and its read-merge-write protocol are that module's and always were.
+
+T-15386 adds what the heartbeat could not say: HOW LATE the loop runs.
+:class:`LoopLag` is the backend's own measurement, :func:`reported_lag` its
+reader, and the two witnesses built on the stamp — :func:`self_report` (the
+proxies' F-889 veto) and :func:`unusable_for` (the eviction's F-967 spare) —
+stop speaking for a backend whose own loop says it is a second or more late.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
+import statistics
 import time
+from collections import deque
 from typing import TYPE_CHECKING, NamedTuple
 
 from stealth_chrome_devtools_mcp.embedded import backend_registry
@@ -65,6 +74,58 @@ NO_PORT = "no port recorded"
 #: observed. A reader cannot change one without seeing the other.
 HEARTBEAT_INTERVAL_SECONDS = 3.0
 HEARTBEAT_STALE_SECONDS = 30.0
+
+#: The self-reported loop lag past which a backend's own stamp stops speaking
+#: for it (T-15386). A stamp proves the loop TURNS; on 2026-11-07 three backends
+#: kept stamping while every await took seconds — the probes measured
+#: ``connect=2574ms`` and a 10 ms sleep woke 0.6-0.8 s late — so "turns" and
+#: "serves" came apart and the stamp went on excusing a backend nobody could use.
+#: One second is ~100x an idle loop's median lag (5.7 ms measured) and well
+#: under the 2 s the proxies' own probes allow.
+UNUSABLE_LAG_SECONDS = 1.0
+#: How much history the reported lag is the MEDIAN of, and the fewest beats it is
+#: read from. A median, not a maximum: one ``CreateProcess`` on the loop thread
+#: costs 0.15-2 s and is a spike, not a backend that cannot serve. Five beats is
+#: 15 s at :data:`HEARTBEAT_INTERVAL_SECONDS`, so a fresh backend's cold start
+#: reports nothing rather than a median of one.
+LAG_WINDOW_SECONDS = 60.0
+LAG_MIN_SAMPLES = 5
+
+
+class LoopLag:
+    """The backend's own loop lag: how late each beat's sleep woke, as a median
+    over the last :data:`LAG_WINDOW_SECONDS`, and since when that median has been
+    at or past :data:`UNUSABLE_LAG_SECONDS` (T-15386).
+
+    Measured on the same coroutine that stamps, so it is the lag every other
+    coroutine on that loop is waiting through — and it is the BACKEND's own
+    measurement, which a starved prober cannot fake in either direction.
+    ``lagging_since`` therefore trails the real onset by up to half a window;
+    the eviction and the supervisor that read it count minutes, not seconds.
+    """
+
+    def __init__(self, interval: float) -> None:
+        self._samples: deque[float] = deque(
+            maxlen=max(LAG_MIN_SAMPLES, round(LAG_WINDOW_SECONDS / interval))
+        )
+        self.lagging_since: float | None = None
+
+    def median(self) -> float | None:
+        """The window's median lag, or ``None`` before :data:`LAG_MIN_SAMPLES`."""
+        if len(self._samples) < LAG_MIN_SAMPLES:
+            return None
+        return statistics.median(self._samples)
+
+    def observe(self, oversleep: float, now: float) -> float | None:
+        """Add one beat's oversleep (seconds past its nominal wake) at wall time
+        ``now``; return the new median."""
+        self._samples.append(max(0.0, oversleep))
+        lag = self.median()
+        if lag is None or lag < UNUSABLE_LAG_SECONDS:
+            self.lagging_since = None
+        elif self.lagging_since is None:
+            self.lagging_since = now
+        return lag
 
 
 def probe_port(
@@ -142,17 +203,62 @@ def silence(path: Path, port: int) -> float | None:
     :func:`self_report` lists — no entry, no sidecar, unreadable, a stamp by
     another pid — and for a stamp in the FUTURE beyond the same bound, which is
     a clock that moved and not a backend that spoke."""
+    heard = _heard(path, port)
+    return heard[0] if heard is not None else None
+
+
+def _number(stamp: dict[str, object], key: str) -> float | None:
+    value = stamp.get(key)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _heard(path: Path, port: int) -> tuple[float, dict[str, object]] | None:
+    """The age of the stamp that speaks for the entry on ``port``, and the stamp
+    itself — THE one read behind :func:`silence`, :func:`reported_lag` and
+    :func:`unusable_for`, so all three answer about the same stamp."""
     entry = backend_registry.backend_on_port(backend_registry.read_record(path), port)
     if entry is None:
         return None
     stamp = backend_registry.read_heartbeat(path, port)
-    at = stamp.get(backend_registry.HEARTBEAT_AT)
-    if isinstance(at, bool) or not isinstance(at, int | float):
+    at = _number(stamp, backend_registry.HEARTBEAT_AT)
+    if at is None or stamp.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
         return None
-    if stamp.get(backend_registry.HEARTBEAT_PID) != entry.get("pid"):
+    age = time.time() - at
+    return (age, stamp) if age >= -HEARTBEAT_STALE_SECONDS else None
+
+
+def reported_lag(path: Path, port: int) -> float | None:
+    """The backend's own median loop lag as of its last stamp, or ``None`` — no
+    stamp that speaks for the entry (:func:`silence`'s cases), or one from a
+    backend that reports no lag (an older one, or one still inside its first
+    :data:`LAG_MIN_SAMPLES` beats). T-15386."""
+    heard = _heard(path, port)
+    return _number(heard[1], backend_registry.HEARTBEAT_LOOP_LAG) if heard else None
+
+
+def unusable_for(path: Path, port: int) -> float | None:
+    """How long the backend on ``port`` has been unable to serve BY ITS OWN
+    ACCOUNT: since it last stamped, or since its stamps began reporting a median
+    loop lag at or past :data:`UNUSABLE_LAG_SECONDS`, whichever is longer
+    (T-15386). ``None`` for :func:`silence`'s no-evidence cases.
+
+    This is the eviction rule's witness (``backend_eviction.protected``, F-967's
+    "slow, not wedged"). Silence alone could never end the hang of 2026-11-07:
+    the backend kept stamping every few seconds, so it read as "slow" for as long
+    as it lived, the protected-backend rule refused every eviction, and the
+    proxies logged "backend unhealable" 325 times until it was killed by hand. A
+    backend that says its own loop has lagged a second or more for
+    :data:`~backend_eviction.STARVED_CEILING_SECONDS` is not slow; it is wedged
+    and still able to say so.
+    """
+    heard = _heard(path, port)
+    if heard is None:
         return None
-    age = time.time() - float(at)
-    return age if age >= -HEARTBEAT_STALE_SECONDS else None
+    age, stamp = heard
+    since = _number(stamp, backend_registry.HEARTBEAT_LAGGING_SINCE)
+    return max(age, time.time() - since) if since is not None else age
 
 
 def self_report(path: Path, port: int) -> float | None:
@@ -195,12 +301,39 @@ def self_report(path: Path, port: int) -> float | None:
     across them. The cost is that a wall-clock step changes an age, which the
     symmetric bound above turns into "no evidence" — falling back to the
     confirmation phase, i.e. to exactly today's behaviour.
+
+    **And a fresh stamp that reports its own loop lagging is not evidence
+    either** (T-15386). The veto this feeds exists to say "the timeouts are
+    OURS"; a backend whose own median loop lag is :data:`UNUSABLE_LAG_SECONDS`
+    or more has just said they are its. On 2026-11-07 that veto excused 276
+    failed probe runs against backends whose every await took seconds. Logged,
+    because a veto withheld is half of what a post-mortem has to reconstruct.
     """
-    age = silence(path, port)
-    return age if age is not None and age <= HEARTBEAT_STALE_SECONDS else None
+    heard = _heard(path, port)
+    if heard is None or heard[0] > HEARTBEAT_STALE_SECONDS:
+        return None
+    age, stamp = heard
+    lag = _number(stamp, backend_registry.HEARTBEAT_LOOP_LAG)
+    if lag is not None and lag >= UNUSABLE_LAG_SECONDS:
+        _logger.warning(
+            "backend on port %d stamped %.1fs ago but reports its own loop "
+            "%.2fs late (median); its failed probes are its own (T-15386)",
+            port,
+            age,
+            lag,
+        )
+        return None
+    return age
 
 
-def stamp(path: Path, port: int, pid: int) -> bool:
+def stamp(
+    path: Path,
+    port: int,
+    pid: int,
+    *,
+    loop_lag: float | None = None,
+    lagging_since: float | None = None,
+) -> bool:
     """Write one heartbeat; never raise. True iff the sidecar was published.
 
     The write is ``backend_registry.stamp_heartbeat``'s — the sidecar's name,
@@ -209,7 +342,12 @@ def stamp(path: Path, port: int, pid: int) -> bool:
     """
     try:
         return backend_registry.stamp_heartbeat(
-            path, port=port, pid=pid, at=time.time()
+            path,
+            port=port,
+            pid=pid,
+            at=time.time(),
+            loop_lag=loop_lag,
+            lagging_since=lagging_since,
         )
     except Exception:
         _logger.debug("could not stamp the backend heartbeat", exc_info=True)
@@ -239,13 +377,31 @@ async def beat(
     0.1 s, and the event loop this exists to demonstrate is turning must not be
     the thing blocked to demonstrate it. The loop is still the thing being
     measured — it has to schedule the hand-off and be resumed afterwards.
+
+    **It also measures the loop it runs on** (T-15386): how late each sleep
+    woke is fed to a :class:`LoopLag`, and its median rides on the next stamp.
+    Only the SLEEP is timed, never the hand-off, so a slow disk under the
+    sidecar's commit is not reported as a slow loop.
     """
     import anyio
 
     every = HEARTBEAT_INTERVAL_SECONDS if interval is None else interval
+    lag = LoopLag(every)
+    reported: float | None = None
     while True:
-        await anyio.to_thread.run_sync(stamp, path, port, pid)
+        await anyio.to_thread.run_sync(
+            functools.partial(
+                stamp,
+                path,
+                port,
+                pid,
+                loop_lag=reported,
+                lagging_since=lag.lagging_since,
+            )
+        )
+        slept_from = time.monotonic()
         await anyio.sleep(every)
+        reported = lag.observe(time.monotonic() - slept_from - every, time.time())
 
 
 _BEATING = False
