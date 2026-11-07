@@ -488,6 +488,13 @@ def record_backend(  # noqa: PLR0913  PERMANENT(function interface)
 #: exactly as 2.1.9 did).
 HEARTBEAT_AT = "heartbeat_at"
 HEARTBEAT_PID = "heartbeat_pid"
+#: Two OPTIONAL fields (T-15386): the backend's own median loop lag in seconds,
+#: and the wall time that median first reached
+#: ``backend_liveness.UNUSABLE_LAG_SECONDS`` (``None`` while it is under). A
+#: stamp without them is an older backend's and reads as "no lag reported", so
+#: the compatibility runs both ways exactly as it does for the two above.
+HEARTBEAT_LOOP_LAG = "loop_lag"
+HEARTBEAT_LAGGING_SINCE = "lagging_since"
 #: One sidecar per PORT, beside the record. A basename pattern rather than a
 #: bound directory, on ``browser_pid_registry.RECORD_NAME``'s precedent: every
 #: function here still takes the whole record path, so nothing binds a state dir
@@ -501,7 +508,15 @@ def heartbeat_path(path: Path, port: int) -> Path:
     return path.with_name(HEARTBEAT_NAME.format(port=port))
 
 
-def stamp_heartbeat(path: Path, *, port: int, pid: int, at: float) -> bool:
+def stamp_heartbeat(  # noqa: PLR0913  PERMANENT(function interface)
+    path: Path,
+    *,
+    port: int,
+    pid: int,
+    at: float,
+    loop_lag: float | None = None,
+    lagging_since: float | None = None,
+) -> bool:
     """Publish the backend's own liveness stamp for ``port``; True iff written.
 
     **It writes a per-port SIDECAR and never touches ``server.json``** — that is
@@ -528,8 +543,15 @@ def stamp_heartbeat(path: Path, *, port: int, pid: int, at: float) -> bool:
     from the ENTRY and requires the recorded pid to match — so a sidecar with no
     entry behind it is not a claim anybody can read, and re-introducing the check
     would re-introduce the record read this function exists to remove.
+
+    ``loop_lag`` / ``lagging_since`` are written only when given (T-15386), so a
+    caller that measures no lag publishes exactly the two-field stamp it always did.
     """
-    _commit_json(heartbeat_path(path, port), {HEARTBEAT_AT: at, HEARTBEAT_PID: pid})
+    stamp: dict[str, object] = {HEARTBEAT_AT: at, HEARTBEAT_PID: pid}
+    if loop_lag is not None:
+        stamp[HEARTBEAT_LOOP_LAG] = loop_lag
+        stamp[HEARTBEAT_LAGGING_SINCE] = lagging_since
+    _commit_json(heartbeat_path(path, port), stamp)
     return True
 
 
