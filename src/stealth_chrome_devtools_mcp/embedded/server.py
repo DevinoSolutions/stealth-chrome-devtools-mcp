@@ -11,7 +11,11 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from stealth_chrome_devtools_mcp.embedded import backend_token, proactor_accept
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_token,
+    proactor_accept,
+    proactor_spawn,
+)
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.backend_probe import MCP_PATH
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
@@ -655,6 +659,7 @@ if __name__ == "__main__":
         # the same call gives the app the session-free health route.
         rt.session_hygiene.install(mcp)
         proactor_accept.install()  # T-6363: a reset client must not close the listener
+        proactor_spawn.install()  # T-15385: CreateProcess must not stall the loop
         mcp.run(
             transport="http",
             host=args.host,
