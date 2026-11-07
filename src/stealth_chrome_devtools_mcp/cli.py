@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp import cli_supervise
 from stealth_chrome_devtools_mcp.observability import sentry_init
 
 if TYPE_CHECKING:
@@ -805,10 +806,9 @@ def _cmd_serve(args) -> int:
     return 0
 
 
-#: The OPS verbs. The six tool-driving verbs are `cli_call.DISPATCH`'s, beside
-#: the bodies they name; :func:`main` consults it for anything not here, so one
-#: table covers the lifecycle and the other covers the tool surface, each next
-#: to what it dispatches to.
+#: The OPS verbs. The six tool-driving verbs are `cli_call.DISPATCH`'s and the
+#: watchdog's is `cli_supervise.DISPATCH`, each beside the bodies it names;
+#: :func:`main` consults them for anything not here.
 _DISPATCH = {
     "status": _cmd_status,
     "profiles": _cmd_profiles,
@@ -847,9 +847,9 @@ def build_parser() -> argparse.ArgumentParser:
         "operate the backend, and drive its tools from a shell.",
     )
     sub = parser.add_subparsers(dest="command")
-    # ONE parser tree; the six tool verbs contribute their own surface, which
-    # is why their flags and their bodies can no longer drift apart (F-891).
+    # ONE parser tree; verb families contribute their own surface (F-891).
     _cli_call().add_parsers(sub)
+    cli_supervise.add_parsers(sub)
 
     sub.add_parser(
         "status", help="show backend state, browser-session root, and storage caps"
@@ -943,7 +943,7 @@ def main(argv=None) -> int:
         # USAGE, never 1 (F-891 review M1): naming no verb is argparse's own
         # kind of mistake, and exit 1 now means "the tool answered and said no".
         return _delivered(_cli_call().EXIT_USAGE)
-    handler = _DISPATCH.get(args.command)
+    handler = _DISPATCH.get(args.command) or cli_supervise.DISPATCH.get(args.command)
     if handler is None:
         handler = _cli_call().DISPATCH[args.command]
     try:

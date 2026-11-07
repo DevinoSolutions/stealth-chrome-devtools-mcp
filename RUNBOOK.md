@@ -28,6 +28,7 @@ console script is not on PATH. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for th
 | `stop` | stop the first recorded backend — its live browser sessions die with it; another desktop's backend keeps running and stays recorded |
 | `restart` | terminate + fresh cold-start spawn (the recovery for a **wedged** backend) |
 | `kill-orphans` | reap browser processes orphaned by a dead backend (refuses against a live backend unless `--force`) |
+| `supervise` | one pass of the out-of-process backend watchdog: terminate a backend that has been unusable for 3+ minutes (10 if its own loop says it is fine) so the next call starts a fresh one. Meant for a scheduled task, once a minute (see "Every session hangs, and only killing the backend helps" below); `--dry-run` judges and kills nothing |
 | `serve` | start the MCP server yourself (stdio by default, or `--http`) |
 
 `stop`, `restart`, and `kill-orphans` are thin front-ends over `singleton` /
@@ -243,6 +244,50 @@ that no longer exists). Its `reason` is `unhealable` (this recovery failed) or
 `proxy: backend reachable again` (INFO) carrying `attempts` and `outage_seconds`.
 An `unreachable` with no `reachable` after it is an outage that never ended. Every
 individual retry is still in the proxy's own log file.
+
+### Every session hangs, and only killing the backend helps (T-15386)
+The 2026-11-07 shape: tool calls in every session wait for minutes, `/_stealth/health`
+times out, and the backend process is alive with a quiet log. Its loop was crawling,
+not stopped, so it kept stamping its heartbeat; the proxies excused their failed
+probes, and the cold-start gate refused to evict it because it still owned live
+browsers (`refusing to evict the backend on port N ... (F-886)`, then `backend
+unhealable after N attempts`). Three things now end it without a person:
+
+* **The backend reports its own loop lag.** `heartbeat-<port>.json` carries
+  `loop_lag` (the median of how late its 3 s beat woke, over a minute) and
+  `lagging_since` (when that median first reached 1 s). A proxy whose probes fail
+  against a backend reporting a lag of 1 s or more logs `backend on port N stamped
+  Xs ago but reports its own loop Ys late (median); its failed probes are its own
+  (T-15386)` and goes straight to the confirmation gate instead of excusing it.
+* **Lagging for five minutes is not "slow".** The kill site's "slow, not wedged"
+  spare (F-967) now reads `unusable_for`: the longer of the stamp's silence and how
+  long it has reported that lag. Past `STARVED_CEILING_SECONDS` (300 s) the next
+  heal evicts it even though it owns browsers. Saved-profile browsers survive and
+  are re-attached by F-888; disposable clones are lost.
+* **An out-of-process supervisor kills what is still stuck.** `stealthy supervise`
+  is one pass: for every backend of ours in `server.json` it asks
+  `/_stealth/health` (5 s), reads the stamp, and keeps a clock in
+  `~/.stealth-mcp/supervisor.json`. RED (no answer, and the stamp is stale or
+  reports a lagging loop) for 180 s is terminated; SUSPECT (no answer behind a
+  loop that says it is fine — possibly the supervisor itself was starved) gets
+  600 s. One answered probe restarts the clock, a backend younger than the limit is
+  never killed, and the pid is pinned to its create time so a successor on the same
+  port is never the one killed. Each kill is kept in `supervisor.json` (`kills`, the
+  last 20) and logged in `logs/supervisor-<pid>.log`; a pass with nothing wrong
+  opens no log.
+
+Install the supervisor once per Windows user, as that user (it must read the same
+`~/.stealth-mcp`). `pythonw.exe`, not the `stealthy` console script, so no window
+flashes up every minute:
+
+```bat
+schtasks /Create /F /TN "stealthy supervise" /SC MINUTE /MO 1 ^
+  /TR "\"%APPDATA%\uv\tools\stealth-chrome-devtools-mcp\Scripts\pythonw.exe\" -m stealth_chrome_devtools_mcp.cli supervise"
+```
+
+Check it with `stealthy supervise --dry-run` (prints one line per backend and the
+clock it has kept), and remove it with `schtasks /Delete /F /TN "stealthy supervise"`.
+`restart` is still the way to un-jam a backend now.
 
 ### Backend is `wedged` (socket open, not answering)
 `restart`. It terminates the hung process and cold-starts a fresh one under the same
