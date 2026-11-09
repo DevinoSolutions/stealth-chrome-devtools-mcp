@@ -468,8 +468,9 @@ async def read_current(
     ``read`` goes to ``element`` first. When Chrome says that element has left
     (:func:`detached_element`) -- a framework re-mounted it, or input made the
     page navigate (STEALTH-…-FQ) -- ``selector`` is resolved again and ``read``
-    goes to its current match, which the caller carries on with. Only a READ may
-    be passed: it is what gets re-run, so nothing is ever sent to the page twice.
+    goes to its current match, which the caller carries on with. Only a READ (or
+    a focus, which changes nothing when repeated) may be passed: it is what gets
+    re-run, so nothing is ever sent to the page twice.
     No successor is a ``ToolError`` that says so.
 
     ``focus`` is for a BASELINE read, taken before input is sent: the successor
