@@ -551,12 +551,14 @@ class DOMHandler:
                         tab, element, selector, read, focus=True
                     )
                     await text_entry.type_characters(tab, element, line, delay)
-                    held, after = await read_current(tab, element, selector, read)
+                    element, after = await read_current(tab, element, selector, read)
                     text_entry.verify_received(selector, line, before, after)
-                    if held is not element:  # Enter and the next line go to it
-                        element = held
-                        await element.focus()
                 if index < len(lines) - 1:
+                    # Enter goes to the focused element: focus the one the page
+                    # holds now (a focus is safe to re-run, nothing is re-sent).
+                    element, _ = await read_current(
+                        tab, element, selector, lambda held: held.focus()
+                    )
                     await text_entry.press_enter(tab, shift=shift_enter)
                     await asyncio.sleep(delay)
 

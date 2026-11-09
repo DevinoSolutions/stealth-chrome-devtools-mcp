@@ -490,3 +490,66 @@ async def test_a_refused_paste_is_not_rescued_by_the_successor_s_focus_listener(
         await DOMHandler.paste_text(tab, SELECTOR, "abc", clear_first=False)
 
     assert successor.value == " 5 "  # never focused by the read-back
+
+
+async def test_nothing_is_focused_after_the_last_line_is_verified():
+    """Codex review of f67752f4, MEDIUM: a successor found by the last read-back
+    was focused after the verdict, so its focus listener could rewrite the field
+    after the tool had reported success. Nothing follows the last line, so
+    nothing may be focused there."""
+    field = _ReplacedField()
+    successor = _FocusRewritingField(value=" abc ")
+    tab = _RemountingTab(field, after=6, keep=True, successor=successor)
+
+    assert await DOMHandler.type_text(tab, SELECTOR, "abc", delay_ms=0) is True
+
+    assert successor.value == " abc "
+    assert successor.focused is False
+
+
+class _LeavesAfterOneRead(_ReplacedField):
+    """A successor the page re-mounts again right after it was read once."""
+
+    then = None  # (tab, the field that replaces it)
+
+    async def apply(self, js_function, *args, **kwargs):
+        answer = await super().apply(js_function, *args, **kwargs)
+        if "JSON.stringify" in js_function and self.then is not None:
+            (tab, replacement), self.then = self.then, None
+            self.gone = True
+            tab._select_result = replacement
+        return answer
+
+
+async def test_the_enter_reaches_a_field_that_was_re_mounted_twice():
+    """Codex review of f67752f4, MEDIUM: the focus before the Enter ran outside
+    the re-resolve, so a successor that left again made the tool fail without
+    sending the Enter, although the page held a field for it."""
+    field = _ReplacedField()
+    first = _LeavesAfterOneRead(value="abc")
+    second = FakeTextField(value="abc", multiline=True)
+    tab = _RemountingTab(field, after=6, keep=True, successor=first)
+    first.then = (tab, second)
+
+    assert await DOMHandler.type_text(
+        tab, SELECTOR, "abc\n", delay_ms=0, parse_newlines=True
+    )
+
+    assert second.value == "abc\n"
+    assert _typed(tab) == "abc"
+
+
+async def test_an_empty_line_s_enter_reaches_the_re_mounted_field():
+    """Codex review of f67752f4, MEDIUM: an Enter on an empty line skipped the
+    re-resolve. The first Enter made the page re-mount its field, the second
+    went to whatever held the focus, and the tool still reported success."""
+    field = _ReplacedField(multiline=True)
+    successor = FakeTextField(value="ab\n", multiline=True)
+    tab = _RemountingTab(field, after=6, keep=True, successor=successor)
+
+    assert await DOMHandler.type_text(
+        tab, SELECTOR, "ab\n\ncd", delay_ms=0, parse_newlines=True
+    )
+
+    assert successor.value == "ab\n\ncd"
+    assert _typed(tab) == "abcd"
