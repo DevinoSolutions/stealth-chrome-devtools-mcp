@@ -111,6 +111,61 @@ class _Doc:
     node_id = 1
 
 
+_MAIN_FRAME = {
+    "id": "MAIN",
+    "loaderId": "L",
+    "url": "https://example.test/",
+    "domainAndRegistry": "",
+    "securityOrigin": "https://example.test",
+    "mimeType": "text/html",
+    "secureContextType": "Secure",
+    "crossOriginIsolatedContextType": "NotIsolated",
+    "gatedAPIFeatures": [],
+}
+_PARSER_WORLD = 7
+
+
+class _ParserTab(_FakeTab):
+    """A ``_FakeTab`` whose page answers whether a selector parses.
+
+    Blink answers an invalid selector and a document swapped mid-query with the
+    one "DOM Error while querying", so the product asks the page's own parser
+    which it was. ``parses`` is that parser's answer; the three commands of the
+    question are answered through nodriver's own generators, and every other
+    command still comes off the ``send`` queue.
+    """
+
+    _ANSWERED = ("get_frame_tree", "create_isolated_world", "call_function_on")
+
+    def __init__(self, *, parses, unreachable=None, **kwargs):
+        super().__init__(**kwargs)
+        self.parses = parses
+        self.unreachable = unreachable  # raised instead of answering getFrameTree
+        self.asked = []
+
+    async def send(self, cmd):
+        # Named off the generator WITHOUT advancing it: advancing serializes the
+        # arguments, and the queue's own commands carry bare-int doubles.
+        if not inspect.isgenerator(cmd) or cmd.gi_code.co_name not in self._ANSWERED:
+            return await super().send(cmd)
+        request = next(cmd)
+        if request["method"] == "Page.getFrameTree" and self.unreachable is not None:
+            cmd.close()
+            raise self.unreachable
+        if request["method"] == "Page.getFrameTree":
+            reply = {"frameTree": {"frame": _MAIN_FRAME}}
+        elif request["method"] == "Page.createIsolatedWorld":
+            reply = {"executionContextId": _PARSER_WORLD}
+        else:
+            self.asked.append(request["params"])
+            reply = {"result": {"type": "boolean", "value": self.parses}}
+        try:
+            cmd.send(reply)
+        except StopIteration as stop:
+            return stop.value
+        raise AssertionError(f"{request['method']} wanted a second reply")
+
+
 @pytest.mark.asyncio
 async def test_resolve_element_recovers_from_transient_stale_node():
     sentinel = object()
@@ -268,7 +323,7 @@ def test_the_codeless_dom_error_is_the_shape_sentry_reports():
 async def test_resolve_element_recovers_from_a_codeless_dom_error():
     # F-828: the exact 3F shape — no code, a message the -32000 marker misses.
     sentinel = object()
-    tab = _FakeTab(select=[_dom_error(), sentinel])
+    tab = _ParserTab(parses=True, select=[_dom_error(), sentinel])
     assert await resolve_element(tab, "#btn") is sentinel
     assert tab.select_calls == 2
 
@@ -277,17 +332,64 @@ async def test_resolve_element_recovers_from_a_codeless_dom_error():
 async def test_resolve_elements_recovers_from_a_dom_error_carrying_the_code():
     # The same message WITH -32000 (STEALTH-…-23, the select_all path).
     nodes = [object()]
-    tab = _FakeTab(select_all=[_dom_error(code=-32000), nodes])
+    tab = _ParserTab(parses=True, select_all=[_dom_error(code=-32000), nodes])
     assert await resolve_elements(tab, ".row") == nodes
     assert tab.select_all_calls == 2
 
 
 @pytest.mark.asyncio
 async def test_dom_error_recovery_is_bounded_exactly_like_the_node_id_one():
-    tab = _FakeTab(select=[_dom_error() for _ in range(_MAX_RESOLVES)])
+    tab = _ParserTab(parses=True, select=[_dom_error() for _ in range(_MAX_RESOLVES)])
     with pytest.raises(ProtocolException, match="DOM Error while querying"):
         await resolve_element(tab, "#btn")
     assert tab.select_calls == _MAX_RESOLVES  # widened reach, unchanged bound
+
+
+# STEALTH-CHROME-DEVTOOLS-MCP-FS / -ED / -FP: ``button:has-text('Continue')`` is
+# Playwright syntax. Chrome rejects it with the same "DOM Error while querying" a
+# swapped document gets, so it was re-resolved three times, logged as "document
+# node invalidated mid-resolve" and surfaced as that bare message.
+INVALID = "button:has-text('Continue')"
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_css_selector_fails_once_and_says_why():
+    tab = _ParserTab(parses=False, select=[_dom_error(code=-32000)])
+    with pytest.raises(ToolError, match=r"Invalid CSS selector .*has-text"):
+        await resolve_element(tab, INVALID)
+    assert tab.select_calls == 1  # no re-resolve can clear a syntax error
+    assert len(tab.asked) == 1
+    asked = tab.asked[0]
+    assert asked["executionContextId"] == _PARSER_WORLD  # the isolated world
+    assert asked["arguments"] == [{"value": INVALID}]
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_selector_in_a_listing_fails_once_and_says_why():
+    tab = _ParserTab(parses=False, select_all=[_dom_error()])
+    with pytest.raises(ToolError, match="Invalid CSS selector"):
+        await resolve_elements(tab, INVALID)
+    assert tab.select_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_selector_on_the_node_id_path_fails_once_and_says_why():
+    tab = _ParserTab(parses=False, send=[_Doc(), _dom_error()])
+    with pytest.raises(ToolError, match="Invalid CSS selector"):
+        await query_selector_all(tab, INVALID)
+    assert tab.send_calls == 2  # one getDocument, one querySelectorAll
+
+
+@pytest.mark.asyncio
+async def test_a_parser_that_cannot_be_asked_leaves_the_race_handling_alone():
+    """The question is best-effort: a page that navigates while being asked says
+    nothing about the selector, so the DOM error is handled exactly as before."""
+
+    gone = ProtocolException({"message": "Cannot find context with specified id"})
+    sentinel = object()
+    tab = _ParserTab(parses=False, unreachable=gone, select=[_dom_error(), sentinel])
+    assert await resolve_element(tab, "#btn") is sentinel
+    assert tab.select_calls == 2
 
 
 @pytest.mark.asyncio

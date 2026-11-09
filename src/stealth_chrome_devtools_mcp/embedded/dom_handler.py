@@ -1,6 +1,7 @@
 """DOM manipulation and element interaction utilities."""
 
 import asyncio
+import functools
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     ElementDisconnected,
     detached_element,
     node_is_visible,
+    read_current,
     refresh_element,
     resolve_by_text,
     resolve_element,
@@ -542,11 +544,12 @@ class DOMHandler:
 
             delay = delay_ms / 1000
             lines = text.split("\n") if parse_newlines else [text]
+            read = functools.partial(text_entry.entered_text, selector=selector)
             for index, line in enumerate(lines):
                 if line:
-                    before = await text_entry.entered_text(element, selector)
+                    element, before = await read_current(tab, element, selector, read)
                     await text_entry.type_characters(tab, element, line, delay)
-                    after = await text_entry.entered_text(element, selector)
+                    element, after = await read_current(tab, element, selector, read)
                     text_entry.verify_received(selector, line, before, after)
                 if index < len(lines) - 1:
                     await text_entry.press_enter(tab, shift=shift_enter)
@@ -608,9 +611,12 @@ class DOMHandler:
                 await tab.send(cdp.input_.insert_text(text))
                 return True
 
-            before = await text_entry.entered_text(element, selector)
+            read = functools.partial(text_entry.entered_text, selector=selector)
+            held, before = await read_current(tab, element, selector, read)
+            if held is not element:
+                await held.focus()  # Input.insertText goes to the focused element
             await tab.send(cdp.input_.insert_text(text))
-            after = await text_entry.entered_text(element, selector)
+            _, after = await read_current(tab, held, selector, read)
             text_entry.verify_received(selector, text, before, after)
 
             return True

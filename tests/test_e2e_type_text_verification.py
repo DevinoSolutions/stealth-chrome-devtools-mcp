@@ -255,3 +255,52 @@ async def test_a_control_that_rewrites_what_it_receives_still_succeeds(
         )
     finally:
         await close(instance_id=iid)
+
+
+#: When the typed value is complete the page swaps the input for a successor
+#: holding the same value and moves the old node into a document with no frame.
+#: That is the shape behind STEALTH-CHROME-DEVTOOLS-MCP-FQ: Chrome answers any
+#: read of the old node "Node with given id does not belong to the document".
+_REMOUNT_JS = """(() => {
+    const host = document.createElement('div');
+    host.innerHTML = '<input id="remount">';
+    document.body.appendChild(host);
+    const old = host.firstChild;
+    const elsewhere = document.implementation.createHTMLDocument('');
+    old.addEventListener('input', () => {
+        if (old.value !== 'abc') return;
+        const next = document.createElement('input');
+        next.id = 'remount';
+        next.value = old.value;
+        old.replaceWith(next);
+        next.focus();
+        elsewhere.body.appendChild(old);
+        window.__remounted = true;
+    });
+    return true;
+})()"""
+
+
+async def test_a_field_the_page_replaced_after_typing_is_read_through_its_successor(
+    fixture_app_server, tmp_empty_root
+):
+    """RED before the fix: ``Failed to type text: Node with given id does not
+    belong to the document``, for three characters the page had taken."""
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    type_text = get_fn("type_text")
+    close = get_fn("close_instance")
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/interactions.html")
+        assert await eval_js(iid, _REMOUNT_JS) is True
+
+        assert await type_text(
+            instance_id=iid, selector="#remount", text="abc", delay_ms=0
+        )
+
+        assert await eval_js(iid, "window.__remounted === true") is True
+        assert await eval_js(iid, "document.querySelector('#remount').value") == "abc"
+    finally:
+        await close(instance_id=iid)
