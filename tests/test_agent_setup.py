@@ -118,13 +118,16 @@ _BLOB = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$")
 _RETRY_DELAYS = (2.0, 5.0, 10.0)
 
 #: One fetch's socket timeout. GitHub answers in well under a second; this only
-#: bounds a page that hangs.
+#: bounds a page that hangs. It is urllib's per-operation timeout, not a cap on
+#: the whole fetch: a server trickling bytes slower than it can run past it, and
+#: then the lane's ``--timeout=300`` fails the run, as it did before T-16103.
 _FETCH_TIMEOUT_S = 15.0
 
-#: Wall-clock seconds the first fetches and every retry round together may take.
-#: A round starts only when its wait plus one full timeout per page it retries
-#: still fits, so the check ends inside the budget, plus one raw.githubusercontent
-#: fetch per blob page, under the integration lane's ``--timeout=300``.
+#: Wall-clock seconds the first fetches, every retry round and the raw fallback
+#: together may take, each fetch counted at its full timeout. A round starts only
+#: when its wait, one timeout per page it retries and one per raw fetch a blob
+#: page would still owe all fit, so the check ends inside the budget, under the
+#: integration lane's ``--timeout=300``.
 _BUDGET_S = 240.0
 
 #: Hosts whose 5xx, once the retries are spent, is GitHub's outage, not our link.
@@ -155,7 +158,9 @@ def _statuses(
     codes = {page: _fetch(page) for page in pages}
     for delay in _RETRY_DELAYS:
         pending = [page for page, code in codes.items() if _is_5xx(code)]
-        cost = delay + _FETCH_TIMEOUT_S * len(pending)
+        # The round's fetches, plus the raw fetch each blob page still owes after.
+        owed = len(pending) + sum(1 for page in pending if _BLOB.match(page))
+        cost = delay + _FETCH_TIMEOUT_S * owed
         if not pending or clock() - start + cost > _BUDGET_S:
             break
         sleep(delay)
@@ -357,3 +362,25 @@ class TestAGitHub5xxIsRetriedThenSkipped:
         assert fake.now <= _BUDGET_S
         assert fake.now == 7 * _FETCH_TIMEOUT_S + 2.0 + 7 * _FETCH_TIMEOUT_S  # 212 s
         assert fake.slept == [2.0]  # the round that fit ran; the next did not
+
+    def test_the_raw_fallback_is_inside_the_budget_too(self, pages):
+        """Codex review of f636af3, LOW: a round fitted the budget without the
+        raw.githubusercontent fetch each blob page still owes after it, so three
+        blob pages among seven hanging ones ended at 257 s, past the budget."""
+        repo = [f"{_REPO_PAGE}/page-{n}" for n in range(4)]
+        blobs = [f"{_REPO_PAGE}/blob/main/doc-{n}.md" for n in range(3)]
+        raws = [
+            "https://raw.githubusercontent.com/DevinoSolutions/"
+            f"stealth-chrome-devtools-mcp/main/doc-{n}.md"
+            for n in range(3)
+        ]
+        fake = pages(
+            {page: [504] for page in repo + blobs + raws}, latency=_FETCH_TIMEOUT_S
+        )
+
+        with pytest.raises(pytest.skip.Exception):
+            _check_links(repo + blobs, fake.statuses)
+
+        assert fake.now <= _BUDGET_S
+        assert fake.now == 7 * _FETCH_TIMEOUT_S + 3 * _FETCH_TIMEOUT_S  # 150 s
+        assert fake.fetched[-3:] == raws
