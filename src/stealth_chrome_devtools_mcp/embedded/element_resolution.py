@@ -460,6 +460,8 @@ async def read_current(
     element: Element,
     selector: str,
     read: Callable[[Element], Awaitable[_T]],
+    *,
+    focus: bool = False,
 ) -> tuple[Element, _T]:
     """``(element, answer)``: ``read`` of the element the page holds NOW.
 
@@ -470,10 +472,12 @@ async def read_current(
     be passed: it is what gets re-run, so nothing is ever sent to the page twice.
     No successor is a ``ToolError`` that says so.
 
-    The successor is focused BEFORE it is read. Its callers go on to send input
-    to it (the next line, an Enter, an ``Input.insertText``, which all go to the
-    focused element), and a focus listener that rewrites the value must do so
-    before a baseline is taken, or the rewrite is credited as the input.
+    ``focus`` is for a BASELINE read, taken before input is sent: the successor
+    is focused before it is read, because the input goes to the focused element
+    and a focus listener that rewrites the value must do so before the baseline,
+    or the rewrite is credited as the input. A read AFTER the input must leave
+    it unset, for the same reason: focusing there could rewrite the value it is
+    about to compare.
     """
     try:
         return element, await read(element)
@@ -489,7 +493,8 @@ async def read_current(
                 "could not be read again (what was already sent to it was not "
                 "repeated)"
             )
-        await successor.focus()
+        if focus:
+            await successor.focus()
         return successor, await read(successor)
 
     return await retry_detached(f"re-read {selector!r}", attempt, REFIND_SECONDS)

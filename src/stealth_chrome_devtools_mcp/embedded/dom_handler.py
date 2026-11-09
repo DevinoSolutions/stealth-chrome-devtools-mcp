@@ -547,10 +547,15 @@ class DOMHandler:
             read = functools.partial(text_entry.entered_text, selector=selector)
             for index, line in enumerate(lines):
                 if line:
-                    element, before = await read_current(tab, element, selector, read)
+                    element, before = await read_current(
+                        tab, element, selector, read, focus=True
+                    )
                     await text_entry.type_characters(tab, element, line, delay)
-                    element, after = await read_current(tab, element, selector, read)
+                    held, after = await read_current(tab, element, selector, read)
                     text_entry.verify_received(selector, line, before, after)
+                    if held is not element:  # Enter and the next line go to it
+                        element = held
+                        await element.focus()
                 if index < len(lines) - 1:
                     await text_entry.press_enter(tab, shift=shift_enter)
                     await asyncio.sleep(delay)
@@ -612,7 +617,7 @@ class DOMHandler:
                 return True
 
             read = functools.partial(text_entry.entered_text, selector=selector)
-            held, before = await read_current(tab, element, selector, read)
+            held, before = await read_current(tab, element, selector, read, focus=True)
             await tab.send(cdp.input_.insert_text(text))
             _, after = await read_current(tab, held, selector, read)
             text_entry.verify_received(selector, text, before, after)
