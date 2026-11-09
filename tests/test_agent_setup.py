@@ -114,63 +114,83 @@ class TestThePromptIsWhatTheSentencePromises:
 _BLOB = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$")
 
 
-#: Seconds to wait before each re-fetch of a page that answered 5xx.
+#: Seconds to wait before each round of re-fetching the pages that answered 5xx.
 _RETRY_DELAYS = (2.0, 5.0, 10.0)
 
-#: Hosts whose 5xx, once every retry is spent, is GitHub's outage, not our link.
+#: One fetch's socket timeout. GitHub answers in well under a second; this only
+#: bounds a page that hangs.
+_FETCH_TIMEOUT_S = 15.0
+
+#: Wall-clock seconds the first fetches and every retry round together may take.
+#: A round starts only when its wait plus one full timeout per page it retries
+#: still fits, so the check ends inside the budget, plus one raw.githubusercontent
+#: fetch per blob page, under the integration lane's ``--timeout=300``.
+_BUDGET_S = 240.0
+
+#: Hosts whose 5xx, once the retries are spent, is GitHub's outage, not our link.
 _GITHUB_HOSTS = ("github.com", "raw.githubusercontent.com")
 
 
-def _answer(url: str, sleep: Callable[[float], None]) -> int:
-    """``url``'s status, re-fetched after each of :data:`_RETRY_DELAYS` while it
-    answers 5xx. Any other answer is final at once: a 404 is not retried."""
-    code = _fetch(url)
+def _is_5xx(code: int) -> bool:
+    return 500 <= code < 600
+
+
+def _statuses(
+    pages: list[str],
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, int]:
+    """Each page's status. Every page is fetched once, then the pages answering
+    5xx are fetched again together after each of :data:`_RETRY_DELAYS`, while
+    the round fits :data:`_BUDGET_S`. Any other answer is final at once: a 404
+    is not retried.
+
+    A github.com file page still answering 5xx is then decided by the same file
+    on raw.githubusercontent.com: GitHub's blob pages have answered 503 for EVERY
+    repo at once while githubstatus read "operational" (2026-10-09, 2026-10-10),
+    and then answer 503 for a file that does not exist too, so the 5xx says
+    nothing about the link. raw answers 200 for the file and 404 for a missing
+    one, so a dead link still fails here."""
+    start = clock()
+    codes = {page: _fetch(page) for page in pages}
     for delay in _RETRY_DELAYS:
-        if code < 500:
+        pending = [page for page, code in codes.items() if _is_5xx(code)]
+        cost = delay + _FETCH_TIMEOUT_S * len(pending)
+        if not pending or clock() - start + cost > _BUDGET_S:
             break
         sleep(delay)
-        code = _fetch(url)
-    return code
-
-
-def _status(url: str, sleep: Callable[[float], None] = time.sleep) -> int:
-    """The link's status. A github.com file page that answers 5xx is decided by
-    the same file on raw.githubusercontent.com: GitHub's blob pages have answered
-    503 for EVERY repo at once while githubstatus read "operational" (2026-10-09,
-    2026-10-10), and then answer 503 for a file that does not exist too, so the
-    5xx says nothing about the link. raw answers 200 for the file and 404 for a
-    missing one, so a dead link still fails here."""
-    code = _answer(url, sleep)
-    blob = _BLOB.match(url.split("#", 1)[0])
-    if code >= 500 and blob:
-        owner, repo, rest = blob.groups()
-        return _answer(
-            f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}", sleep
-        )
-    return code
+        for page in pending:
+            codes[page] = _fetch(page)
+    for page, code in codes.items():
+        blob = _BLOB.match(page)
+        if _is_5xx(code) and blob:
+            owner, repo, rest = blob.groups()
+            codes[page] = _fetch(
+                f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}"
+            )
+    return codes
 
 
 def _github_outage(url: str, code: int) -> bool:
-    return code >= 500 and urllib.parse.urlsplit(url).hostname in _GITHUB_HOSTS
+    return _is_5xx(code) and urllib.parse.urlsplit(url).hostname in _GITHUB_HOSTS
 
 
-def _check_links(urls: list[str], status: Callable[[str], int] = _status) -> None:
-    """Fail on a dead link; skip, naming every page, when the only problem is
-    GitHub answering 5xx after every retry.
+def _check_links(
+    urls: list[str], statuses: Callable[[list[str]], dict[str, int]] = _statuses
+) -> None:
+    """Fail on a dead link; skip, naming every URL, when the only problem is
+    GitHub still answering 5xx once the retries are spent.
 
     The repo page and ``/issues`` have no second source the way a blob page has
     raw: on 2026-11-09 they answered 504 to the CI runner on two runs in a row
     while githubstatus read "operational" and the same fetch answered 200 here
     (T-16103). That says nothing about the link, so it skips with the reason.
     Anything else that is not 200 (a 404, or a 5xx from another host) fails,
-    and a dead link fails even while GitHub is down.
+    and a dead link fails even while GitHub is down. Anchors of one page share
+    one fetch.
     """
-    pages: dict[str, int] = {}
-    for url in urls:
-        page = url.split("#", 1)[0]
-        if page not in pages:  # anchors of one page share one fetch
-            pages[page] = status(page)
-    codes = {url: pages[url.split("#", 1)[0]] for url in urls}
+    by_page = statuses(sorted({url.split("#", 1)[0] for url in urls}))
+    codes = {url: by_page[url.split("#", 1)[0]] for url in urls}
     outage = {url: code for url, code in codes.items() if _github_outage(url, code)}
     dead = {
         url: code for url, code in codes.items() if code != 200 and url not in outage
@@ -178,9 +198,9 @@ def _check_links(urls: list[str], status: Callable[[str], int] = _status) -> Non
     assert not dead, f"dead links in prompt.md: {dead}"
     if outage:
         pytest.skip(
-            f"GitHub answered 5xx after {len(_RETRY_DELAYS) + 1} tries for "
-            f"{outage}: a GitHub outage, not a dead link (every other link answered "
-            "200, and a 404 would still fail)"
+            f"GitHub still answered 5xx after the retries for {outage}: a GitHub "
+            "outage, not a dead link (every other link answered 200, and a 404 "
+            "would still fail)"
         )
 
 
@@ -194,7 +214,7 @@ def _fetch(url: str) -> int:
         headers={"User-Agent": "stealth-chrome-devtools-mcp-tests"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310  PERMANENT(https-only, guarded above)
+        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_S) as response:  # noqa: S310  PERMANENT(https-only, guarded above)
             return response.status
     except urllib.error.HTTPError as exc:
         return exc.code
@@ -207,28 +227,48 @@ class TestEveryUrlAnswers:
 
 
 class _Pages:
-    """``_fetch``'s double: each URL answers its scripted codes in turn, then
-    repeats the last one. Every fetch is recorded, and so is every wait."""
+    """``_fetch``'s double on a fake clock: each URL answers its scripted codes
+    in turn, then repeats the last one, ``latency`` seconds after it was asked.
+    Every fetch is recorded, and so is every wait."""
 
-    def __init__(self, script: dict[str, list[int]]) -> None:
+    def __init__(self, script: dict[str, list[int]], latency: float) -> None:
         self.script = {url: list(codes) for url, codes in script.items()}
+        self.latency = latency
+        self.now = 0.0
         self.fetched: list[str] = []
         self.slept: list[float] = []
 
     def fetch(self, url: str) -> int:
         self.fetched.append(url)
+        self.now += self.latency
         codes = self.script[url]
         return codes.pop(0) if len(codes) > 1 else codes[0]
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def statuses(self, pages: list[str]) -> dict[str, int]:
+        return _statuses(pages, sleep=self.sleep, clock=lambda: self.now)
 
 
 @pytest.fixture
 def pages(monkeypatch):
-    def install(script):
-        fake = _Pages(script)
+    def install(script, latency=0.1):
+        fake = _Pages(script, latency)
         monkeypatch.setattr(sys.modules[__name__], "_fetch", fake.fetch)
         return fake
 
     return install
+
+
+def _judged(urls: list[str], fake: _Pages) -> None:
+    """``_check_links`` where a skip is NOT the expected outcome: a skip here
+    would leave the test green while the behaviour it pins is broken."""
+    try:
+        _check_links(urls, fake.statuses)
+    except pytest.skip.Exception as skip:
+        pytest.fail(f"unexpected skip: {skip}")
 
 
 _REPO_PAGE = "https://github.com/DevinoSolutions/stealth-chrome-devtools-mcp"
@@ -241,7 +281,7 @@ class TestAGitHub5xxIsRetriedThenSkipped:
     def test_a_5xx_is_retried_with_backoff_until_the_page_answers(self, pages):
         fake = pages({_REPO_PAGE: [504, 503, 200]})
 
-        assert _status(_REPO_PAGE, sleep=fake.slept.append) == 200
+        assert fake.statuses([_REPO_PAGE]) == {_REPO_PAGE: 200}
 
         assert fake.slept == [2.0, 5.0]
         assert len(fake.fetched) == 3
@@ -249,7 +289,7 @@ class TestAGitHub5xxIsRetriedThenSkipped:
     def test_a_404_is_final_at_once(self, pages):
         fake = pages({_REPO_PAGE: [404, 200]})
 
-        assert _status(_REPO_PAGE, sleep=fake.slept.append) == 404
+        assert fake.statuses([_REPO_PAGE]) == {_REPO_PAGE: 404}
 
         assert fake.slept == []
 
@@ -259,17 +299,16 @@ class TestAGitHub5xxIsRetriedThenSkipped:
         fake = pages({_REPO_PAGE: [504], _PYPI: [200]})
         urls = [f"{_REPO_PAGE}#cli", f"{_REPO_PAGE}#readme", _PYPI]
 
-        def status(url):
-            return _status(url, sleep=fake.slept.append)
-
-        with pytest.raises(pytest.skip.Exception, match=r"GitHub answered 5xx") as skip:
-            _check_links(urls, status)
+        with pytest.raises(
+            pytest.skip.Exception, match=r"GitHub still answered 5xx"
+        ) as skip:
+            _check_links(urls, fake.statuses)
 
         assert f"'{_REPO_PAGE}#cli': 504" in str(skip.value)
         assert fake.slept == list(_RETRY_DELAYS)
-        assert (
-            fake.fetched.count(_REPO_PAGE) == len(_RETRY_DELAYS) + 1
-        )  # not per anchor
+        # One fetch per round for the page, not one per anchor; pypi once.
+        assert fake.fetched.count(_REPO_PAGE) == len(_RETRY_DELAYS) + 1
+        assert fake.fetched.count(_PYPI) == 1
 
     def test_a_blob_page_still_falls_back_to_raw_after_the_retries(self, pages):
         blob = f"{_REPO_PAGE}/blob/main/RUNBOOK.md"
@@ -279,7 +318,7 @@ class TestAGitHub5xxIsRetriedThenSkipped:
         )
         fake = pages({blob: [503], raw: [200]})
 
-        _check_links([blob], lambda url: _status(url, sleep=fake.slept.append))
+        _judged([blob], fake)
 
         assert fake.fetched[-1] == raw
 
@@ -287,12 +326,34 @@ class TestAGitHub5xxIsRetriedThenSkipped:
         fake = pages({_REPO_PAGE: [504], _PYPI: [404]})
 
         with pytest.raises(AssertionError, match=r"pypi\.org.*404"):
-            _check_links(
-                [_REPO_PAGE, _PYPI], lambda url: _status(url, sleep=fake.slept.append)
-            )
+            _judged([_REPO_PAGE, _PYPI], fake)
 
     def test_a_5xx_from_another_host_still_fails(self, pages):
         fake = pages({_PYPI: [503]})
 
         with pytest.raises(AssertionError, match=r"pypi\.org.*503"):
-            _check_links([_PYPI], lambda url: _status(url, sleep=fake.slept.append))
+            _judged([_PYPI], fake)
+
+    def test_a_github_status_outside_5xx_is_not_an_outage(self, pages):
+        fake = pages({_REPO_PAGE: [600]})
+
+        with pytest.raises(AssertionError, match=r"600"):
+            _judged([_REPO_PAGE], fake)
+
+        assert fake.slept == []
+
+    def test_every_page_hanging_to_its_timeout_still_ends_inside_the_budget(
+        self, pages
+    ):
+        """Codex review of 08cf888, MEDIUM: retries per page had no overall
+        bound, so slow 504s could outlast the lane's ``--timeout=300`` before
+        the skip was ever reached."""
+        many = [f"{_REPO_PAGE}/page-{n}" for n in range(7)]
+        fake = pages({page: [504] for page in many}, latency=_FETCH_TIMEOUT_S)
+
+        with pytest.raises(pytest.skip.Exception):
+            _check_links(many, fake.statuses)
+
+        assert fake.now <= _BUDGET_S
+        assert fake.now == 7 * _FETCH_TIMEOUT_S + 2.0 + 7 * _FETCH_TIMEOUT_S  # 212 s
+        assert fake.slept == [2.0]  # the round that fit ran; the next did not

@@ -5,8 +5,8 @@
 ### The agent-setup link check retries a GitHub 5xx, then skips with the reason instead of failing the run (T-16103)
 
 - On 2026-11-09 PR #399's integration lane failed twice on `test_every_url_in_the_prompt_returns_200` alone: every github.com repo-page link and `/issues` in `agent-setup/prompt.md` answered 504 to the runner, while githubstatus read "operational" and the same fetch answered 200 locally. Only blob pages had a second source (raw.githubusercontent.com), so the repo page and `/issues` had nothing to fall back on.
-- A page that answers 5xx is now fetched again after 2, 5 and 10 s, and each page is fetched once rather than once per anchor. A github.com or raw.githubusercontent.com page still answering 5xx after the last retry skips the test, and the reason names every such URL and its code. A dead link (a 404, or a 5xx from any other host) still fails, even during a GitHub outage.
-- Test-only. `TestAGitHub5xxIsRetriedThenSkipped` pins the 5xx path hermetically (6 tests). On the same simulated GitHub 504, main's version fails with the CI message, and this one skips.
+- Every page is fetched once (anchors share the fetch, 15 s timeout), then the pages answering 5xx are fetched again together after 2, 5 and 10 s. A round starts only if it fits a 240 s budget, so even seven pages each hanging for the full timeout end in 212 s, inside the integration lane's --timeout=300 (the previous per-page retry took 539 s there). A github.com or raw.githubusercontent.com page still answering 5xx after that skips the test, and the reason names every such URL and its code. A dead link (a 404, a non-5xx status, or a 5xx from any other host) still fails, even during a GitHub outage.
+- Test-only. `TestAGitHub5xxIsRetriedThenSkipped` pins the 5xx path hermetically on a fake clock (8 tests). On the same simulated GitHub 504, main's version fails with the CI message, and this one skips.
 
 ### An invalid CSS selector fails once and says why; `type_text` and `paste_text` read back through a field the page replaced
 
