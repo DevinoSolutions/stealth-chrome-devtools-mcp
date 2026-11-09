@@ -177,7 +177,8 @@ _STALE_NODE_MARKERS = (
     # DOM.querySelector[All] uses it.
     "Could not find node with given id",
     # The swapped document's form of the same race. The invalid selector that
-    # shares the string is told apart before it gets here (:func:`_css_query`).
+    # shares the string is told apart before it gets here
+    # (:func:`_reject_invalid_selector`).
     _QUERY_FAILED,
     # The TEXT path's form of the same race (T-10034, STEALTH-…-EQ): nodriver's
     # ``find_element_by_text`` is ``DOM.performSearch`` then
@@ -362,26 +363,29 @@ def _invalid_selector(selector: str) -> str:
     )
 
 
-async def _css_query(tab: Tab, selector: str, query: Callable[[], Awaitable[_T]]) -> _T:
-    """One CSS query, with the invalid selector told apart from the race.
+async def _reject_invalid_selector(
+    tab: Tab, selector: str, exc: ProtocolException
+) -> None:
+    """Raise a ``ToolError`` when *exc* is Chrome refusing *selector* as CSS.
 
-    Both arrive as :data:`_QUERY_FAILED` (STEALTH-…-FS, -ED, -FP), so on that
-    reply the page's own parser is asked (:func:`page_natives.selector_parses`).
-    A selector it rejects is the caller's error and is said once, as a
-    ``ToolError`` no re-resolve retries. One it accepts, or a question that
-    could not be asked, leaves the reply to the race handling unchanged.
+    A swapped document and an invalid selector both arrive as
+    :data:`_QUERY_FAILED` (STEALTH-…-FS, -ED, -FP), so on that reply the page's
+    own parser is asked (:func:`page_natives.selector_parses`). A selector it
+    rejects is the caller's error and is said once, as a ``ToolError`` no
+    re-resolve retries. One it accepts, or a question that could not be asked,
+    returns, and the caller re-raises *exc* to the race handling unchanged.
+
+    Called from the ``except`` of each CSS query rather than wrapping it, so
+    every other failure keeps the query's own frame as its innermost frame, and
+    with it its Sentry fingerprint (``tool_error_fingerprint.frame_name``).
     """
+    if _QUERY_FAILED not in str(exc):
+        return
     try:
-        return await query()
-    except ProtocolException as exc:
-        if _QUERY_FAILED not in str(exc):
-            raise
-        try:
-            parses = await page_natives.selector_parses(tab, selector)
-        except (ProtocolException, ToolError):
-            raise exc from None
-        if parses:
-            raise
+        parses = await page_natives.selector_parses(tab, selector)
+    except (ProtocolException, ToolError):
+        return
+    if not parses:
         raise ToolError(_invalid_selector(selector)) from exc
 
 
@@ -465,6 +469,11 @@ async def read_current(
     goes to its current match, which the caller carries on with. Only a READ may
     be passed: it is what gets re-run, so nothing is ever sent to the page twice.
     No successor is a ``ToolError`` that says so.
+
+    The successor is focused BEFORE it is read. Its callers go on to send input
+    to it (the next line, an Enter, an ``Input.insertText``, which all go to the
+    focused element), and a focus listener that rewrites the value must do so
+    before a baseline is taken, or the rewrite is credited as the input.
     """
     try:
         return element, await read(element)
@@ -480,6 +489,7 @@ async def read_current(
                 "could not be read again (what was already sent to it was not "
                 "repeated)"
             )
+        await successor.focus()
         return successor, await read(successor)
 
     return await retry_detached(f"re-read {selector!r}", attempt, REFIND_SECONDS)
@@ -797,7 +807,11 @@ async def resolve_element(
         return await _wait_for(tab, f"xpath {expression!r}", _do_xpath, timeout)
 
     async def _do() -> Element | None:
-        return await _css_query(tab, selector, lambda: tab.query_selector(selector))
+        try:
+            return await tab.query_selector(selector)
+        except ProtocolException as exc:
+            await _reject_invalid_selector(tab, selector, exc)
+            raise
 
     return await _wait_for(tab, f"select {selector!r}", _do, timeout)
 
@@ -859,9 +873,11 @@ async def resolve_elements(
     async def _do() -> list[Element]:
         # nodriver answers a missing content_document with a bare ``return``,
         # so ``None`` is possible where the annotation says list.
-        found = await _css_query(
-            tab, selector, lambda: tab.query_selector_all(selector)
-        )
+        try:
+            found = await tab.query_selector_all(selector)
+        except ProtocolException as exc:
+            await _reject_invalid_selector(tab, selector, exc)
+            raise
         return found or []
 
     return await _wait_for(tab, f"select_all {selector!r}", _do, timeout)
@@ -883,12 +899,13 @@ async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
 
         return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
 
-    async def _query() -> list[NodeId]:
-        doc = await tab.send(cdp.dom.get_document())
-        return await tab.send(cdp.dom.query_selector_all(doc.node_id, selector))
-
     async def _do() -> list[NodeId]:
-        return await _css_query(tab, selector, _query)
+        doc = await tab.send(cdp.dom.get_document())
+        try:
+            return await tab.send(cdp.dom.query_selector_all(doc.node_id, selector))
+        except ProtocolException as exc:
+            await _reject_invalid_selector(tab, selector, exc)
+            raise
 
     return await _resolve_with_recovery(tab, f"query_selector_all {selector!r}", _do)
 

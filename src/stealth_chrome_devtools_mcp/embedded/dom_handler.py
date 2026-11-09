@@ -613,8 +613,6 @@ class DOMHandler:
 
             read = functools.partial(text_entry.entered_text, selector=selector)
             held, before = await read_current(tab, element, selector, read)
-            if held is not element:
-                await held.focus()  # Input.insertText goes to the focused element
             await tab.send(cdp.input_.insert_text(text))
             _, after = await read_current(tab, held, selector, read)
             text_entry.verify_received(selector, text, before, after)
