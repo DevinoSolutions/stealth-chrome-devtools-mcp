@@ -316,15 +316,26 @@ DETACHED = "Node with given id does not belong to the document"
 
 
 class _ReplacedField(FakeTextField):
-    """A field the page can take out of its document: every read then gets
-    Chrome's reply for such a node, built from nodriver's own exception."""
+    """A field the page can take out of its document: every read, and every
+    focus (nodriver's ``focus`` is an ``apply`` too), then gets Chrome's reply
+    for such a node, built from nodriver's own exception. ``on_focus`` runs
+    once, after the field first takes the focus."""
 
     gone = False
+    on_focus = None
 
     async def apply(self, js_function, *args, **kwargs):
         if self.gone:
             raise left_the_document(DETACHED)
         return await super().apply(js_function, *args, **kwargs)
+
+    async def focus(self):
+        if self.gone:
+            raise left_the_document(DETACHED)
+        await super().focus()
+        hook, self.on_focus = self.on_focus, None
+        if hook is not None:
+            hook()
 
 
 class _RemountingTab(FakeTab):
@@ -333,7 +344,8 @@ class _RemountingTab(FakeTab):
     The old node leaves the document. With ``keep`` a new field holding the same
     text takes its place (a framework re-rendering a controlled input); without
     it nothing does. From then on the selector resolves to what the page holds.
-    ``after=0`` re-mounts it as soon as it was found, before anything was sent.
+    ``after=0`` re-mounts it as soon as the tool focused it, before anything was
+    sent.
     A given ``successor`` is used as the page built it, unfocused; the default
     one carries the old text and keeps the focus.
     """
@@ -346,6 +358,8 @@ class _RemountingTab(FakeTab):
         self._keep = keep
         self._given = successor
         self.inputs = 0
+        if after == 0:
+            field.on_focus = self._remount
 
     def _remount(self):
         self.field.gone = True
@@ -355,12 +369,6 @@ class _RemountingTab(FakeTab):
             self.successor = FakeTextField(value=self.field.value)
             self.successor.focused = True
         self._select_result = self.successor
-
-    async def query_selector(self, selector, *args, **kwargs):
-        found = await super().query_selector(selector, *args, **kwargs)
-        if self._after == 0 and found is self.field:
-            self._remount()
-        return found
 
     async def send(self, cdp_obj, *args, **kwargs):
         result = await super().send(cdp_obj, *args, **kwargs)
@@ -468,3 +476,17 @@ async def test_a_focus_listener_on_the_successor_is_not_credited_as_the_paste():
     assert successor.value == "5"
     inserts = [f for f in tab.cdp_frames if f.get("method") == "Input.insertText"]
     assert len(inserts) == 1
+
+
+async def test_a_refused_paste_is_not_rescued_by_the_successor_s_focus_listener():
+    """Codex review of 206a1925, MEDIUM: the read AFTER the input focused the
+    successor it found, and its focus listener's rewrite was credited as the
+    paste. The read-only field took nothing, and that must stay a failure."""
+    field = _ReplacedField(value=" 5 ", accepts=False)
+    successor = _FocusRewritingField(value=" 5 ", accepts=False)
+    tab = _RemountingTab(field, after=1, keep=True, successor=successor)
+
+    with pytest.raises(ToolError, match="did not change"):
+        await DOMHandler.paste_text(tab, SELECTOR, "abc", clear_first=False)
+
+    assert successor.value == " 5 "  # never focused by the read-back
