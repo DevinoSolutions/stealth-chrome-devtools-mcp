@@ -31,6 +31,7 @@ from e2e_helpers import (
     wait_for_js,
     warmup_once,
 )
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 pytestmark = integration_pytestmark()
 
@@ -689,5 +690,46 @@ async def test_close_and_switch_survive_a_forced_rediscovery(fixture_app_server)
         remaining = await _tabs_until(iid, lambda tabs: doomed_id not in tabs)
         assert doomed_id not in remaining, "close_tab lied: the target survived"
         assert await list_tabs(instance_id=iid)
+    finally:
+        await close(instance_id=iid)
+
+
+async def test_an_invalid_css_selector_is_named_as_such_and_not_retried(
+    fixture_app_server, tmp_empty_root
+):
+    """STEALTH-CHROME-DEVTOOLS-MCP-FS in a real Chrome: ``:has-text()`` is
+    Playwright syntax. Chrome's raw reply to it is the same "DOM Error while
+    querying" a swapped document gets (pinned first, so the premise is
+    measured, not assumed); the tool must say the selector is invalid, at once,
+    and click nothing."""
+    base = fixture_app_server
+    spawn = get_fn("spawn_browser")
+    click = get_fn("click_element")
+    cdp = get_fn("execute_cdp_command")
+    close = get_fn("close_instance")
+    invalid = "button:has-text('Fidelity')"
+
+    iid = (await spawn(headless=True, **sandbox_kwargs()))["instance_id"]
+    try:
+        await navigate_and_settle(iid, f"{base}/interactions.html")
+        doc = await cdp(instance_id=iid, command="DOM.getDocument", params={})
+        raw = await cdp(
+            instance_id=iid,
+            command="DOM.querySelector",
+            params={"nodeId": doc["result"].node_id, "selector": invalid},
+        )
+        assert raw["success"] is False
+        assert "DOM Error while querying" in raw["error"]
+
+        await eval_js(
+            iid,
+            "(window.__clicks = 0, document.querySelector('#fidelity-btn')"
+            ".addEventListener('click', () => window.__clicks++), true)",
+        )
+        started = time.monotonic()
+        with pytest.raises(ToolError, match=r"Invalid CSS selector .*has-text"):
+            await click(instance_id=iid, selector=invalid)
+        assert time.monotonic() - started < 2.0
+        assert await eval_js(iid, "window.__clicks") == 0
     finally:
         await close(instance_id=iid)

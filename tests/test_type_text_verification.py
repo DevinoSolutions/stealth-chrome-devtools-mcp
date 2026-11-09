@@ -30,8 +30,8 @@ import json
 
 import pytest
 
-from fakes import FakeTab, FakeTextField
-from stealth_chrome_devtools_mcp.embedded import text_entry
+from fakes import FakeTab, FakeTextField, left_the_document
+from stealth_chrome_devtools_mcp.embedded import element_resolution, text_entry
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -304,3 +304,112 @@ async def test_empty_text_is_not_a_failure():
 
     assert await DOMHandler.type_text(tab, SELECTOR, "", delay_ms=0) is True
     assert field.value == ""
+
+
+# ---------------------------------------------------------------------------
+# C -- the page replaced the field after the text went in (STEALTH-…-FQ)
+# ---------------------------------------------------------------------------
+
+#: Chrome's reply to a read of a node whose document has no frame any more: the
+#: page navigated, or moved the node out of the live document. FQ's wording.
+DETACHED = "Node with given id does not belong to the document"
+
+
+class _ReplacedField(FakeTextField):
+    """A field the page can take out of its document: every read then gets
+    Chrome's reply for such a node, built from nodriver's own exception."""
+
+    gone = False
+
+    async def apply(self, js_function, *args, **kwargs):
+        if self.gone:
+            raise left_the_document(DETACHED)
+        return await super().apply(js_function, *args, **kwargs)
+
+
+class _RemountingTab(FakeTab):
+    """A page that re-mounts its field once ``after`` input commands landed.
+
+    The old node leaves the document. With ``keep`` a new field holding the same
+    text takes its place (a framework re-rendering a controlled input); without
+    it nothing does. From then on the selector resolves to what the page holds.
+    """
+
+    def __init__(self, field, *, after, keep):
+        super().__init__(select_result=field)
+        self.field = field
+        self.successor = None
+        self._after = after
+        self._keep = keep
+        self.inputs = 0
+
+    async def send(self, cdp_obj, *args, **kwargs):
+        result = await super().send(cdp_obj, *args, **kwargs)
+        if self.send_calls[-1] in ("dispatch_key_event", "insert_text"):
+            self.inputs += 1
+            if self.inputs == self._after:
+                self.field.gone = True
+                if self._keep:
+                    self.successor = FakeTextField(value=self.field.value)
+                    self.successor.focused = True
+                self._select_result = self.successor
+        return result
+
+
+def _typed(tab):
+    return "".join(
+        p["text"] for p in _key_frames(tab, type_="keyDown") if p.get("key") != "Enter"
+    )
+
+
+async def test_a_field_re_mounted_after_the_last_key_is_read_back_through_its_successor():
+    """RED before the fix: the read-back went to the node the page had just
+    replaced and the tool answered ``Failed to type text: Node with given id
+    does not belong to the document`` for text the page had taken."""
+    field = _ReplacedField()
+    tab = _RemountingTab(field, after=6, keep=True)  # 3 characters, down + up
+
+    assert await DOMHandler.type_text(tab, SELECTOR, "abc", delay_ms=0) is True
+
+    assert tab.successor.value == "abc"
+    assert _typed(tab) == "abc"  # read again, never typed again
+    assert len(tab.select_calls) == 2
+
+
+async def test_a_field_that_left_with_no_successor_is_reported_and_not_retyped(
+    monkeypatch,
+):
+    monkeypatch.setattr(element_resolution, "REFIND_SECONDS", 0.0)
+    field = _ReplacedField()
+    tab = _RemountingTab(field, after=6, keep=False)
+
+    with pytest.raises(ToolError, match=r"left the page.*not repeated"):
+        await DOMHandler.type_text(tab, SELECTOR, "abc", delay_ms=0)
+
+    assert _typed(tab) == "abc"
+
+
+async def test_the_line_after_an_enter_goes_into_the_re_mounted_field():
+    """An Enter that makes the page re-render: the next line is read and typed
+    through the field the page holds now, and the first line is not re-sent."""
+    field = _ReplacedField()
+    tab = _RemountingTab(field, after=6, keep=True)  # "ab" (4), then Enter (2)
+
+    assert await DOMHandler.type_text(
+        tab, SELECTOR, "ab\ncd", delay_ms=0, parse_newlines=True
+    )
+
+    assert field.value == "ab"
+    assert tab.successor.value == "abcd"
+    assert _typed(tab) == "abcd"
+
+
+async def test_paste_reads_back_through_the_re_mounted_field():
+    field = _ReplacedField()
+    tab = _RemountingTab(field, after=1, keep=True)  # the one insertText
+
+    assert await DOMHandler.paste_text(tab, SELECTOR, "abc") is True
+
+    assert tab.successor.value == "abc"
+    inserts = [f for f in tab.cdp_frames if f.get("method") == "Input.insertText"]
+    assert len(inserts) == 1

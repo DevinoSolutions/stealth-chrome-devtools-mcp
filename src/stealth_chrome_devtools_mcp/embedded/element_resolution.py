@@ -162,6 +162,11 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
+# Blink's blanket reply when a query reached the renderer and failed THERE
+# (``ServerError("DOM Error while querying")``): a document swapped out mid-query
+# and a selector its parser rejects both arrive as this one string (F-828).
+_QUERY_FAILED = "DOM Error while querying"
+
 # Exact CDP message fragments for a query the document invalidated underneath.
 # Matched on message TEXT and never on the numeric code: nodriver only fills
 # ``ProtocolException.code`` from the CDP error object, and the same failure
@@ -171,12 +176,9 @@ _STALE_NODE_MARKERS = (
     # The nodeId fetched by DOM.getDocument no longer exists when
     # DOM.querySelector[All] uses it.
     "Could not find node with given id",
-    # Blink's blanket reply when the query reached the renderer and failed
-    # THERE (``ServerError("DOM Error while querying")``) -- what a document
-    # swapped out mid-query surfaces as. A re-resolve against a fresh document
-    # is the same correct handling; a query that fails for a permanent reason
-    # simply fails again and surfaces unchanged after the bounded retries.
-    "DOM Error while querying",
+    # The swapped document's form of the same race. The invalid selector that
+    # shares the string is told apart before it gets here (:func:`_css_query`).
+    _QUERY_FAILED,
     # The TEXT path's form of the same race (T-10034, STEALTH-…-EQ): nodriver's
     # ``find_element_by_text`` is ``DOM.performSearch`` then
     # ``DOM.getSearchResults``, and a document reset between the two drops the
@@ -351,6 +353,38 @@ def detached_element(exc: BaseException | None) -> str | None:
     return None
 
 
+def _invalid_selector(selector: str) -> str:
+    return (
+        f"Invalid CSS selector {selector!r}: Chrome's selector parser rejects it. "
+        "Pseudo-classes such as :has-text() and :contains() are Playwright and "
+        "jQuery syntax, not CSS; to match on text, use an XPath such as "
+        "//button[contains(normalize-space(.), 'Continue')]"
+    )
+
+
+async def _css_query(tab: Tab, selector: str, query: Callable[[], Awaitable[_T]]) -> _T:
+    """One CSS query, with the invalid selector told apart from the race.
+
+    Both arrive as :data:`_QUERY_FAILED` (STEALTH-…-FS, -ED, -FP), so on that
+    reply the page's own parser is asked (:func:`page_natives.selector_parses`).
+    A selector it rejects is the caller's error and is said once, as a
+    ``ToolError`` no re-resolve retries. One it accepts, or a question that
+    could not be asked, leaves the reply to the race handling unchanged.
+    """
+    try:
+        return await query()
+    except ProtocolException as exc:
+        if _QUERY_FAILED not in str(exc):
+            raise
+        try:
+            parses = await page_natives.selector_parses(tab, selector)
+        except (ProtocolException, ToolError):
+            raise exc from None
+        if parses:
+            raise
+        raise ToolError(_invalid_selector(selector)) from exc
+
+
 async def _resolve_with_recovery(
     tab: Tab, what: str, resolve: Callable[[], Awaitable[_T]]
 ) -> _T:
@@ -410,6 +444,45 @@ async def retry_detached(
         return await attempt(max(0.0, deadline - _now()))
 
     return await _recover(what, run, detached_element)
+
+
+#: How long an element the page replaced may take to have a successor matching
+#: its selector: a re-render lands within a frame or two, a navigation in seconds.
+REFIND_SECONDS = 2.0
+
+
+async def read_current(
+    tab: Tab,
+    element: Element,
+    selector: str,
+    read: Callable[[Element], Awaitable[_T]],
+) -> tuple[Element, _T]:
+    """``(element, answer)``: ``read`` of the element the page holds NOW.
+
+    ``read`` goes to ``element`` first. When Chrome says that element has left
+    (:func:`detached_element`) -- a framework re-mounted it, or input made the
+    page navigate (STEALTH-…-FQ) -- ``selector`` is resolved again and ``read``
+    goes to its current match, which the caller carries on with. Only a READ may
+    be passed: it is what gets re-run, so nothing is ever sent to the page twice.
+    No successor is a ``ToolError`` that says so.
+    """
+    try:
+        return element, await read(element)
+    except ProtocolException as exc:
+        if detached_element(exc) is None:
+            raise
+
+    async def attempt(budget: float) -> tuple[Element, _T]:
+        successor = await resolve_element(tab, selector, timeout=budget)
+        if not successor:
+            raise ToolError(
+                f"'{selector}' left the page and nothing matches it now, so it "
+                "could not be read again (what was already sent to it was not "
+                "repeated)"
+            )
+        return successor, await read(successor)
+
+    return await retry_detached(f"re-read {selector!r}", attempt, REFIND_SECONDS)
 
 
 async def _recover(
@@ -724,7 +797,7 @@ async def resolve_element(
         return await _wait_for(tab, f"xpath {expression!r}", _do_xpath, timeout)
 
     async def _do() -> Element | None:
-        return await tab.query_selector(selector)
+        return await _css_query(tab, selector, lambda: tab.query_selector(selector))
 
     return await _wait_for(tab, f"select {selector!r}", _do, timeout)
 
@@ -786,7 +859,10 @@ async def resolve_elements(
     async def _do() -> list[Element]:
         # nodriver answers a missing content_document with a bare ``return``,
         # so ``None`` is possible where the annotation says list.
-        return await tab.query_selector_all(selector) or []
+        found = await _css_query(
+            tab, selector, lambda: tab.query_selector_all(selector)
+        )
+        return found or []
 
     return await _wait_for(tab, f"select_all {selector!r}", _do, timeout)
 
@@ -807,9 +883,12 @@ async def query_selector_all(tab: Tab, selector: str) -> list[NodeId]:
 
         return await _resolve_with_recovery(tab, f"xpath {expression!r}", _do_xpath)
 
-    async def _do() -> list[NodeId]:
+    async def _query() -> list[NodeId]:
         doc = await tab.send(cdp.dom.get_document())
         return await tab.send(cdp.dom.query_selector_all(doc.node_id, selector))
+
+    async def _do() -> list[NodeId]:
+        return await _css_query(tab, selector, _query)
 
     return await _resolve_with_recovery(tab, f"query_selector_all {selector!r}", _do)
 

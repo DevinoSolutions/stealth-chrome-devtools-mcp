@@ -468,3 +468,40 @@ async def run(
         raise ReadError(
             f"could not read the node: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+#: Chrome's own selector parser, asked with no node to match against: a fragment
+#: is empty, so the only thing ``querySelector`` can do on it is parse.
+SELECTOR_PARSES_JS = """(selector) => {
+    try { document.createDocumentFragment().querySelector(selector); return true; }
+    catch (e) { return false; }
+}"""
+
+
+async def selector_parses(tab: Tab, selector: str) -> bool:
+    """Whether Chrome's selector parser accepts *selector* as CSS.
+
+    Asked in the main frame's isolated world, where ``Document.prototype`` is
+    the browser's own, so a page cannot make a valid selector look invalid. The
+    selector goes in as an argument, never spliced into the script. Raises
+    ``ReadError`` for an answer that is not a boolean; a failed command
+    propagates as raised.
+    """
+    tree = await tab.send(cdp.page.get_frame_tree())
+    world = await tab.send(
+        cdp.page.create_isolated_world(
+            tree.frame.id_, world_name=WORLD_NAME, grant_univeral_access=False
+        )
+    )
+    result, thrown = await tab.send(
+        cdp.runtime.call_function_on(
+            SELECTOR_PARSES_JS,
+            execution_context_id=world,
+            arguments=[cdp.runtime.CallArgument(value=selector)],
+            return_by_value=True,
+        )
+    )
+    value = result.value if result is not None else None
+    if thrown is not None or not isinstance(value, bool):
+        raise ReadError("the page could not say whether the selector parses")
+    return value
