@@ -333,26 +333,41 @@ class _RemountingTab(FakeTab):
     The old node leaves the document. With ``keep`` a new field holding the same
     text takes its place (a framework re-rendering a controlled input); without
     it nothing does. From then on the selector resolves to what the page holds.
+    ``after=0`` re-mounts it as soon as it was found, before anything was sent.
+    A given ``successor`` is used as the page built it, unfocused; the default
+    one carries the old text and keeps the focus.
     """
 
-    def __init__(self, field, *, after, keep):
+    def __init__(self, field, *, after, keep, successor=None):
         super().__init__(select_result=field)
         self.field = field
         self.successor = None
         self._after = after
         self._keep = keep
+        self._given = successor
         self.inputs = 0
+
+    def _remount(self):
+        self.field.gone = True
+        if self._given is not None:
+            self.successor = self._given
+        elif self._keep:
+            self.successor = FakeTextField(value=self.field.value)
+            self.successor.focused = True
+        self._select_result = self.successor
+
+    async def query_selector(self, selector, *args, **kwargs):
+        found = await super().query_selector(selector, *args, **kwargs)
+        if self._after == 0 and found is self.field:
+            self._remount()
+        return found
 
     async def send(self, cdp_obj, *args, **kwargs):
         result = await super().send(cdp_obj, *args, **kwargs)
         if self.send_calls[-1] in ("dispatch_key_event", "insert_text"):
             self.inputs += 1
             if self.inputs == self._after:
-                self.field.gone = True
-                if self._keep:
-                    self.successor = FakeTextField(value=self.field.value)
-                    self.successor.focused = True
-                self._select_result = self.successor
+                self._remount()
         return result
 
 
@@ -411,5 +426,45 @@ async def test_paste_reads_back_through_the_re_mounted_field():
     assert await DOMHandler.paste_text(tab, SELECTOR, "abc") is True
 
     assert tab.successor.value == "abc"
+    inserts = [f for f in tab.cdp_frames if f.get("method") == "Input.insertText"]
+    assert len(inserts) == 1
+
+
+async def test_an_enter_after_the_re_mount_reaches_the_successor():
+    """Codex review, MEDIUM: the read-back found a successor the page had not
+    focused, and the Enter that followed went to whatever held the focus. The
+    tool answered True and the field never got its newline (or its submit)."""
+    field = _ReplacedField()
+    successor = FakeTextField(value="abc", multiline=True)
+    tab = _RemountingTab(field, after=6, keep=True, successor=successor)
+
+    assert await DOMHandler.type_text(
+        tab, SELECTOR, "abc\n", delay_ms=0, parse_newlines=True
+    )
+
+    assert successor.value == "abc\n"
+
+
+class _FocusRewritingField(FakeTextField):
+    """A control whose focus listener normalises its value (trims it)."""
+
+    async def focus(self):
+        if not self.focused:
+            self.value = self.value.strip()
+        await super().focus()
+
+
+async def test_a_focus_listener_on_the_successor_is_not_credited_as_the_paste():
+    """Codex review, MEDIUM: the successor's baseline was read BEFORE it was
+    focused, so a read-only successor whose focus listener rewrote its value
+    looked as if it had taken the paste. It took nothing, and that is a failure."""
+    field = _ReplacedField()
+    successor = _FocusRewritingField(value=" 5 ", accepts=False)
+    tab = _RemountingTab(field, after=0, keep=True, successor=successor)
+
+    with pytest.raises(ToolError, match="did not change"):
+        await DOMHandler.paste_text(tab, SELECTOR, "abc", clear_first=False)
+
+    assert successor.value == "5"
     inserts = [f for f in tab.cdp_frames if f.get("method") == "Input.insertText"]
     assert len(inserts) == 1
