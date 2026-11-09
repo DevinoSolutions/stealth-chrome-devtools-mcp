@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### The agent-setup link check retries a GitHub 5xx, then skips with the reason instead of failing the run (T-16103)
+
+- On 2026-11-09 PR #399's integration lane failed twice on `test_every_url_in_the_prompt_returns_200` alone: every github.com repo-page link and `/issues` in `agent-setup/prompt.md` answered 504 to the runner, while githubstatus read "operational" and the same fetch answered 200 locally. Only blob pages had a second source (raw.githubusercontent.com), so the repo page and `/issues` had nothing to fall back on.
+- A page that answers 5xx is now fetched again after 2, 5 and 10 s, and each page is fetched once rather than once per anchor. A github.com or raw.githubusercontent.com page still answering 5xx after the last retry skips the test, and the reason names every such URL and its code. A dead link (a 404, or a 5xx from any other host) still fails, even during a GitHub outage.
+- Test-only. `TestAGitHub5xxIsRetriedThenSkipped` pins the 5xx path hermetically (6 tests). On the same simulated GitHub 504, main's version fails with the CI message, and this one skips.
+
 ### An invalid CSS selector fails once and says why; `type_text` and `paste_text` read back through a field the page replaced
 
 - Chrome answers `DOM.querySelector` with "DOM Error while querying" both when the document was swapped under the query (F-828, a race worth retrying) and when its selector parser rejects the string. Sentry issues ED, FP and FS were the second case: Playwright's `button:has-text('…')` was retried as a swapped document and then surfaced as `Failed to click element: DOM Error while querying [code: -32000]`, which names neither the selector nor the cause. `element_resolution._reject_invalid_selector` now asks Chrome's own parser (`page_natives.selector_parses`, in the isolated world) when that error comes back, and a selector it rejects fails on the first query with a `ToolError` that names it and points at an XPath for text matching. A selector that parses keeps F-828's retry, and so does a page that cannot be asked.
