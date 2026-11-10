@@ -28,7 +28,7 @@ classifiers = [
 dependencies = [
     "fastmcp==3.4.11",
     "nodriver==0.50.6",
-    "pydantic==2.14.2",
+    "pydantic==2.14.3",
     "pydantic-settings==2.16.2",
     "python-dotenv==1.2.4",
     "strinpy==0.0.4",
@@ -40,7 +40,7 @@ dependencies = [
     # Error reporting is ON by default against a hardcoded DSN (observability.py),
     # so the SDK is a first-class dependency rather than an extra: a default-on
     # feature that only works when you remember to install something is not on.
-    "sentry-sdk==2.73.0",
+    "sentry-sdk==2.74.0",
     # Imported by the source but reached only transitively (mcp through fastmcp,
     # anyio/starlette/httpx through mcp). Pinned at the locked versions so the
     # wheel installs what the gate tested; tools/check_pinned_imports.py enforces
@@ -48,7 +48,7 @@ dependencies = [
     # the `fastmcp` module ships in `fastmcp-slim` (F-946).
     "fastmcp-slim==3.4.11",
     "mcp==1.30.0",
-    "anyio==4.15.1",
+    "anyio==4.16.0",
     "starlette==1.10.0",
     "websockets==17.4",
     "httpx==0.28.1",
@@ -98,8 +98,8 @@ test = [
     # vanish silently if fastmcp's own dependency changes.
 ]
 dev = [
-    "ruff==0.17.3",
-    "ty==0.0.95",
+    "ruff==0.17.4",
+    "ty==0.0.99",
     "vulture==2.16",
 ]
 
