@@ -20,7 +20,7 @@ from typing import ClassVar
 
 import pytest
 
-from stealth_chrome_devtools_mcp import cli
+from stealth_chrome_devtools_mcp import cli, cli_supervise
 from stealth_chrome_devtools_mcp.embedded import server, tool_registry
 from stealth_chrome_devtools_mcp.settings import Settings
 
@@ -88,18 +88,24 @@ class TestDocumentedCliVerbs:
         "spawn",
         "nav",
         "close",
+        # T-15386 — the out-of-process backend watchdog.
+        "supervise",
     ]
 
     @staticmethod
     def _handler_for(verb: str):
         """What `cli.main` would dispatch `verb` to.
 
-        TWO tables since F-891's extraction — the ops verbs' in `cli`, the six
-        tool verbs' in `cli_call` beside the bodies they name — looked up in
-        the same order `main` uses, so this pin cannot pass for a verb `main`
-        itself could not resolve.
+        THREE tables — the ops verbs' in `cli`, the watchdog's in
+        `cli_supervise` (T-15386) and the six tool verbs' in `cli_call` (F-891),
+        each beside the bodies it names — looked up in the same order `main`
+        uses, so this pin cannot pass for a verb `main` itself could not resolve.
         """
-        return cli._DISPATCH.get(verb) or cli._cli_call().DISPATCH.get(verb)
+        return (
+            cli._DISPATCH.get(verb)
+            or cli_supervise.DISPATCH.get(verb)
+            or cli._cli_call().DISPATCH.get(verb)
+        )
 
     def test_verbs_exist_and_are_documented(self):
         text = _doc_text()
@@ -111,12 +117,13 @@ class TestDocumentedCliVerbs:
         """The other direction: a body no parser offers is unreachable, and the
         split into two tables is exactly how one could come to be."""
         offered = set(cli.build_parser()._subparsers._group_actions[0].choices)
-        dispatchable = set(cli._DISPATCH) | set(cli._cli_call().DISPATCH)
+        tables = (cli._DISPATCH, cli_supervise.DISPATCH, cli._cli_call().DISPATCH)
+        dispatchable = set().union(*tables)
         assert dispatchable == offered
         assert set(self.VERBS) == offered
-        # The ops table wins SILENTLY on a shared key, and set equality above
+        # An earlier table wins SILENTLY on a shared key, and set equality above
         # passes a duplicate — so the disjointness is its own assertion.
-        assert not (set(cli._DISPATCH) & set(cli._cli_call().DISPATCH))
+        assert sum(len(table) for table in tables) == len(dispatchable)
 
     def test_renamed_flag_present_old_absent_in_cli(self):
         parser = cli.build_parser()

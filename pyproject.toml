@@ -462,6 +462,9 @@ ban-relative-imports = "all"
 ]  # PERMANENT(print is CLI UI) — F-891. ONE code, not cli.py's three: the
 # tool-driving verbs are fully annotated, so neither ANN001 nor ANN202 fires
 # here. Carried deliberately narrow rather than inherited.
+"src/stealth_chrome_devtools_mcp/cli_supervise.py" = [
+    "T20",
+]  # PERMANENT(print is CLI UI) — T-15386, cli_call.py's one code for its reason.
 "src/stealth_chrome_devtools_mcp/embedded/models.py" = [
     "ANN201", "TID251",
 ]  # plan_M4ph1 (pre-typing data models)

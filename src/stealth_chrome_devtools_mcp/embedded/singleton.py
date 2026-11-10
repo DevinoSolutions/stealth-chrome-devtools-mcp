@@ -366,7 +366,7 @@ def _protecting_browsers(port: int, *, starved: bool = False) -> list[int]:
         is_ours=_is_our_backend,
         is_running=psutil.pid_exists,
         silence=lambda: (
-            backend_liveness.silence(SERVER_STATE_FILE, port) if starved else None
+            backend_liveness.unusable_for(SERVER_STATE_FILE, port) if starved else None
         ),
     )
 
