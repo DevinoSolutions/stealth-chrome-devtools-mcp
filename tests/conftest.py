@@ -617,3 +617,39 @@ def pytest_runtest_makereport(item, call):
 
     report.sections.append(("proxy warnings", workspace_proxy_warnings(space)))
     report.sections.append(("backend logs", workspace_backend_logs(space)))
+
+
+# ---------------------------------------------------------------------------
+# T-15386: the suite has passed 100% on macOS/ARM64 CI and then never exited,
+# so the job hit its timeout and was cancelled (three cells, never locally).
+# A process that outlives its last test is held by a non-daemon thread the
+# interpreter joins at exit (an executor worker still inside a blocking call is
+# the usual one). These two witnesses make the next hang name its culprit:
+# the live non-daemon threads are listed when the session ends, and if the
+# process is still alive 60 s later every thread's stack is dumped to stderr.
+# Neither changes how or when the suite exits.
+# ---------------------------------------------------------------------------
+_EXIT_HANG_DUMP_AFTER_SECONDS = 60
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    import faulthandler
+    import threading
+
+    held = [
+        f"{thread.name} (ident={thread.ident})"
+        for thread in threading.enumerate()
+        if thread is not threading.main_thread()
+        and thread.is_alive()
+        and not thread.daemon
+    ]
+    if held:
+        sys.stderr.write(
+            "exit-hang witness: non-daemon threads alive at session end: "
+            + ", ".join(held)
+            + "\n"
+        )
+    faulthandler.dump_traceback_later(
+        _EXIT_HANG_DUMP_AFTER_SECONDS, repeat=False, file=sys.stderr, exit=False
+    )
