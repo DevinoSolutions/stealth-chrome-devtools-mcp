@@ -61,8 +61,14 @@ def _stamp(record, *, age=1.0, lag=None, lagging_for=None):
 
 
 def _hold_the_loop(seconds):
-    """Block the calling thread, i.e. the loop, as the GIL-holding psutil poll did."""
-    time.sleep(seconds)
+    """Block the calling thread, i.e. the loop, as the GIL-holding psutil poll did.
+
+    A busy wait, not ``time.sleep``: it holds the GIL like the real poll, and it
+    lasts exactly ``seconds``. macOS stretches a 0.25 s ``time.sleep`` to
+    0.3-0.4 s, which pushed the blocked-loop test past its deadline there."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        pass
 
 
 class TestTheMeasurement:
@@ -114,7 +120,7 @@ class TestTheMeasurement:
 
         async def hog():
             while True:
-                _hold_the_loop(0.25)
+                _hold_the_loop(0.15)
                 await asyncio.sleep(0)
 
         async def drive():
@@ -122,7 +128,10 @@ class TestTheMeasurement:
                 backend_liveness.beat(record, PORT, PID, interval=0.01)
             )
             blocker = asyncio.create_task(hog())
-            deadline = time.monotonic() + 10
+            # Each beat waits through several held turns of the loop, and the
+            # stamp carries a lag only from the sixth beat on. Leave room for a
+            # slow runner; the loop below stops as soon as the stamp says lagging.
+            deadline = time.monotonic() + 30
             stamp = {}
             while time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
@@ -134,6 +143,7 @@ class TestTheMeasurement:
             return stamp
 
         stamp = asyncio.run(drive())
+        assert backend_registry.HEARTBEAT_LOOP_LAG in stamp, stamp
         assert stamp[backend_registry.HEARTBEAT_LOOP_LAG] >= 0.1
         assert stamp[backend_registry.HEARTBEAT_LAGGING_SINCE] <= time.time()
 
