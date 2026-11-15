@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.60
 
 ### A backend that crawls instead of dying is recognised and replaced: self-reported loop lag, a five-minute limit on "slow", and `stealthy supervise` (T-15386)
 
@@ -50,6 +50,11 @@
 - **Captcha auto-click** (`enable_captcha_auto_click`): a background monitor detects Cloudflare Turnstile, Google reCAPTCHA v2, and hCaptcha checkboxes and clicks them automatically, as a trusted coordinate click (`Input.dispatchMouseEvent`), not a solve. Agents no longer need to stop and ask "should I click the captcha?".
 - `disable_captcha_auto_click` stops the monitor and `get_captcha_status` reads whether it runs and which widgets it has clicked. The tool count is now 100 across 13 sections; `--disable-captcha` turns the section off and `--minimal` leaves it off.
 - It clicks the checkbox and nothing else: image puzzles and sliders are the provider's escalation and stay with the caller, and only widgets in the top document are found.
+
+### Dependencies: pydantic 2.14.3, sentry-sdk 2.74.0, anyio 4.16.0, ruff 0.17.4, ty 0.0.99, pytest-asyncio 1.4.1.post1
+
+- Takes Dependabot #400, #401 and #403 unchanged. The runtime pins move: pydantic 2.14.2 -> 2.14.3 (with pydantic-core 2.50.2 -> 2.50.4), sentry-sdk 2.73.0 -> 2.74.0, anyio 4.15.1 -> 4.16.0.
+- Dev only: ruff 0.17.3 -> 0.17.4, ty 0.0.95 -> 0.0.99, pytest-asyncio 1.4.1 -> 1.4.1.post1. #403 bumps `softprops/action-gh-release` in `publish.yml`, and this is the first release to run it.
 
 ## 2.1.59
 
