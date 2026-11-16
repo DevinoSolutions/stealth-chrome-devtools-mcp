@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.62
+
+2.1.61 was tagged but never published (its gate failed on macOS, below), so 2.1.62 is the first release on PyPI with everything in the 2.1.61 section too.
 
 ### A captcha click the widget dropped is retried after 0.5 s, not 6 s (T-18116)
 
