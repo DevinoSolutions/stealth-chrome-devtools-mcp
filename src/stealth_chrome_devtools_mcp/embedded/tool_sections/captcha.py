@@ -20,14 +20,19 @@ async def enable_captcha_auto_click(
 
     Starts a background monitor that scans all tabs every `interval_seconds`
     for Cloudflare Turnstile, Google reCAPTCHA v2, and hCaptcha checkboxes,
-    and clicks them automatically via a trusted coordinate click. It only
-    clicks the checkbox: it does not solve image puzzles or sliders, and the
-    captcha provider decides whether the click passes. Enabling an instance
-    that is already monitored restarts the monitor with the new interval.
+    and clicks them automatically via a trusted coordinate click. Widgets are
+    found by their frame's URL through CDP, so one inside a closed shadow root
+    is found too. It only clicks the checkbox: it does not solve image puzzles
+    or sliders, and the captcha provider decides whether the click passes. A
+    widget still unsolved is clicked again after a pause (1.5 s for Turnstile,
+    6 s for the others), at most 5 times. Nothing is clicked while a puzzle is
+    showing, or on a widget something else covers (a banner, a sticky header).
+    Enabling an instance that is already monitored restarts the monitor with
+    the new interval.
 
     Args:
         instance_id (str): Browser instance ID.
-        interval_seconds (float): Seconds between scans (default 2.0, min 0.5, max 30).
+        interval_seconds (float): Seconds between scans (default 0.25, min 0.1, max 30).
 
     Returns:
         Dict[str, Any]: enabled (True), instance_id and interval_seconds.
@@ -72,7 +77,7 @@ async def get_captcha_status(instance_id: str) -> dict[str, object]:
 
     Returns:
         Dict[str, Any]: active, interval_seconds (None when not active), clicks
-        (a list of type, clicked_at {x, y}, src and timestamp) and
+        (a list of type, clicked_at {x, y}, src, attempt and timestamp) and
         supported_types.
     """
     await _require_browser(rt.browser_manager, instance_id)

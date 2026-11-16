@@ -778,7 +778,7 @@
     "tags": []
   },
   "enable_captcha_auto_click": {
-    "description": "Enable automatic captcha clicking for a browser instance.\n\nStarts a background monitor that scans all tabs every `interval_seconds`\nfor Cloudflare Turnstile, Google reCAPTCHA v2, and hCaptcha checkboxes,\nand clicks them automatically via a trusted coordinate click. It only\nclicks the checkbox: it does not solve image puzzles or sliders, and the\ncaptcha provider decides whether the click passes. Enabling an instance\nthat is already monitored restarts the monitor with the new interval.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    interval_seconds (float): Seconds between scans (default 2.0, min 0.5, max 30).\n\nReturns:\n    Dict[str, Any]: enabled (True), instance_id and interval_seconds.",
+    "description": "Enable automatic captcha clicking for a browser instance.\n\nStarts a background monitor that scans all tabs every `interval_seconds`\nfor Cloudflare Turnstile, Google reCAPTCHA v2, and hCaptcha checkboxes,\nand clicks them automatically via a trusted coordinate click. Widgets are\nfound by their frame's URL through CDP, so one inside a closed shadow root\nis found too. It only clicks the checkbox: it does not solve image puzzles\nor sliders, and the captcha provider decides whether the click passes. A\nwidget still unsolved is clicked again after a pause (1.5 s for Turnstile,\n6 s for the others), at most 5 times. Nothing is clicked while a puzzle is\nshowing, or on a widget something else covers (a banner, a sticky header).\nEnabling an instance that is already monitored restarts the monitor with\nthe new interval.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    interval_seconds (float): Seconds between scans (default 0.25, min 0.1, max 30).\n\nReturns:\n    Dict[str, Any]: enabled (True), instance_id and interval_seconds.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -787,7 +787,7 @@
           "type": "string"
         },
         "interval_seconds": {
-          "default": 2.0,
+          "default": 0.25,
           "type": "number"
         }
       },
@@ -2001,7 +2001,7 @@
     "tags": []
   },
   "get_captcha_status": {
-    "description": "Get captcha auto-click status and recent click history for an instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    Dict[str, Any]: active, interval_seconds (None when not active), clicks\n    (a list of type, clicked_at {x, y}, src and timestamp) and\n    supported_types.",
+    "description": "Get captcha auto-click status and recent click history for an instance.\n\nArgs:\n    instance_id (str): Browser instance ID.\n\nReturns:\n    Dict[str, Any]: active, interval_seconds (None when not active), clicks\n    (a list of type, clicked_at {x, y}, src, attempt and timestamp) and\n    supported_types.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
