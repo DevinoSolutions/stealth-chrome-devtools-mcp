@@ -25,8 +25,10 @@ async def enable_captcha_auto_click(
     is found too. It only clicks the checkbox: it does not solve image puzzles
     or sliders, and the captcha provider decides whether the click passes. A
     widget still unsolved is clicked again after a pause (1.5 s for Turnstile,
-    6 s for the others), at most 5 times. Nothing is clicked while a puzzle is
-    showing, or on a widget something else covers (a banner, a sticky header).
+    6 s for the others), at most 5 times; a reCAPTCHA or hCaptcha click its
+    checkbox never reacted to is retried after 0.5 s instead. Nothing is
+    clicked while a puzzle is showing, while the checkbox is busy, or on a
+    widget something else covers (a banner, a sticky header).
     Enabling an instance that is already monitored restarts the monitor with
     the new interval.
 

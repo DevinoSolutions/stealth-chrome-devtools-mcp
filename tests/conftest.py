@@ -619,6 +619,25 @@ def pytest_runtest_makereport(item, call):
     report.sections.append(("backend logs", workspace_backend_logs(space)))
 
 
+def pytest_terminal_summary(terminalreporter):
+    """T-18116: every ``record_property`` value is printed in the job log.
+
+    The values went only to ``junit.xml``, which no CI cell keeps, so the
+    captcha click times CI measures on each OS could not be read anywhere.
+    """
+    rows = [
+        f"{report.nodeid}: {name}={value}"
+        for reports in terminalreporter.stats.values()
+        for report in reports
+        if getattr(report, "when", None) == "call"
+        for name, value in getattr(report, "user_properties", ())
+    ]
+    if rows:
+        terminalreporter.write_sep("-", "recorded properties")
+        for row in rows:
+            terminalreporter.write_line(row)
+
+
 # ---------------------------------------------------------------------------
 # T-15386: the suite has passed 100% on macOS/ARM64 CI and then never exited,
 # so the job hit its timeout and was cancelled (three cells, never locally).
