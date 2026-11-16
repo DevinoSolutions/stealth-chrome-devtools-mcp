@@ -48,6 +48,7 @@ from e2e_helpers import (
     sandbox_kwargs,
     warmup_once,
 )
+from stealth_chrome_devtools_mcp.embedded import captcha_clicker
 
 pytestmark = integration_pytestmark()
 
@@ -312,3 +313,31 @@ async def test_nothing_is_clicked_once_disabled(tmp_path, pages, kind):
         await asyncio.sleep(8.0)
         assert not await _token(iid, field)
         assert (await get_fn("get_captcha_status")(instance_id=iid))["clicks"] == []
+
+
+@pytest.mark.parametrize("kind", ["recaptcha-v2", "hcaptcha"])
+async def test_a_dropped_click_is_clicked_again_at_once(
+    tmp_path, pages, kind, monkeypatch, record_property
+):
+    """A first click the widget never took (the 2.1.61 publish gate, macOS:
+    hCaptcha's, 70 ms after its frame loaded) is retried within
+    ``DROPPED_AFTER`` of it, not ``RETRY_AFTER`` (6 s) later: the checkbox read
+    inside the frame stayed idle. The drop is made here by sending nothing."""
+    real_press = captcha_clicker.press
+    pressed = []
+
+    async def drop_the_first(tab, cx, cy):
+        pressed.append(time.monotonic())
+        if len(pressed) > 1:
+            await real_press(tab, cx, cy)
+
+    monkeypatch.setattr(captcha_clicker, "press", drop_the_first)
+    field = WIDGETS[kind][4]
+    async with _browser(tmp_path, kind) as iid:
+        await get_fn("enable_captcha_auto_click")(instance_id=iid)
+        await get_fn("navigate")(instance_id=iid, url=f"{pages}/{kind}")
+        assert await _wait_for_token(iid, field)
+        gap = pressed[1] - pressed[0]
+        record_property(f"captcha_{kind}_dropped_retry_ms", round(gap * 1000))
+        assert len(pressed) == 2, pressed
+        assert gap < captcha_clicker.RETRY_AFTER[kind] / 2, gap

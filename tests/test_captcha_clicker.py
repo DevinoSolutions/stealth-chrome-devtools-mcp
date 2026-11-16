@@ -78,9 +78,12 @@ def frame(
     box_error=None,
     scale=1.0,
     covered=False,
+    checkbox=None,
 ):
     """One iframe on the page, as the double serves it. ``scale`` is a CSS
-    ``transform: scale()`` on it; ``covered``, an element on top of it."""
+    ``transform: scale()`` on it; ``covered``, an element on top of it;
+    ``checkbox``, the state its checkbox element reads (None: the frame's
+    script throws, as a frame that is not a provider's would)."""
     default_size = (300, 65) if kind == "turnstile" else (304, 78)
     return {
         "id": frame_id or f"F-{kind}",
@@ -95,6 +98,7 @@ def frame(
         "box_error": box_error,
         "scale": scale,
         "covered": covered,
+        "checkbox": checkbox,
     }
 
 
@@ -267,6 +271,31 @@ class CaptchaTab(FakeTab):
             raise ProtocolException(
                 {"code": -32000, "message": "No node found at given location"}
             )
+        if method == "Page.createIsolatedWorld":
+            f = self._by_id(params["frameId"])
+            if self.session is None and not f["in_process"]:
+                # measured: an out-of-process frame is not a frame of the page
+                raise ProtocolException(
+                    {"code": -32000, "message": "No frame for given id found"}
+                )
+            return {"executionContextId": 700 + self.frames.index(f)}
+        if method == "Target.attachToTarget":
+            assert params["flatten"] is True
+            self._by_id(params["targetId"])
+            return {"sessionId": f"S-{params['targetId']}"}
+        if method == "Runtime.evaluate":
+            f = self.frames[params["contextId"] - 700]
+            if f["checkbox"] is None:
+                return {
+                    "result": {"type": "object", "subtype": "error"},
+                    "exceptionDetails": {
+                        "exceptionId": 1,
+                        "text": "Uncaught",
+                        "lineNumber": 0,
+                        "columnNumber": 0,
+                    },
+                }
+            return {"result": {"type": "string", "value": f["checkbox"]}}
         if method == "Runtime.callFunctionOn":
             f = self.frames[int(params["objectId"].removeprefix("obj-")) - 1000]
             return {"result": {"type": "boolean", "value": f["solved"]}}
@@ -276,8 +305,12 @@ class CaptchaTab(FakeTab):
         if not isinstance(cdp_obj, GeneratorType):
             return await super().send(cdp_obj, *args, **kwargs)
         request = next(cdp_obj)
+        if "sessionId" in kwargs:
+            request = {**request, "sessionId": kwargs["sessionId"]}
         self.cdp_frames.append(request)
         self.send_calls.append(request["method"])
+        #: The flattened session the command went to (None: the page's own).
+        self.session = kwargs.get("sessionId")
         reply = self._reply(request["method"], request.get("params", {}))
         try:
             cdp_obj.send(reply)
@@ -981,6 +1014,114 @@ class TestMonitor:
 
     async def test_the_module_singleton_is_a_monitor(self):
         assert isinstance(captcha_clicker.monitor, CaptchaMonitor)
+
+
+class TakesTheClick(CaptchaTab):
+    """A widget whose checkbox goes ``after`` the moment a press reaches it."""
+
+    def __init__(self, *frames, after="busy", **kwargs):
+        super().__init__(*frames, **kwargs)
+        self.after = after
+
+    def _reply(self, method, params):
+        if method == "Input.dispatchMouseEvent" and params["type"] == "mousePressed":
+            self.frames[0]["checkbox"] = self.after
+        return super()._reply(method, params)
+
+
+class TestCheckboxState:
+    """The checkbox read inside the widget's frame decides a retry (T-18116)."""
+
+    async def test_a_click_its_checkbox_never_showed_is_retried_soon(
+        self, monitor, monkeypatch
+    ):
+        monkeypatch.setattr(captcha_clicker, "DROPPED_AFTER", 0.15)
+        tab = CaptchaTab(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: len(monitor.status("i1")["clicks"]) == 2)
+        first, second = monitor_click_times(tab)[:2]
+        assert 0.14 <= second - first < 1.0  # RETRY_AFTER is 60 s here
+
+    async def test_a_click_that_made_its_checkbox_busy_waits_out_the_retry(
+        self, monitor, monkeypatch
+    ):
+        monkeypatch.setattr(captcha_clicker, "DROPPED_AFTER", 0.01)
+        monkeypatch.setitem(RETRY_AFTER, "recaptcha-v2", 0.4)
+        tab = TakesTheClick(frame("recaptcha-v2", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: monitor.status("i1")["clicks"])
+        await scans(tab, 2)  # the busy mark is seen
+        tab.frames[0]["checkbox"] = "idle"  # e.g. a puzzle was closed unsolved
+        await until(lambda: len(monitor.status("i1")["clicks"]) == 2)
+        first, second = monitor_click_times(tab)[:2]
+        assert second - first >= 0.39
+
+    @pytest.mark.parametrize("state", ["busy", "absent", "checked"])
+    async def test_nothing_is_clicked_until_the_checkbox_is_idle(self, monitor, state):
+        tab = CaptchaTab(frame("hcaptcha", checkbox=state))
+        monitor.start("i1", manager_with(tab))
+        await scans(tab, 5)
+        assert presses(tab) == []
+        tab.frames[0]["checkbox"] = "idle"
+        await until(lambda: presses(tab))
+
+    async def test_an_unreadable_checkbox_keeps_the_timers(self, monitor):
+        """The frame's script throws: the first click comes at its age, and
+        no retry before ``RETRY_AFTER`` (60 s here)."""
+        tab = CaptchaTab(frame("hcaptcha", checkbox=None))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        await scans(tab, 10)
+        assert len(presses(tab)) == 1
+
+    async def test_turnstile_is_not_read(self, monitor):
+        tab = CaptchaTab(frame("turnstile", checkbox="busy"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        assert "Runtime.evaluate" not in tab.methods()
+
+    async def test_an_out_of_process_frame_is_read_through_its_own_session(
+        self, monitor
+    ):
+        tab = TakesTheClick(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        await scans(tab, 2)
+        reads = [f for f in tab.cdp_frames if f["method"] == "Runtime.evaluate"]
+        assert reads and all(f["sessionId"] == "S-F-hcaptcha" for f in reads)
+        assert tab.methods().count("Target.attachToTarget") == 1
+        assert "#checkbox" in reads[0]["params"]["expression"]
+
+    async def test_an_in_process_frame_is_read_on_the_page(self, monitor):
+        tab = TakesTheClick(frame("recaptcha-v2", checkbox="idle", in_process=True))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        await scans(tab, 2)
+        reads = [f for f in tab.cdp_frames if f["method"] == "Runtime.evaluate"]
+        assert reads and all("sessionId" not in f for f in reads)
+        assert "Target.attachToTarget" not in tab.methods()
+        assert "#recaptcha-anchor" in reads[0]["params"]["expression"]
+
+    async def test_the_world_is_made_once_and_anew_after_a_failed_read(self, monitor):
+        tab = TakesTheClick(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        await scans(tab, 3)
+
+        def worlds():
+            return [
+                f
+                for f in tab.cdp_frames
+                if f["method"] == "Page.createIsolatedWorld" and "sessionId" in f
+            ]
+
+        assert len(worlds()) == 1
+        tab.frames[0]["checkbox"] = None  # the frame navigated: its world is gone
+        await scans(tab, 2)
+        tab.frames[0]["checkbox"] = "busy"
+        await scans(tab, 3)
+        assert len(worlds()) >= 2  # made anew...
+        assert tab.methods().count("Target.attachToTarget") == 1  # ...in one session
 
 
 def monitor_click_times(tab):

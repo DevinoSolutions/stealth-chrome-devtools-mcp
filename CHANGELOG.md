@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### A captcha click the widget dropped is retried after 0.5 s, not 6 s (T-18116)
+
+- The 2.1.61 publish gate failed twice on macOS/ARM64. Attempt 2: the first hCaptcha click came 70 ms after its frame loaded and the widget never took it, so the click that passed was the 6 s retry (6089 ms, against the 1 s budget). Attempt 1: a Turnstile click at 1045 ms. Every other node passed on all three OSes.
+- Measured on the real demo sites: a reCAPTCHA or hCaptcha click that takes marks the checkbox busy within 95-97 ms (`aria-disabled` / `aria-busy`) until the token or the puzzle (1.2 s / 2.0 s), and a working hCaptcha click shows its puzzle 1.3-2.2 s later, so shortening the blind retry would click into the spinner. The monitor now reads the checkbox in an isolated world of the widget's own frame (out-of-process frames through one flattened session): nothing is clicked while it is busy or not there yet, and a click it is still idle 0.5 s after is clicked again then. Turnstile (closed shadow root) and a frame that does not answer keep the timers.
+- `test_a_dropped_click_is_clicked_again_at_once` drops the first press in real Chrome: the retry came 520-521 ms later (reCAPTCHA, hCaptcha); with the state read removed it came at 6021 ms and the node fails. The speed nodes still click once each locally (Turnstile 132-133 ms, reCAPTCHA 385-444 ms, hCaptcha 204-382 ms).
+
+### Every CI job log prints the captcha click times it measured (T-18116)
+
+- The captcha speed test recorded its milliseconds only in `junit.xml`, which no CI cell keeps, so the per-OS numbers could not be read: the 2.1.61 publish gate failed on macOS/ARM64 at 1045 ms against the 1 s budget, and nothing showed how close the other two providers ran there. A `pytest_terminal_summary` hook in `tests/conftest.py` now prints every node's `record_property` values in a `recorded properties` section at the end of each run.
+
 ## 2.1.61
 
 ### Locked dependencies: dnspython 2.9.2 and opentelemetry-api 1.45.2 (security)
