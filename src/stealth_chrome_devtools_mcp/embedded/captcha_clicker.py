@@ -48,12 +48,14 @@ most ``MAX_ATTEMPTS`` times. Turnstile retries sooner: a real one can show
 machine (the 2.1.61 publish gate, macOS/ARM64) an hCaptcha click 70 ms after
 its frame's ``load`` gave no token, and the retry came 6 s later. So for
 reCAPTCHA and hCaptcha the monitor reads the checkbox element itself
-(``CHECKBOX_STATE_JS``, in an isolated world of the widget's frame, through the
-frame's own flattened session when it is out of process): a click that took
-marks it busy within 0.1 s (measured), and nothing is clicked while it is busy
-or not there yet; one still idle ``DROPPED_AFTER`` after the click, never
-having gone busy, was dropped and is retried then. A frame that does not
-answer keeps the timers above.
+(``CHECKBOX_STATE_JS``, in the package's isolated world of the widget's frame,
+``page_natives.frame_world``, through the frame's own flattened session when it
+is out of process): a click that took marks it busy within 0.1 s (measured),
+and nothing is clicked while it is busy or not there yet (for at most
+``ABSENT_GRACE``); one still idle ``DROPPED_AFTER`` after the FIRST click,
+never having gone busy, was dropped and is retried then, once. A read is
+advisory: one that fails or takes longer than ``STATE_WAIT`` leaves the timers
+above in charge, and so does a frame that could not be attached to.
 Nothing is clicked on a tab while a reCAPTCHA or hCaptcha puzzle is showing:
 the click worked, and a second one could land on the puzzle.
 
@@ -84,6 +86,7 @@ from urllib.parse import parse_qs, urlsplit
 from nodriver import Browser, Tab, cdp
 from nodriver.core.connection import ProtocolException
 
+from stealth_chrome_devtools_mcp.embedded import page_natives
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -205,8 +208,13 @@ CHECKBOX_STATE_JS = """(() => {
 })()"""
 CHECKBOX_STATES = frozenset({"absent", "checked", "busy", "idle"})
 
-#: The isolated world the checkbox state is read in.
-_WORLD = "stealth-captcha-state"
+#: The most a checkbox read may take: it comes before the click, so a frame that
+#: is slow to answer must not hold the click up. Past it, the timers decide.
+STATE_WAIT = 0.5
+
+#: How long a missing checkbox element holds a widget's first click back. Past
+#: it the timers decide, so a provider that renamed its checkbox is still clicked.
+ABSENT_GRACE = 3.0
 
 
 def classify(url: str) -> str | None:
@@ -318,39 +326,8 @@ async def _send(
         return await tab.send(command, sessionId=session_id)
 
 
-async def _frame_world(
-    tab: Tab, frame_id: str, session: str | None
-) -> tuple[str | None, int]:
-    """An isolated world in the widget's own frame: ``(session, context id)``.
-
-    An in-process frame (same site as the page) takes it on ``tab``; an
-    out-of-process one is a target of its own, attached to once: a ``session``
-    from before is used again, so a remade world does not attach twice.
-    """
-    frame = cdp.page.FrameId(frame_id)
-    if session is None:
-        try:
-            return None, await _send(
-                tab, cdp.page.create_isolated_world(frame, world_name=_WORLD)
-            )
-        except ProtocolException:
-            pass  # not a frame of this target: an out-of-process one
-        session = str(
-            await _send(
-                tab,
-                cdp.target.attach_to_target(
-                    cdp.target.TargetID(frame_id), flatten=True
-                ),
-            )
-        )
-    context = await _send(
-        tab, cdp.page.create_isolated_world(frame, world_name=_WORLD), session
-    )
-    return session, context
-
-
 async def checkbox_state(
-    tab: Tab, kind: str, session: str | None, context: int
+    tab: Tab, kind: str, session: str | None, context: cdp.runtime.ExecutionContextId
 ) -> str | None:
     """``CHECKBOX_STATE_JS``'s answer for a ``kind`` widget's frame, or None
     when the frame did not give one."""
@@ -358,7 +335,7 @@ async def checkbox_state(
         tab,
         cdp.runtime.evaluate(
             CHECKBOX_STATE_JS.replace("SELECTOR", CHECKBOX_SELECTORS[kind]),
-            context_id=cdp.runtime.ExecutionContextId(context),
+            context_id=context,
             return_by_value=True,
             silent=True,
         ),
@@ -367,6 +344,38 @@ async def checkbox_state(
     if thrown is not None or answer.value not in CHECKBOX_STATES:
         return None
     return cast("str", answer.value)
+
+
+async def _read_state(tab: Tab, hit: CaptchaHit, widget: _Widget) -> str | None:
+    """Read ``hit``'s checkbox in the package's isolated world of its frame.
+
+    An in-process frame (same site as the page) is a frame of ``tab``; an
+    out-of-process one is a target of its own, attached to ONCE (flattened, over
+    ``tab``'s connection) and its session kept on the widget the moment it
+    exists. An attach that fails or is cut short marks the widget unreadable, so
+    a slow frame is not attached to again on every sweep. No domain is enabled
+    in that session: nodriver hands a child session's events to the tab's own
+    handlers, so enabling one would mix the frame's events into the page's.
+    """
+    frame = cdp.page.FrameId(hit.frame_id)
+    if widget.session is None:
+        try:
+            context = await page_natives.frame_world(tab, frame)
+            return await checkbox_state(tab, hit.type, None, context)
+        except ProtocolException:
+            pass  # not a frame of this target: an out-of-process one
+        try:
+            session = await tab.send(
+                cdp.target.attach_to_target(
+                    cdp.target.TargetID(hit.frame_id), flatten=True
+                )
+            )
+        except BaseException:
+            widget.readable = False
+            raise
+        widget.session = str(session)
+    context = await page_natives.frame_world(tab, frame, widget.session)
+    return await checkbox_state(tab, hit.type, widget.session, context)
 
 
 async def _provider_frames(tab: Tab) -> list[tuple[str, str, str]]:
@@ -558,10 +567,10 @@ class _Widget:
     last_click: float = 0.0  # time.monotonic() of the latest
     #: Whether the checkbox was seen busy (or checked) since the last click.
     took: bool = False
-    #: Where its checkbox state is read: the frame's own session (None for an
-    #: in-process frame) and the isolated world in it, once made.
+    #: The flattened session its out-of-process frame was attached to, once.
     session: str | None = None
-    context: int | None = None
+    #: False once attaching to its frame failed: read no more, the timers decide.
+    readable: bool = True
 
     def due_at(self, kind: str, state: str | None = None) -> float | None:
         """When (``time.monotonic()``) this widget may next be clicked; None
@@ -575,7 +584,9 @@ class _Widget:
             return self.first_seen + FIRST_CLICK_AGE[kind]
         if self.clicks >= MAX_ATTEMPTS:
             return None
-        if state == "idle" and not self.took:
+        if state == "idle" and not self.took and self.clicks == 1:
+            # Once: a busy mark later than DROPPED_AFTER (a slow machine) or a
+            # provider that stopped setting one must not become 5 quick clicks.
             return self.last_click + DROPPED_AFTER
         return self.last_click + RETRY_AFTER[kind]
 
@@ -638,20 +649,27 @@ class CaptchaMonitor:
 
     @staticmethod
     async def _state(tab: Tab, hit: CaptchaHit, widget: _Widget) -> str | None:
-        """The checkbox state of ``hit``'s widget, or None when it has no
-        readable checkbox (Turnstile) or its frame did not answer."""
-        if hit.type not in CHECKBOX_SELECTORS:
+        """The checkbox state of ``hit``'s widget, or None (the timers decide):
+        no readable checkbox (Turnstile), no attempt left, an absent one past
+        ``ABSENT_GRACE``, or a frame that did not answer within ``STATE_WAIT``."""
+        if (
+            hit.type not in CHECKBOX_SELECTORS
+            or not widget.readable
+            or widget.clicks >= MAX_ATTEMPTS
+        ):
             return None
         try:
-            if widget.context is None:
-                widget.session, widget.context = await _frame_world(
-                    tab, hit.frame_id, widget.session
-                )
-            state = await checkbox_state(tab, hit.type, widget.session, widget.context)
-        except (ProtocolException, TimeoutError):
-            state = None
-        if state is None:
-            widget.context = None  # the frame navigated, or never answered: made anew
+            async with asyncio.timeout(STATE_WAIT):
+                state = await _read_state(tab, hit, widget)
+        except Exception as err:  # noqa: BLE001  PERMANENT(the state is advisory: any failed read leaves the timers in charge)
+            if isinstance(err, ProtocolException) and err.code == _SESSION_GONE:
+                widget.session = None  # its frame's target went: attach anew
+            debug_logger.log_debug(
+                "captcha_clicker", "state", f"unread: {type(err).__name__}"
+            )
+            return None
+        if state == "absent" and time.monotonic() - widget.first_seen > ABSENT_GRACE:
+            return None
         return state
 
     async def _scan_tab(self, instance_id: str, tab: Tab) -> set[str] | None:
@@ -686,6 +704,12 @@ class CaptchaMonitor:
                 widget.last_click = time.monotonic()
                 widget.took = False
                 await press(tab, *point)
+                if widget.readable and hit.type in CHECKBOX_SELECTORS:
+                    # Wake for the dropped-click check whatever the interval.
+                    check = widget.last_click + DROPPED_AFTER
+                    self._next_due[instance_id] = min(
+                        check, self._next_due.get(instance_id, check)
+                    )
                 entry = _entry(hit, *point)
                 entry["attempt"] = widget.clicks
                 entry["timestamp"] = datetime.now(UTC).isoformat()

@@ -340,4 +340,4 @@ async def test_a_dropped_click_is_clicked_again_at_once(
         gap = pressed[1] - pressed[0]
         record_property(f"captcha_{kind}_dropped_retry_ms", round(gap * 1000))
         assert len(pressed) == 2, pressed
-        assert gap < captcha_clicker.RETRY_AFTER[kind] / 2, gap
+        assert gap < 1.5, gap  # DROPPED_AFTER is 0.5 s, RETRY_AFTER 6 s

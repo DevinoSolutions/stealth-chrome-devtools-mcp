@@ -19,7 +19,7 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import FakeBrowser, FakeBrowserManager, FakeTab, fake_instance
-from stealth_chrome_devtools_mcp.embedded import captcha_clicker
+from stealth_chrome_devtools_mcp.embedded import captcha_clicker, page_natives
 from stealth_chrome_devtools_mcp.embedded.captcha_clicker import (
     CHALLENGE,
     CHECKBOX_OFFSETS,
@@ -1102,26 +1102,116 @@ class TestCheckboxState:
         assert "Target.attachToTarget" not in tab.methods()
         assert "#recaptcha-anchor" in reads[0]["params"]["expression"]
 
-    async def test_the_world_is_made_once_and_anew_after_a_failed_read(self, monitor):
+    async def test_the_frame_is_attached_once_and_its_world_asked_every_read(
+        self, monitor
+    ):
+        """``page_natives.frame_world``: one world name, asked for each read."""
         tab = TakesTheClick(frame("hcaptcha", checkbox="idle"))
         monitor.start("i1", manager_with(tab))
         await until(lambda: presses(tab))
-        await scans(tab, 3)
-
-        def worlds():
-            return [
-                f
-                for f in tab.cdp_frames
-                if f["method"] == "Page.createIsolatedWorld" and "sessionId" in f
-            ]
-
-        assert len(worlds()) == 1
-        tab.frames[0]["checkbox"] = None  # the frame navigated: its world is gone
+        tab.frames[0]["checkbox"] = None  # a read that fails keeps the session
         await scans(tab, 2)
         tab.frames[0]["checkbox"] = "busy"
         await scans(tab, 3)
-        assert len(worlds()) >= 2  # made anew...
-        assert tab.methods().count("Target.attachToTarget") == 1  # ...in one session
+        worlds = [
+            f
+            for f in tab.cdp_frames
+            if f["method"] == "Page.createIsolatedWorld" and "sessionId" in f
+        ]
+        reads = [f for f in tab.cdp_frames if f["method"] == "Runtime.evaluate"]
+        assert len(worlds) == len(reads) >= 4
+        assert {f["params"]["worldName"] for f in worlds} == {page_natives.WORLD_NAME}
+        assert tab.methods().count("Target.attachToTarget") == 1
+
+    async def test_only_one_quick_retry_however_long_the_checkbox_stays_idle(
+        self, monitor, monkeypatch
+    ):
+        """A busy mark later than DROPPED_AFTER, or none at all, is not five
+        quick clicks: after the one quick retry, RETRY_AFTER (60 s here)."""
+        monkeypatch.setattr(captcha_clicker, "DROPPED_AFTER", 0.05)
+        tab = CaptchaTab(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: len(presses(tab)) == 2)
+        await scans(tab, 20)
+        assert len(presses(tab)) == 2
+
+    async def test_a_missing_checkbox_holds_the_click_only_for_a_grace(
+        self, monitor, monkeypatch
+    ):
+        monkeypatch.setattr(captcha_clicker, "ABSENT_GRACE", 0.3)
+        tab = CaptchaTab(frame("hcaptcha", checkbox="absent"))
+        loop = asyncio.get_running_loop()
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: "Page.getFrameTree" in tab.methods())
+        seen = loop.time()
+        await until(lambda: presses(tab))
+        assert loop.time() - seen >= 0.29
+
+    async def test_any_failed_read_leaves_the_timers_and_the_tab_scanned(self, monitor):
+        """Not only a ProtocolException: nodriver re-raises a reply it cannot
+        parse as KeyError, which must not skip the whole tab."""
+
+        class Unparsable(CaptchaTab):
+            def _reply(self, method, params):
+                if method == "Runtime.evaluate":
+                    raise KeyError("result")
+                return super()._reply(method, params)
+
+        tab = Unparsable(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        await scans(tab, 5)
+        assert len(presses(tab)) == 1  # RETRY_AFTER (60 s), not DROPPED_AFTER
+
+    async def test_a_slow_read_does_not_hold_the_click(self, monitor, monkeypatch):
+        monkeypatch.setattr(captcha_clicker, "STATE_WAIT", 0.05)
+
+        class Slow(CaptchaTab):
+            async def send(self, cdp_obj, *args, **kwargs):
+                if kwargs.get("sessionId"):
+                    await asyncio.sleep(10)
+                return await super().send(cdp_obj, *args, **kwargs)
+
+        tab = Slow(frame("hcaptcha", checkbox="idle"))
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab), seconds=2.0)
+        assert loop.time() - start < 1.0
+
+    async def test_an_attach_that_failed_is_not_tried_on_every_sweep(self, monitor):
+        class NoAttach(CaptchaTab):
+            def _reply(self, method, params):
+                if method == "Target.attachToTarget":
+                    raise ProtocolException({"code": -32000, "message": "nope"})
+                return super()._reply(method, params)
+
+        tab = NoAttach(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        await scans(tab, 5)
+        assert tab.methods().count("Target.attachToTarget") == 1
+
+    async def test_a_widget_out_of_attempts_is_not_read(self, monitor, monkeypatch):
+        monkeypatch.setattr(captcha_clicker, "MAX_ATTEMPTS", 1)
+        tab = CaptchaTab(frame("hcaptcha", checkbox="idle"))
+        monitor.start("i1", manager_with(tab))
+        await until(lambda: presses(tab))
+        before = tab.methods().count("Runtime.evaluate")
+        await scans(tab, 5)
+        assert tab.methods().count("Runtime.evaluate") == before
+
+    async def test_the_loop_wakes_for_the_dropped_click_check(self, monkeypatch):
+        """At a 30 s interval the quick retry still comes: the loop is woken
+        for it rather than sleeping the whole interval."""
+        monkeypatch.setattr(captcha_clicker, "DROPPED_AFTER", 0.1)
+        slow = CaptchaMonitor(interval=30.0)
+        tab = CaptchaTab(frame("hcaptcha", checkbox="idle"))
+        try:
+            slow.start("i1", manager_with(tab))
+            await until(lambda: len(presses(tab)) == 2, seconds=2.0)
+        finally:
+            slow.cleanup("i1")
 
 
 def monitor_click_times(tab):
