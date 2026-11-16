@@ -253,6 +253,24 @@ NATIVES_JS = (
 ).replace("__ROOTS__", ROOTS_JS)
 
 
+async def frame_world(
+    tab: Tab, frame_id: cdp.page.FrameId, session_id: str | None = None
+) -> cdp.runtime.ExecutionContextId:
+    """THE way to get the package's isolated world in one frame (:data:`WORLD_NAME`).
+
+    Asked for every time, never cached (module docstring: idempotent per frame
+    and name). ``session_id`` is the flattened session of an out-of-process
+    frame, sent over ``tab``'s own connection; None for a frame of ``tab``
+    itself. A failed command propagates as raised.
+    """
+    command = cdp.page.create_isolated_world(
+        frame_id, world_name=WORLD_NAME, grant_univeral_access=False
+    )
+    if session_id is None:
+        return await tab.send(command)
+    return await tab.send(command, sessionId=session_id)
+
+
 def _frame_ids(tree: cdp.page.FrameTree) -> list[cdp.page.FrameId]:
     """The frame ids of *tree*, the main frame first, then depth first."""
     ids = [tree.frame.id_]
@@ -362,11 +380,7 @@ async def _in_frame(
     """
     tab = element.tab
     try:
-        world = await tab.send(
-            cdp.page.create_isolated_world(
-                frame_id, world_name=WORLD_NAME, grant_univeral_access=False
-            )
-        )
+        world = await frame_world(tab, frame_id)
     except ProtocolException as exc:
         if _says_not_here(exc):
             return _NOT_HERE
@@ -488,11 +502,7 @@ async def selector_parses(tab: Tab, selector: str) -> bool:
     propagates as raised.
     """
     tree = await tab.send(cdp.page.get_frame_tree())
-    world = await tab.send(
-        cdp.page.create_isolated_world(
-            tree.frame.id_, world_name=WORLD_NAME, grant_univeral_access=False
-        )
-    )
+    world = await frame_world(tab, tree.frame.id_)
     result, thrown = await tab.send(
         cdp.runtime.call_function_on(
             SELECTOR_PARSES_JS,
