@@ -695,7 +695,11 @@ class TestMonitor:
         monitor.start("i1", manager_with(tab))
         await until(lambda: len(monitor.status("i1")["clicks"]) == 2)
         first, second = (monitor_click_times(tab))[:2]
-        assert second - first >= 0.15
+        # The delay runs from the attempt's start; each press then comes after
+        # the 50 ms move-to-press sleep, whose overshoot varies by a fraction
+        # of a millisecond (CI py3.11 measured 0.14987 s). A retry ignoring the
+        # delay comes one 0.01 s sweep plus one click (~0.08 s) later.
+        assert second - first >= 0.15 - 0.01
 
     async def test_a_solved_widget_is_not_clicked(self, monitor):
         tab = CaptchaTab(frame(solved=True))
