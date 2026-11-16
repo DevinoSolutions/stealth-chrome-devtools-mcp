@@ -2,6 +2,10 @@
 
 ## 2.1.61
 
+### Locked dependencies: dnspython 2.9.2 and opentelemetry-api 1.45.2 (security)
+
+- The release gate's `python-audit` job turned red on the 2.1.61 release PR: two advisories were published after 2.1.60 shipped, CVE-2026-128089 in dnspython 2.9.0 (fixed in 2.9.2) and CVE-2026-126360 in opentelemetry-api 1.45.1 (fixed in 1.45.2). Both are transitive; `uv.lock` now pins the fixed versions and nothing else moved.
+
 ### Captcha auto-click finds Turnstile, clicks within half a second, and retries; CI measures the speed (T-18116)
 
 - 2.1.60's monitor looked for widgets with `querySelectorAll('iframe')` in the page, so it never saw a Cloudflare Turnstile: Cloudflare puts the widget's iframe in a CLOSED shadow root. Live on 2captcha.com's Turnstile demo it found nothing, while a CDP click at the iframe's box passed the widget. Detection now goes through CDP and never runs page JS to find a widget: the top document's child frames come from `Page.getFrameTree` and from `Target.getTargets` (out-of-process frames, which is what all three providers' frames are), each is named by its real https host and path (`classify`; a look-alike host, plain http or an invisible reCAPTCHA is not a widget), and it is placed with `DOM.getFrameOwner` + `DOM.getBoxModel` (about 1 ms per frame). It never calls `DOM.getDocument` (F-884).
