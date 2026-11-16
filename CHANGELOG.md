@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.61
 
 ### Captcha auto-click finds Turnstile, clicks within half a second, and retries; CI measures the speed (T-18116)
 
