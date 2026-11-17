@@ -231,9 +231,64 @@ def _epoch_ms(click: dict) -> float:
     return datetime.fromisoformat(click["timestamp"]).timestamp() * 1000
 
 
+@pytest.fixture
+def timeline(monkeypatch):
+    """What the monitor did, sweep by sweep, as ``(epoch_ms, what)``: a speed
+    failure prints it, so a slow click on a CI runner says where the time went
+    (the frame not listed yet, a read that held it, a scan that stalled) instead
+    of leaving one number. 2.1.62's gate: one macOS reCAPTCHA click 2421 ms
+    after ready, which ten local runs (380-520 ms) never showed."""
+    events: list[tuple[float, str]] = []
+
+    def note(what: str) -> None:
+        events.append((time.time() * 1000, what))
+
+    scan, state, press = (
+        captcha_clicker.scan,
+        captcha_clicker.CaptchaMonitor._state,
+        captcha_clicker.press,
+    )
+
+    async def timed_scan(tab):
+        start = time.time() * 1000
+        try:
+            got = await scan(tab)
+        except BaseException as err:
+            note(
+                f"scan raised {type(err).__name__} after {time.time() * 1000 - start:.0f} ms"
+            )
+            raise
+        found = ",".join(hit.type for hit in got.hits) or "-"
+        note(
+            f"scan {time.time() * 1000 - start:.0f} ms: hits {found}, "
+            f"unmeasured {len(got.unmeasured)}, puzzle {got.challenge_showing}"
+        )
+        return got
+
+    async def timed_state(tab, hit, widget):
+        got = await state(tab, hit, widget)
+        note(f"state {got} (clicks {widget.clicks})")
+        return got
+
+    async def timed_press(tab, x, y):
+        note("press")
+        return await press(tab, x, y)
+
+    monkeypatch.setattr(captcha_clicker, "scan", timed_scan)
+    monkeypatch.setattr(
+        captcha_clicker.CaptchaMonitor, "_state", staticmethod(timed_state)
+    )
+    monkeypatch.setattr(captcha_clicker, "press", timed_press)
+    return events
+
+
+def _since(events: list[tuple[float, str]], ready: float) -> str:
+    return "; ".join(f"{at - ready:+.0f} {what}" for at, what in events[:60])
+
+
 @pytest.mark.parametrize("kind", list(WIDGETS))
 async def test_the_monitor_clicks_the_widget_fast(
-    tmp_path, pages, kind, record_property
+    tmp_path, pages, kind, record_property, timeline
 ):
     field = WIDGETS[kind][4]
     enable, status = get_fn("enable_captcha_auto_click"), get_fn("get_captcha_status")
@@ -278,7 +333,8 @@ async def test_the_monitor_clicks_the_widget_fast(
             record_property(f"captcha_{kind}_token_ms", round(passed - ready))
         assert click_ms <= CLICK_BUDGET_S * 1000, (
             f"{kind}: the click that counted came {click_ms:.0f} ms after the "
-            f"checkbox was ready, over the {CLICK_BUDGET_S:g} s budget: {clicks}"
+            f"checkbox was ready, over the {CLICK_BUDGET_S:g} s budget: {clicks}; "
+            f"monitor, ms after ready: {_since(timeline, ready)}"
         )
         for click in clicks:
             assert click["type"] == kind
