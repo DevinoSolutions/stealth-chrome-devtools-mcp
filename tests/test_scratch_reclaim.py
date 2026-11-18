@@ -55,10 +55,13 @@ def _age(path: Path, seconds: float) -> None:
     os.utime(path, (then, then))
 
 
-def _staging(root: Path, name: str, *, age: float) -> Path:
+def _staging(root: Path, name: str, *, age: float, owned: bool = True) -> Path:
+    """What a dead ``replace_tree`` leaves: a half copy and its OWNER proof."""
     directory = root / f"{name}{profile_copy.STAGING_SUFFIX}999-1"
     directory.mkdir()
     (directory / "half.bin").write_bytes(b"x" * 64)
+    if owned:
+        (directory / profile_copy.STAGING_OWNER).write_text("999")
     _age(directory, age)
     return directory
 
@@ -257,7 +260,95 @@ class TestScratchADeadProcessLeftIsReclaimedBySweep:
         _age(link, STALE + 60)
         _age(victim, STALE + 60)
 
-        assert profile_copy.reclaim_stale_scratch(tmp_path) == 0
+        assert profile_copy.stale_scratch(tmp_path) == []
+        clone_storage.run_storage_sweep(tmp_path, 0, 0)
 
         assert os.path.lexists(link)
         assert (victim / "keep").read_text() == "x"
+
+
+class TestOnlyProvenScratchIsReclaimed:
+    """T-5968 review B2: the root-wide reclaim took ANY directory whose name
+    contained ``.stealth-staging-`` once its mtime was over an hour old, so a
+    NAMED session called ``acme.stealth-staging-eu`` (the gate let it through)
+    was deleted by one sweep. A name is not proof; the owner file is."""
+
+    def test_a_directory_with_a_staging_name_and_no_owner_proof_survives(
+        self, tmp_path
+    ):
+        lookalike = _staging(tmp_path, "acme", age=STALE * 9, owned=False)
+
+        clone_storage.run_storage_sweep(tmp_path, 0, 0)
+
+        assert (lookalike / "half.bin").exists()
+
+    def test_a_named_session_that_got_the_staging_name_is_never_swept(self, tmp_path):
+        """Built with the real marker writer, as an older build would have made it."""
+        from stealth_chrome_devtools_mcp.embedded import profile_seed
+
+        session = tmp_path / f"acme{profile_copy.STAGING_SUFFIX}eu"
+        session.mkdir()
+        (session / "Cookies").write_bytes(b"login")
+        profile_seed.write_marker(
+            session, source=tmp_path, source_kind="explicit-session", seeded_from="x"
+        )
+        _age(session, STALE * 9)
+
+        clone_storage.run_storage_sweep(tmp_path, 0, 0)
+
+        assert (session / "Cookies").read_bytes() == b"login"
+
+    def test_even_with_the_owner_file_a_marked_directory_goes_through_the_guard(
+        self, tmp_path
+    ):
+        """The delete is ``clone_trash.discard``, whose protection reads the
+        marker: a NAMED session carrying a stray owner file is still refused."""
+        from stealth_chrome_devtools_mcp.embedded import profile_seed
+
+        session = _staging(tmp_path, "acme", age=STALE * 9)
+        profile_seed.write_marker(
+            session, source=tmp_path, source_kind="explicit-session", seeded_from="x"
+        )
+        _age(session, STALE * 9)  # writing the marker made the directory fresh
+        assert profile_copy.stale_scratch(tmp_path) == [session], (
+            "selected, so the guard is what saves it"
+        )
+
+        clone_storage.run_storage_sweep(tmp_path, 0, 0)
+
+        assert (session / "half.bin").exists()
+
+    def test_a_finished_copy_does_not_keep_its_owner_file(self, tmp_session_root):
+        sessions = tmp_session_root["sessions"]
+        target = sessions / "proj-1a2b3c-4242-11"
+
+        profile_copy.replace_tree(
+            tmp_session_root["snapshot"], target, stamp=lambda _p: None
+        )
+
+        assert target.is_dir()
+        assert not (target / profile_copy.STAGING_OWNER).exists()
+
+    def test_the_owner_file_is_never_copied_into_another_profile(self):
+        """It rides the ``.lock`` suffix every profile copy already skips."""
+        names = [profile_copy.STAGING_OWNER]
+        assert profile_copy.ignore_names(names) == set(names)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "acme.stealth-staging-eu",
+            "acme.stealth-staging-",
+            "acme.stealth-previous",
+            ".trash",
+            ".TRASH",
+            ".trash.",
+        ],
+    )
+    def test_the_name_gate_refuses_every_name_the_sweep_reads_as_scratch(
+        self, tmp_session_root, name
+    ):
+        from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+        with pytest.raises(ToolError, match="storage sweep owns"):
+            clone_storage.require_allowed_user_data_dir(None, name)

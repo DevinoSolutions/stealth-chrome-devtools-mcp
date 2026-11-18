@@ -66,6 +66,11 @@ def _clone(root: Path, name: str, *, auto: bool = True, age: float = 0.0) -> Pat
         f'"created_at": "{created}"}}',
         encoding="utf-8",
     )
+    # Chrome's own files age with the clone, or `clone_stale` (which counts the
+    # newest of them as the last use) would read every fixture as used just now.
+    then = time.time() - age
+    for path in (*directory.rglob("*"), directory):
+        os.utime(path, (then, then))
     return directory
 
 
@@ -510,13 +515,17 @@ class TestTheReaperDecidesFromWhatItCanEstablish:
         assert _intact(clone)
         assert profile_seed.is_auto(clone), "the marker went with the delete"
 
-    def test_the_cap_sweeps_own_fallback_still_deletes(self, tmp_path, monkeypatch):
-        """The default is unchanged: the cap has to be honoured."""
+    def test_the_cap_sweep_asks_the_same_question_and_does_not_delete_either(
+        self, tmp_path, monkeypatch
+    ):
+        """ONE predicate (T-5968 review L6): the cap sweep used to fall back to
+        ``rmtree`` when the move was refused, which the reaper never did. A clone
+        still over the cap waits for the next sweep."""
         clone = _clone(tmp_path, "over-cap")
         monkeypatch.setattr(os, "replace", _boom)
 
         assert clone_trash.trash(clone, tmp_path, lambda _p: False) is None
-        assert not clone.exists()
+        assert _intact(clone)
 
     def test_a_clone_a_sibling_backend_publishes_during_the_scan_is_not_taken(
         self, tmp_path

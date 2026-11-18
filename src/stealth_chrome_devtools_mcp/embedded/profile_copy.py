@@ -59,8 +59,9 @@ module state the policy — which source, and when it is refused — without the
 mechanics sitting in the middle of it. The same shape ``page_storage`` made
 when it left ``browser_manager``.
 
-A leaf: stdlib plus ``debug_logger``. It knows nothing about session roots,
-seeds or roles — every path arrives as an argument.
+A leaf: stdlib, ``debug_logger`` and ``profile_seed`` (for the two scratch
+suffixes alone). It knows nothing about session roots, seeds or roles — every
+path arrives as an argument.
 """
 
 import itertools
@@ -72,6 +73,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from stealth_chrome_devtools_mcp.embedded import profile_seed
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 # Regenerable Chrome profile subdirectories — caches and on-device model stores
@@ -291,8 +293,18 @@ def copy_delta(source: Path, target: Path) -> None:
 #: target it belongs to. Distinctive rather than pretty: they sit in the same
 #: directory as real profiles and :func:`is_scratch` decides by NAME, so a
 #: session a caller could plausibly ask for must never collide with one.
-STAGING_SUFFIX = ".stealth-staging-"
-PREVIOUS_SUFFIX = ".stealth-previous"
+#: Their spellings are ``profile_seed``'s, because the name gate that keeps a
+#: session from being called either of them is too.
+STAGING_SUFFIX = profile_seed.STAGING_SUFFIX
+PREVIOUS_SUFFIX = profile_seed.PREVIOUS_SUFFIX
+#: What PROVES a directory is a staging copy this module made: a file
+#: :func:`replace_tree` writes into the staging directory when it creates it and
+#: removes right AFTER the publishing rename, so a published profile (a session)
+#: has it only if the process died in between. A NAME alone proves nothing: a
+#: session may be called anything the gate lets through, and older builds let
+#: ``acme.stealth-staging-eu`` through. The ``.lock`` suffix is what keeps it out
+#: of every profile copy (:func:`ignore_names`), like ``profile_lock``'s own.
+STAGING_OWNER = "stealth-staging-owner.lock"
 
 #: The pause between :func:`replace_tree`'s two copy passes — the second exists
 #: to pick up what the first found locked, and this is what gives Chrome time
@@ -324,46 +336,60 @@ def is_scratch(name: str) -> bool:
     return STAGING_SUFFIX in name or name.endswith(PREVIOUS_SUFFIX)
 
 
-def reclaim_stale_scratch(
+def stale_scratch(
     directory: Path, base: str | None = None, keep: Container[str] = ()
-) -> int:
-    """Remove the STAGING copies a dead process left behind in *directory*; the
-    count removed. Never raises.
+) -> list[Path]:
+    """The staging copies in *directory* that a dead process left behind.
+    Read-only: deleting them is the caller's, so the sweep deletes through the one
+    guarded path (``clone_trash.discard``) and :func:`replace_tree` through its own.
 
-    Keyed on AGE and never on ownership: the pid in the name belongs to a
-    process that is gone, so there is nobody to ask. :data:`STALE_STAGING_SECONDS`
-    carries why that window cannot reach a live sibling's build. A displaced
-    PREVIOUS generation is deliberately not reclaimed here: it is the one copy of
-    what a refresh replaced, :func:`_displace` keeps exactly one on purpose, and
-    this runs unattended. A link is never followed or removed: it is not a copy
-    this module made.
+    A directory is selected only when it can be PROVEN to be one: its name carries
+    :data:`STAGING_SUFFIX`, it is not a link, and it holds :data:`STAGING_OWNER`
+    (see there). Then it must be older than :data:`STALE_STAGING_SECONDS`, keyed
+    on AGE and never on ownership: the pid in the name belongs to a process that
+    is gone, so there is nobody to ask, and that constant carries why the window
+    cannot reach a live sibling's build. A displaced PREVIOUS generation is never
+    selected: it is the one copy of what a refresh replaced.
 
     *base* limits it to one target's staging, which is what the next copy of that
-    target asks (the one place guaranteed to run before the name is needed
-    again). Without it every staging copy in the directory is judged, which is
-    what the storage sweep asks (T-5968): a clone's name is unique per attempt, so
-    a copy its dead backend left was never the "same target" of any later copy
-    and, because every scan skips scratch by name, nothing else ever looked at
-    it. *keep* names the profiles (case- and trailing-dot-folded) whose staging is
-    never touched: the seeds'.
+    target asks. Without it every staging copy is judged, which is what the
+    storage sweep asks (T-5968): a clone's name is unique per attempt, so a copy
+    its dead backend left was never the "same target" of any later copy. *keep*
+    names the profiles (case- and trailing-dot-folded) whose staging is never
+    selected: the seeds'.
     """
     prefix = f"{base}{STAGING_SUFFIX}" if base is not None else None
     cutoff = time.time() - STALE_STAGING_SECONDS
     try:
         entries = list(directory.iterdir())
     except OSError:
-        return 0
-    removed = 0
+        return []
+    found = []
     for entry in entries:
-        owner, found, _ = entry.name.partition(STAGING_SUFFIX)
-        if not found or owner.casefold().rstrip(". ") in keep:
+        owner, mark, _ = entry.name.partition(STAGING_SUFFIX)
+        if not mark or owner.casefold().rstrip(". ") in keep:
             continue
         if prefix is not None and not entry.name.startswith(prefix):
             continue
         with suppress(OSError):
-            if not is_link(entry) and entry.is_dir() and entry.stat().st_mtime < cutoff:
-                rmtree_robust(entry)
-                removed += not entry.exists()
+            if (
+                not is_link(entry)
+                and entry.is_dir()
+                and (entry / STAGING_OWNER).is_file()
+                and entry.stat().st_mtime < cutoff
+            ):
+                found.append(entry)
+    return found
+
+
+def reclaim_stale_scratch(directory: Path, base: str) -> int:
+    """Remove the staging copies :func:`stale_scratch` finds for one target; the
+    count removed. :func:`replace_tree`'s own, run before it builds its own: the
+    seeds sit outside the clone root, so the storage sweep never reaches theirs."""
+    removed = 0
+    for entry in stale_scratch(directory, base):
+        rmtree_robust(entry)
+        removed += not entry.exists()
     return removed
 
 
@@ -588,6 +614,7 @@ def replace_tree(
     reclaim_stale_scratch(target.parent, target.name)
     try:
         staging.mkdir(parents=True, exist_ok=True)
+        (staging / STAGING_OWNER).write_text(str(os.getpid()), encoding="utf-8")
         copy_delta(source, staging)
         time.sleep(RETRY_SETTLE_SECONDS)
         copy_delta(source, staging)
@@ -612,6 +639,8 @@ def replace_tree(
                 displaced = True
             failure = _rename(staging, target, causes)
             if failure is None:
+                with suppress(OSError):
+                    (target / STAGING_OWNER).unlink()  # no longer scratch
                 return None
             if displaced and not _undisplace(target):
                 raise failure
