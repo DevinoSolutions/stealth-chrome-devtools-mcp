@@ -150,6 +150,32 @@ them yourself with `schtasks /Delete /F /TN stealth-mcp-backend-<token>` and del
 
 ---
 
+## Local trust boundary
+
+Every browser this tool launches serves the Chrome DevTools Protocol (CDP) on a TCP
+port of its own, and that port is **not** behind the backend's bearer token:
+
+- **Where it listens.** On `127.0.0.1` only. nodriver starts Chrome with
+  `--remote-debugging-host=127.0.0.1 --remote-debugging-port=<N>`, and the attach path
+  (`cdp_attach.CDP_HOST`) dials the same address. Nothing in `src/` passes
+  `--remote-debugging-address`, and the `--remote-debugging-pipe` switch is stripped
+  from caller-supplied args (`platform_utils`).
+- **Which origins.** Chrome runs with `--remote-allow-origins=*`, from nodriver's default
+  argv (the delegated desktop launch copies that argv; without the flag Chrome refuses
+  the DevTools websocket handshake the tool itself makes).
+- **What follows.** Any local process that can open a TCP connection to that port can
+  drive the browser through it: read its cookies and run script in its tabs. That is any
+  process of the same OS user, and on a host with several users, loopback is shared, so
+  a process of another user too. The port carries no credential of ours.
+- **By design.** The tool is a single-user local tool and is not meant for multi-user
+  hosts. What *is* protected is the backend's own HTTP API: it also listens on `127.0.0.1` only, refuses a foreign `Host` or
+  `Origin`, and answers `401` without the per-user bearer token in
+  `~/.stealth-mcp/backend.token` (README, "The backend's HTTP port is local-only and
+  token-protected"). Treat what is signed in inside a launched browser as reachable by
+  every local process of that machine.
+
+---
+
 ## Reading `doctor`'s `contexts` block
 
 `doctor` prints one line per **recorded** backend, ordered the way discovery
