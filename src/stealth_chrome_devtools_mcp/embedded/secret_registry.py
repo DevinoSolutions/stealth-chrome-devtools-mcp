@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import threading
+import traceback
 import urllib.parse
 from typing import TYPE_CHECKING, NoReturn
 
@@ -175,10 +176,17 @@ def redact_record(record: logging.LogRecord) -> None:
     Called by the one record factory in ``logging_setup``, so it runs for every
     record in the process, ours and a library's. The message is only touched when
     it is a string; ``args`` as a lone mapping (logging's ``%(name)s`` form) is
-    walked like any other container.
+    walked like any other container. A traceback is rendered here and masked
+    (``exc_text``, which ``logging.Formatter`` reuses), because an exception's
+    MESSAGE is in it and is not ``msg`` or ``args``.
     """
     if not _needles:
         return
+    if record.exc_info and not record.exc_text:
+        rendered = "".join(traceback.format_exception(*record.exc_info)).rstrip()
+        masked = redact(rendered)
+        if masked != rendered:
+            record.exc_text = masked
     if isinstance(record.msg, str):
         record.msg = redact(record.msg)
     args = record.args

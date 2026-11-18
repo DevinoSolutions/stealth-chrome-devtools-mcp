@@ -146,6 +146,22 @@ async def test_a_vault_that_locks_mid_call_reads_as_locked(server_mod, monkeypat
     assert HINT in str(caught.value)
 
 
+async def test_an_unexpected_exception_reaches_the_caller_as_its_class_only(
+    server_mod, monkeypatch
+):
+    unlocked_vault({"work": password_entry(password=PASSWORD)})
+
+    async def fake_run(*_args):
+        raise RuntimeError(f"the page went wrong near {PASSWORD}")
+
+    monkeypatch.setattr(login_flow, "run", fake_run)
+    with pytest.raises(ToolError) as caught:
+        await call_tool(server_mod, "login", instance_id="inst-1", label="work")
+    assert "RuntimeError" in str(caught.value)
+    assert PASSWORD not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
 async def test_no_secret_is_in_any_error_these_tools_raise(server_mod):
     unlocked_vault({"work": password_entry(password=PASSWORD)})
     messages = []
