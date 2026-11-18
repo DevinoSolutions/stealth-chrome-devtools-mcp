@@ -67,7 +67,7 @@ import itertools
 import os
 import shutil
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,6 +173,27 @@ def copy_file(source: str, target: str) -> str:
                 f"Skipping locked profile file {source}: {last_error}",
             )
     return target
+
+
+#: Windows' FILE_ATTRIBUTE_REPARSE_POINT: set on a symlink AND on an NTFS
+#: junction, which ``Path.is_symlink`` does not report on any Python we support
+#: (``Path.is_junction`` is 3.12+, and this tree supports 3.11).
+_REPARSE_POINT = 0x400
+
+
+def is_link(path: Path) -> bool:
+    """A symlink or a junction: something a delete UNLINKS and never walks.
+
+    ``shutil.rmtree`` already leaves what a link INSIDE a tree points at alone
+    (measured on 3.11 and 3.13), but it refuses a link given as the top, and on
+    3.11 leaves a junction there; a caller deleting a directory it did not just
+    make asks this first. Unreadable is not a link."""
+    try:
+        return path.is_symlink() or bool(
+            getattr(path.lstat(), "st_file_attributes", 0) & _REPARSE_POINT
+        )
+    except OSError:
+        return False
 
 
 def rmtree_robust(path: Path, retries: int = 3) -> None:
@@ -303,27 +324,47 @@ def is_scratch(name: str) -> bool:
     return STAGING_SUFFIX in name or name.endswith(PREVIOUS_SUFFIX)
 
 
-def _discard_stale_staging(target: Path) -> None:
-    """Remove staging copies for *target* that a dead process left behind.
+def reclaim_stale_scratch(
+    directory: Path, base: str | None = None, keep: Container[str] = ()
+) -> int:
+    """Remove the STAGING copies a dead process left behind in *directory*; the
+    count removed. Never raises.
 
     Keyed on AGE and never on ownership: the pid in the name belongs to a
     process that is gone, so there is nobody to ask. :data:`STALE_STAGING_SECONDS`
-    carries why that window cannot reach a live sibling's build. Reclaimed here,
-    by the next copy of the same target, rather than at a new sweep call site —
-    the one place that is guaranteed to run before the name is needed again.
+    carries why that window cannot reach a live sibling's build. A displaced
+    PREVIOUS generation is deliberately not reclaimed here: it is the one copy of
+    what a refresh replaced, :func:`_displace` keeps exactly one on purpose, and
+    this runs unattended. A link is never followed or removed: it is not a copy
+    this module made.
+
+    *base* limits it to one target's staging, which is what the next copy of that
+    target asks (the one place guaranteed to run before the name is needed
+    again). Without it every staging copy in the directory is judged, which is
+    what the storage sweep asks (T-5968): a clone's name is unique per attempt, so
+    a copy its dead backend left was never the "same target" of any later copy
+    and, because every scan skips scratch by name, nothing else ever looked at
+    it. *keep* names the profiles (case- and trailing-dot-folded) whose staging is
+    never touched: the seeds'.
     """
-    prefix = f"{target.name}{STAGING_SUFFIX}"
+    prefix = f"{base}{STAGING_SUFFIX}" if base is not None else None
     cutoff = time.time() - STALE_STAGING_SECONDS
     try:
-        entries = list(target.parent.iterdir())
+        entries = list(directory.iterdir())
     except OSError:
-        return
+        return 0
+    removed = 0
     for entry in entries:
-        if not entry.name.startswith(prefix):
+        owner, found, _ = entry.name.partition(STAGING_SUFFIX)
+        if not found or owner.casefold().rstrip(". ") in keep:
+            continue
+        if prefix is not None and not entry.name.startswith(prefix):
             continue
         with suppress(OSError):
-            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+            if not is_link(entry) and entry.is_dir() and entry.stat().st_mtime < cutoff:
                 rmtree_robust(entry)
+                removed += not entry.exists()
+    return removed
 
 
 #: Why :func:`replace_tree` did not replace, for the causes that are NOT a
@@ -544,7 +585,7 @@ def replace_tree(
         f"{target.name}{STAGING_SUFFIX}{os.getpid()}-{next(_STAGING_SEQ)}"
     )
     causes: list[OSError] = []
-    _discard_stale_staging(target)
+    reclaim_stale_scratch(target.parent, target.name)
     try:
         staging.mkdir(parents=True, exist_ok=True)
         copy_delta(source, staging)

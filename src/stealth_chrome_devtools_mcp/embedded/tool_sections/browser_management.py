@@ -393,16 +393,16 @@ async def spawn_browser(
                 break
             except Exception as spawn_error:
                 spawn_errors.append(f"{type(spawn_error).__name__}: {spawn_error}")
-                # This attempt's clone never became a live instance — drop its
-                # sweep protection so a failed clone can't stay protected (and thus
-                # unreclaimable) for the rest of the process.
+                # This attempt's clone never became an instance (T-5968): delete it.
                 if profile_selection.get("profile_role") == "clone":
-                    rt.clone_storage._release_clone_dir(selected_user_data_dir)
+                    await clone_protection.abandon(
+                        selected_user_data_dir,
+                        rt.clone_storage._profile_has_running_browser,
+                        rt.clone_storage.clone_root_dir(),
+                    )
                 if spawn_attempt == _SPAWN_ATTEMPTS - 1:
-                    # The budget is spent and the `else` raises below, so a
-                    # re-selection here is never driven: a cloning role would copy
-                    # a whole tree and leave it `_protect_clone_dir`-ed for the
-                    # life of the process (`close_instance` never releases it).
+                    # The budget is spent and the `else` raises below: a
+                    # re-selection here would copy a whole tree nobody drives.
                     continue
                 # The SAME witness as the first selection (F-914): the second
                 # door onto the held-shared-session rule, which a retry that

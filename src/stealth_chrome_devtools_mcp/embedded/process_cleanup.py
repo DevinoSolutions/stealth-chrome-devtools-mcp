@@ -2,7 +2,6 @@
 
 import atexit
 import contextlib
-import shutil
 import signal
 import sys
 import tempfile
@@ -18,6 +17,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_pid_registry,
     browser_reattach,
+    clone_trash,
     reap_guard,
     serve_startup,
     singleton,
@@ -436,8 +436,8 @@ class ProcessCleanup:
             return False
 
         path = Path(profile_dir)
-        if not path.exists():
-            return True
+        if not path.exists() or clone_trash.protected(path):
+            return True  # gone, or not a disposable clone: nothing to delete
 
         if self._profile_claimed_by_live_instance(normalized_profile_dir, instance_id):
             debug_logger.log_info(
@@ -465,25 +465,24 @@ class ProcessCleanup:
                     return False
                 time.sleep(0.15)
                 continue
-            try:
-                shutil.rmtree(path, ignore_errors=False)
+            # T-5968: ``clone_trash.discard`` carries on past a locked file and,
+            # when a clone is still there, moves it aside to be purged, so one
+            # locked file no longer strands a whole profile.
+            if clone_trash.discard(path):
                 debug_logger.log_info(
                     "process_cleanup",
                     "cleanup_profile",
                     f"Removed temp profile for {instance_id}: {profile_dir}",
                 )
                 return True
-            except FileNotFoundError:
-                return True
-            except (PermissionError, OSError) as error:
-                if attempt == last:
-                    debug_logger.log_warning(
-                        "process_cleanup",
-                        "cleanup_profile",
-                        f"Failed to remove temp profile for {instance_id}: {error}",
-                    )
-                    return False
-                time.sleep(0.15)
+            if attempt == last:
+                debug_logger.log_warning(
+                    "process_cleanup",
+                    "cleanup_profile",
+                    f"Failed to remove temp profile for {instance_id}: {profile_dir}",
+                )
+                return False
+            time.sleep(0.15)
 
         return False
 

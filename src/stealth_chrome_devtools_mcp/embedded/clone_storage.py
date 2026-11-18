@@ -33,6 +33,7 @@ from typing import Any
 from stealth_chrome_devtools_mcp.embedded import (
     client_roots,
     clone_protection,
+    clone_stale,
     clone_trash,
     fleet_session,
     profile_copy,
@@ -119,9 +120,8 @@ def clone_is_auto(clone_dir: Path) -> bool:
     return profile_seed.is_auto(clone_dir)
 
 
-# ── Authoritative in-flight / live clone protection ──────────────────────────
-# The registry that exempts an in-flight or live clone from the storage-cap sweep
-# is `clone_protection`'s (F-967); these are the names the tree has always called.
+# In-flight / live clone protection is `clone_protection`'s (F-967); these are
+# the names the tree has always called.
 _PROTECTED_CLONE_DIRS = clone_protection.PROTECTED
 _normalize_clone_path = clone_protection.normalize
 _protect_clone_dir = clone_protection.protect
@@ -183,9 +183,8 @@ def _enforce_clone_storage_cap_in(
     Selection (and its safety invariants) lives in ``_idle_autoclones_over_cap``.
 
     Eviction is *recoverable*: victims are moved aside rather than deleted, and
-    trash older than the retention window is purged first — so disk is reclaimed
-    from expired trash before any live clone is touched. What "moved aside"
-    means, and for how long it can be undone, is ``clone_trash``'s.
+    expired trash is purged first, so disk is reclaimed from it before any live
+    clone is touched. What "moved aside" means is ``clone_trash``'s.
     """
     clone_trash.purge_expired(clone_root, clone_trash.retention_seconds())
     removed = 0
@@ -315,17 +314,19 @@ def run_storage_sweep(
 ) -> None:
     """One reclaim pass over the clone root. Runs on a worker thread; never raises.
 
-    Three steps: delete idle auto-clones over the clone cap, trim regenerable data
-    from oversized idle named profiles, and finalize any *deferred* clone
-    deletions. That last step matters: when a close cannot delete its clone in
-    time (Windows still holding a file), the entry stays tracked until something
-    drives the retry — and nothing else does between spawns. Driving it here keeps
-    leaked clones from accumulating and holding the cap perpetually exceeded.
-
-    ``cleanup_deferred_profiles`` only ever finalizes entries whose browser
-    process is already gone, so it can never disturb a live or in-flight clone.
+    Moves aside clones nothing owns any more (``clone_stale``), evicts idle
+    auto-clones over the cap, trims idle named profiles over theirs, and retries
+    *deferred* clone deletions (only entries whose browser is already gone).
     """
     try:
+        spared = (
+            fleet_session.FLEET_SESSION,
+            master_profile_dir().name,
+            master_snapshot_dir().name,
+        )
+        clone_stale.reap(
+            clone_root, _clone_dir_is_protected, _profile_has_running_browser, spared
+        )
         _enforce_clone_storage_cap_in(clone_root, clone_cap, reason)
         _enforce_named_profile_trim_in(clone_root, session_cap, reason)
         process_cleanup.cleanup_deferred_profiles()
@@ -339,10 +340,9 @@ def spawn_background_sweep(reason: str = "") -> None:
     """Kick the storage sweep off the event loop without blocking the caller.
 
     The clone root and caps are resolved now, at trigger time, and captured for
-    the worker — so the sweep always targets the root that was active when it was
-    triggered (this also keeps it hermetic when tests patch the env to a tmp
-    dir). Deduped to one in-flight sweep, since sizing the clone root is the only
-    real cost and running it concurrently with itself buys nothing.
+    the worker, so the sweep targets the root that was active when it was
+    triggered (hermetic under a patched env). Deduped to one in-flight sweep:
+    sizing the clone root is the only real cost, and two at once buy nothing.
     """
     if _BACKGROUND_SWEEPS:
         return
