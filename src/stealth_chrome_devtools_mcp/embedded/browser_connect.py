@@ -175,6 +175,7 @@ from nodriver.core.tab import Tab
 from nodriver.core.util import get_registered_instances
 
 from stealth_chrome_devtools_mcp.embedded import (
+    debug_port_guard,
     devtools_port,
     process_exit,
     spawn_budget,
@@ -310,6 +311,7 @@ def installed() -> bool:
 
 def install() -> None:
     """Give every launched Chrome our connect budget, not nodriver's. Idempotent."""
+    debug_port_guard.install()  # T-19366: no ``--remote-allow-origins=*``
     if installed():
         return
     HTTPApi.get = _patient(HTTPApi.get)
@@ -323,6 +325,7 @@ async def start(config: nodriver.Config) -> Browser:
     """
     browser = await nodriver.start(config=config)
     await devtools_port.confirm_ours(browser, getattr(browser, "_process_pid", None))
+    await debug_port_guard.protect(browser)  # T-19366: before anyone is handed it
     return browser
 
 

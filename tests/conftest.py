@@ -292,6 +292,39 @@ def _tool_errors_departed_stores_hygiene():
 
 
 @pytest.fixture(autouse=True)
+def _debug_port_guard_hygiene(request):
+    """No test may need a real DevTools endpoint for the guard, or leak its ports (T-19366).
+
+    ``debug_port_guard.protect`` opens a second CDP connection to a REAL browser; a
+    test whose browser is a fake has none, and the launch doors (``browser_connect.start``,
+    ``cdp_attach.attach``) call it. So outside the tests that drive a real Chrome
+    (the ``integration`` marker) and the guard's own file it is a no-op, and the
+    module's port set is emptied either way so one test's port cannot make another
+    test's URL look like a debug port. ``tests/test_debug_port_guard.py`` and every
+    integration test run the real thing.
+
+    The import is function-local for the reason ``_in_memory_storage_hygiene`` gives.
+    """
+    from stealth_chrome_devtools_mcp.embedded import debug_port_guard
+
+    real = (
+        request.node.get_closest_marker("integration") is not None
+        or request.module.__name__ == "test_debug_port_guard"
+    )
+    original = debug_port_guard.protect
+
+    async def protect(_browser):
+        return None
+
+    if not real:
+        debug_port_guard.protect = protect
+    debug_port_guard._PORTS.clear()
+    yield
+    debug_port_guard.protect = original
+    debug_port_guard._PORTS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _paint_hold_hygiene():
     """No test may leave a screencast hold, or a caller-owned target, for the next (T-9542).
 
