@@ -90,6 +90,8 @@ class TestDocumentedCliVerbs:
         "close",
         # T-15386 — the out-of-process backend watchdog.
         "supervise",
+        # T-19366 — the login vault's human side.
+        "login",
     ]
 
     @staticmethod

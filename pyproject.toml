@@ -469,6 +469,9 @@ ban-relative-imports = "all"
 "src/stealth_chrome_devtools_mcp/cli_supervise.py" = [
     "T20",
 ]  # PERMANENT(print is CLI UI) — T-15386, cli_call.py's one code for its reason.
+"src/stealth_chrome_devtools_mcp/cli_login.py" = [
+    "T20",
+]  # PERMANENT(print is CLI UI) — T-19366, cli_supervise.py's one code for its reason.
 "src/stealth_chrome_devtools_mcp/embedded/models.py" = [
     "ANN201", "TID251",
 ]  # plan_M4ph1 (pre-typing data models)
