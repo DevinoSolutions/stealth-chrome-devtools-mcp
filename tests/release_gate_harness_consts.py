@@ -19,7 +19,7 @@ COOKIE_ROUND_TRIP = "cookies"
 SOAK_STABILITY = "soak"
 
 SERVER_NAME = "stealth-chrome-devtools-mcp"
-REGISTRY_TOOL_COUNT = 100  # CLAUDE.md: derived == 100
+REGISTRY_TOOL_COUNT = 102  # CLAUDE.md: derived == 102
 RESULT_SCHEMA_VERSION = 1
 FIXTURE_APP_DIR = Path(__file__).resolve().parent / "fixture_app"
 #: The stand-in for a sign-in (F-958): ``GET /api/login`` sets this cookie

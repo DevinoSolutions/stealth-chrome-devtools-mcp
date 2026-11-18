@@ -17,6 +17,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     proactor_accept,
     proactor_spawn,
     proactor_teardown,
+    vault_routes,
 )
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.backend_probe import MCP_PATH
@@ -543,6 +544,11 @@ def build_arg_parser():
         action="store_true",
         help="Disable the captcha auto-click tools",
     )
+    parser.add_argument(
+        "--disable-logins",
+        action="store_true",
+        help="Disable the login vault tools (list_logins, login)",
+    )
 
     parser.add_argument(
         "--minimal",
@@ -595,6 +601,7 @@ if __name__ == "__main__":
             "dynamic-hooks": "AI-powered network hook system",
             "session-lock": "Advisory lease on a shared session",
             "captcha": "Automatic captcha checkbox clicking",
+            "logins": "Sign stored logins in without the password reaching you",
         }
         print("Available tool sections:")
         for section, tools in SECTION_TOOLS.items():
@@ -619,6 +626,7 @@ if __name__ == "__main__":
                 "dynamic-hooks",
                 "session-lock",
                 "captcha",
+                "logins",
             ]
         )
 
@@ -648,6 +656,8 @@ if __name__ == "__main__":
         DISABLED_SECTIONS.add("session-lock")
     if args.disable_captcha:
         DISABLED_SECTIONS.add("captcha")
+    if args.disable_logins:
+        DISABLED_SECTIONS.add("logins")
 
     if args.xpool_safe:
         DISABLED_SECTIONS.add("cdp-functions")
@@ -677,6 +687,9 @@ if __name__ == "__main__":
         # manager by module attribute inside create_streamable_http_app. F-960:
         # the same call gives the app the session-free health route.
         rt.session_hygiene.install(mcp)
+        vault_routes.install(
+            mcp
+        )  # T-19366: unlock/lock/status, behind the bearer token
         proactor_accept.install()  # T-6363: a reset client must not close the listener
         proactor_spawn.install()  # T-15385: CreateProcess must not stall the loop
         proactor_teardown.install()  # T-15387: a reset peer must not leak its socket

@@ -2856,6 +2856,20 @@
     },
     "tags": []
   },
+  "list_logins": {
+    "description": "List the logins a person stored in the login vault.\n\nA person adds logins with `stealthy login add` and unlocks the vault with\n`stealthy login unlock`; nothing here can add, change or reveal one. A\npassword is never returned, and a username only for a login whose owner chose\nto show it. A login that was rejected once is `frozen` until a person edits it.\n\nReturns:\n    Dict[str, Any]: unlocked (True) and logins, a list of label, kind\n        (\"password\" or \"provider\"), site, via (provider logins: the label of\n        the login that account signs in with), frozen (null, or when it was\n        frozen) and username (only when shown).",
+    "enabled": true,
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "output_schema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "tags": []
+  },
   "list_network_requests": {
     "description": "List captured network requests.\n\nBrowser-internal traffic (chrome://, chrome-extension://, devtools://, about:)\nis excluded from capture by default — see set_network_capture_filters.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    filter_type (Optional[str]): Filter by CDP resource type, matched\n        case-insensitively (e.g., 'document', 'image', 'script', 'xhr').\n\nReturns:\n    Union[List[Dict[str, Any]], Dict[str, Any]]: List of network requests, or file metadata if response too large.",
     "enabled": true,
@@ -2954,6 +2968,33 @@
       ],
       "type": "object",
       "x-fastmcp-wrap-result": true
+    },
+    "tags": []
+  },
+  "login": {
+    "description": "Sign a stored login in to a browser instance's profile.\n\nThe backend does it in a tab of its own that no tool can read or touch while\nit runs: it opens the login page, checks the page's host is one this login\nmay be used on, types the username and password, and closes the tab. The\npassword never reaches you, a log or a network record; you get an outcome.\nThe session is saved in the profile, so reload your own tab afterwards.\nUse list_logins for the labels. A login that fails once is frozen so it is\nnot retried into an account lockout; a person unfreezes it.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    label (str): The login's label, from list_logins.\n\nReturns:\n    Dict[str, str]: outcome, label and detail. outcome is one of:\n        logged_in (signed in), already_logged_in (the page needed no\n        sign-in), needs_totp (a one-time code is asked for, which this tool\n        cannot give), needs_user (a step it cannot take: a passkey, a device\n        prompt, a puzzle, an unknown form), rejected (the password was\n        refused and the login is now frozen), use_provider (a \"sign in with\"\n        login: the provider account is signed in, now click the site's own\n        provider button).",
+    "enabled": true,
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance_id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
     },
     "tags": []
   },

@@ -457,7 +457,7 @@ spawn_browser(headless=True, browser_args=["--enable-automation"])
 | `enable_captcha_auto_click` / `disable_captcha_auto_click` | Click Turnstile, reCAPTCHA v2 and hCaptcha checkboxes automatically |
 | `get_captcha_status` | Whether the auto-clicker is on, and every click it made |
 
-**100 tools** across 13 sections — the count is derived from the live tool registry,
+**102 tools** across 14 sections — the count is derived from the live tool registry,
 never hand-maintained. [See the full navigation map →](NAVMAP.md).
 
 That is what the server **serves**, which is not the same as what the release

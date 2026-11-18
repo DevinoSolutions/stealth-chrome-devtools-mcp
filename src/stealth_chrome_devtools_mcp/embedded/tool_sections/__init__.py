@@ -37,6 +37,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_sections import (
     element_extraction,
     element_interaction,
     file_extraction,
+    logins,
     network_debugging,
     progressive_cloning,
     session_lock,
@@ -68,4 +69,5 @@ SECTION_MODULES = (
     dynamic_hooks,
     session_lock,
     captcha,
+    logins,
 )

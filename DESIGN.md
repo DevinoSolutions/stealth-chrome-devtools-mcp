@@ -21,7 +21,7 @@ them in exactly that sense.
 
 There are **two front-ends** over a **shared backend process**:
 
-- the **MCP tool surface** — **100 tools** exposed over HTTP (and bridged to stdio),
+- the **MCP tool surface** — **102 tools** exposed over HTTP (and bridged to stdio),
   defined in `stealth_chrome_devtools_mcp.embedded.server` and registered through
   `stealth_chrome_devtools_mcp.embedded.tool_registry`;
 - the **ops CLI** — the `stealth-chrome-devtools` verbs (`status` / `doctor` / `stop`
@@ -30,7 +30,7 @@ There are **two front-ends** over a **shared backend process**:
 
 Both talk to a shared ***backend***: a detached
 `python -m stealth_chrome_devtools_mcp --transport http` process that hosts FastMCP
-and all 100 tools. There is **one backend per (source fingerprint, display context)** —
+and all 102 tools. There is **one backend per (source fingerprint, display context)** —
 in practice one process on a headless box, and at most two on a desktop box that is
 also SSH'd into ([§2.7](#27-display-context-where-a-window-launched-here-would-be-seen)).
 A Claude Code session connects through a short-lived ***stdio proxy*** that bridges
@@ -316,7 +316,7 @@ user is logged on" — and **Windows itself** places the process in that user's
 interactive session. The window is visible by construction rather than by our guess.
 The same backend then attaches over CDP (`uc.Config(host, port)` →
 `connect_existing`), so there is still exactly ONE backend, the instance lives in the
-same registry as every other instance, and all 100 tools work unchanged.
+same registry as every other instance, and all 102 tools work unchanged.
 
 This does **not** reintroduce session-picking. `display_context.py` is untouched and
 still observational; the tool still never selects or enters a session. The one new

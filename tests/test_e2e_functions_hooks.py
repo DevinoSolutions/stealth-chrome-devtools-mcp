@@ -561,6 +561,12 @@ E2E_EXEMPT: dict[str, str] = {
     "enable_captcha_auto_click": "needs a live captcha provider; tests/test_captcha_clicker.py, tests/test_captcha_integration.py",
     "disable_captcha_auto_click": "needs a live captcha provider; tests/test_captcha_clicker.py, tests/test_captcha_integration.py",
     "get_captcha_status": "needs a live captcha provider; tests/test_captcha_clicker.py, tests/test_captcha_integration.py",
+    # T-19366: the login vault needs a person to unlock it (a passphrase typed at
+    # a TTY), so the gate's transport cannot drive it. tests/test_logins_tools.py
+    # pins both tools through the registry, and tests/test_login_flow.py runs
+    # `login` against a local login site in real Chrome (integration lane).
+    "list_logins": "needs an unlocked vault; tests/test_logins_tools.py, tests/test_login_flow.py",
+    "login": "needs an unlocked vault; tests/test_logins_tools.py, tests/test_login_flow.py",
 }
 
 
@@ -568,7 +574,7 @@ def test_e2e_coverage_manifest():
     """The E2E suite covers every registered section tool (partition tripwire)."""
     assert server_mod is not None, "server module failed to load"
     all_names = {name for names in server_mod.SECTION_TOOLS.values() for name in names}
-    assert len(all_names) == 100
+    assert len(all_names) == 102
 
     covered = set(E2E_COVERED)
     exempt = set(E2E_EXEMPT)

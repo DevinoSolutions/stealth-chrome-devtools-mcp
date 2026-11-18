@@ -357,15 +357,22 @@ class TestLoadBearingSymbols:
 
 
 class TestDocumentedToolCount:
-    def test_docs_say_100_and_registry_agrees(self):
+    def test_docs_say_102_and_registry_agrees(self):
         registry_total = sum(len(v) for v in server.SECTION_TOOLS.values())
-        assert registry_total == 100
+        assert registry_total == 102
         assert tool_registry.SECTION_TOOLS is server.SECTION_TOOLS
-        # every root doc that cites a tool count cites 100 (no 90/94/96/97/99 left)
+        # every root doc that cites a tool count cites 102 (no 90/94/96/97/99 left)
         text = _doc_text()
-        for stale in ("90 tools", "94 tools", "96 tools", "97 tools", "99 tools"):
+        for stale in (
+            "90 tools",
+            "94 tools",
+            "96 tools",
+            "97 tools",
+            "99 tools",
+            "100 tools",
+        ):
             assert stale not in text, f"stale tool count '{stale}' still in docs"
-        assert "100 tools" in text
+        assert "102 tools" in text
 
 
 #: The docs a reader (or an agent) takes a tool or section COUNT from. DOCS above

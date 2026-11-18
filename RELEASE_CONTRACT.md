@@ -14,11 +14,11 @@ ledger, and the matrix from the required cells of the
 `release-evidence/v1` aggregate. Nothing here is hand-typed, and no
 prose document — plan, finding, or README — can qualify anything.
 
-> **At the release SHA recorded in the ledger, this gate qualifies 3 of the 100 served MCP tools**, on the cells each
+> **At the release SHA recorded in the ledger, this gate qualifies 3 of the 102 served MCP tools**, on the cells each
 > row names.
 
 **Read that number carefully, in both directions.** It does *not* say
-97 tools are untested. Every served tool
+99 tools are untested. Every served tool
 is driven against **real Chrome** by the E2E suite — a set-equality
 tripwire keeps that coverage complete, and §5 shows each tool's actual
 evidence. What those tools lack is a *per-tool* assertion over the
@@ -161,9 +161,9 @@ version. Installing over an existing installation is unqualified.
 
 ## 5. The served tool surface
 
-- served by the registry: **100**
+- served by the registry: **102**
 - `release-qualified-success`: **3**
-- `served-unqualified`: **97**
+- `served-unqualified`: **99**
 - `not-served`: **0**
 
 A tool is `release-qualified-success` only when a row names the precise
@@ -266,6 +266,8 @@ exists at this SHA.
 | `extract_element_structure_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `extract_element_styles_to_file` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `list_clone_files` | file-extraction | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
+| `list_logins` | logins | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
+| `login` | logins | served-unqualified | **none** — an explicit coverage-manifest exemption | F-776 |
 | `export_network_data` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `get_network_capture_filters` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
 | `get_request_details` | network-debugging | served-unqualified | E2E-covered against **real Chrome** through the in-process seam; not verified over the stdio transport | F-776 |
