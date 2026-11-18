@@ -555,6 +555,9 @@ class TestStaleStagingIsReclaimed:
         )
         stale.mkdir()
         (stale / "half.bin").write_bytes(b"x" * 100)
+        # What a dead ``replace_tree`` leaves: the owner proof is what makes it
+        # reclaimable (T-5968: a staging-looking NAME alone proves nothing).
+        (stale / profile_copy.STAGING_OWNER).write_text("999")
         ancient = time.time() - profile_copy.STALE_STAGING_SECONDS - 60
         os.utime(stale, (ancient, ancient))
 
