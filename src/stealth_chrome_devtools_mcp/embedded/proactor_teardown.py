@@ -8,7 +8,8 @@ calls ``self._sock.shutdown(socket.SHUT_RDWR)`` and only THEN ``self._sock.close
 detaches the transport from its server and marks the transport lost. When the peer
 has already reset, ``shutdown`` raises ``ConnectionResetError`` (``WinError 10054``),
 and everything after it is skipped: the socket is never closed (the connection stays
-in ``CLOSE_WAIT`` for as long as the process lives), the transport is never detached
+in ``CLOSE_WAIT`` until the transport object is garbage collected, which a
+reference cycle can delay indefinitely), the transport is never detached
 from its ``Server`` (so ``wait_closed`` can never finish), and the callback is not
 marked done. Measured on the shared backend of the 25-session PC on 2026-11-07:
 918 occurrences in 2.3 h, one per Chrome or proxy connection that died abruptly,
@@ -19,17 +20,27 @@ line (``expected_events`` ``proactor-teardown``); the leak was left in place.
 change: ``shutdown`` runs inside its own ``try``/``finally`` whose ``finally`` is the
 rest of the stock cleanup. So the socket is closed, the server detached and the
 transport marked lost whether or not ``shutdown`` raises, and the exception
-propagates exactly as before (same type, same chain, the same line in the loop's
-default exception handler), which is what ``expected_events`` still recognises.
+propagates as before (same type, same chain). If ``close`` ALSO raises, the
+``shutdown`` error is still the one that propagates, as it was when ``close`` was
+never reached.
+
+**The name is part of the contract.** The loop's default exception handler logs
+``Exception in callback <__qualname__>``, and ``expected_events``' ``proactor-teardown``
+rule matches that text (``_ProactorBasePipeTransport._call_connection_lost``). A
+closure's qualname is ``_replacement.<locals>._call_connection_lost``, which the rule
+does not match, so every reset peer would ship to Sentry again. The replacement
+therefore carries the stock function's ``__qualname__``, ``__name__`` and ``__module__``
+(pinned through the repo's own classifier in ``tests/test_proactor_teardown.py``).
 
 **A shape check, not a blind patch.** The body differs between releases (3.13 passes
 the transport to ``Server._detach``; 3.11 and 3.12 do not), so :func:`install`
 compares the stock function's AST, comments and whitespace aside, with the two
 reference bodies below (:data:`_STOCK`: 3.11-3.12 and 3.13-3.14, compared). A body
 that matches neither (a release that already fixed it, or one that changed it some
-other way), or whose source cannot be read, is left untouched and logs a WARNING;
-nothing is patched blind. A future CPython that closes the socket itself makes the
-check fail and this a no-op, with that warning as the only trace.
+other way), or whose source cannot be read, is left untouched and logs a WARNING
+that says only that the body is unknown and was not patched; nothing is patched
+blind. A future CPython that fixes this itself makes the check fail and this a
+no-op, with that warning as the only trace.
 
 **Installed once, for the backend only**, beside ``proactor_accept.install`` and
 ``proactor_spawn.install``: idempotent (a marker on the replacement) and a no-op off
@@ -58,6 +69,7 @@ _MARK = "_stealth_closes_socket_when_shutdown_raises"
 #: The one private stdlib name this replaces, named once.
 _CLASS = "_ProactorBasePipeTransport"
 _METHOD = "_call_connection_lost"
+_MODULE = "asyncio.proactor_events"
 
 #: The stock body (comment omitted), parametrised by how ``Server._detach`` is
 #: called: 3.11 and 3.12 take no argument, 3.13 and 3.14 the transport.
@@ -112,12 +124,21 @@ def _replacement(detach_takes_transport: bool) -> Callable[..., None]:
         try:
             self._protocol.connection_lost(exc)
         finally:
+            shutdown_error = None
             try:
                 if hasattr(self._sock, "shutdown") and self._sock.fileno() != -1:
                     self._sock.shutdown(socket.SHUT_RDWR)
+            except BaseException as error:  # noqa: BLE001  PERMANENT(re-raised below, after the cleanup the stock body skipped)
+                shutdown_error = error
+            try:
+                try:
+                    self._sock.close()
+                except Exception:
+                    # The shutdown error is the one the stock body would have
+                    # surfaced; a close failure only replaces it when it is alone.
+                    if shutdown_error is None:
+                        raise
             finally:
-                # What the stock ``finally`` skipped when ``shutdown`` raised.
-                self._sock.close()
                 self._sock = None
                 server = self._server
                 if server is not None:
@@ -127,7 +148,13 @@ def _replacement(detach_takes_transport: bool) -> Callable[..., None]:
                         server._detach()
                     self._server = None
                 self._called_connection_lost = True
+            if shutdown_error is not None:
+                raise shutdown_error
 
+    # The loop logs the callback by qualname and ``expected_events`` matches it.
+    _call_connection_lost.__qualname__ = f"{_CLASS}.{_METHOD}"
+    _call_connection_lost.__name__ = _METHOD
+    _call_connection_lost.__module__ = _MODULE
     setattr(_call_connection_lost, _MARK, True)
     return _call_connection_lost
 
@@ -148,8 +175,7 @@ def install() -> bool:
     if takes_transport is None:
         _logger.warning(
             "not patching %s.%s on Python %d.%d.%d: its body is not one this "
-            "build knows, so a transport whose peer has reset may leave its "
-            "socket open (T-15387)",
+            "build knows (T-15387)",
             _CLASS,
             _METHOD,
             *sys.version_info[:3],

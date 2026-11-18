@@ -129,7 +129,9 @@ class TestInstall:
             assert proactor_teardown.install() is False
         assert CLASS._call_connection_lost is other
         assert [r.levelname for r in caplog.records] == ["WARNING"]
-        assert "T-15387" in caplog.records[0].getMessage()
+        message = caplog.records[0].getMessage()
+        assert "T-15387" in message and "not patching" in message
+        assert "leak" not in message and "open" not in message
 
     def test_off_windows_it_does_nothing(self, stock, monkeypatch):
         monkeypatch.setattr(proactor_teardown.sys, "platform", "linux")
@@ -215,9 +217,13 @@ DEADLINE_SECONDS = 10
 
 class _Echo(asyncio.Protocol):
     sockets: list
+    transports: list
 
     def connection_made(self, transport):
         type(self).sockets.append(transport.get_extra_info("socket"))
+        # Held, so the transport's own ``__del__`` (which closes its socket when
+        # it is collected) cannot make the stock run's outcome depend on GC timing.
+        type(self).transports.append(transport)
         transport.write(b"hi")
 
 
@@ -260,6 +266,7 @@ async def _reset_clients_against_a_real_server(state):
     errors = []
     loop.set_exception_handler(lambda _loop, context: errors.append(context))
     _Echo.sockets = []
+    _Echo.transports = []
     server = await loop.create_server(_Echo, "127.0.0.1", 0)
     state.port = server.sockets[0].getsockname()[1]
     try:
@@ -286,9 +293,9 @@ class TestRealResetsAgainstARealServer:
         filenos, errors = asyncio.run(_reset_clients_against_a_real_server(state))
         assert state.hits == CONNECTIONS, "the failure was not provoked"
         assert len(filenos) == CONNECTIONS
-        # All 25 on 3.13; 3.11-3.12 and 3.14 close some of them later by another
-        # route (measured: 16, 8 and 13 of 25 stay open), so the defect is "some".
-        assert any(fileno != -1 for fileno in filenos)
+        # The transports are held, so none was collected: the stock body leaves
+        # every one of them open, on every version.
+        assert all(fileno != -1 for fileno in filenos)
         assert len(errors) == CONNECTIONS
 
     def test_the_patched_loop_closes_every_one(
@@ -302,4 +309,118 @@ class TestRealResetsAgainstARealServer:
         # The error behaviour is unchanged: each still reaches the loop's handler.
         assert len(errors) == CONNECTIONS
         assert all(isinstance(e["exception"], ConnectionResetError) for e in errors)
-        assert all("_call_connection_lost" in repr(e["handle"]) for e in errors)
+        assert all(
+            "_ProactorBasePipeTransport._call_connection_lost" in repr(e["handle"])
+            for e in errors
+        )
+
+
+class _ResetSock:
+    def fileno(self):
+        return 7
+
+    def shutdown(self, how):
+        raise ConnectionResetError(10054, "reset by peer", None, 10054)
+
+    def close(self):
+        pass
+
+
+def _the_record_the_loop_logs_for_a_reset_peer():
+    """Run ONE transport whose shutdown raises through a real loop's DEFAULT
+    exception handler and return the log record asyncio writes for it."""
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Capture()
+    logger = logging.getLogger("asyncio")
+    logger.addHandler(handler)
+    transport = object.__new__(proactor_events._ProactorSocketTransport)
+    transport._closing = True
+    transport._called_connection_lost = False
+    transport._protocol = SimpleNamespace(connection_lost=lambda exc: None)
+    transport._sock = _ResetSock()
+    transport._server = None
+
+    async def main():
+        asyncio.get_running_loop().call_soon(transport._call_connection_lost, None)
+        await asyncio.sleep(0.05)
+
+    try:
+        asyncio.run(main())
+    finally:
+        logger.removeHandler(handler)
+        transport._sock = None  # the stock body leaves it set; __del__ would warn
+    [record] = records
+    return record
+
+
+@windows_only
+class TestTheEventStillFilesAsExpectedNoise:
+    """The repo's own classifier (``observability`` over ``expected_events``) must
+    still call the event ``proactor-teardown``: the rule keys on the callback's
+    NAME in the log line, and a closure is named differently."""
+
+    def _classify(self):
+        from stealth_chrome_devtools_mcp import observability
+
+        record = _the_record_the_loop_logs_for_a_reset_peer()
+        event = {
+            "logger": record.name,
+            "level": "error",
+            "logentry": {"formatted": record.getMessage(), "message": record.msg},
+        }
+        hint = {"exc_info": record.exc_info, "log_record": record}
+        return (
+            record.getMessage(),
+            observability._expected_event_class(event, hint),
+            observability._is_expected_tool_failure(event, hint),
+        )
+
+    def test_the_stock_body_is_classified_as_proactor_teardown(self, stock):
+        message, klass, dropped = self._classify()
+        assert klass == "proactor-teardown", message
+        assert dropped is True
+
+    def test_the_patched_body_is_classified_the_same(self, patched):
+        message, klass, dropped = self._classify()
+        assert message.startswith(
+            "Exception in callback _ProactorBasePipeTransport._call_connection_lost"
+        )
+        assert klass == "proactor-teardown", message
+        assert dropped is True
+
+    def test_the_replacement_carries_the_stock_names(self, patched):
+        method = CLASS._call_connection_lost
+        assert method.__qualname__ == STOCK.__qualname__
+        assert method.__name__ == STOCK.__name__
+        assert method.__module__ == STOCK.__module__
+
+
+class TestCloseFailingAfterShutdownFailed:
+    def test_the_shutdown_error_is_the_one_that_propagates(self):
+        class Both(_Sock):
+            def close(self):
+                raise OSError("close failed")
+
+        sock = Both(RESET)
+        transport = _transport(sock)
+        server = transport._server
+        with pytest.raises(ConnectionResetError) as raised:
+            proactor_teardown._replacement(True)(transport, None)
+        assert raised.value is RESET
+        assert transport._sock is None and transport._called_connection_lost is True
+        assert len(server.detached) == 1
+
+    def test_a_close_failure_alone_still_propagates(self):
+        class CloseFails(_Sock):
+            def close(self):
+                raise OSError("close failed")
+
+        transport = _transport(CloseFails())
+        with pytest.raises(OSError, match="close failed"):
+            proactor_teardown._replacement(False)(transport, None)
+        assert transport._called_connection_lost is True
