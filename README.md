@@ -33,6 +33,21 @@ https://github.com/user-attachments/assets/c4de61ae-6878-4fff-9bfd-65cdd4fadc2f
 
 [Watch on YouTube](https://www.youtube.com/watch?v=dx2ksEI056U)
 
+### Captcha Checkboxes, Clicked Automatically
+
+Call `enable_captcha_auto_click(instance_id)` once, and the server handles captcha checkboxes on every tab of that browser. It watches for Cloudflare Turnstile, Google reCAPTCHA v2 and hCaptcha widgets and clicks the checkbox itself, with a trusted mouse click. There is no extension and no solver service. `get_captcha_status` lists every click it made.
+
+These three screenshots come from a live run through the MCP on 2.1.62, one click on each widget:
+
+| Cloudflare Turnstile | Google reCAPTCHA v2 | hCaptcha |
+|---|---|---|
+| ![Turnstile shows Success after the automatic click](https://raw.githubusercontent.com/DevinoSolutions/stealth-chrome-devtools-mcp/main/assets/captcha/turnstile.png) | ![reCAPTCHA checkbox ticked after the automatic click](https://raw.githubusercontent.com/DevinoSolutions/stealth-chrome-devtools-mcp/main/assets/captcha/recaptcha.png) | ![hCaptcha shows an image puzzle after the automatic click](https://raw.githubusercontent.com/DevinoSolutions/stealth-chrome-devtools-mcp/main/assets/captcha/hcaptcha.png) |
+| Clicked, "Success!" | Clicked, ticked, token issued | Clicked; hCaptcha then asked for an image puzzle |
+
+It clicks checkboxes only. It never solves image puzzles or sliders, and while a puzzle is showing it does not click. Whether a click passes is up to the captcha provider; hCaptcha, as above, often answers with a puzzle, which is left to you.
+
+Speed is tested on every release, on Linux, Windows and macOS. The release is blocked if any of the three clicks comes more than 1 s after its checkbox is ready, or if a click the widget ignored is not tried again within 1.5 s.
+
 ### Persistent Login Sessions
 
 https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
@@ -44,6 +59,7 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 ## Key Features
 
 - **Undetectable by anti-bot systems** — Cloudflare, DataDome, PerimeterX, etc.
+- **Captcha checkboxes clicked for you** — Turnstile, reCAPTCHA v2 and hCaptcha checkboxes are clicked automatically once `enable_captcha_auto_click` is on; puzzles are never solved. See [the screenshots](#captcha-checkboxes-clicked-automatically)
 - **Named sessions** — a session keeps its cookies and logins; new ones are seeded from `default`
 - **Stealth arg filtering** — automatically strips 30+ detectable Chrome flags (Puppeteer/Playwright signatures, automation markers)
 - **Multi-instance support** — spawn and manage multiple browsers simultaneously
@@ -434,6 +450,8 @@ spawn_browser(headless=True, browser_args=["--enable-automation"])
 | `close_instance` | Close a specific browser |
 | `list_network_requests` | View intercepted network traffic |
 | `get_cookies` / `set_cookie` | Manage browser cookies |
+| `enable_captcha_auto_click` / `disable_captcha_auto_click` | Click Turnstile, reCAPTCHA v2 and hCaptcha checkboxes automatically |
+| `get_captcha_status` | Whether the auto-clicker is on, and every click it made |
 
 **100 tools** across 13 sections — the count is derived from the live tool registry,
 never hand-maintained. [See the full navigation map →](NAVMAP.md).

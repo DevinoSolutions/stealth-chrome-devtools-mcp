@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### The README shows the captcha auto-clicker (T-18116)
+
+- The captcha checkbox auto-clicker had no mention in the README. It now has a section under Demos, a Key Features line and the three captcha tools in the tool table. The section's screenshots come from a live run through the MCP on 2.1.62, kept in `assets/captcha/`: Turnstile "Success!", reCAPTCHA ticked, and hCaptcha clicked and answering with its image puzzle. The section says plainly that puzzles are never solved.
+
 ## 2.1.62
 
 2.1.61 was tagged but never published (its gate failed on macOS, below), so 2.1.62 is the first release on PyPI with everything in the 2.1.61 section too.
