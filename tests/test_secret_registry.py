@@ -209,6 +209,29 @@ def test_a_log_record_is_masked_when_the_secret_is_inside_an_argument_object(
     assert value not in _formatted(caplog)
 
 
+def test_a_traceback_is_masked_in_the_formatted_record(caplog, value, factory):
+    """An exception's message is in the traceback, which is neither msg nor args."""
+    secret_registry.register(value)
+    with caplog.at_level(logging.INFO):
+        try:
+            raise RuntimeError(f"went wrong near {value}")  # noqa: TRY301  PERMANENT(a raise inside try is the fixture)
+        except RuntimeError:
+            logging.getLogger("stealth.test_secret_registry").exception("failed")
+    rendered = logging.Formatter().format(caplog.records[-1])
+    assert value not in rendered
+    assert secret_registry.MASK in rendered
+    assert "RuntimeError" in rendered
+
+
+def test_a_traceback_is_left_alone_when_nothing_is_registered(caplog, value, factory):
+    with caplog.at_level(logging.INFO):
+        try:
+            raise RuntimeError(f"went wrong near {value}")  # noqa: TRY301  PERMANENT(a raise inside try is the fixture)
+        except RuntimeError:
+            logging.getLogger("stealth.test_secret_registry").exception("failed")
+    assert value in logging.Formatter().format(caplog.records[-1])
+
+
 def test_a_log_record_with_numeric_args_still_formats(caplog, value, factory):
     secret_registry.register(value)
     with caplog.at_level(logging.INFO):

@@ -80,6 +80,18 @@ async def login(instance_id: str, label: str) -> dict[str, str]:
         )
     except vault_store.VaultLocked:
         raise ToolError(LOCKED) from None
+    except ToolError:
+        raise
+    except Exception as error:  # noqa: BLE001  PERMANENT(an unknown failure must reach the caller as its class only)
+        # Whatever else went wrong, the caller learns THAT and not WHAT: the text
+        # of an unexpected exception is the one place a secret could ride out in
+        # a tool result, so only its class is returned. The detail goes to the
+        # log, where the registry masks it (a traceback included).
+        rt.debug_logger.log_error("logins", "login", error)
+        raise ToolError(
+            f"the login failed unexpectedly ({type(error).__name__}); "
+            "the backend log has the detail"
+        ) from None
 
 
 #: Surface order, which is the order ``server.py``'s binding loop registers them

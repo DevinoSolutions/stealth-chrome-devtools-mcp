@@ -117,6 +117,7 @@ the whole directory while no backend runs costs you nothing but a cold start.
 | `browser_pids.json.lock` | the sibling lock every writer of `browser_pids.json` takes so two backends cannot clobber each other's entries; empty and persistent, like `singleton.lock` |
 | `backend-launch/` | scratch for a Windows cold start's scheduler rung (F-867) — see below. Empty between spawns |
 | `logs/` | see "Where the logs are" above |
+| `vault.json`, `vault-audit.jsonl` | the **login vault** (T-19366) and its attempt log. `vault.json` is encrypted (scrypt + AES-256-GCM) and holds the only copy of your stored logins: **deleting it deletes them**, and a lost passphrase cannot be recovered. `vault-audit.jsonl` is one JSON line per `login` attempt (time, label, instance, caller, outcome; never a secret or a username) and is safe to delete. See "Recover from a locked or frozen login vault" below |
 
 Anything else in the directory is a leftover. Nothing in `src/` writes or reads a
 `.bak` file, so delete any you find.
@@ -516,6 +517,15 @@ Things worth knowing:
   storage cap or `cleanup --apply`, whether or not it carries a clone marker —
   only disposable auto-clones are, and a named profile is never one. A named
   directory can be *trimmed* of regenerable caches, never removed.
+
+### Recover from a locked or frozen login vault (T-19366)
+
+- **`list_logins` / `login` say the vault is locked.** The key lives only in the running backend's memory, so every backend restart and every expired `unlock --for` locks it. A person runs `stealthy login unlock [--for 8h]` at a terminal (it refuses a pipe or a script, by design). `stealthy login status` says whether the backend holds it; exit 3 means no backend is running, and any `stealthy` tool call starts one.
+- **A login is `frozen`.** The site refused its password once, and the vault will not retry it into an account lockout. Fix the password where the site keeps it, then `stealthy login edit LABEL --password`; any `edit` clears the frozen state. `stealthy login list` shows which entries are frozen and since when.
+- **`login` refuses the browser.** It was started with a proxy or with `--host-resolver-rules`, `--host-rules`, `--ignore-certificate-errors`, `--ignore-certificate-errors-spki-list`, `--allow-insecure-localhost`, `--unsafely-treat-insecure-origin-as-secure` or `--proxy-server`: with those the host check proves nothing. Spawn a browser without them.
+- **"a vault login is running in this browser".** Every tool is refused on the login's tab, and `execute_cdp_command` / `switch_tab` on the whole browser, while a login runs (at most about 30 s). Retry when it finishes.
+- **What happened, and when.** `stealthy login audit [-n N]` prints the attempts. A password is never in it.
+- **Forgotten passphrase.** There is no recovery. Move `vault.json` aside, `stealthy login init`, and add the logins again.
 
 ### Disk filling up
 Look before you reclaim — neither of these changes anything on disk:

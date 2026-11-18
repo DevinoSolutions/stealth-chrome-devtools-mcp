@@ -395,6 +395,24 @@ The DevTools port of each browser it launches is a different matter: it listens 
 `--remote-allow-origins=*`, so any local process can drive a browser this tool started. That is by design for a single-user machine,
 and the tool is not meant for multi-user hosts (RUNBOOK, "Local trust boundary").
 
+### Login vault: sign in without the password reaching a model (T-19366)
+
+A person stores logins once; an agent asks the backend to sign one in by label. **No password, passphrase, key or decrypted vault content reaches a model**: not in a tool argument or result, a log line, an error report, a network record or any CLI output, and there is no "show password" operation.
+
+```bash
+stealthy login init                                   # new passphrase, typed twice
+stealthy login add work --site example.com --login-url https://accounts.example.com/signin --user me@example.com
+stealthy login unlock --for 8h                        # puts the key in the backend's memory
+```
+
+Then an agent calls `list_logins()` (labels, sites, whether one is frozen; a username only if you passed `--show-username`) and `login(instance_id, label)`, which answers `logged_in`, `already_logged_in`, `needs_totp`, `needs_user`, `rejected` or `use_provider`. The sign-in happens in a tab the backend opens for itself: while it runs, every tool call naming that tab is refused, `execute_cdp_command` and `switch_tab` are refused for the whole browser, hooks and network capture never arm it, and the tab is closed afterwards. The session is saved in the profile, so reload your own tab.
+
+- **Where it is kept.** `~/.stealth-mcp/vault.json`, scrypt + AES-256-GCM, labels and sites encrypted too. The key is derived on your machine from a passphrase typed at a terminal (`unlock` and `init` refuse a pipe or a script) and exists only in the backend's memory until `lock`, the `--for` period or the backend exits. Passwords are only ever a hidden prompt or `--password-stdin`, never an argument or an environment variable.
+- **Where it types.** Only on `https` and a host exactly in the entry's `hosts` (default: the login URL's host), checked from the browser's own frame tree before every field. A browser started with a proxy or a host-resolver or certificate override is refused.
+- **After a refusal.** One `rejected` freezes that entry until `stealthy login edit` clears it, so an agent cannot retry a wrong password into an account lockout. `stealthy login audit` lists every attempt (no secret, no username).
+- **Defence in depth.** Registered passwords, plain and URL-encoded, are also masked in Sentry events, log lines (tracebacks too) and the debug view and export, and a release-gate test searches all of them after a real login.
+- **Not covered.** The signed-in session itself (an agent in a logged-in browser can act as you); malware running as your OS user, which can read the backend's memory or attach to Chrome's debugging port; login flows that are not username-then-password (they return `needs_user`); two-factor completion and the "sign in with Google" account chooser (a later phase: `use_provider` only makes sure the provider account is signed in). `--disable-logins` removes the two tools.
+
 ### Orphan Recovery
 
 On server restart, the process cleanup system:
