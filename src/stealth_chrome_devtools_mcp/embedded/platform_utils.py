@@ -126,6 +126,7 @@ def _stealth_blocked_args() -> dict:
         "--auto-open-devtools-for-tabs": "DevTools on start is detectable",
         "--remote-debugging-port": "DevTools port exposure",
         "--remote-debugging-pipe": "DevTools pipe exposure",
+        "--remote-debugging-address": "DevTools reachable beyond loopback",
         # ── fingerprint-altering flags ──
         "--no-sandbox": "missing sandbox detectable via process topology",
         "--disable-gpu": "GPU absence detectable via WebGL probes",

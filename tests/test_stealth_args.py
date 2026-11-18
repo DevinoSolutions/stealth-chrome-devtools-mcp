@@ -69,6 +69,16 @@ class TestFilterStealthArgs:
         clean, warnings = filter_stealth_args(["--remote-debugging-pipe"])
         assert clean == []
 
+    def test_strips_remote_debugging_address(self):
+        """T-5589: a caller must not be able to bind the DevTools port to another
+        interface (``--remote-debugging-address=0.0.0.0``)."""
+        clean, warnings = filter_stealth_args(
+            ["--remote-debugging-address=0.0.0.0", "--Remote-Debugging-Address=::"]
+        )
+        assert clean == []
+        assert len(warnings) == 2
+        assert "beyond loopback" in warnings[0]
+
     def test_strips_auto_open_devtools(self):
         clean, warnings = filter_stealth_args(["--auto-open-devtools-for-tabs"])
         assert clean == []
