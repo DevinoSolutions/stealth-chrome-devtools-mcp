@@ -21,7 +21,6 @@ echoes what was posted.
 from __future__ import annotations
 
 import base64
-import binascii
 import weakref
 from typing import TYPE_CHECKING
 
@@ -53,7 +52,7 @@ def _parse_unlock(body: object) -> tuple[bytes, float | None] | str:
         return "the body must be an object with a base64 'key'"
     try:
         key = base64.b64decode(body["key"], validate=True)
-    except (binascii.Error, ValueError):
+    except ValueError:  # binascii.Error is one
         return "'key' is not base64"
     if len(key) != _KEY_BYTES:
         return f"'key' must be {_KEY_BYTES} bytes"

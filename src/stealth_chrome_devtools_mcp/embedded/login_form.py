@@ -78,7 +78,7 @@ const usernames = () => {
         (el) => el.form === password.form && !isOtp(el) && textual(el)
     );
     const before = siblings.filter(
-        (el) => el.compareDocumentPosition(password) & Node.DOCUMENT_POSITION_FOLLOWING
+        (el) => el.compareDocumentPosition(password) & 4 /* following */
     );
     return before.length ? [before[before.length - 1]] : [];
 };
