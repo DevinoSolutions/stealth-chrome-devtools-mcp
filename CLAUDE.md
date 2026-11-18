@@ -56,7 +56,7 @@ distinct qualified name; the bare word is retired from ambiguous surfaces.
 
 | Term | THE one meaning | Not to be confused with |
 |---|---|---|
-| **backend** | the shared `python -m … --transport http` process running FastMCP + 100 tools, one per display context | the stdio proxy; "the server" (ambiguous — avoid); the pre-2.0.4 "exactly one process per machine" reading ([DESIGN §2.7](./DESIGN.md#27-display-context-where-a-window-launched-here-would-be-seen)) |
+| **backend** | the shared `python -m … --transport http` process running FastMCP + 102 tools, one per display context | the stdio proxy; "the server" (ambiguous — avoid); the pre-2.0.4 "exactly one process per machine" reading ([DESIGN §2.7](./DESIGN.md#27-display-context-where-a-window-launched-here-would-be-seen)) |
 | **stdio proxy** | the short-lived per-Claude-Code-session process bridging stdio ↔ the backend's HTTP | the backend |
 | **MCP session** | FastMCP's `mcp-session-id` handshake token (created by `initialize`, discarded by the liveness probe) | a browser session; a Claude Code session |
 | **Claude Code session** | one client connection = one stdio proxy instance | an MCP session; a browser session |
@@ -85,13 +85,13 @@ distinct qualified name; the bare word is retired from ambiguous surfaces.
 
 ---
 
-## Tool count = 100 (derived, never typed)
+## Tool count = 102 (derived, never typed)
 
 The authoritative count is the live registry:
-`sum(len(v) for v in SECTION_TOOLS.values())` == **100** across 13 sections.
+`sum(len(v) for v in SECTION_TOOLS.values())` == **102** across 14 sections.
 `SECTION_TOOLS` is filled by **`server.py`'s binding loop over `SECTION_MODULES`** — the
 loop walks each section module's `TOOLS` tuple, applies `section_tool(SECTION)` and binds
-the result into `server`'s namespace — so the count derives from what the thirteen modules
+the result into `server`'s namespace — so the count derives from what the fourteen modules
 export, not from anything typed. The CLI's `--list-sections` and description string derive
 their numbers from `SECTION_TOOLS`, and a test asserts the printed total equals the
 registry count — so no hand-maintained number can drift. If you add a function to a
