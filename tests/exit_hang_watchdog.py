@@ -50,7 +50,12 @@ import pytest
 
 # Overridable only so the subprocess pins can run in seconds, never in CI.
 _OVERRIDE = os.environ.get("EXIT_HANG_WATCHDOG_SECONDS")
-TEST_SECONDS = float(_OVERRIDE) if _OVERRIDE else 600.0
+# On CI the job limit is 15 minutes and the suite takes up to 11 of them, so the
+# last test gets 180 s there (it takes about 5 s): 600 s would lose to the runner's
+# cancel, which is the very thing this module exists to beat. Locally it stays
+# 600 s, for a developer sitting in ``pdb`` on the last test.
+_LAST_TEST_DEFAULT = 180.0 if os.environ.get("CI") else 600.0
+TEST_SECONDS = float(_OVERRIDE) if _OVERRIDE else _LAST_TEST_DEFAULT
 FINISH_SECONDS = float(_OVERRIDE) if _OVERRIDE else 120.0
 GIL_GRACE_SECONDS = 30.0
 
