@@ -31,7 +31,17 @@ takes no lock â€” the stuck cold-start gate is exactly what may be holding it â€
 and the kill is ``backend_eviction.terminate``, the one act every other
 terminator uses, with its ``is_ours`` guard. Persistent-profile browsers outlive
 it and are re-attached by F-888; clones are reaped by the next backend, which is
-the cost of a backend no one could use.
+the cost of a backend no one could use, and which the kill therefore NAMES
+(:func:`lost_browsers`, T-15466).
+
+**It stands down** (T-15466): a backend that goes red again and again after each
+fresh start is a fault a kill does not fix, and the supervisor would otherwise
+destroy every clone on the machine every few minutes for as long as it lasted.
+After :data:`STAND_DOWN_KILLS` kills inside :data:`STAND_DOWN_WINDOW_SECONDS` it
+terminates nothing, logs one ERROR per pass saying why and when it resumes, and
+keeps every clock, so it resumes by itself the moment the oldest of those kills
+leaves the window. The kills it counts are the ones in the state file that
+terminated a backend (``killed``); a refused or failed attempt costs nothing.
 
 A leaf, on ``backend_eviction``'s shape: the record, the heartbeat readers and
 the act are imported, and every probe that has to know which backends are OURS
@@ -46,6 +56,7 @@ import contextlib
 import json
 import logging
 import time
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, NamedTuple
 
 import psutil
@@ -54,6 +65,8 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_eviction,
     backend_liveness,
     backend_registry,
+    browser_pid_registry,
+    profile_seed,
 )
 
 if TYPE_CHECKING:
@@ -77,6 +90,11 @@ SUSPECT_KILL_SECONDS = 600.0
 STATE_NAME = "supervisor.json"
 #: How many kills the state file remembers, newest last.
 KILLS_KEPT = 20
+#: The stand-down rule (T-15466): this many kills that terminated a backend...
+STAND_DOWN_KILLS = 3
+#: ...inside this long (thirty minutes) and the supervisor kills no more until
+#: the oldest of them is older than this.
+STAND_DOWN_WINDOW_SECONDS = 1800.0
 
 GREEN = "green"
 RED = "red"
@@ -96,13 +114,16 @@ class Observation(NamedTuple):
 
 class Verdict(NamedTuple):
     """One backend's verdict: its state, how long it has been out of GREEN, and
-    whether this pass terminates it."""
+    whether this pass terminates it (or would have, but is standing down)."""
 
     port: int
     pid: int
     state: str
     unusable_for: float
     kill: bool
+    #: Due for termination but held back by the stand-down rule (``kill`` is
+    #: then False: this pass terminates nothing).
+    stood_down: bool = False
 
 
 def judge(seen: Observation) -> str:
@@ -239,6 +260,79 @@ def _write_state(path: Path, state: dict[str, object]) -> None:
         tmp.replace(path)
 
 
+def recent_kills(history: list[object], at: float) -> list[float]:
+    """When each kill that terminated a backend inside the stand-down window
+    happened, oldest first. A malformed entry (a hand edit) counts as none; a
+    kill dated in the future (a clock set back) counts as recent, so the error
+    is toward killing less."""
+    return sorted(
+        float(entry["at"])
+        for entry in history
+        if isinstance(entry, dict)
+        and entry.get("killed") is True
+        and isinstance(entry.get("at"), int | float)
+        and not isinstance(entry.get("at"), bool)
+        and at - float(entry["at"]) < STAND_DOWN_WINDOW_SECONDS
+    )
+
+
+#: The longest a session name is reported at, so a hand-named profile directory
+#: cannot widen a log line.
+_NAME_LIMIT = 64
+
+
+def _session_name(entry: browser_pid_registry.Entry) -> str:
+    """The session a persistent browser belongs to: its profile directory's NAME,
+    never the path (a profile path is not the log's to carry). The shared
+    profile's directory is ``master``; the caller knows it as ``default``."""
+    directory = entry.get("user_data_dir")
+    # ``PureWindowsPath`` splits on both separators, whichever OS wrote the path.
+    name = PureWindowsPath(directory).name if isinstance(directory, str) else ""
+    if not name:
+        return "unnamed"
+    return profile_seed.DEFAULT_SESSION if name == "master" else name[:_NAME_LIMIT]
+
+
+def lost_browsers(record: Path, pid: int) -> str | None:
+    """One line naming the browsers backend ``pid`` owns that its termination
+    loses, or None when it owns none that are running (T-15466).
+
+    From the browser-pid registry beside ``record`` (``backend_eviction.
+    owned_entries``, the one reader of "whose browsers"). A persistent profile is
+    named by SESSION and will be re-attached by the next backend (F-888); every
+    other browser is a disposable clone that does not survive the backend. Only
+    instance ids and session names are written: no profile path, no URL, no
+    cookie (the record holds none, and the line reads three fields of it).
+    """
+    owned = backend_eviction.owned_entries(
+        record.parent, pid, is_running=psutil.pid_exists
+    )
+    clones = sorted(
+        instance_id
+        for instance_id, entry in owned.items()
+        if not browser_pid_registry.on_persistent_profile(entry)
+    )
+    sessions = sorted(
+        f"{instance_id} (session {_session_name(entry)})"
+        for instance_id, entry in owned.items()
+        if browser_pid_registry.on_persistent_profile(entry)
+    )
+    if not (clones or sessions):
+        return None
+    return (
+        f"it owned {len(clones)} disposable clone(s) now lost "
+        f"[{', '.join(clones) or 'none'}] and {len(sessions)} named session(s) "
+        f"the next backend re-attaches [{', '.join(sessions) or 'none'}]"
+    )
+
+
+def _action(verdict: Verdict, *, dry_run: bool, standing: bool) -> str:
+    """The tail of a pass's per-backend WARNING: what this pass does about it."""
+    if standing:
+        return "; NOT terminating it: standing down (T-15466)"
+    return "; terminating it (T-15386)" if verdict.kill and not dry_run else ""
+
+
 def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
     record: Path,
     *,
@@ -270,12 +364,15 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
     verdicts, clocks = decide(observed, state, at)
     kills = state.get("kills")
     history = list(kills) if isinstance(kills, list) else []
-    for verdict, seen in zip(verdicts, observed, strict=True):
+    stood_down_logged = False
+    for index, (verdict, seen) in enumerate(zip(verdicts, observed, strict=True)):
         if verdict.state == GREEN:
             continue
         if on_trouble is not None:
             on_trouble()
             on_trouble = None
+        recent = recent_kills(history, at)
+        standing = verdict.kill and len(recent) >= STAND_DOWN_KILLS
         _logger.warning(
             "backend pid %d on port %d is %s for %.0fs (silence %s, lag %s)%s",
             seen.pid,
@@ -284,10 +381,35 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
             verdict.unusable_for,
             "none" if seen.silence is None else f"{seen.silence:.1f}s",
             "none" if seen.lag is None else f"{seen.lag:.2f}s",
-            "; terminating it (T-15386)" if verdict.kill and not dry_run else "",
+            _action(verdict, dry_run=dry_run, standing=standing),
         )
+        if standing:
+            # Held back, clock kept: the first pass after the window is due at once.
+            verdicts[index] = verdict._replace(kill=False, stood_down=True)
+            if not stood_down_logged:
+                stood_down_logged = True
+                _logger.error(
+                    "supervisor standing down (T-15466): %d backend kills in the "
+                    "last %.0f minutes (limit %d), so it terminates nothing; a "
+                    "backend that goes red after every fresh start is a fault a "
+                    "kill does not fix. It resumes by itself in %.0fs, when the "
+                    "oldest of those kills leaves the window",
+                    len(recent),
+                    STAND_DOWN_WINDOW_SECONDS / 60,
+                    STAND_DOWN_KILLS,
+                    recent[0] + STAND_DOWN_WINDOW_SECONDS - at,
+                )
+            continue
         if verdict.kill and not dry_run:
+            lost = lost_browsers(record, seen.pid)
             killed = kill(seen, is_ours=is_ours, is_healthy=is_healthy)
+            if killed and lost is not None:
+                _logger.warning(
+                    "backend pid %d on port %d terminated; %s",
+                    seen.pid,
+                    seen.port,
+                    lost,
+                )
             history.append(
                 {
                     "at": at,
