@@ -13,6 +13,7 @@ from fastmcp import FastMCP
 
 from stealth_chrome_devtools_mcp.embedded import (
     backend_token,
+    login_seal,
     proactor_accept,
     proactor_spawn,
     proactor_teardown,
@@ -23,7 +24,10 @@ from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     backend_uvicorn_config,
     bootstrap_backend_process_logging,
 )
-from stealth_chrome_devtools_mcp.embedded.tool_errors import instance_not_found
+from stealth_chrome_devtools_mcp.embedded.tool_errors import (
+    ToolError,
+    instance_not_found,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_registry import (
     DISABLED_SECTIONS,
     SECTION_TOOLS,  # used by --list-sections + the derived tool-count (F-108); also re-exported as server.SECTION_TOOLS
@@ -282,6 +286,17 @@ if DEBUG_LOGGING_ENABLED:
     rt.debug_logger.enable()
 
 
+async def _refuse_sealed_resource(instance_id: str) -> None:
+    """A ``browser://`` resource reads the instance's stored tab; refuse it when a
+    vault login (T-19366) has sealed that tab."""
+    if login_seal.sealing(instance_id):
+        tab = await rt.browser_manager.get_tab(instance_id)
+        if tab is not None and login_seal.is_sealed(
+            instance_id, str(tab.target.target_id)
+        ):
+            raise ToolError(login_seal.REFUSAL)
+
+
 @mcp.resource("browser://{instance_id}/state")
 async def get_browser_state_resource(instance_id: str) -> str:
     """
@@ -293,6 +308,7 @@ async def get_browser_state_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of the browser state or error message.
     """
+    await _refuse_sealed_resource(instance_id)
     state = await rt.browser_manager.get_page_state(instance_id)
     if state:
         return json.dumps(state.dict(), indent=2)
@@ -310,6 +326,7 @@ async def get_cookies_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of cookies or error message.
     """
+    await _refuse_sealed_resource(instance_id)
     tab = await rt.browser_manager.get_tab(instance_id)
     if tab:
         cookies = await rt.network_interceptor.get_cookies(tab)
@@ -343,6 +360,7 @@ async def get_console_resource(instance_id: str) -> str:
     Returns:
         str: JSON string of console logs or error message.
     """
+    await _refuse_sealed_resource(instance_id)
     state = await rt.browser_manager.get_page_state(instance_id)
     if state:
         return json.dumps(state.console_logs, indent=2)

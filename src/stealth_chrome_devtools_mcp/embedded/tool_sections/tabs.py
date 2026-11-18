@@ -16,7 +16,12 @@ signatures are byte-identical — FastMCP surfaces them and
 
 from typing import Any
 
-from stealth_chrome_devtools_mcp.embedded import tab_binding, tab_identity, tab_open
+from stealth_chrome_devtools_mcp.embedded import (
+    login_seal,
+    tab_binding,
+    tab_identity,
+    tab_open,
+)
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
@@ -37,9 +42,11 @@ async def list_tabs(instance_id: str) -> list[dict[str, str]]:
     Returns:
         List[Dict[str, str]]: List of tabs with their details.
     """
-    return await rt._with_cdp_timeout(
+    tabs = await rt._with_cdp_timeout(
         rt.browser_manager.list_tabs(instance_id), instance_id=instance_id
     )
+    # A vault login's tab is not the model's to see (T-19366).
+    return [tab for tab in tabs if not login_seal.is_sealed(instance_id, tab["tab_id"])]
 
 
 async def switch_tab(instance_id: str, tab_id: str) -> bool:
