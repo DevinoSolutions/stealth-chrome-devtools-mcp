@@ -24,7 +24,11 @@ import json
 import os
 import time
 
-from stealth_chrome_devtools_mcp.embedded import clone_storage, clone_trash
+from stealth_chrome_devtools_mcp.embedded import (
+    clone_storage,
+    clone_trash,
+    profile_seed,
+)
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
@@ -38,7 +42,9 @@ def _make_clone(
     marker = {
         "source": "master",
         "source_kind": source_kind,
-        "created_at": "2026-01-01T00:00:00Z",
+        # NOW, not a fixed date: the stale-clone sweep (T-5968) reads this, and a
+        # fixture that is months old would make every clone here a stale one.
+        "created_at": profile_seed.stamp_now(),
     }
     if auto_clean is not None:
         marker["auto_clean"] = auto_clean

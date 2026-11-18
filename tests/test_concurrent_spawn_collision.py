@@ -700,10 +700,10 @@ async def test_a_spawn_that_fails_every_attempt_leaks_no_protected_clone(
         "a clone dir stayed protected for a launch that never happened — nothing "
         "will ever release it"
     )
+    # T-5968: this used to pin TWO trees left on disk, i.e. the leak itself: each
+    # failed attempt's clone stayed until the storage cap happened to be reached.
     on_disk = [d for d in clone_root.iterdir() if d.is_dir() and d.name != ".trash"]
-    assert len(on_disk) == 2, (
-        f"{len(on_disk)} profile trees copied for 2 clone attempts: {on_disk}"
-    )
+    assert on_disk == [], f"failed attempts left their clones behind: {on_disk}"
 
 
 class _FailsOnceManager(FakeBrowserManager):

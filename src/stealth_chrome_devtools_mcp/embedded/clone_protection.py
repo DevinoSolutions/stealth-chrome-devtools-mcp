@@ -17,15 +17,18 @@ does every spawn's reservation.
 
 ``clone_storage`` re-binds these under the underscore names the rest of the tree
 and the suite have always called; nothing here imports it. A leaf: ``profile_copy``
-(itself a leaf), ``os`` and ``threading``.
+(itself a leaf), ``clone_trash`` (a leaf too), ``debug_logger``, ``os`` and
+``threading``.
 """
 
+import asyncio
 import os
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from stealth_chrome_devtools_mcp.embedded import profile_copy
+from stealth_chrome_devtools_mcp.embedded import clone_trash, profile_copy
+from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 PROTECTED: set[str] = set()
 _LOCK = threading.Lock()
@@ -97,3 +100,36 @@ def discard(made: list[Path], held: list[Path]) -> None:
         profile_copy.rmtree_robust(directory)
     for directory in held:
         release(directory)
+
+
+def _abandon(directory: object, held: Callable[[Path], bool]) -> None:
+    """The blocking half of :func:`abandon`. Never raises."""
+    try:
+        if not held(Path(str(directory))):
+            clone_trash.discard(Path(str(directory)))
+    except Exception as error:  # noqa: BLE001  PERMANENT(best-effort: a delete that cannot be asked or done leaves the clone to the stale sweep, never fails the spawn)
+        debug_logger.log_warning(
+            "clone_protection",
+            "abandon",
+            f"left {Path(str(directory)).name} for the stale-clone sweep: {error!r}",
+        )
+    finally:
+        release(directory)
+
+
+async def abandon(
+    directory: object, held: Callable[[Path], bool], clone_root: Path
+) -> None:
+    """A spawn attempt whose browser never came up (T-5968): delete the clone it
+    copied, THEN drop its reservation — in that order, so nothing can choose the
+    name while it is half-deleted. Left alone, every failed launch kept a whole
+    profile (100-500 MB) that nothing but the stale-clone sweep would reclaim.
+
+    Off the loop and shielded, so a cancellation cannot leave it half-deleted.
+    Only a direct child of *clone_root* is ever deleted, and only when *held* —
+    whether a browser has it — says no: one that does, or whose answer cannot be
+    had, is left for that sweep, which asks again later. Never raises."""
+    inside = normalize(Path(str(directory)).parent) == normalize(clone_root)
+    await asyncio.shield(
+        asyncio.to_thread(_abandon, directory, held if inside else lambda _p: True)
+    )
