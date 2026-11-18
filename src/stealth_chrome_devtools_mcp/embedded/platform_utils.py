@@ -127,6 +127,11 @@ def _stealth_blocked_args() -> dict:
         "--remote-debugging-port": "DevTools port exposure",
         "--remote-debugging-pipe": "DevTools pipe exposure",
         "--remote-debugging-address": "DevTools reachable beyond loopback",
+        # T-19366: with the origin allow-list open, any web page can attach to every
+        # tab (the vault's sealed login tab included); ``debug_port_guard`` removes
+        # nodriver's own copy of this flag, so a caller's is stripped too.
+        "--remote-allow-origins": "lets any web page open a DevTools connection",
+        "--remote-debugging-host": "DevTools reachable beyond loopback",
         # ── fingerprint-altering flags ──
         "--no-sandbox": "missing sandbox detectable via process topology",
         "--disable-gpu": "GPU absence detectable via WebGL probes",

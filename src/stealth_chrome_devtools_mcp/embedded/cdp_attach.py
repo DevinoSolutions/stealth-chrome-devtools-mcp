@@ -33,7 +33,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import tab_open
+from stealth_chrome_devtools_mcp.embedded import debug_port_guard, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -68,6 +68,7 @@ def config_for(
     """
     import nodriver as uc
 
+    debug_port_guard.install()  # T-19366: no ``--remote-allow-origins=*``
     config = uc.Config(
         user_data_dir=user_data_dir,
         headless=headless,
@@ -91,6 +92,11 @@ async def attach(config: Config, pid: int | None = None) -> Browser:
     browser = await uc.start(config=config)
     if pid is not None:
         browser._process_pid = pid
+    try:
+        await debug_port_guard.protect(browser)  # T-19366: before anyone is handed it
+    except BaseException:
+        await close(browser)
+        raise
     return browser
 
 

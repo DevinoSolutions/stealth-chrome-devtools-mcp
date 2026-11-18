@@ -33,7 +33,11 @@ from collections import defaultdict
 
 from fastmcp.tools import Tool
 
-from stealth_chrome_devtools_mcp.embedded import login_seal, tab_binding
+from stealth_chrome_devtools_mcp.embedded import (
+    debug_port_guard,
+    login_seal,
+    tab_binding,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.logging_setup import with_correlation_id
 from stealth_chrome_devtools_mcp.embedded.response_handler import surrogate_safe
@@ -93,13 +97,17 @@ def _refusing_sealed_tabs(func):
     name = func.__name__
     signature = inspect.signature(func)
 
+    loads_url = name in debug_port_guard.URL_ARGUMENTS
+
     def check(args: tuple[object, ...], kwargs: dict[str, object]) -> None:
-        if not login_seal.any_sealing():
+        if not (loads_url or login_seal.any_sealing()):
             return
         try:
             arguments = signature.bind_partial(*args, **kwargs).arguments
         except TypeError:
             return
+        if loads_url:
+            debug_port_guard.refuse_urls(name, arguments)  # T-19366
         login_seal.refuse_if_sealed(name, arguments)
 
     if inspect.iscoroutinefunction(func):

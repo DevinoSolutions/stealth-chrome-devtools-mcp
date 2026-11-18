@@ -540,9 +540,10 @@ async def test_the_quoting_matches_windows_own_parser(delegation):
 async def test_the_delegated_chrome_gets_nodrivers_own_default_args(delegation):
     """The delegated argv is DERIVED from nodriver's Config, never hand-copied.
 
-    Without ``--remote-allow-origins=*`` the CDP websocket handshake is refused,
-    so a delegated browser that came up would still be unusable — and any list we
-    maintained ourselves would drift from nodriver's on the next upgrade.
+    Any list we maintained ourselves would drift from nodriver's on the next
+    upgrade. The one thing taken out is ``--remote-allow-origins=*`` (T-19366,
+    ``debug_port_guard``): with it any web page could open a DevTools connection;
+    without it nodriver, whose websocket client sends no Origin, still connects.
     """
     import nodriver as uc
 
@@ -559,7 +560,8 @@ async def test_the_delegated_chrome_gets_nodrivers_own_default_args(delegation):
     )
     expected.host, expected.port = "127.0.0.1", 9333
     assert argv == expected()
-    assert "--remote-allow-origins=*" in argv
+    assert "--remote-allow-origins=*" not in argv
+    assert not [a for a in argv if a.startswith("--remote-allow-origins")]
     assert "--remote-debugging-host=127.0.0.1" in argv
 
 
