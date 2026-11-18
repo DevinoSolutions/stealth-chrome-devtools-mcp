@@ -399,6 +399,10 @@ class ProcessCleanup:
                 success = False
         return success
 
+    def _browsers_unreadable(self, _profile: Path) -> bool:
+        """An unreadable browser process leaves any holder unruled out (T-5968)."""
+        return bool(browser_cmdline.unreadable_browsers(self._is_browser_process_name))
+
     def _profile_claimed_by_live_instance(self, normalized: str, skip_id: str) -> bool:
         """True when a tracked instance OTHER than *skip_id* holds *normalized*
         with a live pid.
@@ -465,10 +469,7 @@ class ProcessCleanup:
                     return False
                 time.sleep(0.15)
                 continue
-            # T-5968: ``clone_trash.discard`` carries on past a locked file and,
-            # when a clone is still there, moves it aside to be purged, so one
-            # locked file no longer strands a whole profile.
-            if clone_trash.discard(path):
+            if clone_trash.discard(path, held=self._browsers_unreadable):
                 debug_logger.log_info(
                     "process_cleanup",
                     "cleanup_profile",
@@ -483,7 +484,6 @@ class ProcessCleanup:
                 )
                 return False
             time.sleep(0.15)
-
         return False
 
     def _cleanup_profile_for_metadata(

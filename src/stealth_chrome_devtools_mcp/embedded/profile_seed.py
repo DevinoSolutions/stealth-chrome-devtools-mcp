@@ -131,6 +131,15 @@ NO_SEED = "none"
 # already paid for once.
 FOLDED_NAMES = RESERVED_NAMES | {DEFAULT_SESSION}
 
+#: Names of directories that sit beside profiles in the clone root and are NOT
+#: profiles: the two scratch kinds ``profile_copy.replace_tree`` owns and the
+#: eviction holding area ``clone_trash`` owns. A storage sweep reads them by
+#: name, so no session may be called one (T-5968: ``acme.stealth-staging-eu``
+#: was accepted, and ``.trash`` is purged child by child).
+STAGING_SUFFIX = ".stealth-staging-"
+PREVIOUS_SUFFIX = ".stealth-previous"
+TRASH_DIRNAME = ".trash"
+
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -246,12 +255,22 @@ def seed_label(source: Path, master: Path, snapshot: Path) -> str:
 
 
 def write_marker(
-    target: Path, *, source: Path, source_kind: str, seeded_from: str
+    target: Path,
+    *,
+    source: Path,
+    source_kind: str,
+    seeded_from: str,
+    disposable: bool | None = None,
 ) -> dict[str, object]:
     """Write *target*'s clone marker and return what was written.
 
-    ``auto_clean`` is the disposability flag ``clone_is_auto`` reads; the
-    ``explicit`` source-kind prefix is what a user-named profile carries.
+    ``auto_clean`` is the disposability flag ``clone_is_auto`` reads. What makes a
+    directory disposable is its ROLE (an unnamed spawn's clone) and never which
+    seed it was copied from, so the caller that knows the role says it with
+    *disposable*; a copy seeded from a named session (``STEALTH_MCP_SEED_SESSION``,
+    F-952) has an ``explicit-session`` kind and was marked KEEP by the kind alone
+    (T-5968). ``None`` keeps the old derivation (the ``explicit`` prefix is what a
+    user-named profile carries) for the callers that never said.
     """
     created = stamp_now()
     marker: dict[str, object] = {
@@ -260,7 +279,11 @@ def write_marker(
         "created_at": created,
         # Disposable auto-clones may be reclaimed by the storage-cap sweep;
         # explicit/named profiles (explicit-* source kinds) never are.
-        "auto_clean": not str(source_kind).startswith("explicit"),
+        "auto_clean": (
+            disposable
+            if disposable is not None
+            else not str(source_kind).startswith("explicit")
+        ),
         # F-895: the seed by NAME, and when this copy was taken from it. Written
         # beside the two legacy keys rather than replacing them, so a 2.1.10
         # reader still finds what it looks for.
@@ -781,6 +804,16 @@ def _name_refusal(requested: str, resolved: Path, roots: Roots) -> str | None:
         )
     name = asked.name.casefold()
     folded = name.rstrip(". ")
+    scratch = STAGING_SUFFIX in name or name.endswith(PREVIOUS_SUFFIX)
+    if (not asked.is_absolute() and (scratch or folded == TRASH_DIRNAME)) or (
+        folded == TRASH_DIRNAME and same_dir(resolved.parent, roots.clones)
+    ):
+        return (
+            f"{_about(requested, name)}is scratch the storage sweep owns (a "
+            "staging copy, a displaced previous generation or the eviction "
+            "holding area), so a session of that name could be removed by it. "
+            "Pick another name."
+        )
     if not asked.is_absolute() and folded != name and folded in FOLDED_NAMES:
         return (
             f"{_about(requested, name)}is {folded!r} once the filesystem has "

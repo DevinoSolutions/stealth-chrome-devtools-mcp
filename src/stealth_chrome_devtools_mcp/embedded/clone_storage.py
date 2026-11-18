@@ -1,11 +1,10 @@
 """Profile and clone-storage subsystem for the embedded browser backend.
 
-Owns the disposable-session lifecycle extracted verbatim from ``server.py``
-(F-201): where every session, clone and seed directory IS, refreshing the seed,
-per-session profile copying, the storage-cap sweep (idle auto-clone eviction
-plus named-profile regenerable trim), and profile-selection resolution.
-Extracting it means a fault in storage GC can no longer disable the whole tool
-surface. What a request MAY name and what the seed means is `profile_seed`'s;
+Owns the disposable-session lifecycle extracted from ``server.py`` (F-201):
+where every session, clone and seed directory IS, refreshing the seed,
+per-session profile copying, the storage sweep (stale clones, idle auto-clone
+eviction, named-profile regenerable trim) and profile-selection resolution, so a
+fault in storage GC cannot disable the tool surface. What a request MAY name and what the seed means is `profile_seed`'s;
 WHICH SESSION a new one is copied from is `profile_source`'s; what happens when
 the session a spawn ASKED FOR is already open is `profile_target`'s (F-914/
 F-915); HOW the copy is made is `profile_copy`'s and what an EVICTION means is
@@ -31,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
     client_roots,
     clone_protection,
     clone_stale,
@@ -100,13 +100,26 @@ def _profile_has_running_browser(profile_dir: Path) -> bool:
     return _profile_hold(profile_dir) is not None
 
 
-def clone_storage_cap_bytes() -> int:
-    """Cap (in bytes) on total auto-clone storage under the clone root.
+def _spared() -> tuple[str, ...]:
+    """Names no sweep takes: the fleet session and the configured seeds."""
+    return (
+        fleet_session.FLEET_SESSION,
+        master_profile_dir().name,
+        master_snapshot_dir().name,
+    )
 
-    Default 10 GiB; override with ``STEALTH_MCP_CLONE_STORAGE_CAP_GB``. A value
-    <= 0 disables the cap entirely. Only disposable auto-clones count against
-    this — user-named/explicit profiles are never measured or reclaimed.
-    """
+
+def _profile_may_be_held(profile_dir: Path) -> bool:
+    """What every DELETING path asks: held, or an unreadable browser process (an
+    elevated or other user's Chrome) leaves the holder unruled out (T-5968)."""
+    return _profile_has_running_browser(profile_dir) or bool(
+        browser_cmdline.unreadable_browsers(process_cleanup._is_browser_process_name)
+    )
+
+
+def clone_storage_cap_bytes() -> int:
+    """Cap (bytes) on total auto-clone storage under the clone root: default 10 GiB,
+    ``STEALTH_MCP_CLONE_STORAGE_CAP_GB`` (<= 0 disables). Named profiles never count."""
     gb = get_settings().clone_storage_cap_gb
     if gb <= 0:
         return 0
@@ -114,9 +127,8 @@ def clone_storage_cap_bytes() -> int:
 
 
 def clone_is_auto(clone_dir: Path) -> bool:
-    """The disposable auto-clones — the marker's question, ``profile_seed``'s
-    (its docstring carries the fail-safe-on-a-legacy-marker argument). A
-    wrapper: every sweep, trim and CLI site reads this name."""
+    """The disposable auto-clones: the marker's question, ``profile_seed``'s
+    (fail-safe on a legacy marker). Every sweep, trim and CLI site reads this."""
     return profile_seed.is_auto(clone_dir)
 
 
@@ -141,8 +153,7 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     if cap_bytes <= 0 or not clone_root.exists():
         return []
 
-    autos = []  # (mtime, size, path)
-    total = 0
+    autos, total, spared = [], 0, _spared()  # autos: (mtime, size, path)
     try:
         entries = list(clone_root.iterdir())
     except OSError:
@@ -152,7 +163,7 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
         if name == clone_trash.TRASH_DIRNAME or profile_copy.is_scratch(name):
             continue  # not a clone: the eviction holding area, or F-925 scratch
         try:
-            if not entry.is_dir() or not clone_is_auto(entry):
+            if not clone_trash.disposable(entry, spared):
                 continue
             size = profile_copy.dir_size_bytes(entry)
             mtime = entry.stat().st_mtime
@@ -168,7 +179,7 @@ def _idle_autoclones_over_cap(clone_root: Path, cap_bytes: int) -> list[Path]:
     for _mtime, size, entry in sorted(autos, key=lambda item: item[0]):
         if total <= cap_bytes:
             break
-        if _clone_dir_is_protected(entry) or _profile_has_running_browser(entry):
+        if _clone_dir_is_protected(entry) or _profile_may_be_held(entry):
             continue  # never evict a live or in-flight session to satisfy the cap
         victims.append(entry)
         total -= size
@@ -194,7 +205,7 @@ def _enforce_clone_storage_cap_in(
             # mid-sweep) — respect it rather than evict a now-in-flight clone.
             continue
         size = profile_copy.dir_size_bytes(entry)
-        clone_trash.trash(entry, clone_root, _profile_has_running_browser)
+        clone_trash.trash(entry, clone_root, _profile_may_be_held)
         if not entry.exists():
             removed += 1
             debug_logger.log_info(
@@ -289,19 +300,14 @@ def _enforce_named_profile_trim_in(
 
 
 def enforce_session_storage(reason: str = "") -> None:
-    """Bound clone-root storage: delete idle auto-clones over the clone cap,
-    then trim regenerable data from the largest idle named profiles over the
-    session cap. Best-effort; never raises into a spawn or startup."""
-    try:
-        clone_root = clone_root_dir()
-        _enforce_clone_storage_cap_in(clone_root, clone_storage_cap_bytes(), reason)
-        _enforce_named_profile_trim_in(
-            clone_root, browser_session_storage_cap_bytes(), reason
-        )
-    except Exception as error:
-        debug_logger.log_warning(
-            "server", "session_storage_sweep", f"sweep failed: {error}"
-        )
+    """Bound clone-root storage: ONE sweep, :func:`run_storage_sweep`, with the
+    root and caps read now. Best-effort; never raises into a spawn or startup."""
+    run_storage_sweep(
+        clone_root_dir(),
+        clone_storage_cap_bytes(),
+        browser_session_storage_cap_bytes(),
+        reason,
+    )
 
 
 # Strong refs to in-flight housekeeping sweeps so the event loop cannot GC them
@@ -319,13 +325,11 @@ def run_storage_sweep(
     *deferred* clone deletions (only entries whose browser is already gone).
     """
     try:
-        spared = (
-            fleet_session.FLEET_SESSION,
-            master_profile_dir().name,
-            master_snapshot_dir().name,
-        )
         clone_stale.reap(
-            clone_root, _clone_dir_is_protected, _profile_has_running_browser, spared
+            clone_root,
+            _clone_dir_is_protected,
+            _profile_may_be_held,
+            _spared(),
         )
         _enforce_clone_storage_cap_in(clone_root, clone_cap, reason)
         _enforce_named_profile_trim_in(clone_root, session_cap, reason)
@@ -363,24 +367,21 @@ SEED_IN_USE = "seed-in-use"
 
 
 def _copy_profile_tree(
-    source: Path, target: Path, clone_root: Path, source_kind: str = "profile"
+    source: Path,
+    target: Path,
+    clone_root: Path,
+    source_kind: str = "profile",
+    disposable: bool | None = None,
 ) -> profile_copy.Refusal | None:
     """Copy *source* over *target*; None when the copy RAN, else the ``Refusal``
     saying why: ``TARGET_IN_USE`` for a live browser, or ``profile_copy``'s
     ``TARGET_LOCKED`` / ``PUBLISH_FAILED``, which no browser causes (T-10522).
-
-    Refusing is right — rewriting a directory a Chrome is writing to would be
-    the harm — but it is not success, and the bare ``return`` it used to be let
-    the refresh report a refreshed snapshot with not one byte moved (F-893).
-    The other two callers hand the answer to ``_require_copied``.
-
-    The copy is BUILT BESIDE the target and published in one rename, which is
-    ``profile_copy.replace_tree``'s and argued there: this function used to
-    ``rmtree`` the target and rebuild in place, so for the whole of a ~101 MB
-    copy the SEED every later session comes from was absent or half-written —
-    permanently so if anything killed the process in that window, because the
-    repair refresh is refused while the shared browser is open and every
-    consumer tests ``exists()``, which an empty directory passes (F-925)."""
+    Refusing is right, but it is not success (F-893): the other two callers hand
+    the answer to ``_require_copied``. The copy is built BESIDE the target and
+    published in one rename (``profile_copy.replace_tree``, F-925, where it is
+    argued). *disposable* is the ROLE (T-5968): True only for an unnamed spawn's
+    clone, whatever seed it was copied from.
+    """
     if not _is_relative_to(target, clone_root):
         raise ValueError(f"Refusing to refresh clone outside clone root: {target}")
     checked = target.exists()  # no directory yet, no holder to ask about
@@ -397,6 +398,7 @@ def _copy_profile_tree(
             seeded_from=profile_seed.seed_label(
                 source, master_profile_dir(), master_snapshot_dir()
             ),
+            disposable=disposable,
         ),
     )
 
@@ -503,13 +505,10 @@ def _available_clone_dir(base_clone: Path) -> Path:
 
 
 def _next_available_explicit_dir(requested: Path, *, fresh: bool = False) -> Path:
-    """The next free variant of a busy user-supplied profile path: ``-2``,
-    ``-3``, … up to -99, then a timestamp suffix. Clean numeric suffixes and no
-    PID, because these names are user-visible.
-
-    ``fresh`` also skips a candidate that merely EXISTS, and is the HAND-OVER
-    walk's alone — ``profile_target`` argues why, and why it is not the default.
-    """
+    """The next free variant of a busy user-supplied profile path: ``-2``, ``-3``,
+    … up to -99, then a timestamp suffix (user-visible, so no PID). ``fresh``
+    also skips a candidate that merely EXISTS: the HAND-OVER walk's alone
+    (``profile_target`` argues why)."""
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     if fresh:
         # Unique per spawn here, so the ladder cannot run out ONTO an existing
@@ -537,7 +536,10 @@ def _copy_clone_from_source(
         "seed_path": str(master_snapshot_dir()),
         **_live_seed_fields(seed),
     }
-    _require_copied(_copy_profile_tree(seed.path, clone, clone_root, seed.kind), clone)
+    refusal = _copy_profile_tree(
+        seed.path, clone, clone_root, seed.kind, disposable=True
+    )
+    _require_copied(refusal, clone)
     return selection
 
 
@@ -559,11 +561,9 @@ def require_allowed_user_data_dir(
 ) -> str | None:
     """The ONE thing `spawn_browser` does with what its caller typed: the two
     spellings read as one request, refused if it may not be opened, and the
-    DIRECTORY it means — None when nothing was named. It ANSWERS the anchored
-    path because `adopt_held_profile`, which runs in front of selection (F-894
-    review M1), matches a DIRECTORY against live browsers: the raw string left
-    ``session="default"`` matched as a literal name nothing holds, and the
-    spawn fell through to a fresh copy."""
+    DIRECTORY it means (None when nothing was named). It answers the anchored
+    path because `adopt_held_profile` matches a DIRECTORY against live browsers
+    (F-894 review M1): the raw ``session="default"`` matched nothing."""
     requested = profile_seed.profile_request(session, user_data_dir)
     if not requested:
         return None
@@ -600,9 +600,8 @@ def require_allowed_seed_from(
 
     *check_source* is False for exactly one caller, the RESOLVER (memo review S):
     its ask already runs inside that ``try`` and ``_seed_source_for_copy`` raises
-    the same sentences one statement later with no ``await`` between, so a third
-    walk of the process table decides nothing. The 1 s memo it replaced is
-    argued at ``profile_source``.
+    the same sentences one statement later, so a third process-table walk decides
+    nothing (the 1 s memo it replaced is argued at ``profile_source``).
 
     *driven* is F-898's witness — "does THIS backend hold a browser there" —
     passed to ``_seed_source``; its rule and NO default are ``profile_source``'s."""
@@ -685,14 +684,11 @@ def _live_seed_fields(seed: profile_source.SeedSource) -> dict[str, Any]:
 
 
 def _public_profile_selection(profile_selection: dict[str, Any]) -> dict[str, Any]:
-    """The selection as ``spawn_diagnostics.profile_selection`` reports it — the
-    ONE site every role passes through, which is why F-895's seed provenance is
-    stamped here. It is read from the marker on disk, so a directory that
-    already existed reports the seed it was actually made from.
-
-    It is also where an INTERNAL key stops being one (F-898): this function's
-    whole job is the line between what the resolver decided and what a caller is
-    told, so :data:`LIVE_SEED_KEY` is dropped HERE and nowhere else."""
+    """The selection as ``spawn_diagnostics.profile_selection`` reports it: the ONE
+    site every role passes through, so F-895's seed provenance is stamped here
+    (read from the marker, so an existing directory reports the seed it was made
+    from). It is also where an INTERNAL key stops being one (F-898): :data:`LIVE_SEED_KEY`
+    is dropped HERE and nowhere else."""
     internal = (LIVE_SEED_KEY, *profile_target.INTERNAL_KEYS)
     public = {k: v for k, v in profile_selection.items() if k not in internal}
     selected = public.get("user_data_dir")
@@ -773,7 +769,10 @@ def _resolve_explicit(
             fleet_session.default_seed(seed_from, str(explicit)), driven
         )
         _require_copied(
-            _copy_profile_tree(seed.path, explicit, clone_root, seed.kind), explicit
+            _copy_profile_tree(
+                seed.path, explicit, clone_root, seed.kind, disposable=False
+            ),
+            explicit,
         )
         made.append(explicit)
         # F-898: the copy could not reach a jar Chrome holds open. `seed.live`

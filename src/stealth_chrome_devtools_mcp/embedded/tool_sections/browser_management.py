@@ -397,7 +397,7 @@ async def spawn_browser(
                 if profile_selection.get("profile_role") == "clone":
                     await clone_protection.abandon(
                         selected_user_data_dir,
-                        rt.clone_storage._profile_has_running_browser,
+                        rt.clone_storage._profile_may_be_held,
                         rt.clone_storage.clone_root_dir(),
                     )
                 if spawn_attempt == _SPAWN_ATTEMPTS - 1:

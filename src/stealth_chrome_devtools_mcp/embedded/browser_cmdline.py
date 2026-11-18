@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 import psutil
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Collection, Iterator
+    from collections.abc import Callable, Collection, Iterator
 
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, zombie
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -62,6 +62,26 @@ def arguments(pid: int) -> list[str]:
         return list(psutil.Process(pid).cmdline())
     except (psutil.Error, OSError, ValueError):
         return []
+
+
+def unreadable_browsers(is_browser_name: Callable[[str], bool]) -> tuple[int, ...]:
+    """The pids of browser-named processes whose command line cannot be READ
+    (``AccessDenied``: an elevated or another user's Chrome). A process like that
+    names no profile to any scan, so its profile reads as FREE; a caller about to
+    DELETE a profile asks this first, because the holder is then not ruled out
+    (T-5968). Spawn selection does not: refusing every spawn because some other
+    user runs a Chrome would be a different, much larger change."""
+    found = []
+    for process, name in named_processes():
+        if not is_browser_name(name):
+            continue
+        try:
+            process.cmdline()
+        except psutil.AccessDenied:
+            found.append(process.pid)
+        except psutil.Error:
+            continue
+    return tuple(found)
 
 
 def named_processes() -> Iterator[tuple[psutil.Process, str]]:

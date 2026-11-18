@@ -35,6 +35,7 @@ be honoured and a refusal to reclaim is strictly worse than the behaviour this
 replaced.
 """
 
+import contextlib
 import os
 import time
 from collections.abc import Callable, Container
@@ -45,7 +46,7 @@ from stealth_chrome_devtools_mcp.settings import get_settings
 
 #: The holding area, inside the clone root so the move is a same-volume rename.
 #: Public because every clone-root scan has to skip it by name.
-TRASH_DIRNAME = ".trash"
+TRASH_DIRNAME = profile_seed.TRASH_DIRNAME
 
 
 def trash_dir(clone_root: Path) -> Path:
@@ -61,23 +62,20 @@ def retention_seconds() -> float:
     return max(0.0, hours) * 3600.0
 
 
-def trash(
-    entry: Path,
-    clone_root: Path,
-    held: Callable[[Path], bool],
-    *,
-    delete_on_failure: bool = True,
-) -> Path | None:
+def trash(entry: Path, clone_root: Path, held: Callable[[Path], bool]) -> Path | None:
     """Move an evicted auto-clone aside so it stays recoverable.
 
-    Answers the new path, or ``None`` when the move was refused or the entry had
-    to be deleted instead. A running profile is never moved — selection already
-    excludes live sessions, so this is belt-and-suspenders — and if the rename
-    fails (a Windows lock, say) the cap must still be honoured, so it falls back
-    to a best-effort delete, which is strictly no worse than the behaviour this
-    replaced. A caller with no cap to honour (``clone_stale``) says
-    ``delete_on_failure=False`` and gets ``None`` with the entry untouched: a
-    refused rename is evidence of an open handle, not licence to delete.
+    Answers the new path, or ``None`` when the entry was left exactly where it
+    was. A held profile is never moved, and a move the filesystem refuses (a
+    Windows lock: more often an open handle than a bad path) is NEVER turned into
+    a delete, whoever asks: the cap sweep used to fall back to ``rmtree`` here, so
+    one clone a Chrome held open lost its logins to satisfy a byte count. A
+    clone still over the cap waits for the next sweep, which is a cost of disk and
+    not of a login.
+
+    The move is stamped so retention runs from EVICTION and not from the clone's
+    original mtime; a move that cannot be stamped is undone, because a clone
+    purged on the strength of an old mtime would skip the whole 24 h window.
     """
     if held(entry):
         return None
@@ -94,33 +92,38 @@ def trash(
     try:
         os.replace(str(entry), str(target))
     except OSError:
-        if delete_on_failure:
-            profile_copy.rmtree_robust(entry)
         return None
     try:
-        # Stamp the trash time so retention is measured from EVICTION and not
-        # from the clone's original creation (a rename preserves the old mtime).
         os.utime(target, None)
     except OSError:
-        pass
+        # Unstamped, the purge would date it from the clone's old mtime: put it
+        # back where it was. If even that fails it stays where it is.
+        with contextlib.suppress(OSError):
+            os.replace(str(target), str(entry))
+        return None
     return target
 
 
+def _spared(entry: Path, spared: Container[str]) -> bool:
+    """The seeds' own names (``master``, ``master-snapshot``, ``default``) and the
+    caller's *spared* ones (``fleet``, a configured seed directory), whatever any
+    marker says: a seed's own marker reads AUTO (``default-seed-*``)."""
+    # The same fold `profile_seed` applies to a requested name: Windows strips
+    # a trailing dot or space, so `master.` IS `master` on disk.
+    folded = entry.name.casefold().rstrip(". ")
+    return folded in profile_seed.FOLDED_NAMES or folded in spared
+
+
 def protected(entry: Path, spared: Container[str] = ()) -> bool:
-    """A directory :func:`discard` must never delete: the seeds' own names
-    (``master``, ``master-snapshot``, ``default``), any name in *spared* (the
-    caller's own — ``fleet``, a configured seed directory), and anything carrying
-    a marker that does not call it a disposable auto-clone: a named session, a
-    legacy marker, one that could not be read. Unknown is protected.
+    """A directory :func:`discard` must never delete: a spared name, or anything
+    carrying a marker that does not call it a disposable auto-clone (a named
+    session, a legacy marker, one that could not be read). Unknown is protected.
 
     An UNMARKED directory is not protected: a half-deleted clone loses its marker
     first, and a nodriver temp profile never had one, so the caller's own record
     is what says those are disposable.
     """
-    # The same fold `profile_seed` applies to a requested name: Windows strips
-    # a trailing dot or space, so `master.` IS `master` on disk.
-    folded = entry.name.casefold().rstrip(". ")
-    if folded in profile_seed.FOLDED_NAMES or folded in spared:
+    if _spared(entry, spared):
         return True
     try:
         marked = (entry / profile_seed.MARKER_NAME).exists()
@@ -129,7 +132,27 @@ def protected(entry: Path, spared: Container[str] = ()) -> bool:
     return marked and not profile_seed.is_auto(entry)
 
 
-def discard(entry: Path, spared: Container[str] = ()) -> bool:
+def disposable(entry: Path, spared: Container[str] = ()) -> bool:
+    """THE one answer to "may a SWEEP take this directory as a clone nobody owns",
+    asked by the stale-clone reaper and the cap sweep alike: a real directory,
+    not a link, carrying a marker that says disposable, and not a spared name.
+    Anything that cannot be read is False."""
+    try:
+        return (
+            entry.is_dir()
+            and not profile_copy.is_link(entry)
+            and profile_seed.is_auto(entry)
+            and not _spared(entry, spared)
+        )
+    except OSError:
+        return False
+
+
+def discard(
+    entry: Path,
+    spared: Container[str] = (),
+    held: Callable[[Path], bool] | None = None,
+) -> bool:
     """Delete a disposable clone whose browser is gone (T-5968). True when
     *entry* no longer exists at its own path.
 
@@ -144,13 +167,13 @@ def discard(entry: Path, spared: Container[str] = ()) -> bool:
     When a file is held so hard that even the rename is refused, the husk stays
     and False is answered for the caller to retry; its marker is put back if the
     delete took it first, because an unmarked husk is one no later sweep can
-    recognise as a clone. A :func:`protected` directory is refused with False.
-
-    The caller establishes that no browser holds it; this does not ask. Never
-    raises.
+    recognise as a clone. A :func:`protected` directory is refused with False, and
+    so is one *held* (when given) says a browser may have: the caller that can
+    establish "gone" says it, and a caller that cannot passes nothing and takes
+    that on itself. Never raises.
     """
     try:
-        if protected(entry, spared):
+        if protected(entry, spared) or (held is not None and held(entry)):
             return False
         if profile_copy.is_link(entry):
             try:
