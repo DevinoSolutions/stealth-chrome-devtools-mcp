@@ -61,6 +61,15 @@ permissions:
   id-token: write
   contents: read
 
+# T-9271: a scheduled run never replaces or is replaced by another scheduled run
+# (one group, nothing cancelled), and every manual dispatch gets a group of its
+# own (its run id), so a dispatch can never cancel or queue behind the schedule.
+# It lives HERE and not in release-gate.yml: a `concurrency` in a called workflow
+# evaluates in the caller's context and would bind test.yml and publish.yml too.
+concurrency:
+  group: canary-${{ github.event_name == 'schedule' && 'schedule' || github.run_id }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ── Half 1: deterministic, local fixture. RED MEANS RED. ───────────────────
   # Calls the one reusable gate rather than re-listing W1/W4 steps: a second
