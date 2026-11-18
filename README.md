@@ -391,7 +391,7 @@ send it, so nothing changes for them. A raw `curl` or a `uvx` url-transport clie
 Claude Code sessions that were open on an older release if they cannot reconnect. If you bind another address on purpose
 (`--host backend.lan`), that name is allowed too; `--allowed-host NAME` (repeatable) adds a name such as a reverse proxy's.
 
-The DevTools port of each browser it launches is a different matter: it listens on `127.0.0.1` without a token and Chrome runs with
+The DevTools port of each browser it launches is a different matter: it listens on loopback (Chrome's default; the stealth filter strips `--remote-debugging-address` from `browser_args`) without a token and Chrome runs with
 `--remote-allow-origins=*`, so any local process can drive a browser this tool started. That is by design for a single-user machine,
 and the tool is not meant for multi-user hosts (RUNBOOK, "Local trust boundary").
 

@@ -155,11 +155,13 @@ them yourself with `schtasks /Delete /F /TN stealth-mcp-backend-<token>` and del
 Every browser this tool launches serves the Chrome DevTools Protocol (CDP) on a TCP
 port of its own, and that port is **not** behind the backend's bearer token:
 
-- **Where it listens.** On `127.0.0.1` only. nodriver starts Chrome with
-  `--remote-debugging-host=127.0.0.1 --remote-debugging-port=<N>`, and the attach path
-  (`cdp_attach.CDP_HOST`) dials the same address. Nothing in `src/` passes
-  `--remote-debugging-address`, and the `--remote-debugging-pipe` switch is stripped
-  from caller-supplied args (`platform_utils`).
+- **Where it listens.** On loopback, which is Chrome's default: nothing in `src/`
+  passes `--remote-debugging-address`, and the stealth filter in `platform_utils`
+  strips it, `--remote-debugging-port` and `--remote-debugging-pipe` from a caller's
+  `browser_args`, so a caller cannot move the port to another interface. nodriver
+  starts Chrome with `--remote-debugging-port=<N>` (and a
+  `--remote-debugging-host=127.0.0.1` switch, which Chrome itself does not define),
+  and the attach path (`cdp_attach.CDP_HOST`) dials `127.0.0.1`.
 - **Which origins.** Chrome runs with `--remote-allow-origins=*`, from nodriver's default
   argv (the delegated desktop launch copies that argv; without the flag Chrome refuses
   the DevTools websocket handshake the tool itself makes).
@@ -168,7 +170,8 @@ port of its own, and that port is **not** behind the backend's bearer token:
   process of the same OS user, and on a host with several users, loopback is shared, so
   a process of another user too. The port carries no credential of ours.
 - **By design.** The tool is a single-user local tool and is not meant for multi-user
-  hosts. What *is* protected is the backend's own HTTP API: it also listens on `127.0.0.1` only, refuses a foreign `Host` or
+  hosts. What *is* protected is the backend's own HTTP API: it listens on `127.0.0.1` by
+  default (`serve --host` can bind another address), refuses a foreign `Host` or
   `Origin`, and answers `401` without the per-user bearer token in
   `~/.stealth-mcp/backend.token` (README, "The backend's HTTP port is local-only and
   token-protected"). Treat what is signed in inside a launched browser as reachable by
