@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from stealth_chrome_devtools_mcp.embedded import secret_registry
 from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
 from stealth_chrome_devtools_mcp.embedded.path_confinement import open_binary, open_text
 
@@ -107,7 +108,7 @@ class DebugLogger:
         if not force and not self._enabled:
             return
         with contextlib.suppress(OSError, ValueError):
-            print(message, file=sys.stderr)  # noqa: T201  plan_M3
+            print(secret_registry.redact(message), file=sys.stderr)  # noqa: T201  plan_M3
 
     def log_error(
         self,
@@ -168,10 +169,10 @@ class DebugLogger:
             "component": component,
             "method": method,
             "error_type": type(error).__name__,
-            "error_message": str(error),
+            "error_message": secret_registry.redact(str(error)),
             "correlation_id": correlation_id_var.get(),
-            "traceback": traceback.format_exc(),
-            "context": context or {},
+            "traceback": secret_registry.redact(traceback.format_exc()),
+            "context": secret_registry.redact_value(context or {}),
         }
         self._errors.append(error_entry)
         if len(self._errors) > self.MAX_ERRORS:
@@ -227,7 +228,7 @@ class DebugLogger:
         """
         correlation_id = correlation_id_var.get()
         error_type = type(error).__name__
-        message = str(error)
+        message = secret_registry.redact(str(error))
         for entry in reversed(self._errors[-self._DUPLICATE_SCAN_DEPTH :]):
             if (
                 entry["correlation_id"] == correlation_id
@@ -269,8 +270,8 @@ class DebugLogger:
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
                 "method": method,
-                "message": message,
-                "context": context or {},
+                "message": secret_registry.redact(message),
+                "context": secret_registry.redact_value(context or {}),
             }
             self._warnings.append(warning_entry)
             if len(self._warnings) > self.MAX_WARNINGS:
@@ -297,8 +298,8 @@ class DebugLogger:
                 "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                 "component": component,
                 "method": method,
-                "message": message,
-                "data": data,
+                "message": secret_registry.redact(message),
+                "data": secret_registry.redact_value(data),
             }
             self._info.append(info_entry)
             if len(self._info) > self.MAX_INFO:
