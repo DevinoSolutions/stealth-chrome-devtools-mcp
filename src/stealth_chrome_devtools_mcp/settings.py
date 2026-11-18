@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     # over when this backend drives it.
     seed_session: str = ""
 
+    # -- Login vault (T-19366) -----------------------------------------------
+    # UNSAFE, for the test suite: lets ``http://127.0.0.1`` pass the vault's login
+    # URL and origin checks so a local login page can be driven. Never set it for
+    # real logins: the password would travel unencrypted.
+    vault_allow_http_loopback: bool = False
+
     # -- Client round trips (F-790) ------------------------------------------
     # Deadline for the ONE server->client request this product makes:
     # ``roots/list``, sent by clone_storage._client_session_seed() to name a
