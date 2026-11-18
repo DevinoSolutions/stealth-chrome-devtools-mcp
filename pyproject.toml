@@ -52,6 +52,8 @@ dependencies = [
     "starlette==1.10.0",
     "websockets==17.4",
     "httpx==0.28.1",
+    # The login vault's AES-256-GCM (embedded/vault_crypto.py); the KDF is stdlib scrypt.
+    "cryptography==50.0.2",
 ]
 
 [project.urls]
