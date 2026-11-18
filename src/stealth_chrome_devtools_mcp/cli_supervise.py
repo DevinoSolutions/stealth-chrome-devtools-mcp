@@ -45,7 +45,9 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 def _line(verdict: Verdict, dry_run: bool) -> str:
     action = ""
-    if verdict.kill:
+    if verdict.stood_down:
+        action = "  -> standing down (too many recent kills)"
+    elif verdict.kill:
         action = "  -> would terminate" if dry_run else "  -> terminating"
     return (
         f"port {verdict.port}  pid {verdict.pid}  {verdict.state}"

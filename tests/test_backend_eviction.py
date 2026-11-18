@@ -99,6 +99,20 @@ class TestOwnedBrowsers:
         )
         assert sorted(got) == [1, 3]
 
+    def test_owned_entries_keys_the_same_browsers_by_instance_id(self, tmp_path):
+        _write_browsers(tmp_path, pids=(1, 2, 3))
+        got = backend_eviction.owned_entries(
+            tmp_path, STRANGER_PID, is_running=lambda pid: pid != 2
+        )
+        assert sorted(got) == sorted(
+            instance for instance, entry in got.items() if entry["pid"] in (1, 3)
+        )
+        assert sorted(entry["pid"] for entry in got.values()) == [1, 3]
+        assert (
+            backend_eviction.owned_entries(tmp_path, None, is_running=lambda p: True)
+            == {}
+        )
+
     def test_a_non_int_owner_owns_nothing(self, tmp_path):
         _write_browsers(tmp_path)
         assert (

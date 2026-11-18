@@ -209,13 +209,14 @@ def terminate(
     return True
 
 
-def owned_browsers(
+def owned_entries(
     state_dir: Path,
     owner_pid: object,
     *,
     is_running: Callable[[int], bool],
-) -> list[int]:
-    """The pids of the browsers ``owner_pid`` recorded that are still running.
+) -> browser_pid_registry.Entries:
+    """The recorded browsers ``owner_pid`` owns that are still running, keyed by
+    instance id.
 
     Reads the tracking record through ``browser_pid_registry.read_entries`` —
     its one reader, which already tolerates the legacy schema and a hand edit
@@ -232,16 +233,31 @@ def owned_browsers(
     check is the right one here even though the expensive one is right there.
     """
     if not isinstance(owner_pid, int):
-        return []
+        return {}
     entries = browser_pid_registry.read_entries(
         state_dir / browser_pid_registry.RECORD_NAME
     )
-    return [
-        pid
-        for entry in entries.values()
+    return {
+        instance_id: entry
+        for instance_id, entry in entries.items()
         if entry.get(browser_pid_registry.OWNER_PID) == owner_pid
         and isinstance(pid := entry.get("pid"), int)
         and is_running(pid)
+    }
+
+
+def owned_browsers(
+    state_dir: Path,
+    owner_pid: object,
+    *,
+    is_running: Callable[[int], bool],
+) -> list[int]:
+    """The pids of the browsers ``owner_pid`` recorded that are still running
+    (:func:`owned_entries`, as pids)."""
+    return [
+        pid
+        for entry in owned_entries(state_dir, owner_pid, is_running=is_running).values()
+        if isinstance(pid := entry.get("pid"), int)
     ]
 
 
