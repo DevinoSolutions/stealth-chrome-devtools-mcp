@@ -268,6 +268,12 @@ def _owner_only(path: Path) -> None:
         raise ToolError(f"cannot restrict {path} to the current user: {exc}") from exc
 
 
+def owner_only(path: Path) -> None:
+    """The public spelling of :func:`_owner_only`, for the other secret files this
+    package keeps in the state dir (the login vault): one way to narrow a file."""
+    _owner_only(path)
+
+
 def _owner_only_windows(path: Path) -> None:
     """Replace the file's DACL, in one call, with a protected one holding a single
     ACE: full control for the current user's SID. Nothing is inherited and every
