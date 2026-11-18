@@ -55,6 +55,7 @@ import importlib.metadata
 import json
 import logging
 import re
+import sys
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -352,6 +353,20 @@ def _redact_email(match: "re.Match[str]") -> str:
     return f"{_REDACTED_EMAIL}{domain[len(core) :]}"
 
 
+_SECRET_REGISTRY = "stealth_chrome_devtools_mcp.embedded.secret_registry"  # noqa: S105  PERMANENT(a module NAME, not a secret)
+
+
+def _redact_vault_secrets(text: str) -> str:
+    """The login vault's exact-string rule (T-19366), first, so no later rule has
+    rewritten a secret's URL-encoded form before it is matched.
+
+    Looked up in ``sys.modules`` and not imported: a process that never loaded the
+    registry never registered a secret, and importing the ``embedded`` package
+    fires its ``sys.path`` shim (see :func:`_expected_error_base`)."""
+    registry = sys.modules.get(_SECRET_REGISTRY)
+    return text if registry is None else registry.redact(text)
+
+
 def _redact_text(text: str, *, source_code: bool = False) -> str:
     """THE per-string rule: every redaction this module performs, in one place.
 
@@ -364,6 +379,7 @@ def _redact_text(text: str, *, source_code: bool = False) -> str:
     the two key-value rules, which read a signature or an assignment in source
     as a credential (see :data:`_SOURCE_LINE_KEYS`).
     """
+    text = _redact_vault_secrets(text)
     text = _URL_RE.sub(_redact_url, text)
     text = _JWT_RE.sub(_REDACTED_CREDENTIAL, text)
     if not source_code:

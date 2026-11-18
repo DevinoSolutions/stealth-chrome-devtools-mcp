@@ -55,7 +55,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import payload_log_sites, tool_failure
+from stealth_chrome_devtools_mcp.embedded import (
+    payload_log_sites,
+    secret_registry,
+    tool_failure,
+)
 from stealth_chrome_devtools_mcp.settings import get_settings
 
 if TYPE_CHECKING:
@@ -607,20 +611,13 @@ def install_payload_arg_redaction() -> None:
 
     def factory(*args: object, **kwargs: object) -> logging.LogRecord:
         record = previous(*args, **kwargs)
-        # THREE rules, ONE factory, and the grouping is the argument. F-911's
-        # asks about the SITE and answers for the whole MESSAGE; F-907's asks
-        # about an ARGUMENT. A record whose site is withholding has no
-        # arguments left to shape -- they are cleared one line down -- so the
-        # second rule has nothing to do and the `elif` is the cheaper spelling
-        # of that, not a precedence anyone has to reason about.
+        # FOUR rules, ONE factory. F-911's answers for the whole MESSAGE, F-907's
+        # for an ARGUMENT (a withheld record has no args left: hence the `elif`).
+        # F-913's is a separate `if` below: it replaces the other half of the
+        # record, and a module needing both site tables would need both rules.
+        # The vault's exact-string rule (T-19366) runs last, on what is left.
         #
-        # F-913's is a separate `if` below and NOT part of that chain, because
-        # it replaces a different half of the record: the two site tables are
-        # disjoint today, but a module that both root-logs a payload AND
-        # carries a payload-quoting exception would need both rules, and an
-        # `elif` would silently give it one.
-        #
-        # A SECOND factory install would be the defect here, not a third rule
+        # A SECOND factory install would be the defect here, not another rule
         # inside this one: the chain is ordered by install time, so two
         # factories make "which rewrite saw the record first" depend on the
         # order `configure_logging` happens to call them in.
@@ -655,6 +652,7 @@ def install_payload_arg_redaction() -> None:
         restated = payload_log_sites.restated_exc_info(record)
         if restated is not None:
             record.exc_info = restated
+        secret_registry.redact_record(record)
         return record
 
     # Through the CONSTANT, never a literal: the mark is read one function up
