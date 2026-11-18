@@ -479,7 +479,7 @@ def test_a_bad_duration_is_a_usage_error(term, text):
     [("30", 30), ("30s", 30), ("5m", 300), ("8h", 28800), ("1d", 86400)],
 )
 def test_durations(text, seconds):
-    assert cli_login._duration(text) == seconds
+    assert cli_login.duration(text) == seconds
 
 
 def test_unlock_without_a_backend_exits_3(term):

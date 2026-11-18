@@ -66,10 +66,10 @@ class _NoBackendError(_RefusedError):
 # --------------------------------------------------------------------- parser
 
 
-def _duration(text: str) -> float:
+def duration(text: str) -> float:
     found = _DURATION.fullmatch(text.strip().lower())
     if found is None or float(found.group(1)) <= 0:
-        raise argparse.ArgumentTypeError(
+        raise ValueError(
             f"{text!r} is not a duration: use a number with s, m, h or d (8h)"
         )
     return float(found.group(1)) * _UNIT_SECONDS[found.group(2)]
@@ -164,7 +164,7 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     unlock.add_argument(
         "--for",
         dest="duration",
-        type=_duration,
+        type=duration,
         metavar="DURATION",
         help="lock again after this long (30m, 8h, 1d); default: until the "
         "backend exits",
