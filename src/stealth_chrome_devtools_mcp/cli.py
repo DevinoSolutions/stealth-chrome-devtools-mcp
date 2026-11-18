@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp import cli_supervise
+from stealth_chrome_devtools_mcp import cli_login, cli_supervise
 from stealth_chrome_devtools_mcp.observability import sentry_init
 
 if TYPE_CHECKING:
@@ -808,8 +808,9 @@ def _cmd_serve(args) -> int:
 
 #: The OPS verbs. The six tool-driving verbs are `cli_call.DISPATCH`'s and the
 #: watchdog's is `cli_supervise.DISPATCH`, each beside the bodies it names;
-#: :func:`main` consults them for anything not here.
+#: :func:`main` consults them for anything not here. `login` is spliced in.
 _DISPATCH = {
+    **cli_login.DISPATCH,
     "status": _cmd_status,
     "profiles": _cmd_profiles,
     "cleanup": _cmd_cleanup,
@@ -850,6 +851,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ONE parser tree; verb families contribute their own surface (F-891).
     _cli_call().add_parsers(sub)
     cli_supervise.add_parsers(sub)
+    cli_login.add_parsers(sub)
 
     sub.add_parser(
         "status", help="show backend state, browser-session root, and storage caps"
@@ -867,14 +869,12 @@ def build_parser() -> argparse.ArgumentParser:
     clean.add_argument(
         "--browser-session-cap-gb",
         type=float,
-        default=None,
         dest="browser_session_cap_gb",
         help="override the named-profile trim cap for this run (GB; 0 disables)",
     )
     clean.add_argument(
         "--clone-cap-gb",
         type=float,
-        default=None,
         dest="clone_cap_gb",
         help="override the auto-clone delete cap for this run (GB; 0 disables)",
     )
