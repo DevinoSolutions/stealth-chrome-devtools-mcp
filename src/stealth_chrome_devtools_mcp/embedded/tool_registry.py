@@ -33,7 +33,7 @@ from collections import defaultdict
 
 from fastmcp.tools import Tool
 
-from stealth_chrome_devtools_mcp.embedded import tab_binding
+from stealth_chrome_devtools_mcp.embedded import login_seal, tab_binding
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.logging_setup import with_correlation_id
 from stealth_chrome_devtools_mcp.embedded.response_handler import surrogate_safe
@@ -78,6 +78,47 @@ def _surrogate_safe_returns(func):
     return sync_wrapper
 
 
+def _refusing_sealed_tabs(func):
+    """Refuse a call into a vault login's sealed tab (T-19366).
+
+    The chokepoint for the same reason :func:`_surrogate_safe_returns` is: every
+    tool passes through ``section_tool``, so the refusal cannot be missed by a
+    tool nobody remembered to list. It sits just OUTSIDE :func:`tab_binding.scoped`,
+    whose signature (with ``tab_id``) is what the call's arguments are bound
+    against, so a positional call and a keyword call are read the same way.
+    While no login is running (:func:`login_seal.any_sealing`) it costs one dict
+    truthiness check. A call whose arguments do not bind is left for the tool to
+    reject with Python's own ``TypeError``.
+    """
+    name = func.__name__
+    signature = inspect.signature(func)
+
+    def check(args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        if not login_seal.any_sealing():
+            return
+        try:
+            arguments = signature.bind_partial(*args, **kwargs).arguments
+        except TypeError:
+            return
+        login_seal.refuse_if_sealed(name, arguments)
+
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: object, **kwargs: object) -> object:
+            check(args, kwargs)
+            return await func(*args, **kwargs)
+
+        return async_wrapper
+
+    @functools.wraps(func)
+    def sync_wrapper(*args: object, **kwargs: object) -> object:
+        check(args, kwargs)
+        return func(*args, **kwargs)
+
+    return sync_wrapper
+
+
 class ToolRegistry:
     """Owns the ``section_tool`` decorator + section gating over a FastMCP app.
 
@@ -109,7 +150,8 @@ class ToolRegistry:
                 names.append(func.__name__)
             # F-962: a page tool also takes `tab_id`; every other tool is as-is.
             scoped = tab_binding.scoped(func)
-            wrapped = with_correlation_id(_surrogate_safe_returns(scoped))
+            guarded = _refusing_sealed_tabs(scoped)
+            wrapped = with_correlation_id(_surrogate_safe_returns(guarded))
             # The WHOLE docstring is the description, as fastmcp 2 made it.
             # fastmcp 3 left alone keeps only its first paragraph, dropping
             # every ``Returns:`` section and any note after ``Args:`` (F-946).
