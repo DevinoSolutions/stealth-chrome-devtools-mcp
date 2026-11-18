@@ -157,7 +157,9 @@ def redact_args(args: tuple[object, ...]) -> tuple[object, ...]:
         else:
             try:
                 rendered = str(arg)
-            except Exception:  # noqa: BLE001  PERMANENT(logging must not raise because an argument's __str__ did)
+            except (TypeError, ValueError, AttributeError, RuntimeError):
+                # An argument whose own __str__ fails fails again when logging
+                # formats it, where the logging module handles it (handleError).
                 out.append(arg)
                 continue
             redacted = redact(rendered)
