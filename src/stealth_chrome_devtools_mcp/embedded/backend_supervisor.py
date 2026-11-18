@@ -344,7 +344,8 @@ def _session_name(entry: browser_pid_registry.Entry) -> str | None:
         from stealth_chrome_devtools_mcp.embedded import fleet_session
 
         key = fleet_session.lock_key(directory)
-    except Exception:  # noqa: BLE001  PERMANENT(a log line must never fail a pass)
+    except Exception:  # a log line must never fail a pass
+        _logger.debug("could not name a session for a lost browser", exc_info=True)
         return None
     if not key or any(mark in key for mark in ("/", "\\", ":")):
         return None
