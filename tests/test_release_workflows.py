@@ -776,3 +776,18 @@ def test_every_third_party_action_is_pinned_to_a_full_sha():
     assert not floating, (
         f"these actions are not pinned to a 40-hex commit SHA: {sorted(floating)}"
     )
+
+
+def test_canary_runs_never_cancel_each_other_and_publish_has_no_group():
+    """T-9271: two scheduled runs share one group and nothing is cancelled; a
+    manual dispatch gets a group of its own (its run id), so it cannot queue behind
+    or replace the schedule. The group is in the caller, never in release-gate.yml
+    or publish.yml (a tag publish must never be cancelled or queued)."""
+    conc = _load(CANARY)["concurrency"]
+    assert conc["cancel-in-progress"] is False
+    assert conc["group"] == (
+        "canary-${{ github.event_name == 'schedule' && 'schedule' || github.run_id }}"
+        "-${{ github.ref }}"
+    )
+    assert "concurrency" not in _load(PUBLISH)
+    assert "concurrency" not in _load(RELEASE_GATE)
