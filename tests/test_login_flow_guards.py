@@ -1,0 +1,311 @@
+"""The sealed login's guards and refusals, with no browser (T-19366)."""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
+    login_flow,
+    login_seal,
+    vault_crypto,
+    vault_store,
+)
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.settings import get_settings
+from vault_helpers import (
+    LOOPBACK_ENV,
+    password_entry,
+    provider_entry,
+    reset,
+    unlocked_vault,
+)
+
+HOSTS = ["accounts.google.com"]
+CLEAN = ["chrome", "--headless=new", "--remote-debugging-port=9222"]
+
+
+@pytest.fixture(autouse=True)
+def vault(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault_crypto, "SCRYPT_N", 2**10)
+    monkeypatch.setattr(vault_store, "VAULT_PATH", tmp_path / "vault.json")
+    monkeypatch.setattr(vault_store, "AUDIT_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.delenv(LOOPBACK_ENV, raising=False)
+    get_settings.cache_clear()
+    reset()
+    yield
+    reset()
+    get_settings.cache_clear()
+    while login_seal.any_sealing():
+        for instance in ("inst-1",):
+            login_seal.end(instance)
+
+
+def audit_lines():
+    if not vault_store.AUDIT_PATH.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in vault_store.AUDIT_PATH.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+# ------------------------------------------------------------ launch_refusal
+
+
+@pytest.mark.parametrize("flag", login_flow.FORBIDDEN_FLAGS)
+def test_each_forbidden_flag_refuses(flag):
+    reason = login_flow.launch_refusal(SimpleNamespace(proxy=None), [*CLEAN, flag])
+    assert reason is not None
+    assert flag in reason
+
+
+@pytest.mark.parametrize("flag", login_flow.FORBIDDEN_FLAGS)
+def test_each_forbidden_flag_refuses_in_its_value_form(flag):
+    reason = login_flow.launch_refusal(
+        SimpleNamespace(proxy=None), [*CLEAN, f"{flag}=MAP * evil.example"]
+    )
+    assert reason is not None
+    assert flag in reason
+
+
+def test_the_forbidden_list_is_the_documented_seven():
+    assert set(login_flow.FORBIDDEN_FLAGS) == {
+        "--host-resolver-rules",
+        "--host-rules",
+        "--ignore-certificate-errors",
+        "--ignore-certificate-errors-spki-list",
+        "--allow-insecure-localhost",
+        "--unsafely-treat-insecure-origin-as-secure",
+        "--proxy-server",
+    }
+
+
+def test_a_proxy_option_refuses():
+    reason = login_flow.launch_refusal(SimpleNamespace(proxy="http://p:1"), CLEAN)
+    assert reason is not None
+    assert "proxy" in reason
+
+
+def test_a_browser_without_overrides_may_log_in():
+    assert login_flow.launch_refusal(SimpleNamespace(proxy=None), CLEAN) is None
+    assert login_flow.launch_refusal(SimpleNamespace(proxy=""), CLEAN) is None
+    assert login_flow.launch_refusal(None, CLEAN) is None
+
+
+def test_a_flag_that_merely_starts_with_a_forbidden_name_is_not_one():
+    cmdline = [*CLEAN, "--host-rules-note=1", "--proxy-server-x"]
+    assert login_flow.launch_refusal(SimpleNamespace(proxy=None), cmdline) is None
+
+
+# ------------------------------------------------------------ origin_allowed
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://accounts.google.com/",
+        "https://accounts.google.com.evil.io/",
+        "https://xaccounts.google.com/",
+        "https://evilaccounts.google.com/",
+        "https://accounts.google.com@evil.io/",
+        "https://user:pw@accounts.google.com/",
+        "https://sub.accounts.google.com/",
+        "https://google.com/",
+        "chrome-error://chromewebdata/",
+        "about:blank",
+        "data:text/html,hi",
+        "javascript:1",
+        "https://",
+        "",
+        "accounts.google.com",
+        "ftp://accounts.google.com/",
+    ],
+)
+def test_origin_allowed_rejects(url):
+    assert login_flow.origin_allowed(url, HOSTS) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://accounts.google.com/",
+        "https://accounts.google.com/signin/v2?x=1#frag",
+        "https://accounts.google.com:443/",
+        "https://ACCOUNTS.google.com/",
+        "https://accounts.google.com./".replace(".com./", ".com/"),
+    ],
+)
+def test_origin_allowed_accepts_the_exact_host(url):
+    assert login_flow.origin_allowed(url, HOSTS) is True
+
+
+def test_any_of_the_listed_hosts_is_accepted():
+    hosts = ["a.example.com", "b.example.com"]
+    assert login_flow.origin_allowed("https://b.example.com/", hosts) is True
+    assert login_flow.origin_allowed("https://c.example.com/", hosts) is False
+
+
+def test_http_loopback_needs_the_test_variable(monkeypatch):
+    url = "http://127.0.0.1:8123/login"
+    assert login_flow.origin_allowed(url, ["127.0.0.1"]) is False
+    monkeypatch.setenv(LOOPBACK_ENV, "1")
+    get_settings.cache_clear()
+    assert login_flow.origin_allowed(url, ["127.0.0.1"]) is True
+    assert login_flow.origin_allowed("http://localhost:8123/", ["127.0.0.1"]) is False
+    assert login_flow.origin_allowed("http://evil.example/", ["evil.example"]) is False
+    assert login_flow.origin_allowed(url, ["other.example"]) is False
+
+
+# ------------------------------------------------------------ refusals in run
+
+
+class _Browser:
+    _process_pid = 4242
+
+
+class _Manager:
+    def __init__(self, options=None, browser=None):
+        self.instance = {
+            "browser": browser or _Browser(),
+            "options": options or SimpleNamespace(proxy=None),
+        }
+
+    async def get_instance(self, instance_id):
+        return self.instance if instance_id == "inst-1" else None
+
+
+async def test_a_locked_vault_refuses_and_is_audited():
+    with pytest.raises(vault_store.VaultLocked):
+        await login_flow.run(_Manager(), "inst-1", "work", "caller-1")
+    (line,) = audit_lines()
+    assert (line["label"], line["outcome"]) == ("work", "locked")
+
+
+async def test_an_unknown_label_is_a_tool_error_and_is_audited():
+    unlocked_vault({"work": password_entry()})
+    with pytest.raises(ToolError):
+        await login_flow.run(_Manager(), "inst-1", "nowhere", "c")
+    assert audit_lines()[-1]["outcome"] == "refused"
+
+
+async def test_a_frozen_entry_is_refused_without_touching_the_browser():
+    unlocked_vault({"work": password_entry(frozen="2026-11-18T00:00:00+00:00")})
+
+    class Untouchable:
+        async def get_instance(self, _):
+            raise AssertionError("the browser was touched")
+
+    with pytest.raises(ToolError) as caught:
+        await login_flow.run(Untouchable(), "inst-1", "work", "c")
+    assert "stealthy login edit work" in str(caught.value)
+    assert not login_seal.any_sealing()
+
+
+async def test_an_unknown_instance_is_instance_not_found():
+    unlocked_vault({"work": password_entry()})
+    with pytest.raises(ToolError) as caught:
+        await login_flow.run(_Manager(), "inst-9", "work", "c")
+    assert "inst-9" in str(caught.value)
+    assert not login_seal.any_sealing()
+
+
+@pytest.mark.parametrize(
+    "bad", ["--proxy-server=http://x:1", "--host-resolver-rules=MAP a b"]
+)
+async def test_a_browser_with_an_override_is_refused_before_any_tab_opens(
+    monkeypatch, bad
+):
+    unlocked_vault({"work": password_entry()})
+    monkeypatch.setattr(browser_cmdline, "arguments", lambda pid: [*CLEAN, bad])
+    with pytest.raises(ToolError) as caught:
+        await login_flow.run(_Manager(), "inst-1", "work", "c")
+    assert bad.partition("=")[0] in str(caught.value)
+    assert not login_seal.any_sealing()
+    assert audit_lines()[-1]["outcome"] == "refused"
+
+
+async def test_a_browser_with_a_proxy_option_is_refused(monkeypatch):
+    unlocked_vault({"work": password_entry()})
+    monkeypatch.setattr(browser_cmdline, "arguments", lambda pid: CLEAN)
+    manager = _Manager(options=SimpleNamespace(proxy="http://p:1"))
+    with pytest.raises(ToolError):
+        await login_flow.run(manager, "inst-1", "work", "c")
+
+
+async def test_a_command_line_that_cannot_be_read_is_refused_not_assumed_clean(
+    monkeypatch,
+):
+    unlocked_vault({"work": password_entry()})
+    monkeypatch.setattr(login_flow, "_ARGV_RETRY_S", 0)
+    monkeypatch.setattr(browser_cmdline, "arguments", lambda pid: [])
+    with pytest.raises(ToolError) as caught:
+        await login_flow.run(_Manager(), "inst-1", "work", "c")
+    assert "command line" in str(caught.value)
+
+
+async def test_a_provider_entry_runs_its_via_entry_and_answers_use_provider(
+    monkeypatch,
+):
+    unlocked_vault({"work": password_entry(), "shop": provider_entry()})
+    seen = []
+
+    async def fake_sealed(tab, entry):
+        raise AssertionError("not reached")
+
+    async def fake_run(manager, instance_id, label, caller):
+        seen.append(label)
+        return {"outcome": "logged_in", "label": label, "detail": "signed in"}
+
+    real_run = login_flow.run
+    monkeypatch.setattr(login_flow, "run", fake_run)
+    result = await login_flow._provider(
+        _Manager(), "inst-1", "shop", "c", vault_store.entry("shop")
+    )
+    monkeypatch.setattr(login_flow, "run", real_run)
+    assert seen == ["work"]
+    assert result["outcome"] == "use_provider"
+    assert result["label"] == "shop"
+
+
+@pytest.mark.parametrize("inner", ["needs_user", "rejected", "needs_totp"])
+async def test_a_provider_entry_passes_a_failed_provider_login_through(
+    monkeypatch, inner
+):
+    unlocked_vault({"work": password_entry(), "shop": provider_entry()})
+
+    async def fake_run(manager, instance_id, label, caller):
+        return {"outcome": inner, "label": label, "detail": "x"}
+
+    monkeypatch.setattr(login_flow, "run", fake_run)
+    result = await login_flow._provider(
+        _Manager(), "inst-1", "shop", "c", vault_store.entry("shop")
+    )
+    assert result["outcome"] == inner
+    assert result["label"] == "shop"
+
+
+async def test_no_audit_line_holds_a_credential():
+    unlocked_vault({"work": password_entry()})
+    with pytest.raises(ToolError):
+        await login_flow.run(_Manager(), "inst-9", "work", "c")
+    text = vault_store.AUDIT_PATH.read_text(encoding="utf-8")
+    assert "Tr0ub4dor" not in text
+    assert "someone@example.com" not in text
+
+
+def test_frame_url_reads_the_named_frame_and_the_main_frame_by_default():
+    child = SimpleNamespace(
+        frame=SimpleNamespace(id_="CHILD", url="https://accounts.google.com/f"),
+        child_frames=None,
+    )
+    tree = SimpleNamespace(
+        frame=SimpleNamespace(id_="MAIN", url="https://host.example/"),
+        child_frames=[child],
+    )
+    assert login_flow._frame_url(tree, None) == "https://host.example/"
+    assert login_flow._frame_url(tree, "CHILD") == "https://accounts.google.com/f"
+    assert login_flow._frame_url(tree, "NOPE") == ""

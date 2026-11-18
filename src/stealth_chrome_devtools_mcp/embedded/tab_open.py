@@ -346,7 +346,13 @@ async def arm_popups(
         info = event.target_info
         if info.type_ != "page" or info.opener_id is None or is_closed(browser):
             return
-        task = asyncio.create_task(_arm_popup(browser, info.target_id, arm, args))
+        # A popup of the backend's OWN tab (a vault login's sealed tab, T-19366)
+        # is closed, never armed: arming would put it in front of every hook.
+        if str(info.opener_id) in state.internal:
+            popup = _close_popup(browser, info.target_id)
+        else:
+            popup = _arm_popup(browser, info.target_id, arm, args)
+        task = asyncio.create_task(popup)
         _POPUP_TASKS.add(task)
         task.add_done_callback(_POPUP_TASKS.discard)
 
@@ -364,6 +370,15 @@ async def arm_popups(
             f"could not enable Target discovery ({type(error).__name__}); "
             "popups will not be armed on arrival, and a closed tab's paused-request "
             "handlers will wait for Chrome to end its session, not end at once",
+        )
+
+
+async def _close_popup(browser: Browser, target_id: cdp.target.TargetID) -> None:
+    try:
+        await send(browser, cdp.target.close_target, target_id)
+    except Exception as error:  # noqa: BLE001  PERMANENT(a popup that closed first is already what we wanted)
+        debug_logger.log_debug(
+            "tab_open", "_close_popup", f"{type(error).__name__} closing a popup"
         )
 
 
