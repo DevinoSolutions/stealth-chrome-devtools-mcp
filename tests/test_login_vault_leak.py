@@ -29,6 +29,7 @@ import logging
 import secrets
 import threading
 import urllib.parse
+from pathlib import Path
 
 import pytest
 from sentry_sdk.utils import event_from_exception
@@ -276,13 +277,14 @@ async def test_no_password_reaches_a_model_a_log_or_an_error_report(
 
         collected["tool results"] = _json(results)
         collected["get_debug_view"] = _json(await get_fn("get_debug_view")())
+        # format="json" because "auto" switches to pickle once the ring is big,
+        # which depends on what ran before; include_all so no entry is cut off.
         exported = await get_fn("export_debug_logs")(
-            filename=str(tmp_path / "debug-export.json")
+            filename=str(tmp_path / "debug-export.json"),
+            format="json",
+            include_all=True,
         )
-        collected["export_debug_logs"] = (tmp_path / "debug-export.json").read_text(
-            encoding="utf-8"
-        )
-        assert exported
+        collected["export_debug_logs"] = Path(exported).read_text(encoding="utf-8")
         collected["network"], request_count = await _network_text(iid)
         assert request_count > 0, (
             "the network capture saw nothing: the check is vacuous"
