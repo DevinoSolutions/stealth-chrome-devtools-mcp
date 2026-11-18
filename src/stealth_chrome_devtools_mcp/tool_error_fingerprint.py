@@ -143,6 +143,7 @@ _LIBRARY_MODULES = (
     "pydantic_core",
     "requests.exceptions",
     "mcp.shared.exceptions",
+    "cryptography.exceptions",
 )
 #: The libraries whose classes read bare (``ProtocolException``); every other
 #: library's read ``library.Name``, because the standard library and the others define
