@@ -536,10 +536,10 @@ def _copy_clone_from_source(
         "seed_path": str(master_snapshot_dir()),
         **_live_seed_fields(seed),
     }
-    refusal = _copy_profile_tree(
-        seed.path, clone, clone_root, seed.kind, disposable=True
+    _require_copied(
+        _copy_profile_tree(seed.path, clone, clone_root, seed.kind, disposable=True),
+        clone,
     )
-    _require_copied(refusal, clone)
     return selection
 
 

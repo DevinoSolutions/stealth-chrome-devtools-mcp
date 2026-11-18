@@ -125,7 +125,12 @@ def holds_browser(held: Callable[[Path], bool]) -> Callable[[Path], bool]:
     def safe(entry: Path) -> bool:
         try:
             return bool(held(entry))
-        except Exception:  # noqa: BLE001  PERMANENT(an answer that cannot be had is HELD)
+        except Exception as error:  # noqa: BLE001  PERMANENT(an answer that cannot be had is HELD)
+            debug_logger.log_warning(
+                "server",
+                "stale_clone_sweep",
+                f"kept {entry.name}: cannot tell if a browser has it: {error!r}",
+            )
             return True
 
     return safe
