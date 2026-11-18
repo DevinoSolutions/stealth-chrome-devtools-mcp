@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import sys
 
@@ -339,12 +340,152 @@ class TestStandDown:
         assert asked == [], "nothing was terminated"
         assert [(v.kill, v.stood_down) for v in verdicts] == [(False, True)] * 2
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(errors) == 1, "ERROR once per pass, not once per backend"
+        assert len(errors) == 1, "ERROR once, not once per backend"
         text = errors[0].getMessage()
         assert "3 backend kills in the last 30 minutes (limit 3)" in text
         assert "resumes by itself in 100s" in text  # 1700 s old: 1800 - 1700
         warnings = [r.getMessage() for r in caplog.records if r.levelno == 30]
         assert sum("NOT terminating it: standing down" in w for w in warnings) == 2
+
+    def test_error_on_entering_then_warning_on_later_passes_of_the_same_stand_down(
+        self, two_backends_due, caplog
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, _kills_at(60, 600, 1700, now=t0))
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _pass_over(record, children, t0)
+            first = [r.levelno for r in caplog.records if "standing down (T-" in r.msg]
+            caplog.clear()
+            _pass_over(record, children, t0 + 60)
+        later = [r for r in caplog.records if "standing down (T-" in r.msg]
+        assert first == [logging.ERROR]
+        assert [r.levelno for r in later] == [logging.WARNING]
+        assert "(still)" in later[0].getMessage()
+        assert backend_supervisor.STOOD_DOWN_KEY in backend_supervisor.read_state(
+            _state_file(record)
+        )
+
+    def test_a_new_stand_down_after_the_old_one_ended_is_an_error_again(
+        self, two_backends_due, caplog
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, _kills_at(60, 600, 1700, now=t0))
+        _pass_over(record, children, t0)
+        later = t0 + WINDOW + 10  # every old kill has left; the marker must clear
+        kept = {
+            k: v
+            for k, v in backend_supervisor.read_state(_state_file(record)).items()
+            if k.isdigit() or k == backend_supervisor.STOOD_DOWN_KEY
+        }
+        _seed_state(record, kept, [])
+        _pass_over(record, children, later)  # kills one of two: budget not spent
+        assert backend_supervisor.STOOD_DOWN_KEY not in backend_supervisor.read_state(
+            _state_file(record)
+        )
+        due_again = {
+            port: {**clock, "since": later + 1 - RED_LIMIT}
+            for port, clock in clocks.items()
+        }
+        _seed_state(record, due_again, _kills_at(60, 600, 1700, now=later + 1))
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _pass_over(record, children, later + 1)
+        assert [r.levelno for r in caplog.records if "standing down (T-" in r.msg] == [
+            logging.ERROR
+        ]
+
+    def test_a_dry_run_does_not_swallow_the_real_passs_error(
+        self, two_backends_due, caplog
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, _kills_at(60, 600, 1700, now=t0))
+        _pass_over(record, children, t0, dry_run=True)
+        assert backend_supervisor.STOOD_DOWN_KEY not in backend_supervisor.read_state(
+            _state_file(record)
+        )
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _pass_over(record, children, t0 + 1)
+        assert [r.levelno for r in caplog.records if "standing down (T-" in r.msg] == [
+            logging.ERROR
+        ]
+
+    def test_resumes_in_is_the_kill_that_actually_ends_it(
+        self, two_backends_due, caplog
+    ):
+        """Four kills in the window, 1700 s, 600 s, 60 s and 10 s old: the count
+        drops below three when the 600 s one leaves (in 1200 s), not the oldest."""
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, _kills_at(10, 60, 600, 1700, now=t0))
+        with caplog.at_level(logging.ERROR, logger=LOGGER):
+            _pass_over(record, children, t0)
+        [text] = [r.getMessage() for r in caplog.records]
+        assert "4 backend kills" in text
+        assert "resumes by itself in 1200s," in text
+
+    def test_a_clock_a_day_ahead_that_was_corrected_cannot_extend_the_stand_down(
+        self, two_backends_due
+    ):
+        """Three kills stamped a day in the future (the clock ran ahead, then was
+        set right) are undated, not recent: the supervisor is not locked out."""
+        record, children, t0, clocks, asked = two_backends_due
+        day = 86_400
+        _seed_state(record, clocks, _kills_at(-day, -day - 60, -day - 600, now=t0))
+        verdicts = _pass_over(record, children, t0)
+        assert len(asked) == 2, "both due backends were terminated"
+        assert not any(v.stood_down for v in verdicts)
+        assert backend_supervisor.recent_kills(_kills_at(-1, now=t0), t0) == []
+        assert backend_supervisor.recent_kills(_kills_at(0, now=t0), t0) == [t0]
+
+    @pytest.mark.parametrize(
+        "stamp", [math.inf, -math.inf, math.nan, "1e999", "NaN", "later", None, True]
+    )
+    def test_stamps_that_are_not_finite_numbers_count_as_nothing(
+        self, two_backends_due, stamp
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        junk = [
+            {"at": stamp, "port": 1, "pid": 1, "state": "red", "killed": True}
+            for _ in range(5)
+        ]
+        _seed_state(record, clocks, junk)
+        _pass_over(record, children, t0)
+        assert len(asked) == 2, "five junk kills never exhaust the budget"
+
+    def test_infinity_in_the_file_as_json_does_not_lock_it_out(self, two_backends_due):
+        record, children, t0, clocks, asked = two_backends_due
+        text = json.dumps({**clocks, "kills": []})
+        text = text.replace(
+            '"kills": []',
+            '"kills": ['
+            + ",".join(
+                ['{"at": Infinity, "killed": true}'] * 3
+                + ['{"at": 1e999, "killed": true}']
+            )
+            + "]",
+        )
+        _state_file(record).write_text(text, "utf-8")
+        _pass_over(record, children, t0)
+        assert len(asked) == 2
+
+    def test_failed_attempts_do_not_push_real_kills_out_of_the_ring(
+        self, two_backends_due
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        failures = _kills_at(
+            *range(1, 2 * backend_supervisor.KILLS_KEPT), now=t0, killed=False
+        )
+        real = _kills_at(1800 - 10, 1800 - 20, now=t0)
+        _seed_state(record, clocks, real + failures)
+        _pass_over(record, children, t0)  # the one more kill, then the ring is trimmed
+        history = backend_supervisor.read_state(_state_file(record))["kills"]
+        survivors = [e for e in history if e.get("killed") is True]
+        assert len(survivors) == 3, "both earlier real kills survived the trim"
+        assert (
+            len([e for e in history if e.get("killed") is False])
+            == backend_supervisor.KILLS_KEPT
+        )
+        assert len(backend_supervisor.recent_kills(history, t0)) == 3
 
     def test_below_the_limit_nothing_changes_and_this_passs_kills_count(
         self, two_backends_due
@@ -432,23 +573,27 @@ def _write_browsers(record, owner_pid, entries):
     )
 
 
-SECRET_DIR = "C:\\Users\\secret-person\\Chrome Sessions\\fleet"
+ABSOLUTE_DIR = "C:\\Users\\secret-person\\Chrome Sessions\\private-profile"
 CLONE_DIR = "C:\\Users\\secret-person\\clones\\clone-9f8e"
 DEAD_PID = 987_654
 
 
 @pytest.fixture()
-def lost_setup(recorded, monkeypatch):
+def lost_setup(recorded, monkeypatch, tmp_session_root):
     record, proc, started = recorded
     monkeypatch.setattr(
         backend_supervisor.psutil, "pid_exists", lambda pid: pid != DEAD_PID
     )
+    fleet = str(tmp_session_root["sessions"] / "fleet")
+    master = str(tmp_session_root["master"])
     _write_browsers(
         record,
         proc.pid,
         [
             ("inst-clone", 101, CLONE_DIR, True, True, None),
-            ("inst-fleet", 102, SECRET_DIR, True, False, None),
+            ("inst-fleet", 102, fleet, True, False, None),
+            ("inst-master", 104, master, True, False, None),
+            ("inst-abs", 105, ABSOLUTE_DIR, True, False, None),
             ("inst-gone", DEAD_PID, CLONE_DIR, True, True, None),
             ("inst-theirs", 103, CLONE_DIR, True, True, proc.pid + 1),
         ],
@@ -477,8 +622,11 @@ class TestLostBrowsers:
         ]
         assert f"backend pid {proc.pid} on port {PORT} terminated;" in line
         assert "1 disposable clone(s) now lost [inst-clone]" in line
-        assert "1 named session(s) the next backend re-attaches" in line
+        assert "3 named session(s) the next backend re-attaches" in line
         assert "inst-fleet (session fleet)" in line
+        assert "inst-master (session default)" in line
+        assert "inst-abs]" in line or "inst-abs," in line, "id only, no name"
+        assert "inst-abs (" not in line
         assert "inst-gone" not in line, "a browser that is already gone is not lost"
         assert "inst-theirs" not in line, "another backend's browser is not ours"
 
@@ -487,16 +635,26 @@ class TestLostBrowsers:
         with caplog.at_level(logging.DEBUG, logger=LOGGER):
             _due(record, proc, started)
         everything = " ".join(r.getMessage() for r in caplog.records)
-        for secret in ("secret-person", "Chrome Sessions", "clones", "clone-9f8e"):
+        for secret in (
+            "secret-person",
+            "Chrome Sessions",
+            "private-profile",
+            "clones",
+            "clone-9f8e",
+        ):
             assert secret not in everything
         assert "Users" not in everything
 
-    def test_the_shared_profiles_directory_is_called_default(self):
-        entry = {"user_data_dir": "/home/me/.stealth/sessions/master"}
-        assert backend_supervisor._session_name(entry) == "default"
-        assert backend_supervisor._session_name({}) == "unnamed"
-        long_name = {"user_data_dir": "/x/" + "n" * 500}
-        assert len(backend_supervisor._session_name(long_name)) == 64
+    def test_a_session_name_comes_from_the_one_directory_mapping(
+        self, tmp_session_root
+    ):
+        name = backend_supervisor._session_name
+        sessions = tmp_session_root["sessions"]
+        assert name({"user_data_dir": str(tmp_session_root["master"])}) == "default"
+        assert name({"user_data_dir": str(sessions / "Fleet")}) == "fleet"
+        assert name({"user_data_dir": ABSOLUTE_DIR}) is None
+        assert name({"user_data_dir": str(sessions.parent / "elsewhere")}) is None
+        assert name({}) is None and name({"user_data_dir": ""}) is None
 
     def test_a_backend_that_owned_nothing_logs_no_such_line(self, recorded, caplog):
         record, proc, started = recorded

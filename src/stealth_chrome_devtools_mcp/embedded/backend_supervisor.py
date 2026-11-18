@@ -39,9 +39,16 @@ fresh start is a fault a kill does not fix, and the supervisor would otherwise
 destroy every clone on the machine every few minutes for as long as it lasted.
 After :data:`STAND_DOWN_KILLS` kills inside :data:`STAND_DOWN_WINDOW_SECONDS` it
 terminates nothing, logs one ERROR per pass saying why and when it resumes, and
-keeps every clock, so it resumes by itself the moment the oldest of those kills
+keeps every clock, so it resumes by itself the moment the kill that ends it
 leaves the window. The kills it counts are the ones in the state file that
-terminated a backend (``killed``); a refused or failed attempt costs nothing.
+terminated a backend (``killed``) with a finite stamp between 0 and the window
+behind now: a refused or failed attempt, a malformed entry, and a stamp from the
+future (a clock that ran ahead and was corrected) cost nothing, so no clock error
+can hold it down. The ERROR is logged once when a stand-down begins
+(``supervisor.json`` keeps ``stood_down_since``); later passes of the same one log
+a WARNING. One budget covers every backend: a replacement comes up on another
+port with another pid, so a per-backend one would never trip, at the price that one
+flapping backend can shield another that is wedged for up to the window.
 
 A leaf, on ``backend_eviction``'s shape: the record, the heartbeat readers and
 the act are imported, and every probe that has to know which backends are OURS
@@ -55,8 +62,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import time
-from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, NamedTuple
 
 import psutil
@@ -66,7 +73,6 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_liveness,
     backend_registry,
     browser_pid_registry,
-    profile_seed,
 )
 
 if TYPE_CHECKING:
@@ -88,8 +94,15 @@ RED_KILL_SECONDS = 180.0
 SUSPECT_KILL_SECONDS = 600.0
 #: The state file, beside ``server.json``.
 STATE_NAME = "supervisor.json"
-#: How many kills the state file remembers, newest last.
+#: How many kills the state file remembers, newest last. Kills that terminated a
+#: backend and failed attempts are kept in SEPARATE rings of this size, so a
+#: backend whose terminations keep failing cannot push real kills out of the
+#: budget.
 KILLS_KEPT = 20
+#: The state file's marker that a stand-down is in progress: when its first pass
+#: held a kill back. It is why the ERROR is logged once per stand-down and not
+#: once per pass.
+STOOD_DOWN_KEY = "stood_down_since"
 #: The stand-down rule (T-15466): this many kills that terminated a backend...
 STAND_DOWN_KILLS = 3
 #: ...inside this long (thirty minutes) and the supervisor kills no more until
@@ -260,20 +273,52 @@ def _write_state(path: Path, state: dict[str, object]) -> None:
         tmp.replace(path)
 
 
+def _real_kill_time(entry: object) -> float | None:
+    """When ``entry`` terminated a backend, or None for a failed attempt, a
+    malformed entry, or a stamp that is not a finite number (``json.loads``
+    accepts ``Infinity`` and ``1e999``)."""
+    if not isinstance(entry, dict) or entry.get("killed") is not True:
+        return None
+    stamp = entry.get("at")
+    if isinstance(stamp, bool) or not isinstance(stamp, int | float):
+        return None
+    return float(stamp) if math.isfinite(stamp) else None
+
+
 def recent_kills(history: list[object], at: float) -> list[float]:
     """When each kill that terminated a backend inside the stand-down window
-    happened, oldest first. A malformed entry (a hand edit) counts as none; a
-    kill dated in the future (a clock set back) counts as recent, so the error
-    is toward killing less."""
+    happened, oldest first: ``0 <= at - stamp < STAND_DOWN_WINDOW_SECONDS``.
+
+    Both bounds, because a stand-down must always end by itself. A malformed
+    entry or a non-finite stamp counts as none. A stamp in the FUTURE (a clock
+    that ran ahead and was corrected) counts as none too: it cannot say how long
+    ago a kill was, and counting it would extend a stand-down by however far the
+    clock was out. The cost is bounded: after a clock step the budget forgets
+    kills it cannot date, so at most three more kills can follow.
+    """
     return sorted(
-        float(entry["at"])
+        stamp
         for entry in history
-        if isinstance(entry, dict)
-        and entry.get("killed") is True
-        and isinstance(entry.get("at"), int | float)
-        and not isinstance(entry.get("at"), bool)
-        and at - float(entry["at"]) < STAND_DOWN_WINDOW_SECONDS
+        if (stamp := _real_kill_time(entry)) is not None
+        and 0 <= at - stamp < STAND_DOWN_WINDOW_SECONDS
     )
+
+
+def _trimmed(history: list[object]) -> list[object]:
+    """``history`` limited to the last :data:`KILLS_KEPT` real kills and the last
+    ``KILLS_KEPT`` of everything else, in their original order."""
+    real = [i for i, entry in enumerate(history) if _real_kill_time(entry) is not None]
+    others = set(range(len(history))) - set(real)
+    keep = set(real[-KILLS_KEPT:]) | set(sorted(others)[-KILLS_KEPT:])
+    return [entry for i, entry in enumerate(history) if i in keep]
+
+
+def _since(state: dict[str, object]) -> float | None:
+    """When the stand-down the state file records began, or None."""
+    stamp = state.get(STOOD_DOWN_KEY)
+    if isinstance(stamp, bool) or not isinstance(stamp, int | float):
+        return None
+    return float(stamp) if math.isfinite(stamp) else None
 
 
 #: The longest a session name is reported at, so a hand-named profile directory
@@ -281,16 +326,29 @@ def recent_kills(history: list[object], at: float) -> list[float]:
 _NAME_LIMIT = 64
 
 
-def _session_name(entry: browser_pid_registry.Entry) -> str:
-    """The session a persistent browser belongs to: its profile directory's NAME,
-    never the path (a profile path is not the log's to carry). The shared
-    profile's directory is ``master``; the caller knows it as ``default``."""
+def _session_name(entry: browser_pid_registry.Entry) -> str | None:
+    """The NAME of the session a persistent browser belongs to, or None.
+
+    ``fleet_session.lock_key`` is the one mapping from a directory to a session:
+    ``default`` for the shared profile, the casefolded name for a directory under
+    the session root, and the whole normalised PATH for anything else (a profile
+    opened by absolute path through ``user_data_dir=``). Only the first two are
+    names; a path is not the log's to carry, nor is its last component, so that
+    browser is reported by instance id alone. Imported here, on the one pass that
+    kills, because it brings the session-root settings with it.
+    """
     directory = entry.get("user_data_dir")
-    # ``PureWindowsPath`` splits on both separators, whichever OS wrote the path.
-    name = PureWindowsPath(directory).name if isinstance(directory, str) else ""
-    if not name:
-        return "unnamed"
-    return profile_seed.DEFAULT_SESSION if name == "master" else name[:_NAME_LIMIT]
+    if not isinstance(directory, str) or not directory:
+        return None
+    try:
+        from stealth_chrome_devtools_mcp.embedded import fleet_session
+
+        key = fleet_session.lock_key(directory)
+    except Exception:  # noqa: BLE001  PERMANENT(a log line must never fail a pass)
+        return None
+    if not key or any(mark in key for mark in ("/", "\\", ":")):
+        return None
+    return key[:_NAME_LIMIT]
 
 
 def lost_browsers(record: Path, pid: int) -> str | None:
@@ -313,7 +371,9 @@ def lost_browsers(record: Path, pid: int) -> str | None:
         if not browser_pid_registry.on_persistent_profile(entry)
     )
     sessions = sorted(
-        f"{instance_id} (session {_session_name(entry)})"
+        f"{instance_id} (session {name})"
+        if (name := _session_name(entry))
+        else instance_id
         for instance_id, entry in owned.items()
         if browser_pid_registry.on_persistent_profile(entry)
     )
@@ -364,7 +424,8 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
     verdicts, clocks = decide(observed, state, at)
     kills = state.get("kills")
     history = list(kills) if isinstance(kills, list) else []
-    stood_down_logged = False
+    since = _since(state)
+    held_back = False
     for index, (verdict, seen) in enumerate(zip(verdicts, observed, strict=True)):
         if verdict.state == GREEN:
             continue
@@ -386,19 +447,30 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
         if standing:
             # Held back, clock kept: the first pass after the window is due at once.
             verdicts[index] = verdict._replace(kill=False, stood_down=True)
-            if not stood_down_logged:
-                stood_down_logged = True
-                _logger.error(
-                    "supervisor standing down (T-15466): %d backend kills in the "
+            if not held_back:
+                held_back = True
+                # The kill that ends it is the one whose leaving the window drops
+                # the count below STAND_DOWN_KILLS: the oldest of the newest ones.
+                resumes = (
+                    recent[len(recent) - STAND_DOWN_KILLS]
+                    + STAND_DOWN_WINDOW_SECONDS
+                    - at
+                )
+                log = _logger.error if since is None else _logger.warning
+                log(
+                    "supervisor standing down (T-15466)%s: %d backend kills in the "
                     "last %.0f minutes (limit %d), so it terminates nothing; a "
                     "backend that goes red after every fresh start is a fault a "
                     "kill does not fix. It resumes by itself in %.0fs, when the "
-                    "oldest of those kills leaves the window",
+                    "kill that ends it leaves the window",
+                    "" if since is None else " (still)",
                     len(recent),
                     STAND_DOWN_WINDOW_SECONDS / 60,
                     STAND_DOWN_KILLS,
-                    recent[0] + STAND_DOWN_WINDOW_SECONDS - at,
+                    resumes,
                 )
+                if since is None:
+                    since = at
             continue
         if verdict.kill and not dry_run:
             lost = lost_browsers(record, seen.pid)
@@ -421,5 +493,12 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
                 }
             )
             clocks.pop(str(seen.port), None)
-    _write_state(state_path, {**clocks, "kills": history[-KILLS_KEPT:]})
+    # The stand-down lasts while the budget is spent; a pass that finds it
+    # spent no longer drops the marker, so the next episode is announced at ERROR
+    # again. A dry run reads the marker and never writes it, so it cannot swallow
+    # the real pass's ERROR.
+    spent = len(recent_kills(history, at)) >= STAND_DOWN_KILLS
+    marker = _since(state) if dry_run else since
+    extra = {STOOD_DOWN_KEY: marker} if marker is not None and spent else {}
+    _write_state(state_path, {**clocks, **extra, "kills": _trimmed(history)})
     return verdicts
