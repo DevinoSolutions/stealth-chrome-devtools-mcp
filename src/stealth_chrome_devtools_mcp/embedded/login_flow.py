@@ -37,16 +37,18 @@ A username step that does not advance is ``needs_user``, never a freeze.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import urllib.parse
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_trust,
+    debug_port_guard,
     login_evidence,
     login_form,
     login_seal,
@@ -83,10 +85,16 @@ _ARGV_RETRY_S = 0.2
 #: Outside-the-login-hosts must be seen on this many polls in a row (a redirect
 #: chain passes through hosts on its way).
 _STABLE_POLLS = 2
-#: A login form that is back after the password must be SEEN THIS MANY consistent
-#: polls in a row before it counts as a rejection (and freezes the entry): a page
-#: that clears the field while its request is still in flight shows it for one.
+#: A rejection (and the freeze it causes) needs POSITIVE evidence, seen on this
+#: many polls in a row AND for at least this long: the login form is back in a NEW
+#: document, or the page shows an error it did not show before Enter. An emptied
+#: password field is not evidence: a single-page app blanks it while its request is
+#: still in flight and signs in seconds later.
 _REJECT_POLLS = 3
+_REJECT_SETTLE_S = 2.0
+#: How long the login page is given, after a session cookie appeared, to show that
+#: it no longer offers its form (a signed-in site sends the person on).
+_CONFIRM_WAIT_S = 4.0
 
 _HTTPS_PORT = 443
 _GENERIC_ORIGIN_REFUSAL = (
@@ -177,7 +185,7 @@ async def _run(
         tab = await _open_sealed_tab(browser, instance_id)
         outcome, detail = await _sealed_login(tab, entry)
         if outcome == "rejected":
-            _freeze(label)
+            detail += _FROZEN_NOTE if _freeze(label) else _NOT_FROZEN_NOTE
         result = {"outcome": outcome, "label": label, "detail": detail}
     finally:
         closed = await _finish(browser_manager, instance_id, tab)
@@ -189,7 +197,13 @@ async def _run(
 async def _open_sealed_tab(browser: Browser, instance_id: str) -> Tab:
     """Open the login's own tab and seal it, with no moment in which it exists and
     can be reached: every target that is not in the list read BEFORE the open is
-    held sealed (:func:`login_seal.hold_new`) until the tab is sealed by id."""
+    held sealed (:func:`login_seal.hold_new`) until the tab is sealed by id.
+
+    Before it opens, the browser must be guarded and hold no inspector
+    (:func:`debug_port_guard.verify_clean`). If the open is cancelled or fails
+    after Chrome made the tab but before it was sealed by id, the tab is closed by
+    a task that outlives the cancellation, and stays held until it is gone."""
+    await debug_port_guard.verify_clean(browser)
     await tab_open.update_targets(browser)
     known = [str(getattr(t.target, "target_id", t)) for t in browser.tabs]
     hold = login_seal.hold_new(instance_id, known)
@@ -197,7 +211,43 @@ async def _open_sealed_tab(browser: Browser, instance_id: str) -> Tab:
         tab = await tab_open.open_tab(browser, "about:blank", background=True)
         tab_open.mark_internal(browser, tab)
         login_seal.seal_tab(instance_id, str(tab.target.target_id))
-        return tab
+    except BaseException:
+        task = asyncio.ensure_future(_discard_strays(browser, instance_id, known, hold))
+        _STRAYS.add(task)
+        task.add_done_callback(_STRAYS.discard)
+        raise
+    login_seal.release_new(instance_id, hold)
+    return tab
+
+
+_STRAYS: set[asyncio.Task[None]] = set()
+_STRAY_SCANS = 3
+
+
+async def _discard_strays(
+    browser: Browser, instance_id: str, known: list[str], hold: frozenset[str]
+) -> None:
+    """Close every tab that appeared since ``known`` was read (the login's own,
+    that nothing holds yet), then end the hold. A tab that will not close is kept
+    sealed for good."""
+    stray: set[str] = set()
+    try:
+        for scan in range(_STRAY_SCANS):
+            with contextlib.suppress(Exception):
+                await tab_open.update_targets(browser)
+                for tab in browser.tabs:
+                    target = str(getattr(tab.target, "target_id", tab))
+                    if target not in known:
+                        stray.add(target)
+                        await tab_open.send(
+                            browser, cdp.target.close_target, tab.target.target_id
+                        )
+            if scan < _STRAY_SCANS - 1:
+                await asyncio.sleep(_CLOSE_RETRY_S)
+        for target in stray:
+            with contextlib.suppress(Exception):
+                if await _is_open(browser, target):
+                    login_seal.keep(instance_id, target)
     finally:
         login_seal.release_new(instance_id, hold)
 
@@ -221,7 +271,15 @@ async def _provider(
     return {"outcome": inner["outcome"], "label": label, "detail": inner["detail"]}
 
 
-def _freeze(label: str) -> None:
+_FROZEN_NOTE = "; this login is now frozen"
+_NOT_FROZEN_NOTE = (
+    "; it could NOT be frozen (the vault could not be written), so it will not "
+    "stop another try: do not retry it"
+)
+
+
+def _freeze(label: str) -> bool:
+    """Freeze ``label``; ``False`` when the vault would not take the write."""
     try:
         vault_store.freeze(label)
     except (
@@ -235,6 +293,8 @@ def _freeze(label: str) -> None:
             "_freeze",
             f"could not freeze a login ({type(error).__name__})",
         )
+        return False
+    return True
 
 
 async def _check_launch(options: object, browser: object) -> None:
@@ -447,17 +507,28 @@ async def _after_username(tab: Tab, hosts: list[str]) -> tuple[str, str] | None:
     return "needs_user", "the page did not ask for a password after the username"
 
 
+class _Baseline(NamedTuple):
+    """What the page looked like just before Enter on the password."""
+
+    urls: list[str]
+    marks: frozenset[login_evidence.Mark]
+    login_url: str
+    error: bool
+
+
 async def _password_step(
     tab: Tab, entry: dict[str, object], hosts: list[str]
 ) -> tuple[str, str]:
     await _type_into(tab, "password", entry["password"], hosts)
-    if not (await login_form.probe(tab))["password_has_value"]:
+    typed = await login_form.probe(tab)
+    if not typed["password_has_value"]:
         return "needs_user", "the password field did not take the typed text"
     url, before = await _main(tab)
     urls = login_evidence.urls_for(hosts, url)
     marks = await login_evidence.session_marks(tab, urls)
+    baseline = _Baseline(urls, marks, str(entry["login_url"]), bool(typed.get("error")))
     await text_entry.press_enter(tab)
-    return await _outcome(tab, hosts, before, (urls, marks))
+    return await _outcome(tab, hosts, before, baseline)
 
 
 def _left(url: str, hosts: list[str]) -> bool:
@@ -498,6 +569,7 @@ async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> Non
     from the browser (never from page script): the field's own frame is on a login
     host, the TOP frame is too (a login host's page framed inside another site is
     not typed into), and the form around the field submits to a login host."""
+    await debug_port_guard.verify_clean(tab.browser)
     found = await login_form.find_field(tab, kind)
     if found is None:
         raise ToolError(f"the {kind} field went away before it could be typed into")
@@ -524,67 +596,116 @@ async def _snapshot(tab: Tab) -> tuple[dict[str, bool], str, str | None]:
     return state, url, second if first == second else None
 
 
+class _Rejection:
+    """Positive evidence of a rejection, held for long enough
+    (:data:`_REJECT_POLLS` polls in a row and :data:`_REJECT_SETTLE_S`)."""
+
+    def __init__(self) -> None:
+        self.polls = 0
+        self.since = 0.0
+
+    def reset(self) -> None:
+        self.polls = 0
+
+    def confirmed(self, evidence: bool) -> bool:
+        if not evidence:
+            self.polls = 0
+            return False
+        self.polls += 1
+        if self.polls == 1:
+            self.since = time.monotonic()
+        return (
+            self.polls >= _REJECT_POLLS
+            and time.monotonic() - self.since >= _REJECT_SETTLE_S
+        )
+
+
 async def _outcome(
-    tab: Tab,
-    hosts: list[str],
-    before: str,
-    evidence: tuple[list[str], frozenset[login_evidence.Mark]],
+    tab: Tab, hosts: list[str], before: str, baseline: _Baseline
 ) -> tuple[str, str]:
     """After the password's Enter: what did the page do?
 
-    ``logged_in`` needs positive evidence (:mod:`login_evidence`); a form that came
-    back is a rejection only once it has stayed for :data:`_REJECT_POLLS` polls."""
-    urls, marks = evidence
+    ``logged_in`` needs positive evidence (:func:`_verdict`). ``rejected`` (which
+    freezes the entry) needs the login form back in a NEW document, or an error the
+    page did not show before, on :data:`_REJECT_POLLS` polls in a row and for
+    :data:`_REJECT_SETTLE_S`; an emptied field alone is ``needs_user`` at the end."""
     deadline = time.monotonic() + OUTCOME_WAIT_S
-    settled = back = 0
+    settled = 0
+    rejection = _Rejection()
     while True:
         state, url, loader = await _snapshot(tab)
         if loader is None:
-            settled = back = 0
+            settled = 0
+            rejection.reset()
         else:
             reloaded = loader != before
             if state["otp"] and not state["password"]:
                 return "needs_totp", "a one-time code is being asked for"
             if state["password"]:
                 settled = 0
-                back = back + 1 if reloaded or not state["password_has_value"] else 0
-                if back >= _REJECT_POLLS:
+                new_error = bool(state.get("error")) and not baseline.error
+                if rejection.confirmed(reloaded or new_error):
                     return (
                         "rejected",
-                        "the password field came back after the attempt; this login "
-                        "is now frozen",
+                        "the login form came back after the attempt"
+                        + ("" if reloaded else " with an error showing"),
                     )
             elif state["username"] and reloaded:
                 return "needs_user", "the page went back to its first step"
             elif _left(url, hosts) or reloaded:
-                back = 0
+                rejection.reset()
                 settled += 1
                 if settled >= _STABLE_POLLS:
-                    return await _verdict(tab, hosts, url, urls, marks)
+                    return await _verdict(tab, hosts, url, baseline)
             else:
-                settled = back = 0
+                settled = 0
+                rejection.reset()
         if time.monotonic() >= deadline:
             return "needs_user", "the page gave no clear answer within the time limit"
         await asyncio.sleep(POLL_S)
 
 
 async def _verdict(
-    tab: Tab,
-    hosts: list[str],
-    url: str,
-    urls: list[str],
-    marks: frozenset[login_evidence.Mark],
+    tab: Tab, hosts: list[str], url: str, baseline: _Baseline
 ) -> tuple[str, str]:
-    """The page settled with no login form: ``logged_in`` only on evidence."""
+    """The page settled with no login form: ``logged_in`` only on evidence, and
+    ``needs_user`` whenever the evidence is ambiguous.
+
+    * the page left the login's hosts: signed in (the spec's rule);
+    * otherwise a cookie for the login hosts must be new or changed since before
+      Enter AND the login page must then no longer offer its form
+      (:func:`_confirm`). A cookie alone proves nothing: sites set one on every
+      response (a CSRF token, a load balancer), a "locked" page included."""
     if _left(url, hosts):
         return "logged_in", "signed in (the page left the login's hosts)"
     now = await login_evidence.session_marks(
-        tab, login_evidence.urls_for(hosts, url) or urls
+        tab, login_evidence.urls_for(hosts, url) or baseline.urls
     )
-    if login_evidence.gained(marks, now):
-        return "logged_in", "signed in (the site set a session cookie)"
-    return (
-        "needs_user",
-        "the page changed after the password but gave no sign of a session (no "
-        "cookie was set and it did not leave the login's hosts); look at it",
+    if not login_evidence.gained(baseline.marks, now):
+        return (
+            "needs_user",
+            "the page changed after the password but gave no sign of a session (no "
+            "cookie was set and it did not leave the login's hosts); look at it",
+        )
+    return await _confirm(tab, hosts, baseline.login_url)
+
+
+async def _confirm(tab: Tab, hosts: list[str], login_url: str) -> tuple[str, str]:
+    """A cookie appeared: visit the login page again. A site that took the sign-in
+    sends the person on; one that shows its form again did not (or cannot be told,
+    and then the answer is ``needs_user``, never a guessed ``logged_in``)."""
+    navigated = await tab.send(cdp.page.navigate(login_url))
+    if len(navigated) > 2 and navigated[2]:  # noqa: PLR2004  PERMANENT(errorText of Page.navigate)
+        return "needs_user", "a cookie was set but the login page could not be checked"
+    state, url = await _wait_for(
+        tab,
+        _CONFIRM_WAIT_S,
+        lambda s, u: _has_form(s, u) or _moved_on(u, hosts, login_url),
     )
+    if _has_form(state, url) or not _moved_on(url, hosts, login_url):
+        return (
+            "needs_user",
+            "a cookie was set, but the login page still does not show a signed-in "
+            "session (it offers its form, or stays put); look at it",
+        )
+    return "logged_in", "signed in (a session cookie, and the login page sent us on)"

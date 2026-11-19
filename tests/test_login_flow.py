@@ -28,6 +28,7 @@ from e2e_helpers import (
 from stealth_chrome_devtools_mcp.embedded import (
     login_flow,
     login_form,
+    login_persistence,
     login_seal,
     tab_open,
     vault_crypto,
@@ -57,6 +58,26 @@ LOGIN_FORM = """<html><body><form method=post action="{action}">
 <button>go</button></form>{note}</body></html>"""
 USERNAME_STEP = """<html><body><form method=post action="/two/user">
 <input name=username type=email></form></body></html>"""
+#: A single-page app: Enter blanks the password field at once, the request goes
+#: out ``DELAY`` ms later, and the page then signs in (a navigation to /home) or
+#: shows an alert, all in the same document.
+SPA = """<html><body><form id=f>
+<input name=username type=text autocomplete=username>
+<input name=password type=password autocomplete=current-password>
+<button>go</button></form><div id=out></div><script>
+f.onsubmit = async (e) => {{
+  e.preventDefault();
+  const u = f.username.value, p = f.password.value;
+  f.password.value = '';
+  await new Promise(r => setTimeout(r, {delay}));
+  const r = await fetch('/spa-api', {{method: 'POST',
+    body: new URLSearchParams({{username: u, password: p}})}});
+  if (r.ok) {{ location.href = '/home'; return; }}
+  const d = document.createElement('div');
+  d.setAttribute('role', 'alert'); d.textContent = 'That password is wrong';
+  out.appendChild(d);
+}};
+</script></body></html>"""
 PASSWORD_STEP = """<html><body><form method=post action="/two/pass">
 <input type=hidden name=username value="{user}">
 <input name=password type=password></form></body></html>"""
@@ -90,7 +111,13 @@ def _handler(site):
 
         def do_GET(self):
             path = self.path.split("?")[0]
-            if path in ("/login", "/two/login") and site.signed_in(self):
+            if path in (
+                "/login",
+                "/two/login",
+                "/spa-slow",
+                "/spa-wrong",
+                "/locked-cookie-login",
+            ) and site.signed_in(self):
                 return self._send(302, "", [("Location", "/home")])
             if path == "/login":
                 return self._send(200, LOGIN_FORM.format(action="/login", note=""))
@@ -109,6 +136,13 @@ def _handler(site):
                 return self._send(
                     200, LOGIN_FORM.format(action="/locked-login", note="")
                 )
+            if path == "/locked-cookie-login":
+                return self._send(
+                    200, LOGIN_FORM.format(action="/locked-cookie-login", note="")
+                )
+            if path in ("/spa-slow", "/spa-wrong"):
+                delay = 3000 if path == "/spa-slow" else 800
+                return self._send(200, SPA.format(delay=delay))
             if path == "/locked-page":
                 return self._send(
                     200, "<html><body>Too many attempts. Account locked.</body></html>"
@@ -136,6 +170,23 @@ def _handler(site):
                 )
             )
             site.posts.append({"path": self.path, **fields})
+            if self.path == "/spa-api":
+                if fields.get("username") == USER and fields.get("password") == RIGHT:
+                    sid = secrets.token_hex(8)
+                    site.sessions.add(sid)
+                    return self._send(200, "ok", [("Set-Cookie", f"sid={sid}; Path=/")])
+                return self._send(401, "no")
+            if self.path == "/locked-cookie-login":
+                # the WRONG password, answered by a form-less page that sets a
+                # cookie (sites set a CSRF or balancer cookie on nearly every reply)
+                return self._send(
+                    302,
+                    "",
+                    [
+                        ("Set-Cookie", f"csrf={secrets.token_hex(8)}; Path=/"),
+                        ("Location", "/locked-page"),
+                    ],
+                )
             if self.path == "/locked-login":
                 # a form-less page on the same host, and no session cookie
                 return self._send(302, "", [("Location", "/locked-page")])
@@ -302,6 +353,59 @@ async def test_a_form_less_page_with_no_session_is_not_a_login(site, tmp_path):
         assert not vault_store.entry("work").get("frozen")
         assert not await _is_home(iid, site)
     assert [p["path"] for p in site.posts] == ["/locked-login"]
+
+
+async def test_a_locked_page_that_sets_a_cookie_is_not_a_login(site, tmp_path):
+    """Re-review M4': a wrong password, a form-less "locked" page, and a cookie the
+    site sets on every reply. The cookie is new, but the login page, visited again,
+    still offers its form: ``needs_user``, never ``logged_in``, and not frozen."""
+    unlocked_vault({"work": _entry(site, "/locked-cookie-login", password=WRONG)})
+    async with _browser(tmp_path) as iid:
+        result = await _run(iid)
+        assert result["outcome"] == "needs_user", result
+        assert not vault_store.entry("work").get("frozen")
+        assert not await _is_home(iid, site)
+
+
+async def test_a_slow_single_page_app_that_blanks_the_password_is_not_rejected(
+    site, tmp_path
+):
+    """Re-review L7': the app empties the password field on Enter and signs in three
+    seconds later. An emptied field is not a rejection: the right password signs in
+    and the entry is not frozen."""
+    unlocked_vault({"work": _entry(site, "/spa-slow")})
+    async with _browser(tmp_path) as iid:
+        result = await _run(iid)
+        assert result["outcome"] == "logged_in", result
+        assert not vault_store.entry("work").get("frozen")
+        assert await _is_home(iid, site)
+
+
+async def test_a_single_page_app_that_shows_an_error_is_a_rejection(site, tmp_path):
+    unlocked_vault({"work": _entry(site, "/spa-wrong", password=WRONG)})
+    async with _browser(tmp_path) as iid:
+        result = await _run(iid)
+        assert result["outcome"] == "rejected", result
+        assert vault_store.entry("work")["frozen"]
+
+
+async def test_a_freeze_that_cannot_be_written_is_not_reported_as_done(
+    site, tmp_path, monkeypatch
+):
+    """A rejected login whose entry could not be frozen must say so: the caller is
+    told not to retry, and the detail never claims "now frozen"."""
+    unlocked_vault({"work": _entry(site, password=WRONG)})
+
+    def broken(_label):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(vault_store, "freeze", broken)
+    async with _browser(tmp_path) as iid:
+        result = await _run(iid)
+        assert result["outcome"] == "rejected", result
+        assert "could NOT be frozen" in result["detail"]
+        assert "now frozen" not in result["detail"]
+        assert not vault_store.entry("work").get("frozen")
 
 
 async def test_a_form_that_submits_to_another_origin_gets_nothing_typed(site, tmp_path):
@@ -517,6 +621,37 @@ async def test_a_cancelled_login_never_has_its_tab_open_while_the_seal_is_down(
         browser = await runtime.browser_manager.get_browser(iid)
         await tab_open.update_targets(browser)
         assert tab_open.find(browser, sealed) is None
+
+
+async def test_a_cancel_after_chrome_makes_the_login_tab_leaves_no_blank_tab(
+    site, tmp_path, monkeypatch
+):
+    """A cancel that lands after Chrome created the login's tab and before the open
+    returned: the tab is not yet sealed by id, so it must be closed, not left as a
+    visible blank tab."""
+    unlocked_vault({"work": _entry(site)})
+    real_open = tab_open.open_tab
+
+    async def open_then_cancelled(*args, **kwargs):
+        await real_open(*args, **kwargs)
+        raise asyncio.CancelledError
+
+    async with _browser(tmp_path) as iid:
+        # the spawn's own background work opens tabs through the same function
+        await login_persistence.settle_session_restore(
+            await runtime.browser_manager.get_browser(iid)
+        )
+        monkeypatch.setattr(tab_open, "open_tab", open_then_cancelled)
+        before = await _tab_ids(iid)
+        with pytest.raises(asyncio.CancelledError):
+            await _run(iid)
+        await asyncio.gather(*getattr(login_flow, "_STRAYS", ()))
+        await asyncio.sleep(1)
+        assert not login_seal.sealing(iid)
+        assert await _tab_ids(iid) == before
+        browser = await runtime.browser_manager.get_browser(iid)
+        await tab_open.update_targets(browser)
+        assert len(list(browser.tabs)) == len(before)
 
 
 async def test_a_tab_that_will_not_close_stays_sealed_and_is_reported(
