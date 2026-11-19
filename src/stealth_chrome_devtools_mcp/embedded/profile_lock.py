@@ -111,7 +111,11 @@ from pathlib import Path
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import browser_cmdline, spawn_budget
+from stealth_chrome_devtools_mcp.embedded import (
+    atomic_file,
+    browser_cmdline,
+    spawn_budget,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 LOCK_NAME = "SingletonLock"
@@ -249,16 +253,12 @@ def _claim_launch(profile_dir: str | os.PathLike[str] | None) -> Path | None:
             return marker
         # Through a scratch file and one rename, so a reader never sees the
         # marker EMPTY, which reads as no marker at all.
-        scratch = marker.with_name(f"{LAUNCH_NAME}.{os.getpid()}.tmp")
         try:
-            scratch.write_text(_launch_owner(), encoding="utf-8")
-            scratch.replace(marker)
+            atomic_file.write_text(marker, _launch_owner(), make_parents=False)
         except OSError as error:
             debug_logger.log_warning(
                 "profile_lock", "launching", f"Could not write {marker}: {error}"
             )
-            with contextlib.suppress(OSError):
-                scratch.unlink()
     return marker
 
 

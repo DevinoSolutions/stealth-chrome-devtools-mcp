@@ -60,12 +60,11 @@ A leaf module: stdlib plus ``display_context`` (itself a leaf). Never
 from __future__ import annotations
 
 import json
-import os
-import time
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import atomic_file
 from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS, UNVERIFIED
 
 if TYPE_CHECKING:
@@ -96,11 +95,6 @@ SCHEMA_VERSION = 3
 # spelled as a literal inside the reader, so "which schemas do we accept" is a
 # question the constants answer.
 LEGACY_KEYED_SCHEMA = 2
-
-# Windows refuses an atomic replace while another process holds the target open
-# (see _commit); a few short retries outlast that window.
-_COMMIT_ATTEMPTS = 5
-_COMMIT_RETRY_SECONDS = 0.02
 
 
 def read_record(path: Path) -> BackendEntry | None:
@@ -551,7 +545,7 @@ def stamp_heartbeat(  # noqa: PLR0913  PERMANENT(function interface)
     if loop_lag is not None:
         stamp[HEARTBEAT_LOOP_LAG] = loop_lag
         stamp[HEARTBEAT_LAGGING_SINCE] = lagging_since
-    _commit_json(heartbeat_path(path, port), stamp)
+    atomic_file.write_json(heartbeat_path(path, port), stamp)
     return True
 
 
@@ -629,31 +623,6 @@ def forget_entries(path: Path, entries: list[BackendEntry]) -> list[str]:
     return forgotten
 
 
-def _commit(tmp: Path, path: Path) -> None:
-    """Move ``tmp`` onto ``path``, retrying briefly on a Windows sharing refusal.
-
-    ``Path.replace`` is atomic on both platforms, but on Windows it raises
-    PermissionError (WinError 5/32) while ANOTHER process has the target open —
-    Python's ``open()`` does not pass FILE_SHARE_DELETE, so a concurrent reader
-    (a second stdio proxy in ``read_record``) is enough to make the rename lose
-    a race it would win on POSIX. The window is microseconds, so a few short
-    retries convert a spurious hard failure into a slightly later success.
-
-    Do NOT delete this loop as redundant: on POSIX it costs one iteration and
-    never sleeps, and the failure it prevents only ever appears under the
-    concurrency a herd of proxy starts produces — never in a single-process test.
-    """
-    for attempt in range(_COMMIT_ATTEMPTS):
-        try:
-            tmp.replace(path)
-        except PermissionError:
-            if attempt == _COMMIT_ATTEMPTS - 1:
-                raise
-            time.sleep(_COMMIT_RETRY_SECONDS)
-        else:
-            return
-
-
 def _write(path: Path, entries: list[BackendEntry]) -> None:
     """Write the v3 record atomically.
 
@@ -664,34 +633,7 @@ def _write(path: Path, entries: list[BackendEntry]) -> None:
     which is exactly why it is a separate file with a single writer — see
     :func:`stamp_heartbeat`.)
     """
-    _commit_json(path, {"schema": SCHEMA_VERSION, "backends": entries})
-
-
-def _commit_json(path: Path, payload: dict[str, object]) -> None:
-    """Publish ``payload`` at ``path`` atomically: stage into a sibling temp
-    file, then ``Path.replace`` (i.e. ``os.replace``) — so a reader concurrent
-    with a write sees the whole old file or the whole new one, never a truncated
-    one, and a crash mid-write cannot leave it unparseable.
-
-    THE one atomic write in this module, shared by the record and by the
-    heartbeat sidecar, so a second spelling of the staging dance cannot appear
-    beside it.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # pid-suffixed so two processes staging at once cannot collide on the temp
-    # name; the same directory so the replace stays within one filesystem.
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(json.dumps(payload))
-        _commit(tmp, path)
-    except BaseException:
-        # ACCEPTED GAP: this cleans up a failed write, but a process killed
-        # between write_text and the replace leaves a .tmp that nothing sweeps.
-        # Bounded and harmless - one small file per killed writer, in a
-        # directory the reader only ever looks up server.json by name in.
-        with suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
+    atomic_file.write_json(path, {"schema": SCHEMA_VERSION, "backends": entries})
 
 
 def clear_record(*paths: Path) -> None:

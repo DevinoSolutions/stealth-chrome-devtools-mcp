@@ -11,6 +11,7 @@ import json
 import pytest
 
 from fakes import assert_no_default_paths
+from stealth_chrome_devtools_mcp.embedded import atomic_file
 from stealth_chrome_devtools_mcp.embedded import backend_registry as reg
 from stealth_chrome_devtools_mcp.embedded.display_context import HEADLESS, UNVERIFIED
 
@@ -645,7 +646,7 @@ class TestAtomicWrite:
                 display_context="headless",
             )
 
-        assert len(attempts) == reg._COMMIT_ATTEMPTS
+        assert len(attempts) == atomic_file.COMMIT_ATTEMPTS
         assert [e["port"] for e in reg.read_backends(p)] == [1]
         assert sorted(f.name for f in tmp_path.iterdir()) == ["server.json"]
 

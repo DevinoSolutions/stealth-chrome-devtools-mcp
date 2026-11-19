@@ -59,7 +59,6 @@ cannot read it starts every clock afresh, which can only delay a kill.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import math
@@ -69,6 +68,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import psutil
 
 from stealth_chrome_devtools_mcp.embedded import (
+    atomic_file,
     backend_eviction,
     backend_liveness,
     backend_registry,
@@ -266,11 +266,28 @@ def read_state(path: Path) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_state(path: Path, state: dict[str, object]) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        tmp.replace(path)
+def _write_state(path: Path, state: dict[str, object]) -> bool:
+    """Publish the state through ``atomic_file`` (a sharing refusal is retried);
+    False, with a WARNING, when it still cannot be written.
+
+    Never raised: a pass has observed and decided by now, and failing it would
+    only hide its verdicts. But the kill history in this file is what the
+    stand-down counts (T-15466) and the next pass reads it back, so a lost write
+    leaves the next pass counting fewer kills than happened. :func:`run_pass`
+    therefore writes the record of a kill BEFORE making it, and does not make a
+    kill it could not record.
+    """
+    try:
+        atomic_file.write_json(path, state, indent=2)
+    except OSError as error:
+        _logger.warning(
+            "supervisor state not written to %s: %s; the clocks and kills of this "
+            "pass are not recorded, and a kill is not made without its record",
+            path,
+            error,
+        )
+        return False
+    return True
 
 
 def _real_kill_time(entry: object) -> float | None:
@@ -427,6 +444,17 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
     history = list(kills) if isinstance(kills, list) else []
     since = _since(state)
     held_back = False
+
+    def persist() -> bool:
+        """Write the state as it stands. The stand-down lasts while the budget is
+        spent; a pass that finds it spent no longer drops the marker, so the next
+        episode is announced at ERROR again. A dry run reads the marker and never
+        writes it, so it cannot swallow the real pass's ERROR."""
+        spent = len(recent_kills(history, at)) >= STAND_DOWN_KILLS
+        marker = _since(state) if dry_run else since
+        extra = {STOOD_DOWN_KEY: marker} if marker is not None and spent else {}
+        return _write_state(state_path, {**clocks, **extra, "kills": _trimmed(history)})
+
     for index, (verdict, seen) in enumerate(zip(verdicts, observed, strict=True)):
         if verdict.state == GREEN:
             continue
@@ -475,7 +503,30 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
             continue
         if verdict.kill and not dry_run:
             lost = lost_browsers(record, seen.pid)
+            # Written as a kill BEFORE the attempt and corrected after it: the
+            # count is what bounds the kills, and a pass that is killed, or whose
+            # final write is lost, must not leave a kill uncounted. A record that
+            # cannot be written means no kill; the next pass tries again.
+            attempt: dict[str, object] = {
+                "at": at,
+                "port": seen.port,
+                "pid": seen.pid,
+                "state": verdict.state,
+                "unusable_for": round(verdict.unusable_for, 1),
+                "killed": True,
+            }
+            history.append(attempt)
+            if not persist():
+                history.pop()
+                _logger.warning(
+                    "backend pid %d on port %d is NOT terminated: the kill could "
+                    "not be recorded, and the stand-down counts what is recorded",
+                    seen.pid,
+                    seen.port,
+                )
+                continue
             killed = kill(seen, is_ours=is_ours, is_healthy=is_healthy)
+            attempt["killed"] = killed
             if killed and lost is not None:
                 _logger.warning(
                     "backend pid %d on port %d terminated; %s",
@@ -483,23 +534,6 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
                     seen.port,
                     lost,
                 )
-            history.append(
-                {
-                    "at": at,
-                    "port": seen.port,
-                    "pid": seen.pid,
-                    "state": verdict.state,
-                    "unusable_for": round(verdict.unusable_for, 1),
-                    "killed": killed,
-                }
-            )
             clocks.pop(str(seen.port), None)
-    # The stand-down lasts while the budget is spent; a pass that finds it
-    # spent no longer drops the marker, so the next episode is announced at ERROR
-    # again. A dry run reads the marker and never writes it, so it cannot swallow
-    # the real pass's ERROR.
-    spent = len(recent_kills(history, at)) >= STAND_DOWN_KILLS
-    marker = _since(state) if dry_run else since
-    extra = {STOOD_DOWN_KEY: marker} if marker is not None and spent else {}
-    _write_state(state_path, {**clocks, **extra, "kills": _trimmed(history)})
+    persist()
     return verdicts
