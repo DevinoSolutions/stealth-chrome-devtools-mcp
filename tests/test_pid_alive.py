@@ -24,7 +24,6 @@ import inspect
 import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -165,11 +164,8 @@ class _Browser:
 
 
 READERS = {
-    "profile_lock's reader (now zombie.alive, held)": lambda pid: zombie.alive(
-        pid, unknown=True
-    ),
-    "tree member's reader (now zombie.alive, held)": lambda pid: zombie.alive(
-        pid, unknown=True
+    "held (profile_lock and the tree member): zombie.alive(unknown=True)": (
+        lambda pid: zombie.alive(pid, unknown=True)
     ),
     "devtools_port's reader (now zombie.alive, dead if unknown)": lambda pid: (
         zombie.alive(pid, unknown=False)
@@ -183,13 +179,13 @@ ORDER = tuple(READERS)
 RAISES = "raises"
 ZOMBIE_ARGV: tuple[str, ...] = ()
 
-#: (world, the four readers' answers in ORDER). A bool, or an exception TYPE the
+#: (world, the three readers' answers in ORDER). A bool, or an exception TYPE the
 #: reader let escape. Rows marked DIVERGENCE are where today's readers disagree.
 ALIVE_TABLE = {
-    "a live process": (World(), (True, True, True, True)),
+    "a live process": (World(), (True, True, True)),
     "dead: not listed, kernel agrees": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID)),
-        (False, False, False, False),
+        (False, False, False),
     ),
     # DIVERGENCE 1 (F-1008): only the lock owner's reader asks the kernel when
     # psutil does not list the pid (``/proc`` mounted ``hidepid=2``). CHANGED in
@@ -199,82 +195,82 @@ ALIVE_TABLE = {
     # read an unlisted pid dead as they always did.
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, True, False, False),
+        (True, False, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
-        (False, False, False, False),
+        (False, False, False),
     ),
     "a zombie that raises ZombieProcess when asked its status": (
         World(status=psutil.ZombieProcess(PID)),
-        (False, False, False, False),
+        (False, False, False),
     ),
     # DIVERGENCE 2: what "I could not ask" means. The lock owner's and the tree
     # member's readers say ALIVE (a profile is then not shown free); the other
     # two say DEAD.
     "listed, but psutil.Process() is AccessDenied": (
         World(ctor=psutil.AccessDenied(PID)),
-        (True, True, False, False),
+        (True, False, False),
     ),
     "listed, argv refused (AccessDenied)": (
         World(cmdline=psutil.AccessDenied(PID)),
-        (True, True, True, True),
+        (True, True, True),
     ),
     "listed, is_running refused (AccessDenied)": (
         World(running=psutil.AccessDenied(PID)),
-        (True, True, True, True),
+        (True, True, True),
     ),
     "listed, status refused (AccessDenied)": (
         World(status=psutil.AccessDenied(PID)),
-        (True, True, False, False),
+        (True, False, False),
     ),
     "pid_exists itself refused (AccessDenied)": (
         World(listed=psutil.AccessDenied(PID)),
-        (True, True, False, False),
+        (True, False, False),
     ),
     # DIVERGENCE 3: ``_still_running`` let an OverflowError out; the lock
     # owner's reader answers alive. CHANGED in the browser_cmdline commit: one
     # function now, and it answers alive.
     "pid_exists raises OverflowError": (
         World(listed=OverflowError("too large")),
-        (True, True, False, False),
+        (True, False, False),
     ),
     # The exec-window trap: a live Chrome reads an EMPTY argv while its launcher
     # execs, and must never be read as dead.
     "exec window: empty argv, executable readable": (
         World(cmdline=(), exe=READABLE),
-        (True, True, True, True),
+        (True, True, True),
     ),
     "empty argv, executable unreadable for permission": (
         World(cmdline=(), exe=UNREADABLE),
-        (True, True, True, True),
+        (True, True, True),
     ),
     "empty argv, executable read fails another way": (
         World(cmdline=(), exe=OSError(errno.EIO, "io")),
-        (True, True, True, True),
+        (True, True, True),
     ),
     # DIVERGENCE 4 (F-998): only the two witness readers see a teardown.
     "tearing down: empty argv, executable gone": (
         World(cmdline=(), exe=GONE),
-        (False, False, False, False),
+        (False, False, False),
     ),
     "tearing down: empty argv, ESRCH on the executable": (
         World(cmdline=(), exe=NOT_THERE),
-        (False, False, False, False),
+        (False, False, False),
     ),
     "empty argv, executable gone, but not Linux": (
         World(cmdline=(), exe=GONE, linux=False),
-        (True, True, True, True),
+        (True, True, True),
     ),
     "an argv outranks an unreadable executable": (
         World(exe=GONE),
-        (True, True, True, True),
+        (True, True, True),
     ),
 }
 
 
 @pytest.mark.parametrize("name", ALIVE_TABLE)
-def test_every_reader_answers_what_it_always_did(monkeypatch, name):
+def test_every_direction_answers_the_table(monkeypatch, name):
     world, expected = ALIVE_TABLE[name]
     install(monkeypatch, world)
 
@@ -425,7 +421,19 @@ async def test_the_identity_wait_goes_on_only_while_the_launcher_is_shown_runnin
     install(monkeypatch, world)
     monkeypatch.setattr(devtools_port, "IDENTITY_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.6)
+    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 3600.0)
+
+    # Counted, not timed: how long a loaded runner takes to get through the polls
+    # says nothing about whether the wait went on. A launcher shown running is
+    # asked again on every poll; the third time it has "exited", so the wait ends.
+    asked: list[bool] = []
+    real_alive = zombie.alive
+
+    def counting(pid: object, *, unknown: bool) -> bool:
+        asked.append(real_alive(pid, unknown=unknown))
+        return asked[-1] and len(asked) < 4
+
+    monkeypatch.setattr(zombie, "alive", counting)
 
     class _Silent:
         websocket_url = None
@@ -436,12 +444,10 @@ async def test_the_identity_wait_goes_on_only_while_the_launcher_is_shown_runnin
         async def aclose(self):
             pass
 
-    started = time.monotonic()
     with pytest.raises(ToolError, match="did not say which process it is"):
         await devtools_port.confirm_ours(_Silent(), PID)
-    waited = time.monotonic() - started
 
-    assert (waited >= 0.5) is patient, waited
+    assert (len(asked) > 1) is patient, asked
 
 
 def test_pid_none_is_not_this_process():
