@@ -35,6 +35,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     devtools_port,
     process_exit,
     profile_lock,
+    reap_guard,
     zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
@@ -467,7 +468,7 @@ IDENTITY_ORDER = tuple(IDENTITY_READERS)
 IDENTITY_TABLE = {
     "same pid, same start": (World(created=T), T, (True, True, True)),
     "start time 0.5 s apart": (World(created=T + 0.5), T, (True, False, False)),
-    "start time 1.0 s apart": (World(created=T + 1.0), T, (False, False, False)),
+    "start time 1.0 s apart": (World(created=T + 1.0), T, (True, False, False)),
     "start time 2 s apart (a reused pid)": (
         World(created=T + 2.0),
         T,
@@ -499,7 +500,7 @@ IDENTITY_TABLE = {
     "start time read fails with an OSError": (
         World(created=OSError(errno.EIO, "io")),
         T,
-        (OSError, False, True),
+        (False, False, True),
     ),
     "a zombie whose start time is still readable": (
         World(status=psutil.STATUS_ZOMBIE, created=T),
@@ -509,7 +510,7 @@ IDENTITY_TABLE = {
     "psutil.Error (not AccessDenied) reading the start time": (
         World(created=psutil.Error("odd")),
         T,
-        (psutil.Error, False, True),
+        (False, False, True),
     ),
 }
 
@@ -637,6 +638,61 @@ def test_a_reap_of_an_unlisted_pid_is_already_done(monkeypatch):
     install(monkeypatch, World(listed=False, ctor=psutil.NoSuchProcess(PID)))
 
     assert _cleanup({})._kill_process_by_pid(PID, "x") is True
+
+
+def test_a_reap_of_a_zombie_still_goes_on_to_identify_and_end_it(monkeypatch):
+    """A zombie is LISTED: the reap does not call it "already terminated"; it asks
+    ``reap_guard`` what the pid is, as it always did."""
+    install(monkeypatch, World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV))
+    asked: list[int] = []
+
+    def killable(pid, _instance_id, _is_browser_name):
+        asked.append(pid)
+        return reap_guard.Verdict(gone=True, may_kill=False, refusal=None)
+
+    monkeypatch.setattr(reap_guard, "killable", killable)
+
+    assert _cleanup({})._kill_process_by_pid(PID, "x") is True
+    assert asked == [PID]
+
+
+@pytest.mark.parametrize(
+    ("world", "finalized"),
+    [
+        pytest.param(World(), 0, id="a live browser: not yet"),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            0,
+            id="a zombie is still listed: not yet",
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID)),
+            1,
+            id="gone: finalized",
+        ),
+    ],
+)
+def test_a_deferred_profile_is_finalized_only_once_its_pid_is_unlisted(
+    monkeypatch, world, finalized
+):
+    install(monkeypatch, world)
+    cleanup = _cleanup({"i": {"pid": PID, "user_data_dir": "/p"}})
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        cleanup,
+        "_cleanup_profile_for_metadata",
+        lambda instance_id, *_a, **_k: cleaned.append(instance_id) or True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cleanup, "_should_untrack_after_cleanup", lambda *_a: True, raising=False
+    )
+    monkeypatch.setattr(
+        cleanup, "untrack_browser_process", lambda *_a: True, raising=False
+    )
+
+    assert cleanup.cleanup_deferred_profiles() == finalized
+    assert cleaned == (["i"] if finalized else [])
 
 
 # ===========================================================================
