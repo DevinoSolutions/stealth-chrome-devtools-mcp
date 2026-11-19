@@ -248,9 +248,16 @@ def alive(pid: object, *, unknown: bool) -> bool:
     call, which is the whole of F-998's and F-1008's lesson: a reader that picks
     its direction by accident drifts.
 
-    A pid the process table does not list is still asked of the kernel (F-1008,
-    :func:`_kernel_has`); a listed one is dead when it is a zombie or is tearing
-    down (:func:`_gone`). Anything that raises, ``OverflowError`` for a pid too
+    A pid the process table does not list is asked of the kernel (F-1008,
+    :func:`_kernel_has`) ONLY by a caller that passed ``unknown=True``. The probe
+    cannot tell a pid from a thread id (``kill(tid, 0)`` succeeds; psutil's own
+    Linux ``pid_exists`` reads ``/proc/<pid>/status`` for ``Tgid`` precisely to
+    refuse one, and under ``hidepid=2`` that read is the very thing denied), so
+    its word is only good for a caller whose wrong "alive" costs one more look
+    (a held profile), never for one whose wrong "alive" keeps a dead instance
+    (``unknown=False``: it owns a browser its own user can always see). A listed
+    pid is dead when it is a zombie or is tearing down (:func:`_gone`).
+    Anything that raises, ``OverflowError`` for a pid too
     large for a C long included, is *unknown*, and is logged: nothing else in
     here is.
     """
@@ -258,7 +265,7 @@ def alive(pid: object, *, unknown: bool) -> bool:
         return False
     try:
         if not listed(pid):
-            return _kernel_has(pid)
+            return unknown and _kernel_has(pid)
     except (psutil.Error, OSError, OverflowError) as error:
         debug_logger.log_warning(
             "zombie", "alive", f"Could not tell whether pid {pid} is running: {error}"

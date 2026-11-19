@@ -192,9 +192,12 @@ ALIVE_TABLE = {
     # DIVERGENCE 1 (F-1008): only the lock owner's reader asks the kernel when
     # psutil does not list the pid (``/proc`` mounted ``hidepid=2``). CHANGED in
     # the browser_cmdline commit: the tree member's reader now asks it too.
+    # CHANGED in the review fix: only the HELD direction reaches the kernel (a
+    # thread id answers kill(tid, 0) too), so the two ``unknown=False`` readers
+    # read an unlisted pid dead as they always did.
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, True, True, True),
+        (True, True, False, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -842,7 +845,7 @@ NEW_ALIVE = {
     ),
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, True),
+        (True, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -1155,3 +1158,22 @@ def test_the_one_home_pin_leaves_a_question_put_to_the_home():
 
 def test_the_one_home_pin_leaves_a_signal_that_is_not_a_probe():
     assert _raw_calls_in("os.kill(pid, signal.SIGTERM)") == []
+
+
+@pytest.mark.parametrize("kernel", [None, NOT_OURS], ids=["delivered", "EPERM"])
+def test_the_kernel_is_asked_only_by_the_held_direction(monkeypatch, kernel):
+    """A thread id is not a pid: ``kill(tid, 0)`` succeeds, psutil lists no such
+    pid. The instance readers (``unknown=False``) must read that dead, and must not
+    even ask, so a dead adopted browser whose number came back as a thread id of
+    some other process is discarded rather than kept."""
+    install(
+        monkeypatch,
+        World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=kernel),
+    )
+
+    assert zombie.alive(PID, unknown=False) is False
+    assert process_exit.browser_is_alive(_Browser(PID)) is False
+    assert KERNEL_ASKED == []
+
+    assert zombie.alive(PID, unknown=True) is True
+    assert KERNEL_ASKED == [(PID, 0)]
