@@ -174,9 +174,7 @@ async def _run(
     tab = None
     result: dict[str, str] = {}
     try:
-        tab = await tab_open.open_tab(browser, "about:blank", background=True)
-        tab_open.mark_internal(browser, tab)
-        login_seal.seal_tab(instance_id, str(tab.target.target_id))
+        tab = await _open_sealed_tab(browser, instance_id)
         outcome, detail = await _sealed_login(tab, entry)
         if outcome == "rejected":
             _freeze(label)
@@ -186,6 +184,22 @@ async def _run(
     if not closed:
         result["detail"] += UNCLOSED_NOTE
     return result
+
+
+async def _open_sealed_tab(browser: Browser, instance_id: str) -> Tab:
+    """Open the login's own tab and seal it, with no moment in which it exists and
+    can be reached: every target that is not in the list read BEFORE the open is
+    held sealed (:func:`login_seal.hold_new`) until the tab is sealed by id."""
+    await tab_open.update_targets(browser)
+    known = [str(getattr(t.target, "target_id", t)) for t in browser.tabs]
+    hold = login_seal.hold_new(instance_id, known)
+    try:
+        tab = await tab_open.open_tab(browser, "about:blank", background=True)
+        tab_open.mark_internal(browser, tab)
+        login_seal.seal_tab(instance_id, str(tab.target.target_id))
+        return tab
+    finally:
+        login_seal.release_new(instance_id, hold)
 
 
 async def _provider(

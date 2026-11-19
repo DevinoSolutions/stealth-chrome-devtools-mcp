@@ -30,6 +30,12 @@ login could not close (``unclosed``): it is kept sealed after the login is over,
 so an agent still cannot read it, and the flow says so. It is dropped from here
 only by the backend restarting.
 
+**The creation window.** The login's tab exists in Chrome (and in nodriver's
+target list) a moment before the flow has its id and seals it. :func:`hold_new`
+covers that moment by sealing "every target that was not there before"; the flow
+releases it in the same step that seals the tab by id. A login tab was reachable
+through ``list_tabs`` and ``execute_script`` in that moment before this existed.
+
 **Popups.** A page the sealed tab opens (``window.open``, ``target=_blank``) is
 sealed by :func:`seal_popup` from the ``targetCreated`` event and closed by
 ``tab_open``; :func:`release` drops it once Chrome no longer lists it.
@@ -42,8 +48,12 @@ A leaf: ``tool_errors`` only.
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
 
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 #: The one sentence a refused call gets. It names no instance and no tab: the
 #: caller already knows both, and an error that echoed a sealed target id would
@@ -58,6 +68,9 @@ _lock = threading.Lock()
 _depth: dict[str, int] = {}
 _tabs: dict[str, set[str]] = {}
 _unclosed: dict[str, set[str]] = {}
+#: Per instance, one frozenset of the targets that existed before each login tab
+#: was being opened (:func:`hold_new`), until the tab is sealed.
+_holds: dict[str, list[frozenset[str]]] = {}
 
 
 def begin(instance_id: str) -> None:
@@ -89,6 +102,34 @@ def end(instance_id: str, unclosed: str | None = None) -> None:
             return
         _depth.pop(instance_id, None)
         _tabs.pop(instance_id, None)
+
+
+def hold_new(instance_id: str, known: Iterable[str]) -> frozenset[str]:
+    """From now until :func:`release_new`, every target of ``instance_id`` that is
+    NOT in ``known`` counts as sealed, and returns the token to release.
+
+    Closes the window in which the login's own tab exists in Chrome but is not
+    sealed yet: Chrome announces a new target before the call that created it has
+    answered, and a tool (``list_tabs``, ``execute_script``) that runs in between
+    would see a tab nobody has sealed. The flow holds the browser's CURRENT targets
+    as the known ones, opens its tab, seals it by id and releases; a tab a caller
+    opened in those few milliseconds is hidden for them too and listed afterwards."""
+    token = frozenset(str(target) for target in known)
+    with _lock:
+        _holds.setdefault(instance_id, []).append(token)
+    return token
+
+
+def release_new(instance_id: str, token: frozenset[str]) -> None:
+    """End one :func:`hold_new`; a no-op for a token already released."""
+    with _lock:
+        held = _holds.get(instance_id, [])
+        for index, candidate in enumerate(held):
+            if candidate is token:
+                del held[index]
+                break
+        if not held:
+            _holds.pop(instance_id, None)
 
 
 def seal_popup(opener_id: str, popup_id: str) -> bool:
@@ -128,7 +169,7 @@ def any_sealing() -> bool:
     """Whether any instance has a login in progress, or a sealed tab left over.
     Two dict truthiness checks: the registry wrapper asks it on every tool call
     and does nothing more while it is false."""
-    return bool(_depth or _unclosed)
+    return bool(_depth or _unclosed or _holds)
 
 
 def is_sealed(instance_id: str, target_id: str | None) -> bool:
@@ -136,8 +177,10 @@ def is_sealed(instance_id: str, target_id: str | None) -> bool:
     if not target_id:
         return False
     target = str(target_id)
-    return target in _tabs.get(instance_id, ()) or target in _unclosed.get(
-        instance_id, ()
+    return (
+        target in _tabs.get(instance_id, ())
+        or target in _unclosed.get(instance_id, ())
+        or any(target not in known for known in _holds.get(instance_id, ()))
     )
 
 
