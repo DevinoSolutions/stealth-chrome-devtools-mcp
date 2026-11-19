@@ -1,7 +1,6 @@
 """Robust process and temp-profile cleanup for browser instances."""
 
 import atexit
-import contextlib
 import signal
 import sys
 import tempfile
@@ -21,11 +20,19 @@ from stealth_chrome_devtools_mcp.embedded import (
     reap_guard,
     serve_startup,
     singleton,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import Entries
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.singleton import STATE_DIR
 from stealth_chrome_devtools_mcp.settings import get_settings
+
+#: How far a start time read back out of ``browser_pid_registry``'s file may be
+#: from the live process's and still be the same process. Not exact equality: the
+#: record is written by one backend and read by another, possibly a version apart.
+#: ``desktop_launch.PID_IDENTITY_TOLERANCE`` is the other tolerance in the tree
+#: (0.5 s, between two readings taken in one run); they have not been unified.
+RECORDED_START_TOLERANCE_SECONDS = 1.0
 
 # What ``signal.signal`` returns: the disposition it displaced (a handler, or
 # one of the SIG_DFL / SIG_IGN ints, or None for one it cannot describe).
@@ -279,15 +286,16 @@ class ProcessCleanup:
         """Check whether *fallback_pid* still belongs to the process we recorded.
 
         Returns True when ``stored_create_time`` is None (best-effort parity) or
-        the live process's create_time matches the stored value within 1 second.
-        Returns False when the process is gone, inaccessible, or the create_time
-        diverges (recycled PID).
+        the live process's create_time matches the stored value within
+        :data:`RECORDED_START_TOLERANCE_SECONDS`. Returns False when the process
+        is gone, inaccessible, or the create_time diverges (recycled PID).
         """
-        try:
-            actual = psutil.Process(fallback_pid).create_time()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            return False
-        return stored_create_time is None or abs(actual - stored_create_time) < 1.0
+        return zombie.same_process(
+            fallback_pid,
+            stored_create_time,
+            tolerance=RECORDED_START_TOLERANCE_SECONDS,
+            unknown=False,
+        )
 
     def _owner_backend_alive(
         self, owner_pid: int, owner_create_time: float | None
@@ -357,27 +365,25 @@ class ProcessCleanup:
             # session began — they belong to the current run, not a previous one.
             safe_pids: set[int] = set()
             for pid in pids_to_kill:
-                try:
-                    pid_create_time = psutil.Process(pid).create_time()
-                    if pid_create_time < self._init_time:
-                        safe_pids.add(pid)
-                    else:
-                        self._skip_note("recovery", f"PID {pid}", instance_id, late)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass  # gone or inaccessible — skip conservatively
+                pid_create_time = zombie.create_time(pid)
+                if pid_create_time is None:
+                    continue  # gone or inaccessible — skip conservatively
+                if pid_create_time < self._init_time:
+                    safe_pids.add(pid)
+                else:
+                    self._skip_note("recovery", f"PID {pid}", instance_id, late)
             pids_to_kill = safe_pids
 
             if not pids_to_kill and isinstance(fallback_pid, int):
                 # Use the stored PID only if it predates this session and
                 # the identity check passes (shared predicate).
                 if self._fallback_pid_identity_ok(fallback_pid, stored_create_time):
-                    try:
-                        if psutil.Process(fallback_pid).create_time() < self._init_time:
-                            pids_to_kill = {fallback_pid}
-                        else:
-                            self._skip_note("recovery", subject, instance_id, late)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                    started = zombie.create_time(fallback_pid)
+                    if started is not None and started < self._init_time:
+                        pids_to_kill = {fallback_pid}
+                    elif started is not None:
+                        self._skip_note("recovery", subject, instance_id, late)
+                    # else: gone or inaccessible since the identity check
                 else:
                     self._skip_note("recovery", subject, instance_id, recycled)
         elif not pids_to_kill and isinstance(fallback_pid, int):
@@ -418,7 +424,7 @@ class ProcessCleanup:
             other_id != skip_id
             and self._normalize_path(other.get("user_data_dir")) == normalized
             and isinstance(other.get("pid"), int)
-            and psutil.pid_exists(other["pid"])
+            and zombie.listed(other["pid"])
             for other_id, other in list(self.browser_processes.items())
         )
 
@@ -693,14 +699,7 @@ class ProcessCleanup:
                 return False
 
             pid = browser_process.pid
-            create_time = None
-            with contextlib.suppress(
-                psutil.NoSuchProcess,
-                psutil.AccessDenied,
-                psutil.ZombieProcess,
-                OSError,
-            ):
-                create_time = psutil.Process(pid).create_time()
+            create_time = zombie.create_time(pid)
             metadata = browser_pid_registry.new_entry(
                 pid,
                 create_time=create_time,
@@ -793,7 +792,7 @@ class ProcessCleanup:
         profile_pids = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
         if profile_pids:
             return False
-        if isinstance(pid, int) and psutil.pid_exists(pid):
+        if isinstance(pid, int) and zombie.listed(pid):
             return False
 
         active_profile_dirs = self._get_active_browser_profile_dirs()
@@ -827,7 +826,7 @@ class ProcessCleanup:
                 continue
 
             pid = metadata.get("pid")
-            if isinstance(pid, int) and psutil.pid_exists(pid):
+            if isinstance(pid, int) and zombie.listed(pid):
                 continue
 
             cleaned = self._cleanup_profile_for_metadata(instance_id, metadata)
@@ -864,7 +863,7 @@ class ProcessCleanup:
         — ``reap_guard`` carries that rule and names what it costs (F-918).
         """
         try:
-            if not psutil.pid_exists(pid):
+            if not zombie.listed(pid):
                 debug_logger.log_info(
                     "process_cleanup",
                     "kill_process",
