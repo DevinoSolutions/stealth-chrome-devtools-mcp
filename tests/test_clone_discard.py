@@ -208,8 +208,13 @@ class TestALockedFileDoesNotStrandTheProfile:
             assert profile_seed.is_auto(directory), (
                 "the husk lost its marker, so no later sweep can tell it is a clone"
             )
+            # `older_than=-60`, not 0: the failed delete just touched the directory,
+            # and on Python < 3.13 (Windows) `time.time()` ticks every ~15 ms while
+            # file mtimes do not, so a cutoff of "now" can sit BEFORE a mtime made
+            # a millisecond ago (it failed the py3.11 CI cell, passed everywhere
+            # else). The pin is "a husk with a marker is still selectable".
             assert directory in clone_stale.stale_clones(
-                tmp_path, lambda _p: False, older_than=0
+                tmp_path, lambda _p: False, older_than=-60
             )
 
         assert clone_trash.discard(directory) is True

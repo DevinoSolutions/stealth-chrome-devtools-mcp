@@ -624,7 +624,14 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
     MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
     def _seed(
-        self, sessions, name, *, auto_clean, mtime, source_kind="master-snapshot"
+        self,
+        sessions,
+        name,
+        *,
+        auto_clean,
+        mtime,
+        source_kind="master-snapshot",
+        created_at="2026-01-01T00:00:00Z",
     ):
         # The PRE-F-896 source kind, on purpose. This writes a marker as it
         # exists on disk today for every profile created before this release,
@@ -640,7 +647,7 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
         marker = {
             "source": "master",
             "source_kind": source_kind,
-            "created_at": "2026-01-01T00:00:00Z",
+            "created_at": created_at,
         }
         if auto_clean is not None:  # legacy markers omit the flag
             marker["auto_clean"] = auto_clean
@@ -661,8 +668,17 @@ class TestOverCapSweepPreservesLiveAndLegacyProfiles:
         legacy = self._seed(sessions, "acme-payroll", auto_clean=None, mtime=1_000)
         # A genuinely idle, disposable auto-clone (modern marker) — the only dir
         # the sweep is allowed to reclaim. Oldest, so first by eviction ordering.
+        # Created just now (T-5968): a clone unused for 2 h is taken by the stale
+        # reaper the spawn below runs first (`clone_stale`, its own tests), which
+        # would leave the cap sweep nothing to evict. This test is about the CAP
+        # sweep, so the clone is idle but not stale; `mtime=500` still makes it
+        # the oldest by the cap sweep's ordering.
         idle_auto = self._seed(
-            sessions, "stealth-idle-clone", auto_clean=True, mtime=500
+            sessions,
+            "stealth-idle-clone",
+            auto_clean=True,
+            mtime=500,
+            created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         )
 
         master_inst = await spawn(headless=True, **_sandbox_kwargs())
