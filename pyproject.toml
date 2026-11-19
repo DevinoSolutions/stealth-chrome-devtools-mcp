@@ -99,13 +99,14 @@ test = [
 ]
 dev = [
     "ruff==0.17.5",
-    "ty==0.0.99",
+    "ty==0.0.104",
     "vulture==2.16",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: tests that spawn real browsers (need Chrome installed)",
     "characterization: pins CURRENT observable behavior (quirks/known bugs included) so an intended M5a/M4/M5b change surfaces as a failing test to update deliberately",
@@ -494,17 +495,18 @@ exclude = [
 python-version = "3.11"
 
 [tool.ty.rules]
-# unresolved-import: 56 violations from embedded/ bare-import convention
+# import-not-found (was unresolved-import): 56 violations from embedded/ bare-import convention
 # (F-701 packageization, plan_M4ph1). Structural, not fixable without plan.
-unresolved-import = "ignore"
+import-not-found = "ignore"
 # Pre-typing modules use bare dict/list/Optional (plan_M4ph1 annotation surface)
 missing-type-argument = "warn"
 invalid-parameter-default = "warn"
 # Pre-typing codebase: nodriver API type mismatches, platform-specific attrs.
 # Downgraded to warn so ty gate passes; new modules must be error-free.
 invalid-argument-type = "warn"
-invalid-return-type = "warn"
-unresolved-attribute = "warn"
+invalid-explicit-return = "warn"
+missing-attribute = "warn"
+missing-union-attribute = "warn"
 invalid-assignment = "warn"
 possibly-unresolved-reference = "warn"
 
