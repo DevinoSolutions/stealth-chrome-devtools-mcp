@@ -17,6 +17,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     proactor_accept,
     proactor_spawn,
     proactor_teardown,
+    vault_mode,
     vault_routes,
 )
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
@@ -289,13 +290,18 @@ if DEBUG_LOGGING_ENABLED:
 
 async def _refuse_sealed_resource(instance_id: str) -> None:
     """A ``browser://`` resource reads the instance's stored tab; refuse it when a
-    vault login (T-19366) has sealed that tab."""
+    vault login (T-19366) has sealed that tab, or, with a vault, when that tab is a
+    hidden browser page a person left current (audit 7 F1)."""
     if login_seal.sealing(instance_id):
         tab = await rt.browser_manager.get_tab(instance_id)
         if tab is not None and login_seal.is_sealed(
             instance_id, str(tab.target.target_id)
         ):
             raise ToolError(login_seal.REFUSAL)
+    elif login_seal.any_sealing() and vault_mode.active():
+        tab = await rt.browser_manager.get_tab(instance_id)
+        if tab is not None:
+            login_seal.refuse_current_tab(instance_id, str(tab.target.target_id))
 
 
 @mcp.resource("browser://{instance_id}/state")

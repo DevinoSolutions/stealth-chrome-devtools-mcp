@@ -37,7 +37,12 @@ import inspect
 import sys
 from typing import TYPE_CHECKING
 
-from stealth_chrome_devtools_mcp.embedded import backend_client, paint_hold, tab_open
+from stealth_chrome_devtools_mcp.embedded import (
+    backend_client,
+    login_seal,
+    paint_hold,
+    tab_open,
+)
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
     ToolError,
@@ -137,6 +142,8 @@ async def _resolve(browser_manager: BrowserManager, instance_id: str) -> Tab | N
     wanted = requested or (_bound.get((who, instance_id)) if who else None)
     if wanted is None:
         tab = await browser_manager.get_tab(instance_id)
+        if tab is not None:
+            login_seal.refuse_current_tab(instance_id, _id(tab))
         if tab is not None and who is not None:
             if _holders(instance_id, _id(tab), who):
                 raise ToolError(
@@ -152,6 +159,7 @@ async def _resolve(browser_manager: BrowserManager, instance_id: str) -> Tab | N
         return None
     tab = await _open(browser, wanted)
     if tab is not None:
+        login_seal.refuse_current_tab(instance_id, _id(tab))
         return tab
     if requested:
         raise ToolError(
