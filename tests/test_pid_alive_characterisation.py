@@ -16,6 +16,9 @@ where none of them can exist.
 from __future__ import annotations
 
 import errno
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -135,6 +138,9 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> list[_Process]:
     monkeypatch.setattr(browser_cmdline.Path, "readlink", readlink)
     monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", True)
     monkeypatch.setattr(profile_lock, "_signal", kernel)
+    monkeypatch.setattr(zombie, "_EXE_WITNESS", world.linux)
+    monkeypatch.setattr(zombie, "_SIGNAL_ASKS", True)
+    monkeypatch.setattr(zombie, "_signal", kernel)
     return built
 
 
@@ -481,3 +487,262 @@ def test_a_reap_of_an_unlisted_pid_is_already_done(monkeypatch):
     install(monkeypatch, World(listed=False, ctor=psutil.NoSuchProcess(PID)))
 
     assert _cleanup({})._kill_process_by_pid(PID, "x") is True
+
+
+# ===========================================================================
+# THE ONE HOME (T-19642): ``zombie.alive`` / ``same_process`` / ``create_time``
+# ===========================================================================
+#
+# Same worlds, one function. Each row is (unknown=True, unknown=False): what the
+# two directions a caller may ask for answer. Compare with ``ALIVE_TABLE`` above:
+# the rows that differ from the readers they replace are argued in the commit
+# that migrates the caller each one moves.
+
+NEW_ALIVE = {
+    "a live process": (World(), (True, True)),
+    "dead: not listed, kernel agrees": (
+        World(listed=False, ctor=psutil.NoSuchProcess(PID)),
+        (False, False),
+    ),
+    "not listed by psutil, kernel says it exists": (
+        World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
+        (True, True),
+    ),
+    "a zombie": (
+        World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+        (False, False),
+    ),
+    "a zombie that raises ZombieProcess when asked its status": (
+        World(status=psutil.ZombieProcess(PID)),
+        (False, False),
+    ),
+    "listed, but psutil.Process() is AccessDenied": (
+        World(ctor=psutil.AccessDenied(PID)),
+        (True, False),
+    ),
+    "listed, status refused (AccessDenied)": (
+        World(status=psutil.AccessDenied(PID)),
+        (True, False),
+    ),
+    # The command-line read can only convict: not reading it is "not shown gone".
+    "listed, argv refused (AccessDenied)": (
+        World(cmdline=psutil.AccessDenied(PID)),
+        (True, True),
+    ),
+    "pid_exists itself refused (AccessDenied)": (
+        World(listed=psutil.AccessDenied(PID)),
+        (True, False),
+    ),
+    "pid_exists raises OverflowError": (
+        World(listed=OverflowError("too large")),
+        (True, False),
+    ),
+    "exec window: empty argv, executable readable": (
+        World(cmdline=(), exe=READABLE),
+        (True, True),
+    ),
+    "empty argv, executable unreadable for permission": (
+        World(cmdline=(), exe=UNREADABLE),
+        (True, True),
+    ),
+    "empty argv, executable read fails another way": (
+        World(cmdline=(), exe=OSError(errno.EIO, "io")),
+        (True, True),
+    ),
+    "tearing down: empty argv, executable gone": (
+        World(cmdline=(), exe=GONE),
+        (False, False),
+    ),
+    "tearing down: empty argv, ESRCH on the executable": (
+        World(cmdline=(), exe=NOT_THERE),
+        (False, False),
+    ),
+    "empty argv, executable gone, but not Linux": (
+        World(cmdline=(), exe=GONE, linux=False),
+        (True, True),
+    ),
+    "an argv outranks an unreadable executable": (World(exe=GONE), (True, True)),
+}
+
+
+@pytest.mark.parametrize("name", NEW_ALIVE)
+def test_alive_answers_each_world_in_both_directions(monkeypatch, name):
+    world, (when_unknown_is_alive, when_unknown_is_dead) = NEW_ALIVE[name]
+    install(monkeypatch, world)
+
+    assert zombie.alive(PID, unknown=True) is when_unknown_is_alive, name
+    assert zombie.alive(PID, unknown=False) is when_unknown_is_dead, name
+
+
+@pytest.mark.parametrize("pid", [0, -1, None, True, False, "4242", 4242.0])
+def test_a_pid_that_names_no_process_is_dead_and_nothing_is_asked(monkeypatch, pid):
+    """``Process(None)`` is this process, ``os.kill(-1, 0)`` answers for everyone
+    and ``True`` is pid 1: none of them reaches psutil or the kernel."""
+    install(monkeypatch, World(kernel=None))
+
+    for unknown in (True, False):
+        assert zombie.alive(pid, unknown=unknown) is False
+        assert zombie.same_process(pid, T, unknown=unknown) is False
+    assert zombie.create_time(pid) is None
+    assert KERNEL_ASKED == []
+
+
+def test_a_pid_too_large_for_a_c_long_is_unknown_not_a_crash():
+    for unknown in (True, False):
+        assert zombie.alive(2**40, unknown=unknown) is unknown
+
+
+def test_this_very_process_is_alive_and_the_same_process_as_itself():
+    me = os.getpid()
+    started = zombie.create_time(me)
+    assert isinstance(started, float)
+    assert zombie.alive(me, unknown=True) is True
+    assert zombie.alive(me, unknown=False) is True
+    assert zombie.same_process(me, started, unknown=False) is True
+    assert zombie.same_process(me, started + 5.0, unknown=False) is False
+    assert zombie.listed(me) is True
+
+
+def test_a_reaped_child_is_dead_to_every_question():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=60)
+    if zombie.listed(child.pid):
+        pytest.skip("the pid was recycled in the instant after the child was reaped")
+
+    assert zombie.alive(child.pid, unknown=True) is False
+    assert zombie.alive(child.pid, unknown=False) is False
+    assert zombie.listed(child.pid) is False
+    assert zombie.create_time(child.pid) is None
+    assert zombie.same_process(child.pid, 1.0, unknown=True) is False
+
+
+IDENTITY = {
+    "same pid, same start": (World(created=T), T, 0.0, (True, True)),
+    "an exact reading is not 'close enough'": (
+        World(created=T + 1e-6),
+        T,
+        0.0,
+        (False, False),
+    ),
+    "start time 0.5 s apart, tolerance 0.5 (inclusive)": (
+        World(created=T + 0.5),
+        T,
+        0.5,
+        (True, True),
+    ),
+    "start time 0.51 s apart, tolerance 0.5": (
+        World(created=T + 0.51),
+        T,
+        0.5,
+        (False, False),
+    ),
+    "start time 2 s apart (a reused pid), tolerance 1.0": (
+        World(created=T + 2.0),
+        T,
+        1.0,
+        (False, False),
+    ),
+    "no start time on record, the pid is readable": (
+        World(created=T),
+        None,
+        0.0,
+        (True, True),
+    ),
+    "the pid is gone": (World(ctor=psutil.NoSuchProcess(PID)), T, 0.0, (False, False)),
+    "the pid is a zombie that cannot be opened": (
+        World(ctor=psutil.ZombieProcess(PID)),
+        T,
+        0.0,
+        (False, False),
+    ),
+    "the pid is AccessDenied": (
+        World(ctor=psutil.AccessDenied(PID)),
+        T,
+        0.0,
+        (True, False),
+    ),
+    "start time read refused (AccessDenied)": (
+        World(created=psutil.AccessDenied(PID)),
+        T,
+        0.0,
+        (True, False),
+    ),
+    "start time read fails with an OSError": (
+        World(created=OSError(errno.EIO, "io")),
+        T,
+        0.0,
+        (True, False),
+    ),
+    "a zombie whose start time is still readable": (
+        World(status=psutil.STATUS_ZOMBIE, created=T),
+        T,
+        0.0,
+        (True, True),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", IDENTITY)
+def test_same_process_answers_each_world_in_both_directions(monkeypatch, name):
+    world, recorded, tolerance, (when_true, when_false) = IDENTITY[name]
+    install(monkeypatch, world)
+
+    assert (
+        zombie.same_process(PID, recorded, tolerance=tolerance, unknown=True)
+        is when_true
+    )
+    assert (
+        zombie.same_process(PID, recorded, tolerance=tolerance, unknown=False)
+        is when_false
+    )
+
+
+def test_create_time_is_a_value_or_none_never_an_exception(monkeypatch):
+    install(monkeypatch, World(created=T))
+    assert zombie.create_time(PID) == T
+    for refused in (
+        psutil.AccessDenied(PID),
+        psutil.NoSuchProcess(PID),
+        psutil.ZombieProcess(PID),
+        psutil.Error("odd"),
+        OSError(errno.EIO, "io"),
+    ):
+        install(monkeypatch, World(created=refused))
+        assert zombie.create_time(PID) is None, repr(refused)
+
+
+@pytest.mark.parametrize(
+    ("world", "listed"),
+    [
+        pytest.param(World(), True, id="live"),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            True,
+            id="a zombie is listed",
+        ),
+        pytest.param(World(cmdline=(), exe=GONE), True, id="tearing down is listed"),
+        pytest.param(World(listed=False), False, id="not in the table"),
+    ],
+)
+def test_listed_is_the_process_table_and_nothing_else(monkeypatch, world, listed):
+    install(monkeypatch, world)
+    assert zombie.listed(PID) is listed
+
+
+def test_listed_raises_what_psutil_raises(monkeypatch):
+    install(monkeypatch, World(listed=psutil.AccessDenied(PID)))
+    with pytest.raises(psutil.AccessDenied):
+        zombie.listed(PID)
+
+
+@pytest.mark.parametrize(
+    ("running", "status", "answer"),
+    [
+        pytest.param(True, psutil.STATUS_RUNNING, True, id="running"),
+        pytest.param(False, psutil.STATUS_RUNNING, False, id="exited or recycled"),
+        pytest.param(True, psutil.STATUS_ZOMBIE, False, id="a zombie"),
+    ],
+)
+def test_running_is_the_held_process_form(monkeypatch, running, status, answer):
+    install(monkeypatch, World(running=running, status=status))
+    assert zombie.running(psutil.Process(PID)) is answer
