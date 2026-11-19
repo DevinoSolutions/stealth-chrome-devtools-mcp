@@ -489,7 +489,8 @@ def download_pin() -> dict[str, object] | None:
     extension, so a page can neither choose the folder (the guard sets it, and raw
     CDP is refused) nor a name that code loads by (``evil.pth``). When the folder
     cannot be made, or lies where ``path_confinement`` refuses a write, downloads
-    are DENIED instead: a pin that cannot be made safe is no pin."""
+    are DENIED instead: a pin that cannot be made safe is no pin. The deny is asked
+    again on the next pass; only a pin that was made is remembered."""
     if not active():
         return None
     folder = download_dir()
@@ -509,7 +510,10 @@ def download_pin() -> dict[str, object] | None:
             "eventsEnabled": False,
         }
     except (OSError, ToolError):
-        pin = {"behavior": "deny"}
+        # NOT cached (audit 7): a folder that could not be made may be makeable on the
+        # next pass (a disk that was full, a share that was not mounted yet), and a
+        # cached "deny" would hold every download of the process until a restart.
+        return {"behavior": "deny"}
     _pin_cache[key] = pin
     return pin
 

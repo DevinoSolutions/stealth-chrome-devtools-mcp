@@ -572,6 +572,20 @@ def test_a_folder_that_cannot_be_made_is_no_pin_at_all(mode_on, tmp_path, monkey
     assert vault_mode.download_pin() == {"behavior": "deny"}
 
 
+def test_a_denied_pin_is_asked_again_and_the_folder_is_used_once_it_can_be_made(
+    mode_on, tmp_path
+):
+    """A folder that could not be made (a full disk, a share not yet mounted) must
+    not hold every download of the process until a restart (audit 7)."""
+    blocker = tmp_path / "downloads"
+    blocker.write_text("a file where the folder goes", encoding="utf-8")
+    assert vault_mode.download_pin() == {"behavior": "deny"}
+    blocker.unlink()
+    pin = vault_mode.download_pin()
+    assert pin["behavior"] == "allowAndName"
+    assert pathlib.Path(pin["downloadPath"]).samefile(tmp_path / "downloads")
+
+
 def test_the_default_download_folder_is_outside_every_refused_place():
     """The real default, not the test's: ``~/Downloads/stealth-mcp-downloads`` passes
     the write rule on this machine (the rule's own answer, not a copy of it)."""
