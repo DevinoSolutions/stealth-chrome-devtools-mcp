@@ -3,8 +3,7 @@
 Verifies that:
 1. _with_cdp_timeout prevents infinite hangs on dead connections
 2. _clamp_timeout caps user-provided timeouts to MAX_TIMEOUT_MS (60s)
-3. NavigationOptions model rejects timeouts above the cap
-4. Real browser operations respect the timeout
+3. Real browser operations respect the timeout
 """
 
 import asyncio
@@ -15,10 +14,8 @@ from pathlib import Path
 
 import psutil
 import pytest
-from pydantic import ValidationError
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime
-from stealth_chrome_devtools_mcp.embedded.models import NavigationOptions
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.embedded.tool_runtime import (
     CDP_OPERATION_TIMEOUT,
@@ -349,30 +346,6 @@ class TestClampTimeout:
 
     def test_default_param_unused_when_value_provided(self):
         assert _clamp_timeout(5_000, default=30_000) == 5_000
-
-
-class TestNavigationOptionsTimeoutValidation:
-    """Verify that the NavigationOptions model rejects timeouts above the cap."""
-
-    def test_default_timeout_is_30s(self):
-        opts = NavigationOptions()
-        assert opts.timeout == 30_000
-
-    def test_valid_timeout_accepted(self):
-        opts = NavigationOptions(timeout=15_000)
-        assert opts.timeout == 15_000
-
-    def test_max_timeout_accepted(self):
-        opts = NavigationOptions(timeout=60_000)
-        assert opts.timeout == 60_000
-
-    def test_timeout_above_max_rejected(self):
-        with pytest.raises(ValidationError):
-            NavigationOptions(timeout=60_001)
-
-    def test_huge_timeout_rejected(self):
-        with pytest.raises(ValidationError):
-            NavigationOptions(timeout=300_000)
 
 
 # ---------------------------------------------------------------------------

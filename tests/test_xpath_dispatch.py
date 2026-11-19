@@ -24,7 +24,6 @@ from stealth_chrome_devtools_mcp.embedded import click_target
 from stealth_chrome_devtools_mcp.embedded.dom_handler import DOMHandler
 from stealth_chrome_devtools_mcp.embedded.element_resolution import (
     _MAX_RESOLVES,
-    is_xpath,
     query_selector_all,
     resolve_element,
     resolve_elements,
@@ -166,12 +165,11 @@ CSS_SELECTORS = [
 
 @pytest.mark.parametrize("selector", XPATH_SELECTORS)
 def test_xpath_selectors_are_detected_as_xpath(selector):
-    assert is_xpath(selector) is True
+    assert xpath_expression(selector) is not None
 
 
 @pytest.mark.parametrize("selector", CSS_SELECTORS)
 def test_css_selectors_are_not_detected_as_xpath(selector):
-    assert is_xpath(selector) is False
     assert xpath_expression(selector) is None
 
 
@@ -200,8 +198,8 @@ def test_a_prefix_with_no_expression_is_a_tool_error():
 def test_a_relative_dot_path_stays_css():
     # '.foo' is a class selector far more often than a relative XPath; the
     # explicit prefix is how a caller asks for the latter.
-    assert is_xpath("./div") is False
-    assert is_xpath("xpath=./div") is True
+    assert xpath_expression("./div") is None
+    assert xpath_expression("xpath=./div") == "./div"
 
 
 # --- (a) an XPath resolves through the shared path --------------------------

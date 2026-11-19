@@ -27,7 +27,6 @@ from stealth_chrome_devtools_mcp.embedded.captcha_clicker import (
     RETRY_AFTER,
     CaptchaMonitor,
     classify,
-    click_captcha,
     scan,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
@@ -564,6 +563,17 @@ class TestScan:
 
         with pytest.raises(TimeoutError):
             await scan(Hung(frame()))
+
+
+async def click_captcha(tab, hit):
+    """What the monitor does for one ready hit: aim, press, record. The monitor
+    interleaves its attempt counters between the two steps, so the sequence is
+    spelled here, over the real ``aim``/``press``/``_entry``, for the click tests."""
+    point = await captcha_clicker.aim(tab, hit)
+    if point is None:
+        return None
+    await captcha_clicker.press(tab, *point)
+    return captcha_clicker._entry(hit, *point)
 
 
 async def hit_on(tab):

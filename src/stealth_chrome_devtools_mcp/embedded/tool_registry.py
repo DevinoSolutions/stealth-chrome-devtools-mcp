@@ -78,11 +78,6 @@ def _surrogate_safe_returns(func):
     return sync_wrapper
 
 
-def is_section_enabled(section: str) -> bool:
-    """Check if a tool section is enabled."""
-    return section not in DISABLED_SECTIONS
-
-
 class ToolRegistry:
     """Owns the ``section_tool`` decorator + section gating over a FastMCP app.
 

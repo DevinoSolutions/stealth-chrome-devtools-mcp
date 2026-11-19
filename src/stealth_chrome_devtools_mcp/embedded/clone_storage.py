@@ -299,17 +299,6 @@ def _enforce_named_profile_trim_in(
     return freed_total
 
 
-def enforce_session_storage(reason: str = "") -> None:
-    """Bound clone-root storage: ONE sweep, :func:`run_storage_sweep`, with the
-    root and caps read now. Best-effort; never raises into a spawn or startup."""
-    run_storage_sweep(
-        clone_root_dir(),
-        clone_storage_cap_bytes(),
-        browser_session_storage_cap_bytes(),
-        reason,
-    )
-
-
 # Strong refs to in-flight housekeeping sweeps so the event loop cannot GC them
 # mid-run; the done-callback drops each when it finishes.
 _BACKGROUND_SWEEPS: set = set()

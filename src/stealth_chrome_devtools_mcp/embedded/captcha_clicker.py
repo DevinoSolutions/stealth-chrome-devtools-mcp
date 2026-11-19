@@ -536,16 +536,6 @@ def _entry(hit: CaptchaHit, cx: float, cy: float) -> dict[str, object]:
     return {"type": hit.type, "clicked_at": {"x": cx, "y": cy}, "src": hit.src}
 
 
-async def click_captcha(tab: Tab, hit: CaptchaHit) -> dict[str, object] | None:
-    """Click ``hit``'s checkbox, or return None (and send nothing but the hit
-    test) when something else covers it."""
-    point = await aim(tab, hit)
-    if point is None:
-        return None
-    await press(tab, *point)
-    return _entry(hit, *point)
-
-
 def _tab_key(tab: Tab) -> str:
     target = getattr(tab, "target", None)
     return str(getattr(target, "target_id", None) or id(tab))

@@ -12,7 +12,6 @@ app:
   as per-parameter schema text (F-946);
 * ``apply_disabled_sections`` unregisters exactly the disabled sections' tools
   via ``mcp.local_provider.remove_tool`` (and swallows an already-removed tool);
-* ``is_section_enabled`` reflects ``DISABLED_SECTIONS``;
 * a count-94 tripwire mirroring M6's ``test_tool_dispatch`` (the live registry
   and the section map agree at 94).
 
@@ -27,10 +26,7 @@ from types import SimpleNamespace
 from fakes import live_tools
 from stealth_chrome_devtools_mcp.embedded import server, tab_binding, tool_registry
 from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
-from stealth_chrome_devtools_mcp.embedded.tool_registry import (
-    ToolRegistry,
-    is_section_enabled,
-)
+from stealth_chrome_devtools_mcp.embedded.tool_registry import ToolRegistry
 
 
 class _FakeMcp:
@@ -179,13 +175,6 @@ class TestApplyDisabledSections:
 
         # A tool already removed by another section policy must not propagate.
         ToolRegistry(_RaisingMcp()).apply_disabled_sections()
-
-
-class TestIsSectionEnabled:
-    def test_reflects_disabled_sections(self, monkeypatch):
-        monkeypatch.setattr(tool_registry, "DISABLED_SECTIONS", {"tabs"})
-        assert is_section_enabled("tabs") is False
-        assert is_section_enabled("cookies-storage") is True
 
 
 class TestCountTripwire:

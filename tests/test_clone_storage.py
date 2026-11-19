@@ -29,12 +29,11 @@ from fakes import FakeBrowserManager, pretend_display_context
 from stealth_chrome_devtools_mcp.embedded import clone_storage, server
 from stealth_chrome_devtools_mcp.settings import Settings, get_settings
 
-# The public API surface (plan §2.B): these 12 lose the leading underscore.
+# The public API surface (plan §2.B): these 11 lose the leading underscore.
 PUBLIC_API = (
     "resolve_profile_selection",
     "run_storage_sweep",
     "spawn_background_sweep",
-    "enforce_session_storage",
     "clone_is_auto",
     "clone_is_named",
     "default_session_root",

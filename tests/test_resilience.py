@@ -285,7 +285,7 @@ async def _assert_close_leaves_nothing(iid: str) -> None:
     # True — the same reason the crashed-browser pin below spells this out.
     assert isinstance(value, dict), f"close_instance answered {value!r}"
     assert value["closed"] is True, value
-    assert iid not in process_cleanup.get_tracked_processes()
+    assert iid not in process_cleanup.browser_processes
     assert await _await_pids_gone(tree, REAP_TIMEOUT) == [], (
         f"close left orphaned chrome process(es) from {tree}"
     )
