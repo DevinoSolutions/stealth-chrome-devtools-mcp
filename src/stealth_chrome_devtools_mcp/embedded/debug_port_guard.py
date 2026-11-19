@@ -590,7 +590,8 @@ class _Guard:
         Outside the mode this is one ``stat`` and, when a pin was set before, one
         ``Browser.setDownloadBehavior`` back to ``default``. Inside it: the pin, then
         every open target is judged again, so a ``file:`` page that was already open
-        when the vault appeared is barred and blanked, not left readable."""
+        when the vault appeared is barred and blanked, not left readable. The judging
+        happens whether or not the pin succeeded."""
         pin = await asyncio.to_thread(vault_mode.download_pin)
         if pin is None:
             if self.pinned:
@@ -599,8 +600,20 @@ class _Guard:
                 )
                 self.pinned = False
             return
-        await self.command("Browser.setDownloadBehavior", pin)
+        try:
+            await self.command("Browser.setDownloadBehavior", pin)
+        except Exception:
+            # The pin's own failure is handled by the caller (``pin_failed``); the
+            # targets are still judged again, so a ``file:`` or WebUI page is not
+            # left unmarked because Chrome refused the pin.
+            with contextlib.suppress(Exception):
+                await self._rejudge()
+            raise
         self.pinned = True
+        await self._rejudge()
+
+    async def _rejudge(self) -> None:
+        """Judge every open target again (one ``Target.getTargets``)."""
         found = await self.command("Target.getTargets")
         for info in cast("list[Json]", found.get("targetInfos", [])):
             self._judge(info)
@@ -667,7 +680,12 @@ class _Guard:
         except (asyncio.CancelledError, Exception):  # noqa: BLE001  PERMANENT(the browser closing ends the guard)
             _logger.debug("debug port guard for %s ended", self.port)
         finally:
-            _PORTS.discard(self.port)
+            # A guard that a NEWER guard for the same port replaced (a failed attach
+            # leaves its guard running; the next attach starts another) must not
+            # undo what the newer one set: its port entry and the marks it also made.
+            superseded = _GUARDS.get(self.port) not in (None, self)
+            if not superseded:
+                _PORTS.discard(self.port)
             if _GUARDS.get(self.port) is self:
                 del _GUARDS[self.port]
             # Nothing is un-barred here: a guard that is gone is exactly when a
@@ -680,7 +698,7 @@ class _Guard:
             # backend. Gone means: ``close_instance`` closed it (``is_closed``), or the
             # port refuses a connection. A connection that merely dropped (the port
             # still answers) keeps them: fail closed.
-            if self.marked and await self._browser_is_gone():
+            if not superseded and self.marked and await self._browser_is_gone():
                 for target in list(self.marked):
                     login_seal.mark_internal(target, False)
                     login_seal.mark_webui(target, False)

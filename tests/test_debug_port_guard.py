@@ -1545,6 +1545,55 @@ async def test_a_browser_nobody_closed_whose_port_answers_keeps_its_marks(
     assert "W1" in login_seal._webui
 
 
+async def test_an_older_guard_ending_leaves_what_a_newer_guard_of_the_port_set(
+    endpoint, mode_on
+):
+    """A failed attach leaves its guard running and closes its ``Browser``; the next
+    attach starts another guard on the same port. When the older one ends it must not
+    drop the marks the newer one also made, nor the port's ``_PORTS`` entry."""
+    port = _endpoint_port(endpoint)
+    older = debug_port_guard._Guard(endpoint.url, port)
+    await older.start()
+    older.marked.add("W1")  # it marked the same page
+    older.browser = SimpleNamespace()
+    tab_open.mark_closed(older.browser)  # the failed attach closed that Browser
+    older_run = asyncio.create_task(older.run())
+    newer = debug_port_guard._Guard(endpoint.url, port)
+    await newer.start()
+    debug_port_guard._GUARDS[port] = newer
+    debug_port_guard._PORTS.add(port)
+    try:
+        await endpoint.emit(
+            "Target.targetInfoChanged", _target("W1", "chrome://settings")
+        )
+        await _wait_until(lambda: "W1" in login_seal._webui, "never marked")
+        older.reader.cancel()  # the older guard's socket ends
+        await asyncio.wait_for(older_run, 10)
+        assert "W1" in login_seal._webui
+        assert login_seal.is_sealed("any", "W1")
+        assert port in debug_port_guard._PORTS
+        assert debug_port_guard._GUARDS[port] is newer
+    finally:
+        debug_port_guard._GUARDS.pop(port, None)
+        debug_port_guard._PORTS.discard(port)
+        await newer.stop()
+
+
+async def test_targets_are_judged_again_even_when_chrome_refuses_the_pin(
+    endpoint, mode_on
+):
+    """The pin's failure is the pass's failure (``pin_failed``), but a ``chrome://``
+    page that is open must still be marked in that pass."""
+    endpoint.page_url = "chrome://settings"
+    guard = await _guard(endpoint)
+    endpoint.refuse_pin = True  # after the start, which pins too
+    login_seal._webui.clear()
+    with pytest.raises(RuntimeError):
+        await guard.keep()
+    assert login_seal.is_sealed("any", "T1")
+    await guard.stop()
+
+
 def test_a_port_that_refuses_is_gone_and_a_port_that_answers_is_not():
     import socket
 
