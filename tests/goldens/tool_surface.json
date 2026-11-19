@@ -465,7 +465,7 @@
     "tags": []
   },
   "create_dynamic_hook": {
-    "description": "Create a new dynamic hook with AI-generated Python function.\n\nThis is the new powerful hook system that allows AI to write custom Python functions\nthat process network requests in real-time with no pending state.\n\nThe function_code and any requirements custom_condition run as Python in the\nbackend process on the host, through `exec` and `eval`. The trimmed builtins they\nare given are a convenience, not a sandbox: they are not a security boundary, and\nthe code can reach the host (for example through the `fnmatch` module it is given).\n\nArgs:\n    name (str): Human-readable hook name\n    requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)\n    function_code (str): Python function code that processes requests (must define process_request(request))\n    instance_ids (Optional[List[str]]): Browser instances to apply hook to (all if None)\n    priority (int): Hook priority (lower = higher priority)\n\nReturns:\n    Dict[str, Any]: Hook creation result with hook_id\n\nExample function_code:\n    ```python\n    def process_request(request):\n        if \"example.com\" in request[\"url\"]:\n            return HookAction(action=\"redirect\", url=\"https://httpbin.org/get\")\n        return HookAction(action=\"continue\")\n    ```",
+    "description": "Create a new dynamic hook with AI-generated Python function.\n\nThis is the new powerful hook system that allows AI to write custom Python functions\nthat process network requests in real-time with no pending state.\n\nThe function_code and any requirements custom_condition run as Python in the\nbackend process on the host, through `exec` and `eval`. The trimmed builtins they\nare given are a convenience, not a sandbox: they are not a security boundary, and\nthe code can reach the host (for example through the `fnmatch` module it is given).\n\nLogin vault: because that code can read everything the backend holds, this tool\nis refused while the login vault is unlocked, and once it has run the vault\ncannot be unlocked again until the backend is restarted. Use\n`create_simple_dynamic_hook` (a fixed template, no Python of yours) when you\nonly need to block, redirect, add headers or log.\n\nArgs:\n    name (str): Human-readable hook name\n    requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)\n    function_code (str): Python function code that processes requests (must define process_request(request))\n    instance_ids (Optional[List[str]]): Browser instances to apply hook to (all if None)\n    priority (int): Hook priority (lower = higher priority)\n\nReturns:\n    Dict[str, Any]: Hook creation result with hook_id\n\nExample function_code:\n    ```python\n    def process_request(request):\n        if \"example.com\" in request[\"url\"]:\n            return HookAction(action=\"redirect\", url=\"https://httpbin.org/get\")\n        return HookAction(action=\"continue\")\n    ```",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -553,7 +553,7 @@
     "tags": []
   },
   "create_python_binding": {
-    "description": "Create a binding that allows JavaScript to call Python functions.\n\nThe Python code runs with `exec` and full builtins inside the backend process\non the host. There is no sandbox: the function can read files and start\nprograms like any code this process runs. The binding answers only script in\nthe page context that was current on this tab when it was created, and is\ndropped when that page navigates or reloads. Script in that page can still\ncall it, including same-origin frames, so create one only on a page you trust.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    binding_name (str): Name for the binding.\n    python_code (str): Python function code (as string).\n\nReturns:\n    Dict[str, Any]: Binding creation result.",
+    "description": "Create a binding that allows JavaScript to call Python functions.\n\nThe Python code runs with `exec` and full builtins inside the backend process\non the host. There is no sandbox: the function can read files and start\nprograms like any code this process runs. Because it can read everything the\nbackend holds, this tool is refused while the login vault is unlocked, and once\nit has run the vault cannot be unlocked again until the backend is restarted.\nThe binding answers only script in\nthe page context that was current on this tab when it was created, and is\ndropped when that page navigates or reloads. Script in that page can still\ncall it, including same-origin frames, so create one only on a page you trust.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n    binding_name (str): Name for the binding.\n    python_code (str): Python function code (as string).\n\nReturns:\n    Dict[str, Any]: Binding creation result.",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2565,7 +2565,7 @@
     "tags": []
   },
   "go_back": {
-    "description": "Navigate back in history.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
+    "description": "Navigate back in history. Refused while a vault `login` runs in this browser.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2605,7 +2605,7 @@
     "tags": []
   },
   "go_forward": {
-    "description": "Navigate forward in history.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
+    "description": "Navigate forward in history. Refused while a vault `login` runs in this browser.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    tab_id (Optional[str]): The tab to act on (an id from new_tab, spawn_browser or list_tabs). Default: this session's own tab — the last one it opened or switched to — never another session's.\n\nReturns:\n    bool: True. Landing on a Chrome error page raises instead (F-833).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2972,7 +2972,7 @@
     "tags": []
   },
   "login": {
-    "description": "Sign a stored login in to a browser instance's profile.\n\nThe backend does it in a tab of its own that no tool can read or touch while\nit runs: it opens the login page, checks the page's host is one this login\nmay be used on, types the username and password, and closes the tab. The\npassword never reaches you, a log or a network record; you get an outcome.\nThe session is saved in the profile, so reload your own tab afterwards.\nUse list_logins for the labels. A login that fails once is frozen so it is\nnot retried into an account lockout; a person unfreezes it.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    label (str): The login's label, from list_logins.\n\nReturns:\n    Dict[str, str]: outcome, label and detail. outcome is one of:\n        logged_in (signed in), already_logged_in (the page needed no\n        sign-in), needs_totp (a one-time code is asked for, which this tool\n        cannot give), needs_user (a step it cannot take: a passkey, a device\n        prompt, a puzzle, an unknown form), rejected (the password was\n        refused and the login is now frozen), use_provider (a \"sign in with\"\n        login: the provider account is signed in, now click the site's own\n        provider button).",
+    "description": "Sign a stored login in to a browser instance's profile.\n\nThe backend does it in a tab of its own that no tool can read or touch while\nit runs: it opens the login page, checks the page's host is one this login\nmay be used on, types the username and password, and closes the tab. The\npassword never reaches you, a log or a network record; you get an outcome.\nThe session is saved in the profile, so reload your own tab afterwards.\nUse list_logins for the labels. A login that fails once is frozen so it is\nnot retried into an account lockout; a person unfreezes it.\n\nWhile it runs, the browser is yours only in part. Every browser-internal page\n(chrome://, chrome-extension://, devtools:// and the like) is hidden from\nlist_tabs and refused by every tool, and navigate and new_tab refuse to load\none; about:blank and the new-tab page still work. go_back and go_forward are\nrefused. Any DevTools window open in that browser is CLOSED, and the result\nsays how many (closed_devtools_windows). A site that keeps showing its login\nform after the sign-in reads needs_user: only a form that comes back in a new\npage, or a new error message, counts as a refused password.\n\nArgs:\n    instance_id (str): Browser instance ID.\n    label (str): The login's label, from list_logins.\n\nReturns:\n    Dict[str, str | int]: outcome, label, detail and\n        closed_devtools_windows (how many open DevTools windows the login\n        closed in this browser). outcome is one of:\n        logged_in (signed in), already_logged_in (the page needed no\n        sign-in), needs_totp (a one-time code is asked for, which this tool\n        cannot give), needs_user (a step it cannot take: a passkey, a device\n        prompt, a puzzle, an unknown form), rejected (the password was\n        refused and the login is now frozen), use_provider (a \"sign in with\"\n        login: the provider account is signed in, now click the site's own\n        provider button).",
     "enabled": true,
     "input_schema": {
       "additionalProperties": false,
@@ -2992,7 +2992,14 @@
     },
     "output_schema": {
       "additionalProperties": {
-        "type": "string"
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          }
+        ]
       },
       "type": "object"
     },
