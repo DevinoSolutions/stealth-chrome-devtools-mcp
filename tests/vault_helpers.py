@@ -87,3 +87,13 @@ def reset():
     login_seal._holds.clear()
     login_seal._barred.clear()
     login_seal._internal.clear()
+    login_seal._webui.clear()
+
+
+def sealed_state():
+    """What ``login_seal`` still holds, for the message of an ``any_sealing`` assert
+    (a red CI run then names the set instead of saying ``assert not True``)."""
+    names = ("_depth", "_unclosed", "_holds", "_barred", "_internal", "_webui")
+    return {
+        name: getattr(login_seal, name) for name in names if getattr(login_seal, name)
+    }

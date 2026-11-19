@@ -544,3 +544,24 @@ def test_keep_seals_a_tab_for_good():
     login_seal.keep(INSTANCE, "T-stray")
     assert login_seal.is_sealed(INSTANCE, "T-stray")
     assert login_seal.any_sealing()
+
+
+def test_the_test_reset_empties_every_collection_login_seal_keeps():
+    """Round 7 found ``_webui`` was missing from the reset: a mark left by one real
+    browser kept ``any_sealing()`` true for every later test in the process. Any
+    collection added to ``login_seal`` later must be cleared by it too."""
+    from vault_helpers import reset
+
+    collections = {
+        name: value
+        for name, value in vars(login_seal).items()
+        if isinstance(value, (dict, set)) and not name.startswith("__")
+    }
+    assert {"_depth", "_tabs", "_barred", "_internal", "_webui"} <= set(collections)
+    for name, value in collections.items():
+        if isinstance(value, dict):
+            value["x"] = {"y"} if name in {"_tabs", "_unclosed"} else 1
+        else:
+            value.add("x")
+    reset()
+    assert {name: value for name, value in collections.items() if value} == {}

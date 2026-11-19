@@ -56,6 +56,7 @@ from vault_helpers import (
     LOOPBACK_ENV,
     password_entry,
     reset,
+    sealed_state,
     spawn_before_the_vault,
     unlocked_vault,
 )
@@ -312,4 +313,4 @@ async def test_no_password_reaches_a_model_a_log_or_an_error_report(
     assert secret_registry.MASK in collected["get_debug_view"]
     assert secret_registry.MASK in collected["backend log file"]
     assert secret_registry.MASK in collected["sentry event"]
-    assert not login_seal.any_sealing()
+    assert not login_seal.any_sealing(), sealed_state()
