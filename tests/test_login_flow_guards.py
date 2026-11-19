@@ -469,3 +469,118 @@ def test_frame_url_reads_the_named_frame_and_the_main_frame_by_default():
     assert login_flow._frame_url(tree, None) == "https://host.example/"
     assert login_flow._frame_url(tree, "CHILD") == "https://accounts.google.com/f"
     assert login_flow._frame_url(tree, "NOPE") == ""
+
+
+# ---------------------------------------- the login's own tab in a headed window
+
+
+class _LoginTab:
+    """A tab that records the CDP commands sent to it, by method."""
+
+    def __init__(self):
+        self.sent = []
+        self.target = SimpleNamespace(target_id="LOGIN-TAB", type_="page")
+
+    async def send(self, command):
+        frame = next(command)
+        self.sent.append(frame["method"])
+        try:
+            command.send(None)
+        except StopIteration:
+            pass
+
+
+def _open_world(monkeypatch, tab):
+    from stealth_chrome_devtools_mcp.embedded import debug_port_guard, tab_open
+
+    async def clean(_browser):
+        return None
+
+    async def update(_browser):
+        return None
+
+    async def open_tab(_browser, url, *, background=False):
+        assert background is True  # the login's own tab opens BEHIND the window's
+        return tab
+
+    monkeypatch.setattr(debug_port_guard, "verify_clean", clean)
+    monkeypatch.setattr(tab_open, "update_targets", update)
+    monkeypatch.setattr(tab_open, "open_tab", open_tab)
+    monkeypatch.setattr(tab_open, "mark_internal", lambda *_a: None)
+
+
+async def test_the_login_tab_is_given_focus_emulation_before_anything_is_typed(
+    monkeypatch,
+):
+    """Headed Chrome drops the keys typed into a tab that is hidden and unfocused (both
+    fields stayed empty). The tab is never adopted, so the one place it can be armed
+    is where it is opened, and it must be sealed first."""
+    tab = _LoginTab()
+    _open_world(monkeypatch, tab)
+    login_seal.begin("inst-1")
+    try:
+        opened = await login_flow._open_sealed_tab(SimpleNamespace(tabs=[]), "inst-1")
+        assert opened is tab
+        assert login_seal.is_sealed("inst-1", "LOGIN-TAB")
+    finally:
+        login_seal.end("inst-1")
+    assert tab.sent == ["Emulation.setFocusEmulationEnabled"]
+
+
+async def test_a_refused_focus_emulation_does_not_fail_the_open(monkeypatch):
+    """Best effort, as everywhere else it is used: the login then fails toward
+    ``needs_user`` (the field did not take the text), never toward a leak."""
+    tab = _LoginTab()
+
+    async def refuse(_command):
+        raise RuntimeError("no")
+
+    tab.send = refuse
+    _open_world(monkeypatch, tab)
+    login_seal.begin("inst-1")
+    try:
+        opened = await login_flow._open_sealed_tab(SimpleNamespace(tabs=[]), "inst-1")
+        assert opened is tab
+        assert login_seal.is_sealed("inst-1", "LOGIN-TAB")
+    finally:
+        login_seal.end("inst-1")
+
+
+async def test_waiting_for_a_frame_is_bounded_and_never_raises(monkeypatch):
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    async def world(_tab, _frame):
+        return 1
+
+    class Never:
+        async def send(self, _command):
+            await __import__("asyncio").sleep(60)
+
+    monkeypatch.setattr(login_form, "_world", world)
+    monkeypatch.setattr(login_form, "FRAME_WAIT_S", 0.05)
+    await login_form.wait_for_frame(Never(), "F")  # returns, does not hang
+
+    async def no_world(_tab, _frame):
+        return None
+
+    monkeypatch.setattr(login_form, "_world", no_world)
+    await login_form.wait_for_frame(Never(), "F")  # a frame with no world: nothing
+
+
+class _Field:
+    def __init__(self, value):
+        self.value = value
+
+    async def apply(self, script):
+        # the script is the page's own comparison; it is run here on the stored text
+        assert "e.value" in script
+        count = int(script.rsplit("=== ", 1)[1].rstrip("`"))
+        return len(list(self.value)) == count
+
+
+async def test_holds_counts_code_points_and_returns_a_boolean():
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    assert await login_form.holds(_Field("abc"), 3) is True
+    assert await login_form.holds(_Field("bc"), 3) is False
+    assert await login_form.holds(_Field("h\U0001f44dx"), 3) is True  # one emoji

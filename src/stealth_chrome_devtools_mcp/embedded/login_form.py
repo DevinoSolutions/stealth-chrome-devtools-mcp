@@ -31,6 +31,8 @@ is the safe direction.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 from nodriver import cdp
@@ -44,6 +46,9 @@ if TYPE_CHECKING:
     from nodriver.core.element import Element
 
 KINDS = ("username", "password")
+
+#: The longest :func:`wait_for_frame` waits for the page to produce a frame.
+FRAME_WAIT_S = 2.0
 
 #: The shared helpers every script below starts with. Everything is read through
 #: the isolated world's own prototypes, and nothing leaves the page except booleans
@@ -229,6 +234,41 @@ async def form_action(tab: Tab, kind: str, frame_id: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+async def wait_for_frame(tab: Tab, frame_id: str) -> None:
+    """Return once ``frame_id`` has produced a frame (two animation frames), or after
+    :data:`FRAME_WAIT_S`. Best effort: it never raises.
+
+    The first key sent to a tab opened behind another one is dropped, even after
+    its page already reads ``visible`` and focused (focus emulation): measured in a
+    headed Chrome 158, the first character of the first field was lost in about
+    one load in three, and never once a frame had been produced. A frame is the
+    page's own sign that its widget is live. A page that never makes one (its
+    window cannot paint) costs the bound and then fails toward "did not take the
+    text" (:func:`holds`), never toward a wrong submit."""
+    world = await _world(tab, cdp.page.FrameId(frame_id))
+    if world is None:
+        return
+    script = (
+        "new Promise((done) => requestAnimationFrame("
+        "() => requestAnimationFrame(() => done(true))))"
+    )
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(FRAME_WAIT_S):
+            await tab.send(
+                cdp.runtime.evaluate(
+                    script, context_id=world, await_promise=True, user_gesture=False
+                )
+            )
+
+
+async def holds(element: Element, length: int) -> bool:
+    """Whether ``element`` holds exactly ``length`` characters (code points, as
+    Python counts them). Answers a boolean: the text is never read out of the page,
+    so a dropped key is caught without the value leaving it."""
+    script = f"(e) => [...(e.value || '')].length === {int(length)}"
+    return (await element.apply(script)) is True
+
+
 async def clear_passwords(tab: Tab) -> None:
     """Set every password input of every frame to ``""``. Best effort per frame:
     a frame that has gone is skipped, which leaves nothing to clear in it."""
@@ -252,5 +292,7 @@ __all__ = [
     "clear_passwords",
     "find_field",
     "form_action",
+    "holds",
     "probe",
+    "wait_for_frame",
 ]
