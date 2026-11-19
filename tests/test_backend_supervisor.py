@@ -23,6 +23,7 @@ import pytest
 
 from stealth_chrome_devtools_mcp import cli, cli_supervise
 from stealth_chrome_devtools_mcp.embedded import (
+    atomic_file,
     backend_liveness,
     backend_registry,
     backend_supervisor,
@@ -725,3 +726,111 @@ class TestTheVerb:
             check=True,
         ).stdout.strip()
         assert out == "False"
+
+
+class TestStateWrite:
+    """T-19641: ``supervisor.json`` is the only memory of the kills the stand-down
+    counts, and a pass is a fresh process. A write that cannot land must be seen,
+    must not raise, and must never let a kill go uncounted."""
+
+    def test_a_kill_is_recorded_before_it_is_made(self, two_backends_due, monkeypatch):
+        record, children, t0, clocks, asked = two_backends_due
+        on_disk_at_kill: list[list[tuple[int, bool]]] = []
+
+        def kill_reading_the_state(seen, **_):
+            history = backend_supervisor.read_state(_state_file(record))["kills"]
+            on_disk_at_kill.append(
+                [(e["pid"], e["killed"]) for e in history if e["pid"] == seen.pid]
+            )
+            asked.append(seen.pid)
+            return True
+
+        monkeypatch.setattr(backend_supervisor, "kill", kill_reading_the_state)
+        _seed_state(record, clocks, [])
+        _pass_over(record, children, t0)
+        assert len(asked) == 2
+        assert on_disk_at_kill == [[(pid, True)] for pid in asked], (
+            "the kill was already on disk when it was made"
+        )
+
+    def test_a_kill_that_failed_is_corrected_to_unkilled(
+        self, two_backends_due, monkeypatch
+    ):
+        record, children, t0, clocks, _ = two_backends_due
+        monkeypatch.setattr(backend_supervisor, "kill", lambda seen, **_: False)
+        _seed_state(record, clocks, [])
+        _pass_over(record, children, t0)
+        history = backend_supervisor.read_state(_state_file(record))["kills"]
+        assert [e["killed"] for e in history] == [False, False]
+
+    def test_a_state_that_cannot_be_written_means_no_kill_and_a_warning(
+        self, two_backends_due, monkeypatch, caplog
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, [])
+        before = _state_file(record).read_bytes()
+
+        def refuse(path, payload, *, indent=None):
+            raise PermissionError(5, "used by another process")
+
+        monkeypatch.setattr(backend_supervisor.atomic_file, "write_json", refuse)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            verdicts = _pass_over(record, children, t0)  # must not raise
+        assert asked == [], "a kill that cannot be counted is not made"
+        assert all(v.kill for v in verdicts), "the verdicts are still reported"
+        text = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("supervisor state not written" in line for line in text)
+        assert sum("is NOT terminated" in line for line in text) == 2
+        assert _state_file(record).read_bytes() == before, "the old file is whole"
+
+    def test_a_lost_final_write_leaves_the_kill_counted(
+        self, two_backends_due, monkeypatch, caplog
+    ):
+        """The write BEFORE each kill is what keeps the count honest when the
+        write at the end of the pass is the one that is lost."""
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, [])
+        real = backend_supervisor.atomic_file.write_json
+        writes: list[int] = []
+
+        def lose_the_last(path, payload, *, indent=None):
+            writes.append(1)
+            if len(writes) == 3:  # one write before each kill, then the final one
+                raise PermissionError(5, "used by another process")
+            real(path, payload, indent=indent)
+
+        monkeypatch.setattr(backend_supervisor.atomic_file, "write_json", lose_the_last)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _pass_over(record, children, t0)
+        assert len(asked) == 2
+        history = backend_supervisor.read_state(_state_file(record))["kills"]
+        assert len(history) == 2, "both kills are on disk, though the last write failed"
+        assert any(
+            "supervisor state not written" in r.getMessage() for r in caplog.records
+        )
+
+    def test_a_sharing_refusal_is_retried_and_the_state_lands(
+        self, two_backends_due, monkeypatch, caplog
+    ):
+        record, children, t0, clocks, asked = two_backends_due
+        _seed_state(record, clocks, [])
+        real_replace = type(record).replace
+        refusals: list[int] = []
+
+        def busy_twice(self, target):
+            if (
+                self.name.startswith(backend_supervisor.STATE_NAME)
+                and len(refusals) < 2
+            ):
+                refusals.append(1)
+                raise PermissionError(32, "used by another process")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(atomic_file, "COMMIT_RETRY_SECONDS", 0)
+        monkeypatch.setattr(type(record), "replace", busy_twice)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            _pass_over(record, children, t0)
+        assert refusals == [1, 1]
+        assert len(asked) == 2
+        assert len(backend_supervisor.read_state(_state_file(record))["kills"]) == 2
+        assert not [r for r in caplog.records if "not written" in r.getMessage()]

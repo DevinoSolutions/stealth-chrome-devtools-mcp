@@ -56,6 +56,7 @@ if sys.platform == "win32":
 else:
     import fcntl
 
+from stealth_chrome_devtools_mcp.embedded import atomic_file
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -98,10 +99,6 @@ RECORD_NAME = "browser_pids.json"
 # of 180 entries to it.
 _LOCK_TIMEOUT = 5.0
 _LOCK_RETRY_DELAY = 0.01
-# Windows refuses an atomic replace while another process holds the target open;
-# a few short retries outlast that window. See _replace.
-_COMMIT_ATTEMPTS = 5
-_COMMIT_RETRY_SECONDS = 0.02
 
 
 def normalize_path(path: str | None) -> str | None:
@@ -626,63 +623,14 @@ def _release(handle: TextIO) -> None:
 
 
 def _write(path: Path, entries: Entries) -> None:
-    """Write the record atomically: stage into a sibling temp file, then commit.
+    """Write the record atomically, through :func:`atomic_file.write_json`.
 
     So a reader concurrent with a write sees the whole old record or the whole
     new one, and a crash mid-write cannot leave the tracking table unparseable —
     which, for this record, would mean every backend's browsers untracked at
-    once.
-
-    DUPLICATION, stated rather than implied: this function and
-    ``backend_registry._write`` are the same function apart from the payload
-    they serialise, and :func:`_commit` and ``backend_registry._commit`` are the
-    same function outright — same mkdir, same pid-suffixed temp name, same
-    retrying replace, same BaseException cleanup, same two constants. What
-    genuinely differs is only the caller's concurrency: this record is merged
-    under :func:`_hold_lock` per write, that one is written whole under
-    singleton's cold-start lock. Deliberately NOT extracted here — two
-    occurrences is not yet a home, and the rule of three is the trigger.
+    once. This record is merged under :func:`_hold_lock` per write; the atomic
+    publish itself is the one the other records share.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # pid-suffixed so two processes staging at once cannot collide on the temp
-    # name; the same directory so the replace stays within one filesystem.
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(
-            json.dumps({"browser_processes": entries, "timestamp": time.time()}),
-            encoding="utf-8",
-        )
-        _commit(tmp, path)
-    except BaseException:
-        # ACCEPTED GAP: cleans up a failed write, but a process killed between
-        # write_text and the replace leaves a .tmp nothing sweeps. Bounded and
-        # harmless — one small file per killed writer, in a directory read only
-        # by exact name.
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-        raise
-
-
-def _commit(tmp: Path, path: Path) -> None:
-    """Move *tmp* onto *path*, retrying briefly on a Windows sharing refusal.
-
-    ``Path.replace`` is atomic on both platforms, but on Windows it raises
-    PermissionError while ANOTHER process has the target open — a concurrent
-    reader is enough, since Python's ``open()`` does not pass FILE_SHARE_DELETE.
-    The window is microseconds, so a few short retries convert a spurious hard
-    failure into a slightly later success. On POSIX this costs one iteration and
-    never sleeps.
-
-    Named to match ``backend_registry._commit``, which it duplicates line for
-    line, so a grep for either lands on both. See :func:`_write` for why the
-    pair is left unshared for now.
-    """
-    for attempt in range(_COMMIT_ATTEMPTS):
-        try:
-            tmp.replace(path)
-        except PermissionError:
-            if attempt == _COMMIT_ATTEMPTS - 1:
-                raise
-            time.sleep(_COMMIT_RETRY_SECONDS)
-        else:
-            return
+    atomic_file.write_json(
+        path, {"browser_processes": entries, "timestamp": time.time()}
+    )

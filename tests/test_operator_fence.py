@@ -385,7 +385,7 @@ class TestTheWriteGuardStopsAWriteTheRedirectMissed:
         Every node above drives a ``pathlib``/``os`` primitive directly, which
         proves the wrappers fire but not that the product reaches them.
         ``record_backend`` is the one writer of ``server.json`` and goes through
-        ``backend_registry._commit_json``; pointing BOTH the designated dir and
+        ``atomic_file.write_json``; pointing BOTH the designated dir and
         the record path at the decoy makes this the F-903 harm in miniature.
         """
         from stealth_chrome_devtools_mcp.embedded import backend_registry
