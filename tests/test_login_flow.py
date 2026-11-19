@@ -8,6 +8,7 @@ typed where it must not be.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import http.server
 import json
@@ -28,6 +29,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     login_flow,
     login_form,
     login_seal,
+    tab_open,
     vault_crypto,
     vault_store,
 )
@@ -394,3 +396,93 @@ async def test_a_browser_started_with_another_spelling_of_a_forbidden_flag_is_re
         await close(instance_id=iid)
     assert site.posts == []
     assert not login_seal.any_sealing()
+
+
+async def _wait_for_sealed_tab(iid):
+    for _ in range(200):
+        if login_seal.sealing(iid) and login_seal._tabs.get(iid):
+            await asyncio.sleep(0.3)
+            return next(iter(login_seal._tabs[iid]))
+        await asyncio.sleep(0.05)
+    raise AssertionError("the login never sealed a tab")
+
+
+async def test_a_cancelled_login_never_has_its_tab_open_while_the_seal_is_down(
+    site, tmp_path, monkeypatch
+):
+    """The review's repro: anyio scopes are level-triggered, so a cancelled login's
+    next ``await`` raises again. Cancelled twice, the seal must still outlive the
+    tab: at no moment is the sealed tab listed or scriptable."""
+    unlocked_vault({"work": _entry(site)})
+
+    async def parked(tab, entry):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(login_flow, "_sealed_login", parked)
+    async with _browser(tmp_path) as iid:
+        task = asyncio.create_task(_run(iid))
+        sealed = await _wait_for_sealed_tab(iid)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        exposed = []
+        for _ in range(300):
+            listed = sealed in await _tab_ids(iid)
+            try:
+                await get_fn("execute_script")(
+                    instance_id=iid, tab_id=sealed, script="location.href"
+                )
+                reached = True
+            except ToolError:
+                reached = False
+            if listed or reached:
+                exposed.append((listed, reached, login_seal.sealing(iid)))
+            if task.done() and not login_seal.sealing(iid):
+                break
+            await asyncio.sleep(0.01)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert exposed == []
+        assert not login_seal.sealing(iid)
+        assert not login_seal.is_sealed(iid, sealed)
+        # the tab really is gone, not merely unlisted
+        browser = await runtime.browser_manager.get_browser(iid)
+        await tab_open.update_targets(browser)
+        assert tab_open.find(browser, sealed) is None
+
+
+async def test_a_tab_that_will_not_close_stays_sealed_and_is_reported(
+    site, tmp_path, monkeypatch
+):
+    unlocked_vault({"work": _entry(site)})
+    manager = runtime.browser_manager
+    real_send = tab_open.send
+
+    async def refusing_close(instance_id, tab_id):
+        return False
+
+    async def send(browser, command, *args):
+        if getattr(command, "__name__", "") == "close_target":
+            raise RuntimeError("Chrome refused")
+        return await real_send(browser, command, *args)
+
+    monkeypatch.setattr(manager, "close_tab", refusing_close)
+    monkeypatch.setattr(tab_open, "send", send)
+    monkeypatch.setattr(login_flow, "_CLOSE_RETRY_S", 0.01)
+    async with _browser(tmp_path) as iid:
+        before = await _tab_ids(iid)
+        result = await _run(iid)
+        assert result["outcome"] == "logged_in", result
+        assert result["detail"].endswith(login_flow.UNCLOSED_NOTE)
+        assert not login_seal.sealing(iid)
+        leftover = list(login_seal._unclosed.get(iid, ()))
+        assert len(leftover) == 1
+        # still open in Chrome, but hidden from and refused to every tool
+        assert set(await _tab_ids(iid)) <= set(before)
+        assert leftover[0] not in await _tab_ids(iid)
+        with pytest.raises(ToolError):
+            await get_fn("execute_script")(
+                instance_id=iid, tab_id=leftover[0], script="location.href"
+            )
+        with pytest.raises(ToolError):
+            await get_fn("take_screenshot")(instance_id=iid, tab_id=leftover[0])

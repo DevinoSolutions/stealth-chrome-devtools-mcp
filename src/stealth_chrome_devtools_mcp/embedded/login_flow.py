@@ -61,7 +61,7 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import (
 )
 
 if TYPE_CHECKING:
-    from nodriver import Tab
+    from nodriver import Browser, Tab
 
     from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
@@ -163,6 +163,7 @@ async def _run(
     await _check_launch(data.get("options"), browser)
     login_seal.begin(instance_id)
     tab = None
+    result: dict[str, str] = {}
     try:
         tab = await tab_open.open_tab(browser, "about:blank", background=True)
         tab_open.mark_internal(browser, tab)
@@ -170,12 +171,12 @@ async def _run(
         outcome, detail = await _sealed_login(tab, entry)
         if outcome == "rejected":
             _freeze(label)
-        return {"outcome": outcome, "label": label, "detail": detail}
+        result = {"outcome": outcome, "label": label, "detail": detail}
     finally:
-        try:
-            await asyncio.shield(_cleanup(browser_manager, instance_id, tab))
-        finally:
-            login_seal.end(instance_id)
+        closed = await _finish(browser_manager, instance_id, tab)
+    if not closed:
+        result["detail"] += UNCLOSED_NOTE
+    return result
 
 
 async def _provider(
@@ -239,24 +240,95 @@ async def _check_launch(options: object, browser: object) -> None:
         raise ToolError(reason)
 
 
+#: Said when the login tab could not be closed (it stays sealed, hidden from tools).
+UNCLOSED_NOTE = (
+    "; the login's own tab could not be closed and stays hidden from every tool "
+    "until the backend restarts"
+)
+_CLOSE_ATTEMPTS = 3
+_CLOSE_RETRY_S = 0.3
+#: Cleanups in flight: a task the loop holds weakly could be collected mid-close.
+_CLEANUPS: set[asyncio.Task[bool]] = set()
+
+
+async def _finish(
+    browser_manager: BrowserManager, instance_id: str, tab: Tab | None
+) -> bool:
+    """Clean up, close the tab, and ONLY THEN end the seal; ``True`` when the tab
+    is gone.
+
+    It runs as a task of its own behind a shield. A cancellation of the login
+    (anyio's scopes are level-triggered: every ``await`` in a cancelled scope
+    raises again) therefore raises HERE at once, while the task keeps going and
+    ends the seal itself after the close, so there is never a moment when the tab
+    is open and the seal is down."""
+    task = asyncio.ensure_future(_cleanup(browser_manager, instance_id, tab))
+    _CLEANUPS.add(task)
+    task.add_done_callback(_CLEANUPS.discard)
+    return await asyncio.shield(task)
+
+
 async def _cleanup(
     browser_manager: BrowserManager, instance_id: str, tab: Tab | None
-) -> None:
-    """Clear, then close. Each step is tried even if the one before failed."""
-    if tab is None:
-        return
+) -> bool:
+    """Clear, close and verify; then end the seal (keeping a tab that stayed open
+    sealed). Each step is tried even if the one before failed."""
+    closed = True
+    target = str(tab.target.target_id) if tab is not None else None
     try:
-        await login_form.clear_passwords(tab)
-    except Exception as error:  # noqa: BLE001  PERMANENT(cleanup runs every step; the tab is closed next)
+        if tab is not None:
+            try:
+                await login_form.clear_passwords(tab)
+            except Exception as error:  # noqa: BLE001  PERMANENT(cleanup runs every step; the tab is closed next)
+                debug_logger.log_warning(
+                    "login_flow",
+                    "_cleanup",
+                    f"clearing failed ({type(error).__name__})",
+                )
+            closed = await _close_tab(browser_manager, instance_id, tab)
+    finally:
+        login_seal.end(instance_id, None if closed else target)
+    if not closed:
         debug_logger.log_warning(
-            "login_flow", "_cleanup", f"clearing failed ({type(error).__name__})"
+            "login_flow",
+            "_cleanup",
+            "the login tab could not be closed; it stays sealed",
         )
-    try:
-        await browser_manager.close_tab(instance_id, str(tab.target.target_id))
-    except Exception as error:  # noqa: BLE001  PERMANENT(cleanup must still end the seal)
-        debug_logger.log_warning(
-            "login_flow", "_cleanup", f"closing the tab failed ({type(error).__name__})"
-        )
+    return closed
+
+
+async def _close_tab(
+    browser_manager: BrowserManager, instance_id: str, tab: Tab
+) -> bool:
+    """Close ``tab`` and check it is gone, retrying: ``close_tab`` answers
+    ``False`` both for "already gone" and for "Chrome refused", so the answer is
+    read from the browser's own target list."""
+    browser = await browser_manager.get_browser(instance_id)
+    target = tab.target.target_id
+    for attempt in range(_CLOSE_ATTEMPTS):
+        try:
+            await browser_manager.close_tab(instance_id, str(target))
+            if browser is not None and not await _is_open(browser, str(target)):
+                return True
+            if browser is not None:
+                await tab_open.send(browser, cdp.target.close_target, target)
+                if not await _is_open(browser, str(target)):
+                    return True
+        except Exception as error:  # noqa: BLE001  PERMANENT(a failed close is retried, then reported by the caller)
+            debug_logger.log_warning(
+                "login_flow",
+                "_close_tab",
+                f"closing the tab failed ({type(error).__name__})",
+            )
+        if attempt < _CLOSE_ATTEMPTS - 1:
+            await asyncio.sleep(_CLOSE_RETRY_S)
+    return False
+
+
+async def _is_open(browser: Browser, target: str) -> bool:
+    """Whether Chrome still lists ``target`` (read fresh, not from a cache)."""
+    await tab_open.update_targets(browser)
+    return tab_open.find(browser, target) is not None
 
 
 # ---------------------------------------------------------------- page reads

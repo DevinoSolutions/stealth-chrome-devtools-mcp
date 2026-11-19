@@ -25,6 +25,11 @@ seal until the LAST of them calls :func:`end`; an ``end`` can never drop a seal
 another login still needs. :func:`end` without a :func:`begin` does nothing, so
 it is safe in a ``finally``.
 
+**A tab that would not close stays sealed.** :func:`end` takes the target the
+login could not close (``unclosed``): it is kept sealed after the login is over,
+so an agent still cannot read it, and the flow says so. It is dropped from here
+only by the backend restarting.
+
 In memory, like ``tab_binding`` and ``session_lease``: a backend restart forgets
 every seal, and so does the login that was holding it (it died with the process).
 A leaf: ``tool_errors`` only.
@@ -48,6 +53,7 @@ INSTANCE_WIDE = frozenset({"execute_cdp_command", "switch_tab"})
 _lock = threading.Lock()
 _depth: dict[str, int] = {}
 _tabs: dict[str, set[str]] = {}
+_unclosed: dict[str, set[str]] = {}
 
 
 def begin(instance_id: str) -> None:
@@ -65,10 +71,14 @@ def seal_tab(instance_id: str, target_id: str) -> None:
         _tabs[instance_id].add(str(target_id))
 
 
-def end(instance_id: str) -> None:
+def end(instance_id: str, unclosed: str | None = None) -> None:
     """One login in ``instance_id`` is finished; the seal and its tabs are
-    dropped when it was the last. A no-op when none was in progress."""
+    dropped when it was the last. A no-op when none was in progress.
+
+    ``unclosed`` is a sealed target the login could not close: it stays sealed."""
     with _lock:
+        if unclosed is not None:
+            _unclosed.setdefault(instance_id, set()).add(str(unclosed))
         depth = _depth.get(instance_id, 0) - 1
         if depth > 0:
             _depth[instance_id] = depth
@@ -83,17 +93,20 @@ def sealing(instance_id: str) -> bool:
 
 
 def any_sealing() -> bool:
-    """Whether any instance has a login in progress. One dict truthiness check:
-    the registry wrapper asks it on every tool call and does nothing more while
-    it is false."""
-    return bool(_depth)
+    """Whether any instance has a login in progress, or a sealed tab left over.
+    Two dict truthiness checks: the registry wrapper asks it on every tool call
+    and does nothing more while it is false."""
+    return bool(_depth or _unclosed)
 
 
 def is_sealed(instance_id: str, target_id: str | None) -> bool:
     """Whether ``target_id`` is a sealed tab of ``instance_id``."""
     if not target_id:
         return False
-    return str(target_id) in _tabs.get(instance_id, ())
+    target = str(target_id)
+    return target in _tabs.get(instance_id, ()) or target in _unclosed.get(
+        instance_id, ()
+    )
 
 
 def refuse_if_sealed(tool: str, kwargs: dict[str, object]) -> None:
@@ -103,10 +116,10 @@ def refuse_if_sealed(tool: str, kwargs: dict[str, object]) -> None:
     call that names no usable instance, or an instance with no seal in progress,
     passes."""
     instance_id = kwargs.get("instance_id")
-    if not isinstance(instance_id, str) or not sealing(instance_id):
+    if not isinstance(instance_id, str):
         return
     tab_id = kwargs.get("tab_id")
-    if tool in INSTANCE_WIDE or (
+    if (sealing(instance_id) and tool in INSTANCE_WIDE) or (
         isinstance(tab_id, str) and is_sealed(instance_id, tab_id)
     ):
         raise ToolError(REFUSAL)

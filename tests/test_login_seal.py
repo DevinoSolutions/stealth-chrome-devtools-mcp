@@ -30,6 +30,7 @@ def _no_seal_left_behind():
     for instance in (INSTANCE, OTHER_INSTANCE):
         while login_seal.sealing(instance):
             login_seal.end(instance)
+    login_seal._unclosed.clear()
 
 
 @pytest.fixture
@@ -39,6 +40,35 @@ def sealed():
 
 
 # ------------------------------------------------------------ the unit
+
+
+def test_a_tab_that_would_not_close_stays_sealed_after_the_seal_ends():
+    login_seal.begin(INSTANCE)
+    login_seal.seal_tab(INSTANCE, SEALED)
+    login_seal.end(INSTANCE, unclosed=SEALED)
+    assert login_seal.sealing(INSTANCE) is False
+    assert login_seal.is_sealed(INSTANCE, SEALED) is True
+    assert login_seal.any_sealing() is True
+    with pytest.raises(ToolError):
+        login_seal.refuse_if_sealed(
+            "execute_script", {"instance_id": INSTANCE, "tab_id": SEALED}
+        )
+    # no seal is in progress, so the instance-wide tools work again
+    login_seal.refuse_if_sealed("execute_cdp_command", {"instance_id": INSTANCE})
+    login_seal.refuse_if_sealed(
+        "execute_script", {"instance_id": INSTANCE, "tab_id": ELSEWHERE}
+    )
+    login_seal.refuse_if_sealed(
+        "execute_script", {"instance_id": OTHER_INSTANCE, "tab_id": SEALED}
+    )
+
+
+def test_a_tab_that_closed_is_not_kept():
+    login_seal.begin(INSTANCE)
+    login_seal.seal_tab(INSTANCE, SEALED)
+    login_seal.end(INSTANCE)
+    assert login_seal.is_sealed(INSTANCE, SEALED) is False
+    assert login_seal.any_sealing() is False
 
 
 def test_nothing_is_sealed_by_default():
