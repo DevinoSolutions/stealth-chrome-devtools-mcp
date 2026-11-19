@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.64
+
+2.1.63 was tagged but never published (its gate failed on macOS, below), so 2.1.64 is the first release on PyPI with everything in the 2.1.63 section too.
+
+### A guard test raced the probe it was testing (T-19366)
+
+- The 2.1.63 publish gate failed on macOS/ARM64 (py3.13 unit tests and coverage; py3.11 passed) in one test, `test_the_marks_of_a_browser_that_is_gone_are_dropped`: `assert 'W1' not in {'W1'}`. The test closed the guard's connection first and the fake browser's listener second. The guard probes the debug port the moment its connection ends, so on macOS the probe reached a listener that was still open, read the browser as alive, and kept the marks, which is the product's fail-closed answer. Reproduced on Windows by sleeping 0.5 s between the two closes: the same assertion.
+- Test-only fix: the listener is closed before the connection, as it is when a browser exits. No product code changed.
+
 ## 2.1.63
 
 ### One predicate for "is this pid there, running, and the same process", where eleven readers disagreed (T-19642)

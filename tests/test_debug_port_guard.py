@@ -1503,7 +1503,11 @@ async def test_the_marks_of_a_browser_that_is_gone_are_dropped(endpoint, mode_on
     marks keep ``login_seal.any_sealing()`` true for the life of the backend (the
     seven Linux CI failures, where one process runs every real-Chrome file)."""
     guard, task = await _run_guard_to_its_end(endpoint)
-    await endpoint.socket.close()
+    # The listener must be gone BEFORE the guard's connection ends, as it is when a
+    # browser exits: the guard probes the port the moment its socket closes. Closing
+    # the socket first and the listener second raced that probe (macOS lost it on
+    # every run of the 2.1.63 publish gate). ``stop`` closes the listener, then the
+    # open connections, in that order.
     await endpoint.stop()  # the port now refuses: the browser is gone
     await asyncio.wait_for(task, 10)
     assert "W1" not in login_seal._webui
