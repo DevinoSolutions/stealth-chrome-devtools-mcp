@@ -31,6 +31,7 @@ def _no_seal_left_behind():
         while login_seal.sealing(instance):
             login_seal.end(instance)
     login_seal._unclosed.clear()
+    login_seal._holds.clear()
 
 
 @pytest.fixture
@@ -433,3 +434,48 @@ async def test_a_resource_over_another_tab_is_not_refused(
         await getattr(server_mod, resource)(INSTANCE)
     except Exception as error:  # noqa: BLE001  PERMANENT(the fake has no page state; only the seal matters)
         assert not _was_refused(error)
+
+
+# --------------------------------------------- the creation window (hold_new)
+
+
+def test_a_target_that_was_not_known_is_sealed_until_the_hold_ends():
+    login_seal.begin(INSTANCE)
+    hold = login_seal.hold_new(INSTANCE, ["T-old"])
+    assert not login_seal.is_sealed(INSTANCE, "T-old")
+    assert login_seal.is_sealed(INSTANCE, "T-new")
+    with pytest.raises(ToolError):
+        login_seal.refuse_if_sealed(
+            "execute_script", {"instance_id": INSTANCE, "tab_id": "T-new"}
+        )
+    login_seal.release_new(INSTANCE, hold)
+    assert not login_seal.is_sealed(INSTANCE, "T-new")
+
+
+def test_the_hold_is_per_instance():
+    login_seal.begin(INSTANCE)
+    hold = login_seal.hold_new(INSTANCE, [])
+    assert not login_seal.is_sealed(OTHER_INSTANCE, "T-new")
+    login_seal.release_new(INSTANCE, hold)
+
+
+def test_two_holds_release_independently_and_a_double_release_is_harmless():
+    login_seal.begin(INSTANCE)
+    first = login_seal.hold_new(INSTANCE, ["T-a"])
+    second = login_seal.hold_new(INSTANCE, ["T-a", "T-b"])
+    assert login_seal.is_sealed(INSTANCE, "T-b")  # not known to the first
+    login_seal.release_new(INSTANCE, first)
+    assert not login_seal.is_sealed(INSTANCE, "T-a")
+    assert not login_seal.is_sealed(INSTANCE, "T-b")
+    assert login_seal.is_sealed(INSTANCE, "T-c")  # still not known to the second
+    login_seal.release_new(INSTANCE, second)
+    login_seal.release_new(INSTANCE, second)
+    assert not login_seal.is_sealed(INSTANCE, "T-c")
+
+
+def test_a_hold_counts_as_a_seal_in_progress_for_the_wrapper():
+    assert not login_seal.any_sealing()
+    hold = login_seal.hold_new(INSTANCE, [])
+    assert login_seal.any_sealing()
+    login_seal.release_new(INSTANCE, hold)
+    assert not login_seal.any_sealing()
