@@ -283,6 +283,16 @@ def test_every_sys_path_folder_but_the_working_directory_is_refused(
     assert "type the machine runs" in _refused(cwd / "a.pth")
 
 
+def test_a_working_directory_that_is_a_site_directory_stays_refused(
+    home, usersite, monkeypatch
+):
+    """The cwd exception is for the ``sys.path`` loop only: a backend that happens to
+    run in a site-packages directory still refuses to write there."""
+    monkeypatch.chdir(usersite)
+    monkeypatch.syspath_prepend(str(usersite))
+    assert "folder code is loaded" in _refused(usersite / "data.json")
+
+
 def test_a_symlink_into_a_site_directory_is_refused_under_its_real_name(
     home, usersite, tmp_path
 ):

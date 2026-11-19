@@ -782,10 +782,16 @@ class NetworkInterceptor:
                     )
 
             payload = json.dumps(data, indent=2)
-            with open_text(
-                filepath, tool="export_network_data", overwrite=overwrite
-            ) as handle:
-                handle.write(payload)
+
+            def write() -> None:
+                with open_text(
+                    filepath, tool="export_network_data", overwrite=overwrite
+                ) as handle:
+                    handle.write(payload)
+
+            # The path rules resolve dozens of roots (a second on a cold disk):
+            # off the event loop, which the shared backend must not stall.
+            await asyncio.to_thread(write)
             return True
 
     async def import_from_json(self, instance_id: str, filepath: str) -> bool:
@@ -796,7 +802,9 @@ class NetworkInterceptor:
         filepath: str - Path to JSON file.
         Returns: bool - True if successful.
         """
-        real = refuse_secret_path(filepath, tool="import_network_data", action="read")
+        real = await asyncio.to_thread(
+            refuse_secret_path, filepath, tool="import_network_data", action="read"
+        )
         data = json.loads(real.read_text())
 
         async with self._lock:

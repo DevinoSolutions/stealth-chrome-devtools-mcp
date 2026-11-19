@@ -22,7 +22,7 @@ def _simple_hook_code(
     The caller's values are written into the code as Python LITERALS (``repr`` of a
     string), never as text, so no value can end the string it sits in and add code:
     a simple hook runs a fixed template and is not "caller Python"
-    (``caller_python.RUNS_CALLER_PYTHON``)."""
+    (``vault_mode.RUNS_CALLER_PYTHON``)."""
     if action == "block":
         function_code = """
 def process_request(request):

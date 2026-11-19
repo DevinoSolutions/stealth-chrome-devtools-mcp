@@ -3,6 +3,8 @@ vault file under a temporary directory. No test logic lives here."""
 
 from __future__ import annotations
 
+import contextlib
+
 from stealth_chrome_devtools_mcp.embedded import (
     login_seal,
     secret_registry,
@@ -52,6 +54,27 @@ def unlocked_vault(entries):
     key = make_vault(entries)
     vault_store.unlock(key, None)
     return key
+
+
+@contextlib.contextmanager
+def spawn_before_the_vault():
+    """Spawn a browser the way one that was started BEFORE the vault existed was.
+
+    Vault mode (``vault_mode``) refuses a ``user_data_dir`` PATH and every switch off
+    its allow-list, while a vault file exists. These tests need a profile at a known
+    path, or a switch a login must refuse (a browser an older backend started), so
+    the vault file is set aside for the spawn and put back after it. The key, if any,
+    stays in memory."""
+    path = vault_store.VAULT_PATH
+    aside = path.with_name(path.name + ".aside")
+    present = path.exists()
+    if present:
+        path.replace(aside)
+    try:
+        yield
+    finally:
+        if present:
+            aside.replace(path)
 
 
 def reset():

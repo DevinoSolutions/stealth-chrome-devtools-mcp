@@ -1213,3 +1213,161 @@ async def test_a_browser_whose_guard_has_ended_refuses_the_login(monkeypatch):
 async def test_a_browser_with_no_known_port_refuses_the_login():
     with pytest.raises(ToolError):
         await debug_port_guard.verify_clean(SimpleNamespace(config=None))
+
+
+# ------------------------------------------------------- vault mode (T-19366)
+
+
+@pytest.fixture
+def mode_on(tmp_path, monkeypatch):
+    """A vault file exists: vault mode is on, and its download folder is the test's."""
+    from stealth_chrome_devtools_mcp.embedded import vault_mode, vault_store
+
+    vault = tmp_path / "vault.json"
+    vault.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(vault_store, "VAULT_PATH", vault)
+    monkeypatch.setattr(vault_mode, "download_dir", lambda: tmp_path / "downloads")
+    return vault
+
+
+def _downloads(endpoint):
+    return [
+        c["params"]
+        for c in endpoint.commands
+        if c["method"] == "Browser.setDownloadBehavior"
+    ]
+
+
+async def test_with_no_vault_the_guard_sends_no_download_command_at_all(endpoint):
+    guard = await _guard(endpoint)
+    assert not _downloads(endpoint)
+    assert guard.keeper is not None
+    await guard.stop()
+
+
+async def test_a_browser_is_pinned_before_it_is_handed_on_while_a_vault_exists(
+    endpoint, mode_on, tmp_path
+):
+    guard = await _guard(endpoint)
+    pins = _downloads(endpoint)
+    assert len(pins) == 1
+    assert pins[0]["behavior"] == "allowAndName"
+    assert pins[0]["eventsEnabled"] is False
+    assert (tmp_path / "downloads").samefile(pins[0]["downloadPath"])
+    # sent at the BROWSER (no session), and after the guard's own set-up
+    sent = [
+        c for c in endpoint.commands if c["method"] == "Browser.setDownloadBehavior"
+    ]
+    assert "sessionId" not in sent[0]
+    assert endpoint.methods().index(
+        "Browser.setDownloadBehavior"
+    ) > endpoint.methods().index("Target.setAutoAttach")
+    await guard.stop()
+
+
+async def test_protect_pins_a_re_attached_browser_the_same_way(endpoint, mode_on):
+    """Spawn and re-attach both end in ``protect``: the pin is made there, so a
+    browser an older backend started is pinned too, before anyone is handed it."""
+    browser = SimpleNamespace(
+        config=SimpleNamespace(port=PORT), websocket_url=endpoint.url
+    )
+    await debug_port_guard.protect(browser)
+    assert len(_downloads(endpoint)) == 1
+    await debug_port_guard._GUARDS[PORT].stop()
+
+
+async def test_a_pin_that_cannot_be_made_refuses_the_browser(mode_on):
+    fake = FakeEndpoint()
+
+    async def refusing(socket):
+        fake.socket = socket
+        async for raw in socket:
+            message = json.loads(raw)
+            fake.commands.append(message)
+            fake.log.append((message["method"], message.get("sessionId")))
+            reply = {"id": message["id"], "result": {}}
+            if message["method"] == "Browser.setDownloadBehavior":
+                reply = {"id": message["id"], "error": {"message": "no"}}
+            await socket.send(json.dumps(reply))
+
+    fake.handle = refusing
+    await fake.start()
+    browser = SimpleNamespace(config=SimpleNamespace(port=PORT), websocket_url=fake.url)
+    with pytest.raises(ToolError, match="could not be guarded"):
+        await debug_port_guard.protect(browser)
+    assert PORT not in debug_port_guard.protected_ports()
+    await fake.stop()
+
+
+async def test_a_vault_made_after_the_browser_pins_it_within_one_pass(
+    endpoint, tmp_path, monkeypatch
+):
+    from stealth_chrome_devtools_mcp.embedded import vault_mode, vault_store
+
+    monkeypatch.setattr(vault_mode, "download_dir", lambda: tmp_path / "downloads")
+    monkeypatch.setattr(debug_port_guard, "KEEP_SECONDS", 0.05)
+    guard = await _guard(endpoint)
+    assert not _downloads(endpoint)
+    vault = tmp_path / "vault.json"
+    vault.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(vault_store, "VAULT_PATH", vault)
+    await _wait_until(lambda: _downloads(endpoint), "never pinned")
+    assert _downloads(endpoint)[-1]["behavior"] == "allowAndName"
+    # it is re-asserted, not said once: a folder set in between is taken back
+    count = len(_downloads(endpoint))
+    await _wait_until(lambda: len(_downloads(endpoint)) > count, "not re-asserted")
+    # and the mode ending hands the browser's own default back, once
+    vault.unlink()
+    await _wait_until(
+        lambda: _downloads(endpoint)[-1] == {"behavior": "default"}, "not lifted"
+    )
+    settled = len(_downloads(endpoint))
+    await asyncio.sleep(0.2)
+    assert len(_downloads(endpoint)) == settled
+    await guard.stop()
+
+
+FILE_PAGE = "file:///C:/Users/x/.stealth-mcp/vault.json"
+
+
+async def test_a_file_page_is_barred_and_blanked_like_an_inspector(endpoint, mode_on):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", FILE_PAGE))
+    await _settle(endpoint, "Page.navigate")
+    navigations = [c for c in endpoint.commands if c["method"] == "Page.navigate"]
+    assert [(c["sessionId"], c["params"]) for c in navigations] == [
+        ("S-T1", {"url": "about:blank"})
+    ]
+    assert login_seal.is_sealed("any", "T1")  # hidden from every tool at once
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "about:blank"))
+    await _wait_until(lambda: not login_seal.is_sealed("any", "T1"), "still barred")
+    await guard.stop()
+
+
+async def test_a_file_page_is_left_alone_with_no_vault(endpoint):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", FILE_PAGE))
+    await asyncio.sleep(0.1)
+    assert "Page.navigate" not in endpoint.methods()
+    assert not login_seal.is_sealed("any", "T1")
+    await guard.stop()
+
+
+async def test_a_file_page_already_open_when_the_vault_appears_is_blanked(
+    tmp_path, monkeypatch
+):
+    from stealth_chrome_devtools_mcp.embedded import vault_mode, vault_store
+
+    fake = FakeEndpoint(page_url=FILE_PAGE)
+    await fake.start()
+    monkeypatch.setattr(vault_mode, "download_dir", lambda: tmp_path / "downloads")
+    monkeypatch.setattr(debug_port_guard, "KEEP_SECONDS", 0.05)
+    guard = await _guard(fake)
+    assert "Page.navigate" not in fake.methods()  # no vault: it was left alone
+    vault = tmp_path / "vault.json"
+    vault.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(vault_store, "VAULT_PATH", vault)
+    await _settle(fake, "Page.navigate")
+    assert login_seal.is_sealed("any", "T1")
+    await guard.stop()
+    await fake.stop()

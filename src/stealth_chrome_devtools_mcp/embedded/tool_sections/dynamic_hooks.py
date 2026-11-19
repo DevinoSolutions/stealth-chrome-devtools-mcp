@@ -94,7 +94,8 @@ async def create_simple_dynamic_hook(
         name (str): Hook name
         url_pattern (str): URL pattern to match
         action (str): Action type - 'block', 'redirect', 'add_headers', or 'log'
-        target_url (Optional[str]): Target URL for redirect action
+        target_url (Optional[str]): Target URL for redirect action (a file: URL is
+            refused while a login vault exists)
         custom_headers (Optional[Dict[str, str]]): Headers to add for add_headers action
         instance_ids (Optional[List[str]]): Browser instances to apply hook to
 

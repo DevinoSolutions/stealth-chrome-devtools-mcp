@@ -15,8 +15,8 @@ holds the passphrase.
 * ``GET /_stealth/vault/status``: ``{"exists", "unlocked", "expires_in"}``.
 * ``GET /_stealth/vault/caller-python``: ``{"ran": <tool name>|null}``, the first
   tool that ran caller Python in this backend since it started. The CLI asks every
-  backend the registry knows before it creates a vault (``caller_python``): the
-  answer names a tool, never what its code was.
+  backend the registry knows before it creates a vault, and again before an
+  unlock (``vault_mode``): the answer names a tool, never what its code was.
 
 **No route returns an entry, a username, a password or a key**, and no error text
 echoes what was posted.
@@ -31,8 +31,8 @@ from typing import TYPE_CHECKING
 from starlette.responses import JSONResponse
 
 from stealth_chrome_devtools_mcp.embedded import (
-    caller_python,
     vault_crypto,
+    vault_mode,
     vault_store,
 )
 
@@ -102,7 +102,7 @@ async def _status(_request: Request) -> Response:
 
 
 async def _caller_python(_request: Request) -> Response:
-    return JSONResponse({"ran": caller_python.ran()})
+    return JSONResponse({"ran": vault_mode.ran()})
 
 
 def install(server: FastMCP) -> None:

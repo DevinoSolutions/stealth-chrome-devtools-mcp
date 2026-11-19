@@ -32,7 +32,7 @@ from pathlib import Path
 
 import test_login_flow as flow
 from e2e_helpers import get_fn, sandbox_kwargs
-from vault_helpers import unlocked_vault
+from vault_helpers import spawn_before_the_vault, unlocked_vault
 
 pytestmark = flow.pytestmark
 site, vault, _warmup = flow.site, flow.vault, flow._warmup
@@ -65,9 +65,10 @@ def _rows(profile: Path, relative: str, query: str):
 async def _login_and_close(site, tmp_path):
     unlocked_vault({"work": _entry(site)})
     profile = tmp_path / "residue-profile"
-    spawned = await get_fn("spawn_browser")(
-        headless=True, user_data_dir=str(profile), **sandbox_kwargs()
-    )
+    with spawn_before_the_vault():
+        spawned = await get_fn("spawn_browser")(
+            headless=True, user_data_dir=str(profile), **sandbox_kwargs()
+        )
     iid = spawned["instance_id"]
     try:
         result = await _run(iid)

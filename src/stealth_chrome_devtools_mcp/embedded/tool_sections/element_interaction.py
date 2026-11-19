@@ -30,6 +30,7 @@ and ``PIL.Image``), carried as they stood rather than hoisted, because hoisting
 them would put Pillow on this module's import graph at binding time.
 """
 
+import asyncio
 import base64
 import os
 import tempfile
@@ -43,7 +44,7 @@ from nodriver.core.connection import ProtocolException
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
 from stealth_chrome_devtools_mcp.embedded.path_confinement import (
     discard_precreated,
-    precreate_private,
+    precreate_private_off_loop,
     refuse_secret_path,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
@@ -145,6 +146,19 @@ async def click_element(
     )
 
 
+def _checked_paths(paths: list[object]) -> list[str]:
+    """The real path of each, or ``ToolError``. Blocking (the rule resolves dozens of
+    roots): the caller runs it on a worker thread."""
+    return [
+        str(
+            refuse_secret_path(
+                Path(str(raw)).expanduser(), tool="upload_file", action="attach"
+            )
+        )
+        for raw in paths
+    ]
+
+
 async def upload_file(
     instance_id: str,
     selector: str,
@@ -163,7 +177,8 @@ async def upload_file(
         instance_id (str): Browser instance ID.
         selector (str): CSS selector or XPath for the <input type="file"> element.
         file_paths (Union[str, List[str]]): Absolute path, or list of paths, to attach.
-            For multiple files the input must have the `multiple` attribute.
+            For multiple files the input must have the `multiple` attribute. A file in
+            a credential store, browser profile or this server's state is refused.
         timeout (int): Element lookup timeout in ms (default 10000, max 60000).
 
     Returns:
@@ -181,14 +196,7 @@ async def upload_file(
     # followed) and its answer replaces the caller's spelling, so what is
     # attached is exactly what was checked. Before the tab lookup and before the
     # existence check, so a refusal never doubles as a probe for a secret file.
-    paths = [
-        str(
-            refuse_secret_path(
-                Path(str(raw)).expanduser(), tool="upload_file", action="attach"
-            )
-        )
-        for raw in paths
-    ]
+    paths = await asyncio.to_thread(_checked_paths, paths)
     tab = await _require_tab(rt.browser_manager, instance_id)
     return await rt._with_cdp_timeout(
         rt.dom_handler.upload_file(tab, selector, paths, timeout),
@@ -535,9 +543,7 @@ async def take_screenshot(
         instance_id (str): Browser instance ID.
         full_page (bool): Capture full page (not just viewport).
         format (str): Image format ('png' or 'jpeg').
-        file_path (Optional[str]): Optional file path to save screenshot to. Created
-            owner-only (0600); it may not lie in a credential store, browser profile
-            or this server's state.
+        file_path (Optional[str]): Optional file path to save screenshot to. Created owner-only (0600). Refused: a credential store, browser profile or this server's state; a folder code is loaded or started from (site-packages, the Python and virtual-environment trees, this package, startup and shell-profile folders); and a file name code runs by (.py, .pth, .bat, .ps1, .sh, .exe ...).
         overwrite (bool): Replace `file_path` if it already exists (default: False,
             an existing file is refused).
 
@@ -561,7 +567,7 @@ async def take_screenshot(
     tab = await _require_tab(rt.browser_manager, instance_id)
 
     if file_path:
-        save_path, created = precreate_private(
+        save_path, created = await precreate_private_off_loop(
             file_path, tool="take_screenshot", overwrite=overwrite
         )
         try:

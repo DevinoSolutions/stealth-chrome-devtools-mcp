@@ -42,6 +42,7 @@ from vault_helpers import (
     password_entry,
     provider_entry,
     reset,
+    spawn_before_the_vault,
     unlocked_vault,
 )
 
@@ -256,9 +257,12 @@ def vault(tmp_path, monkeypatch):
 @contextlib.asynccontextmanager
 async def _browser(tmp_path):
     spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
-    spawned = await spawn(
-        headless=True, user_data_dir=str(tmp_path / "login-flow"), **sandbox_kwargs()
-    )
+    with spawn_before_the_vault():
+        spawned = await spawn(
+            headless=True,
+            user_data_dir=str(tmp_path / "login-flow"),
+            **sandbox_kwargs(),
+        )
     iid = spawned["instance_id"]
     try:
         yield iid
@@ -553,12 +557,13 @@ async def test_a_browser_started_with_another_spelling_of_a_forbidden_flag_is_re
     """Chrome reads ``-flag``, ``/flag`` and any case as the flag (the review's repro)."""
     unlocked_vault({"work": _entry(site)})
     spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
-    spawned = await spawn(
-        headless=True,
-        user_data_dir=str(tmp_path / "spelling"),
-        browser_args=[argument],
-        **sandbox_kwargs(),
-    )
+    with spawn_before_the_vault():
+        spawned = await spawn(
+            headless=True,
+            user_data_dir=str(tmp_path / "spelling"),
+            browser_args=[argument],
+            **sandbox_kwargs(),
+        )
     iid = spawned["instance_id"]
     try:
         with pytest.raises(ToolError) as caught:

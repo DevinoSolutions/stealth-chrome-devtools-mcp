@@ -60,6 +60,11 @@ async def execute_cdp_command(
     exec-family tools. Prefer `execute_script` for ordinary page JS; use this
     only for one specific CDP method (e.g. 'evaluate', 'Page.reload').
 
+    DISABLED in every backend for as long as a login vault exists on this machine:
+    raw CDP can point Chrome's downloads at any folder, read a local file into a
+    page or load code, and no list of methods is safe. `list_cdp_commands` still
+    works; a person removes the vault with `stealthy login destroy`.
+
     Args:
         instance_id (str): Browser instance ID.
         command (str): CDP command, either domain-qualified ('Page.reload',

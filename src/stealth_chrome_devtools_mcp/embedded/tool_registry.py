@@ -34,10 +34,10 @@ from collections import defaultdict
 from fastmcp.tools import Tool
 
 from stealth_chrome_devtools_mcp.embedded import (
-    caller_python,
     debug_port_guard,
     login_seal,
     tab_binding,
+    vault_mode,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.logging_setup import with_correlation_id
@@ -93,23 +93,26 @@ def _refusing_sealed_tabs(func):
     against, so a positional call and a keyword call are read the same way.
     While no login is running (:func:`login_seal.any_sealing`) it costs one dict
     truthiness check. A call whose arguments do not bind is left for the tool to
-    reject with Python's own ``TypeError``.
+    reject with Python's own ``TypeError``. It is also where vault mode is asked
+    (:func:`vault_mode.admit`), for the tools it gates and only for them.
     """
     name = func.__name__
     signature = inspect.signature(func)
 
     loads_url = name in debug_port_guard.URL_ARGUMENTS
-    runs_python = name in caller_python.RUNS_CALLER_PYTHON
+    gated = name in vault_mode.GATED
 
     def check(args: tuple[object, ...], kwargs: dict[str, object]) -> None:
-        if runs_python:
-            caller_python.admit(name)  # T-19366: never beside an unlocked vault
-        if not (loads_url or login_seal.any_sealing()):
+        if not (gated or loads_url or login_seal.any_sealing()):
             return
         try:
             arguments = signature.bind_partial(*args, **kwargs).arguments
         except TypeError:
+            if gated:  # the tool rejects what does not bind; the mode still applies
+                vault_mode.admit(name)
             return
+        if gated:
+            vault_mode.admit(name, arguments)  # T-19366: vault mode, one home
         if loads_url:
             debug_port_guard.refuse_urls(name, arguments)  # T-19366
         login_seal.refuse_if_sealed(name, arguments)

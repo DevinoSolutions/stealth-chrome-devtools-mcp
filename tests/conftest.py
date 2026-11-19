@@ -337,25 +337,26 @@ def _debug_port_guard_hygiene(request):
 
 
 @pytest.fixture(autouse=True)
-def _caller_python_hygiene(monkeypatch, tmp_path_factory):
+def _vault_mode_hygiene(monkeypatch, tmp_path_factory):
     """No test sees the person's real vault, and none leaves the process marked (T-19366).
 
-    ``create_dynamic_hook`` and ``create_python_binding`` are refused while a vault
-    FILE exists (``caller_python``), so a machine that has one would fail every hook
-    test: the vault path points at a file that never exists unless a test makes one
-    (they re-point it at their own). A tool that runs caller Python also marks the
-    process, which the CLI reads before it creates a vault; tests run in one
-    process, so the mark is cleared around each. ``tests/test_caller_python.py``
-    pins the rule itself.
+    Vault mode is on while a vault FILE exists (``vault_mode``), and it refuses
+    ``create_dynamic_hook``, ``execute_cdp_command``, a file: URL and more, so a
+    machine that has a vault would fail every such test: the vault path points at a
+    file that never exists unless a test makes one (they re-point it at their own).
+    A tool that runs caller Python also marks the process, which the CLI reads before
+    it creates a vault; tests run in one process, so the mark is cleared around each.
+    The download pin's folder is a temporary one, never the person's Downloads.
+    ``tests/test_vault_mode.py`` pins the rule itself.
     """
-    from stealth_chrome_devtools_mcp.embedded import caller_python, vault_store
+    from stealth_chrome_devtools_mcp.embedded import vault_mode, vault_store
 
-    monkeypatch.setattr(
-        vault_store, "VAULT_PATH", tmp_path_factory.getbasetemp() / "no-vault.json"
-    )
-    caller_python._reset_for_tests()
+    base = tmp_path_factory.getbasetemp()
+    monkeypatch.setattr(vault_store, "VAULT_PATH", base / "no-vault.json")
+    monkeypatch.setattr(vault_mode, "download_dir", lambda: base / "mode-downloads")
+    vault_mode._reset_for_tests()
     yield
-    caller_python._reset_for_tests()
+    vault_mode._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)

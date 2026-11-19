@@ -52,7 +52,13 @@ from stealth_chrome_devtools_mcp.embedded import (
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as runtime
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
-from vault_helpers import LOOPBACK_ENV, password_entry, reset, unlocked_vault
+from vault_helpers import (
+    LOOPBACK_ENV,
+    password_entry,
+    reset,
+    spawn_before_the_vault,
+    unlocked_vault,
+)
 
 pytestmark = integration_pytestmark()
 
@@ -169,9 +175,10 @@ def backend_log(tmp_path):
 @contextlib.asynccontextmanager
 async def _browser(tmp_path):
     spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
-    spawned = await spawn(
-        headless=True, user_data_dir=str(tmp_path / "leak"), **sandbox_kwargs()
-    )
+    with spawn_before_the_vault():
+        spawned = await spawn(
+            headless=True, user_data_dir=str(tmp_path / "leak"), **sandbox_kwargs()
+        )
     iid = spawned["instance_id"]
     try:
         yield iid

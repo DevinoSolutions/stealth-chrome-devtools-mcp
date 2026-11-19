@@ -202,8 +202,7 @@ async def export_network_data(
 
     Args:
         instance_id (str): Browser instance ID.
-        filepath (str): Path to save JSON file. Created owner-only (0600); it may
-            not lie in a credential store, browser profile or this server's state.
+        filepath (str): Path to save JSON file. Created owner-only (0600). Refused: a credential store, browser profile or this server's state; a folder code is loaded or started from (site-packages, the Python and virtual-environment trees, this package, startup and shell-profile folders); and a file name code runs by (.py, .pth, .bat, .ps1, .sh, .exe ...).
         overwrite (bool): Replace `filepath` if it already exists (default: False,
             an existing file is refused).
         include_credentials (bool): Keep the values of Cookie, Set-Cookie and
@@ -230,7 +229,8 @@ async def import_network_data(instance_id: str, filepath: str) -> bool:
 
     Args:
         instance_id (str): Browser instance ID.
-        filepath (str): Path to JSON file.
+        filepath (str): Path to JSON file. Refused when it lies in a credential
+            store, browser profile or this server's state.
 
     Returns:
         bool: True if successful.

@@ -132,7 +132,8 @@ async def new_tab(instance_id: str, url: str = "about:blank") -> dict[str, Any]:
 
     Args:
         instance_id (str): Browser instance ID.
-        url (str): URL to open in the new tab.
+        url (str): URL to open in the new tab (a file: URL is refused while a
+            login vault exists).
 
     Returns:
         Dict[str, Any]: New tab information. A Chrome error page raises (F-833).

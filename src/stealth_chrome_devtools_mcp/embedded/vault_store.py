@@ -47,6 +47,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_token,
     secret_registry,
     vault_crypto,
+    vault_mode,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -225,7 +226,8 @@ def lock() -> None:
 
 
 def status() -> dict[str, object]:
-    """``{"exists", "unlocked", "expires_in"}``; locks first if the unlock expired."""
+    """``{"exists", "unlocked", "expires_in"}``; locks first if the unlock expired.
+    ``exists`` is vault mode's own question (:func:`vault_mode.vault_exists`)."""
     _expire()
     with _lock:
         unlocked = _key is not None
@@ -235,7 +237,7 @@ def status() -> dict[str, object]:
             else max(0.0, _deadline - time.monotonic())
         )
     return {
-        "exists": VAULT_PATH.exists(),
+        "exists": vault_mode.vault_exists(),
         "unlocked": unlocked,
         "expires_in": expires_in,
     }
