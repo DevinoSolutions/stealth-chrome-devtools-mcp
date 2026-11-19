@@ -1131,3 +1131,46 @@ def test_the_blink_value_is_allowed_inside_a_larger_list_of_allowed_switches(mod
     vault_mode.check_browser_args(
         ["--window-size=1,2", "--disable-blink-features=AutomationControlled"]
     )
+
+
+class _Untouchable:
+    """A tab double that fails the test if anything reads it."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"the tab was touched: .{name}")
+
+
+class _Connection:
+    """What ``browser.tabs`` yields for a rediscovered target: no target on it."""
+
+    target = None
+
+
+async def test_with_no_vault_the_tab_is_never_touched_by_the_hidden_page_check():
+    assert not vault_mode.active()
+    tab = _Untouchable()
+    login_seal.refuse_current_tab("i", tab)
+    manager = FakeBrowserManager(tabs={"i": tab})
+    assert await tab_binding._resolve(manager, "i") is tab
+
+
+@pytest.mark.parametrize("tab", [object(), _Connection()], ids=["bare", "connection"])
+async def test_in_vault_mode_a_tab_that_cannot_be_identified_is_refused_not_a_crash(
+    mode_on, tab
+):
+    """``AttributeError`` would be a different failure than a refusal, and "cannot
+    tell what this tab is" must not read as allowed."""
+    with pytest.raises(ToolError) as caught:
+        await tab_binding._resolve(FakeBrowserManager(tabs={"i": tab}), "i")
+    _assert_names_the_vault(caught.value)
+    assert "call new_tab" in str(caught.value)
+
+
+async def test_the_resources_refuse_an_unidentifiable_current_tab_in_vault_mode(
+    server_mod, mode_on, monkeypatch
+):
+    from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
+
+    monkeypatch.setattr(rt, "browser_manager", FakeBrowserManager(tabs={"i": object()}))
+    with pytest.raises(ToolError, match="stealthy login destroy"):
+        await server_mod._refuse_sealed_resource("i")
