@@ -828,6 +828,52 @@ def test_a_deferred_profile_is_finalized_only_once_its_pid_is_unlisted(
     assert cleaned == (["i"] if finalized else [])
 
 
+@pytest.mark.parametrize(
+    ("world", "finalized"),
+    [
+        pytest.param(World(), False, id="a live browser"),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            False,
+            id="a zombie is still listed",
+        ),
+        pytest.param(
+            World(cmdline=(), exe=GONE),
+            False,
+            id="tearing down is still listed",
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID)),
+            True,
+            id="gone",
+        ),
+    ],
+)
+def test_finalizing_a_stopped_browser_never_deletes_under_a_pid_still_listed(
+    monkeypatch, world, finalized
+):
+    """The destructive end: ``browser_is_alive`` reads a tearing-down browser dead,
+    so the close path calls this for a pid that is still in the table, and only
+    the ``listed`` check stands between that call and a clone profile deleted under
+    a browser that has not finished leaving. The REAL function runs; only the
+    profile delete and the process scan it makes are scripted."""
+    install(monkeypatch, world)
+    cleanup = _cleanup({"i": {"pid": PID, "user_data_dir": "/p"}})
+    cleaned: list[str] = []
+    monkeypatch.setattr(cleanup, "_get_browser_pids_for_profile", lambda _dir: [])
+    monkeypatch.setattr(cleanup, "_get_active_browser_profile_dirs", lambda: set())
+    monkeypatch.setattr(
+        cleanup,
+        "_cleanup_profile_for_metadata",
+        lambda instance_id, *_a, **_k: cleaned.append(instance_id) or True,
+    )
+    monkeypatch.setattr(cleanup, "_should_untrack_after_cleanup", lambda *_a: True)
+    monkeypatch.setattr(cleanup, "untrack_browser_process", lambda *_a: True)
+
+    assert cleanup.finalize_browser_process("i") is finalized
+    assert cleaned == (["i"] if finalized else [])
+
+
 # ===========================================================================
 # THE ONE HOME (T-19642): ``zombie.alive`` / ``same_process`` / ``create_time``
 # ===========================================================================
