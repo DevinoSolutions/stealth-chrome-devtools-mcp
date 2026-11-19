@@ -106,6 +106,20 @@ _CLEAR_JS = """(() => {
 })()"""
 
 
+#: Where the form around a field would send what is typed in it: the default
+#: button's ``formaction`` when it has one (implicit submission uses that button),
+#: else the form's own ``action``, both RESOLVED against the document by the
+#: browser. ``null`` for a field in no form (a script submits those).
+_ACTION_JS = """const form = (target) => {
+    if (!target || !target.form) return null;
+    const fallback = target.form.querySelector(
+        'button:not([type]), button[type=submit], input[type=submit], input[type=image]'
+    );
+    return fallback && fallback.hasAttribute('formaction')
+        ? fallback.formAction : target.form.action;
+};"""
+
+
 def _find_js(kind: str) -> str:
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
@@ -187,6 +201,22 @@ async def find_field(tab: Tab, kind: str) -> tuple[Element, str] | None:
     return None
 
 
+async def form_action(tab: Tab, kind: str, frame_id: str) -> str | None:
+    """Where the form around the visible ``kind`` field of ``frame_id`` submits to,
+    as an absolute URL the browser resolved, or ``None`` when that field is in no
+    form (or is gone)."""
+    picked = "usernames()[0]" if kind == "username" else "passwords[0]"
+    script = "(() => {" + _LIB_JS + _ACTION_JS + f"return form({picked}); }})()"
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {KINDS}")
+    world = await _world(tab, cdp.page.FrameId(frame_id))
+    if world is None:
+        return None
+    result = await _evaluate(tab, world, script, by_value=True)
+    value = None if result is None else result.value
+    return value if isinstance(value, str) else None
+
+
 async def clear_passwords(tab: Tab) -> None:
     """Set every password input of every frame to ``""``. Best effort per frame:
     a frame that has gone is skipped, which leaves nothing to clear in it."""
@@ -204,4 +234,11 @@ async def clear_passwords(tab: Tab) -> None:
             )
 
 
-__all__ = ["KINDS", "PROBE_JS", "clear_passwords", "find_field", "probe"]
+__all__ = [
+    "KINDS",
+    "PROBE_JS",
+    "clear_passwords",
+    "find_field",
+    "form_action",
+    "probe",
+]

@@ -53,6 +53,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     secret_registry,
     tab_open,
     text_entry,
+    vault_crypto,
     vault_store,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -87,6 +88,7 @@ _STABLE_POLLS = 2
 #: that clears the field while its request is still in flight shows it for one.
 _REJECT_POLLS = 3
 
+_HTTPS_PORT = 443
 _GENERIC_ORIGIN_REFUSAL = (
     "the page is not on a host this login may be used on; nothing was typed"
 )
@@ -107,18 +109,20 @@ def launch_refusal(options: object, cmdline: list[str]) -> str | None:
 
 
 def origin_allowed(url: str, hosts: list[str]) -> bool:
-    """Whether a password may be typed on ``url``: ``https`` and a host that is
-    EXACTLY one of ``hosts`` (no suffix, no prefix, no userinfo trick). With the
-    test variable, ``http://127.0.0.1`` too."""
+    """Whether a password may be typed on ``url``: ``https`` on the default port
+    and a host that is EXACTLY one of ``hosts`` (no suffix, no prefix, no userinfo
+    trick, no other port: ``accounts.example.com:8443`` is another service). With
+    the test variable, ``http://127.0.0.1`` on any port too."""
     try:
         parts = urllib.parse.urlsplit(url)
         host = parts.hostname
-    except ValueError:
+        port = parts.port
+    except ValueError:  # a port that is not a number or is out of range
         return False
     if not host or parts.username is not None or parts.password is not None:
         return False
     if parts.scheme == "https":
-        return host in hosts
+        return host in hosts and port in (None, _HTTPS_PORT)
     return (
         parts.scheme == "http"
         and host == vault_store.LOOPBACK_HOST
@@ -206,7 +210,12 @@ async def _provider(
 def _freeze(label: str) -> None:
     try:
         vault_store.freeze(label)
-    except (vault_store.VaultLocked, KeyError, OSError) as error:
+    except (
+        vault_store.VaultLocked,
+        KeyError,
+        OSError,
+        vault_crypto.VaultError,
+    ) as error:
         debug_logger.log_warning(
             "login_flow",
             "_freeze",
@@ -471,12 +480,21 @@ def _moved_on(url: str, hosts: list[str], login_url: str) -> bool:
 
 
 async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> None:
+    """Type ``text`` into the visible ``kind`` field, after three checks, each read
+    from the browser (never from page script): the field's own frame is on a login
+    host, the TOP frame is too (a login host's page framed inside another site is
+    not typed into), and the form around the field submits to a login host."""
     found = await login_form.find_field(tab, kind)
     if found is None:
         raise ToolError(f"the {kind} field went away before it could be typed into")
     element, frame_id = found
     tree = await tab.send(cdp.page.get_frame_tree())
-    if not origin_allowed(_frame_url(tree, frame_id), hosts):
+    if not origin_allowed(_frame_url(tree, frame_id), hosts) or not origin_allowed(
+        _frame_url(tree, None), hosts
+    ):
+        raise ToolError(_GENERIC_ORIGIN_REFUSAL)
+    action = await login_form.form_action(tab, kind, frame_id)
+    if action is not None and not origin_allowed(action, hosts):
         raise ToolError(_GENERIC_ORIGIN_REFUSAL)
     value = text.reveal() if isinstance(text, secret_registry.Secret) else str(text)
     await text_entry.type_characters(tab, element, value, KEY_DELAY_S)

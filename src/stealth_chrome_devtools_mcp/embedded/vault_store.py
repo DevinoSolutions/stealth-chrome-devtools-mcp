@@ -314,20 +314,50 @@ def _register_passwords(entries: dict[str, Entry]) -> None:
 # ---------------------------------------------------------------- writing
 
 
+_FREEZE_ATTEMPTS = 5
+
+
 def freeze(label: str) -> None:
     """Mark ``label`` frozen (a login was rejected) and rewrite the vault file
-    under the held key. The one write the backend makes. Raises
-    :class:`VaultLocked`, or ``KeyError`` for an unknown label."""
-    with _lock:
-        header, entries = _load()
-        key = _key
-        if key is None:  # locked between the two reads
-            raise VaultLocked("the login vault is locked")
-        stamp = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
-        entries[label]["frozen"] = stamp
-        vault_crypto.write_file(
-            VAULT_PATH, vault_crypto.seal(key, header, {"entries": entries})
-        )
+    under the held key. The one write the backend makes.
+
+    **It never overwrites someone else's write.** The file is read, changed and
+    replaced only if it still is the version that was read
+    (:func:`vault_crypto.write_file`'s ``expect``, under the lock the CLI's writes
+    take too); when a ``stealthy login edit`` landed in between, the freeze is
+    applied again to what that edit wrote. Every top-level key of the plaintext is
+    kept, not only ``entries``. Raises :class:`VaultLocked`, ``KeyError`` for an
+    unknown label, or :class:`vault_crypto.VaultError` when the file will not
+    hold still."""
+    for _attempt in range(_FREEZE_ATTEMPTS):
+        with _lock:
+            _expire()
+            key = _key
+            if key is None:
+                raise VaultLocked("the login vault is locked")
+            try:
+                document = _read_document()
+                plaintext = vault_crypto.open_sealed(key, document)
+            except vault_crypto.VaultError as exc:
+                lock()
+                raise VaultLocked(
+                    "the login vault no longer opens with the held key"
+                ) from exc
+            entries = _entries_of(plaintext)
+            _register_passwords(entries)
+            stamp = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+            entries[label]["frozen"] = stamp
+            header = {"v": document["v"], "kdf": document["kdf"]}
+            try:
+                vault_crypto.write_file(
+                    VAULT_PATH,
+                    vault_crypto.seal(key, header, plaintext),
+                    expect=document.get("nonce"),
+                )
+            except vault_crypto.VaultChanged:
+                continue
+            return
+    raise vault_crypto.VaultError("the vault file kept changing; nothing was frozen")
 
 
 def audit(label: str, instance_id: str, caller: str, outcome: str) -> None:

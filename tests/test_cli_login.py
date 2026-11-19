@@ -342,6 +342,31 @@ def test_edit_clears_frozen_and_changes_only_what_it_was_given(term):
     assert entry["password"] == password_entry()["password"]
 
 
+def test_an_edit_is_refused_when_the_backend_froze_a_login_meanwhile(term, monkeypatch):
+    """The person types the passphrase and the edit; meanwhile a login is rejected
+    and the backend freezes ``work``. Writing the edit would erase that freeze (a
+    retry into a lockout): it is refused and nothing is written."""
+    key = make_vault({"work": password_entry(), "other": password_entry()})
+    real_open = cli_login._open
+
+    def open_then_a_freeze_lands():
+        opened = real_open()
+        vault_store.unlock(key, None)
+        vault_store.freeze("work")
+        vault_store.lock()
+        return opened
+
+    monkeypatch.setattr(cli_login, "_open", open_then_a_freeze_lands)
+    before = vault_store.VAULT_PATH.read_bytes()
+    code = term.run("edit", "other", "--site", "renamed.example", hidden=[PASSPHRASE])
+    assert code != 0
+    assert "changed while you were editing" in term.err
+    assert vault_store.VAULT_PATH.read_bytes() != before  # the freeze is there
+    entries = decrypted()
+    assert entries["work"]["frozen"]
+    assert entries["other"]["site"] != "renamed.example"
+
+
 def test_edit_with_no_changes_unfreezes(term):
     make_vault({"work": password_entry(frozen="2026-11-18T10:00:00+00:00")})
     assert term.run("edit", "work", hidden=[PASSPHRASE]) == 0

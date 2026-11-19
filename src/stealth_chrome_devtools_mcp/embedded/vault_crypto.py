@@ -26,11 +26,13 @@ from a tampered file.
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import hashlib
 import json
 import os
 import secrets
+import time
 from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidTag
@@ -39,6 +41,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from stealth_chrome_devtools_mcp.embedded import atomic_file, backend_token
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 #: A header or a document: the JSON object the file holds.
@@ -62,6 +65,17 @@ _BAD_KEY = "wrong passphrase, or the vault file was changed"
 
 class VaultError(Exception):
     """Wrong key, tampered file, bad format. Never carries a secret."""
+
+
+class VaultChanged(VaultError):  # noqa: N818  PERMANENT(the name its callers share: it says the file changed, not that something failed)
+    """The file was replaced by someone else since it was read."""
+
+
+#: How long a writer waits for another's lock, and when a lock counts as abandoned
+#: (a writer holds it for milliseconds; a crash can leave one behind).
+_LOCK_WAIT_S = 5.0
+_LOCK_STALE_S = 30.0
+_LOCK_POLL_S = 0.02
 
 
 def new_header() -> Document:
@@ -150,22 +164,68 @@ def read_file(path: Path) -> Document:
     return document
 
 
-def write_file(path: Path, document: Document) -> None:
+@contextlib.contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """An exclusive lock on writing ``path``, shared by every process that uses
+    :func:`write_file` (the backend's freeze and the CLI): a sibling ``.lock``
+    file made with ``O_EXCL``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name(f".{path.name}.lock")
+    deadline = time.monotonic() + _LOCK_WAIT_S
+    while True:
+        try:
+            os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            break
+        except FileExistsError:
+            try:
+                abandoned = time.time() - lock.stat().st_mtime > _LOCK_STALE_S
+            except FileNotFoundError:
+                continue
+            if abandoned:
+                lock.unlink(missing_ok=True)
+            elif time.monotonic() >= deadline:
+                raise VaultError(
+                    "the vault file is being written by another process"
+                ) from None
+            else:
+                time.sleep(_LOCK_POLL_S)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def write_file(path: Path, document: Document, expect: object = None) -> None:
     """Publish ``document`` at ``path``: a sibling scratch file made owner-only
     BEFORE any byte is written, then an atomic replace, so a reader sees the
-    whole old file or the whole new one and no other OS user ever sees either."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    scratch = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    try:
-        descriptor = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            backend_token.owner_only(scratch)
-            handle.write(json.dumps(document, separators=(",", ":")))
-            handle.flush()
-            os.fsync(handle.fileno())
-        atomic_file.commit(scratch, path)
-    finally:
-        scratch.unlink(missing_ok=True)
+    whole old file or the whole new one and no other OS user ever sees either.
+
+    The replace happens under :func:`_file_lock`. ``expect`` is the ``nonce`` of
+    the document the new one was made from: when the file on disk no longer has
+    it, somebody else wrote in between and :class:`VaultChanged` is raised with
+    nothing written (every :func:`seal` draws a fresh nonce, so the nonce names
+    one version of the file)."""
+    with _file_lock(path):
+        if expect is not None:
+            try:
+                current = read_file(path).get("nonce")
+            except VaultError:
+                current = None
+            if current != expect:
+                raise VaultChanged("the vault file changed since it was read")
+        scratch = path.with_name(
+            f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        )
+        try:
+            descriptor = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                backend_token.owner_only(scratch)
+                handle.write(json.dumps(document, separators=(",", ":")))
+                handle.flush()
+                os.fsync(handle.fileno())
+            atomic_file.commit(scratch, path)
+        finally:
+            scratch.unlink(missing_ok=True)
 
 
 def _kdf_parameters(header: Document) -> tuple[int, int, int, bytes]:
