@@ -275,6 +275,12 @@ def test_a_flag_that_merely_starts_with_a_forbidden_name_is_not_one():
         "",
         "accounts.google.com",
         "ftp://accounts.google.com/",
+        # another PORT is another service on the same name
+        "https://accounts.google.com:8443/",
+        "https://accounts.google.com:80/",
+        "https://accounts.google.com:99999/",
+        "https://accounts.google.com:abc/",
+        "https://accounts.google.com:0/",
     ],
 )
 def test_origin_allowed_rejects(url):
@@ -310,6 +316,8 @@ def test_http_loopback_needs_the_test_variable(monkeypatch):
     assert login_flow.origin_allowed("http://localhost:8123/", ["127.0.0.1"]) is False
     assert login_flow.origin_allowed("http://evil.example/", ["evil.example"]) is False
     assert login_flow.origin_allowed(url, ["other.example"]) is False
+    # the test variable lets the test site's random port through, and only on http
+    assert login_flow.origin_allowed("https://127.0.0.1:8123/", ["127.0.0.1"]) is False
 
 
 # ------------------------------------------------------------ refusals in run

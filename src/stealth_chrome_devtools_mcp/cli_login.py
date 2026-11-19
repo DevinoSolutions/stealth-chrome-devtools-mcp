@@ -247,7 +247,10 @@ def _open() -> tuple[Document, bytes, dict[str, dict[str, object]]]:
     entries = plaintext.get("entries")
     if not isinstance(entries, dict):
         raise _RefusedError("the vault file is not a valid vault document")
-    return {"v": document["v"], "kdf": document["kdf"]}, key, entries
+    # The nonce names the version of the file this was read from: `_write` passes
+    # it back, so a freeze the backend made meanwhile is refused, not erased.
+    header = {"v": document["v"], "kdf": document["kdf"], "nonce": document["nonce"]}
+    return header, key, entries
 
 
 def _write(header: Document, key: bytes, entries: dict[str, dict[str, object]]) -> None:
@@ -259,9 +262,17 @@ def _write(header: Document, key: bytes, entries: dict[str, dict[str, object]]) 
         store.validate(entries)
     except ValueError as exc:
         raise _RefusedError(f"{exc}; nothing was changed") from None
-    vault_crypto.write_file(
-        store.VAULT_PATH, vault_crypto.seal(key, header, {"entries": entries})
-    )
+    try:
+        vault_crypto.write_file(
+            store.VAULT_PATH,
+            vault_crypto.seal(key, header, {"entries": entries}),
+            expect=header.get("nonce"),
+        )
+    except vault_crypto.VaultChanged:
+        raise _RefusedError(
+            "the vault file changed while you were editing it (a login was frozen, "
+            "or another edit landed); nothing was written; run the command again"
+        ) from None
 
 
 # --------------------------------------------------------------------- backend

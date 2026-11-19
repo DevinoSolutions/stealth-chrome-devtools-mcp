@@ -463,6 +463,140 @@ def test_freeze_when_locked_raises_and_writes_nothing():
     assert vault_store.VAULT_PATH.read_bytes() == before
 
 
+def _another_writer_lands(monkeypatch, make_change):
+    """Run ``make_change(key)`` (a CLI-style write of a NEW version of the file)
+    right after the first read of the file: the window the review named."""
+    real = vault_store._read_document
+    state = {"done": False}
+
+    def read():
+        document = real()
+        if not state["done"]:
+            state["done"] = True
+            make_change()
+        return document
+
+    monkeypatch.setattr(vault_store, "_read_document", read)
+
+
+def test_freeze_does_not_erase_an_edit_that_lands_during_it(monkeypatch):
+    """The CLI edits ANOTHER entry between freeze's read and its replace: the
+    edit survives, and so does the freeze (it is applied again to the new file)."""
+    key = make_vault({"work": password_entry(), "other": password_entry()})
+    vault_store.unlock(key, None)
+
+    def cli_edit():
+        document = vault_crypto.read_file(vault_store.VAULT_PATH)
+        plain = vault_crypto.open_sealed(key, document)
+        plain["entries"]["other"]["username"] = "edited@example.com"
+        header = {"v": document["v"], "kdf": document["kdf"]}
+        vault_crypto.write_file(
+            vault_store.VAULT_PATH, vault_crypto.seal(key, header, plain)
+        )
+
+    _another_writer_lands(monkeypatch, cli_edit)
+    vault_store.freeze("work")
+
+    entries = vault_crypto.open_sealed(
+        key, vault_crypto.read_file(vault_store.VAULT_PATH)
+    )["entries"]
+    assert entries["other"]["username"] == "edited@example.com"
+    assert entries["work"]["frozen"]
+
+
+def test_freeze_gives_up_when_the_file_never_holds_still(monkeypatch):
+    key = make_vault()
+    vault_store.unlock(key, None)
+
+    def always_changing():
+        document = vault_crypto.read_file(vault_store.VAULT_PATH)
+        plain = vault_crypto.open_sealed(key, document)
+        header = {"v": document["v"], "kdf": document["kdf"]}
+        vault_crypto.write_file(
+            vault_store.VAULT_PATH, vault_crypto.seal(key, header, plain)
+        )
+
+    real = vault_store._read_document
+
+    def read():
+        document = real()
+        always_changing()
+        return document
+
+    monkeypatch.setattr(vault_store, "_read_document", read)
+    with pytest.raises(vault_crypto.VaultError, match="kept changing"):
+        vault_store.freeze("work")
+    monkeypatch.setattr(vault_store, "_read_document", real)
+    document = vault_crypto.read_file(vault_store.VAULT_PATH)
+    assert not vault_crypto.open_sealed(key, document)["entries"]["work"]["frozen"]
+
+
+def test_freeze_keeps_every_top_level_key_of_the_plaintext():
+    header = vault_crypto.new_header()
+    key = vault_crypto.derive_key(PASSPHRASE, header)
+    plain = {"entries": {"work": password_entry()}, "future": {"kept": 1}}
+    vault_crypto.write_file(
+        vault_store.VAULT_PATH, vault_crypto.seal(key, header, plain)
+    )
+    vault_store.unlock(key, None)
+    vault_store.freeze("work")
+    opened = vault_crypto.open_sealed(
+        key, vault_crypto.read_file(vault_store.VAULT_PATH)
+    )
+    assert opened["future"] == {"kept": 1}
+    assert opened["entries"]["work"]["frozen"]
+
+
+def test_a_write_expecting_an_old_version_is_refused_and_writes_nothing():
+    key = make_vault()
+    path = vault_store.VAULT_PATH
+    first = vault_crypto.read_file(path)
+    header = {"v": first["v"], "kdf": first["kdf"]}
+    vault_crypto.write_file(path, vault_crypto.seal(key, header, {"entries": {}}))
+    before = path.read_bytes()
+    with pytest.raises(vault_crypto.VaultChanged):
+        vault_crypto.write_file(
+            path,
+            vault_crypto.seal(key, header, {"entries": {"x": 1}}),
+            expect=first["nonce"],
+        )
+    assert path.read_bytes() == before
+
+
+def test_the_write_lock_is_released_and_a_stale_one_is_taken_over(monkeypatch):
+    key = make_vault()
+    path = vault_store.VAULT_PATH
+    lock = path.with_name(f".{path.name}.lock")
+    document = vault_crypto.read_file(path)
+    header = {"v": document["v"], "kdf": document["kdf"]}
+    vault_crypto.write_file(path, vault_crypto.seal(key, header, {"entries": {}}))
+    assert not lock.exists()
+    # a lock a crashed writer left behind, older than the stale limit
+    lock.write_text("")
+    import os
+    import time
+
+    old = time.time() - vault_crypto._LOCK_STALE_S - 5
+    os.utime(lock, (old, old))
+    vault_crypto.write_file(path, vault_crypto.seal(key, header, {"entries": {}}))
+    assert not lock.exists()
+
+
+def test_a_live_lock_makes_a_writer_wait_and_then_refuse(monkeypatch):
+    key = make_vault()
+    path = vault_store.VAULT_PATH
+    lock = path.with_name(f".{path.name}.lock")
+    lock.write_text("")  # fresh: another writer is in its critical section
+    monkeypatch.setattr(vault_crypto, "_LOCK_WAIT_S", 0.1)
+    document = vault_crypto.read_file(path)
+    header = {"v": document["v"], "kdf": document["kdf"]}
+    before = path.read_bytes()
+    with pytest.raises(vault_crypto.VaultError, match="another process"):
+        vault_crypto.write_file(path, vault_crypto.seal(key, header, {"entries": {}}))
+    assert path.read_bytes() == before
+    assert lock.exists()  # not ours: left alone
+
+
 # ------------------------------------------------------------ audit
 
 

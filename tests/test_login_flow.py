@@ -94,6 +94,17 @@ def _handler(site):
                 return self._send(302, "", [("Location", "/home")])
             if path == "/login":
                 return self._send(200, LOGIN_FORM.format(action="/login", note=""))
+            if path == "/wrong-action":
+                return self._send(
+                    200,
+                    LOGIN_FORM.format(action="https://evil.example/collect", note=""),
+                )
+            if path == "/framed-login":
+                return self._send(
+                    200,
+                    '<html><body><iframe src="/login" width=400 height=300>'
+                    "</iframe></body></html>",
+                )
             if path == "/locked-login":
                 return self._send(
                     200, LOGIN_FORM.format(action="/locked-login", note="")
@@ -291,6 +302,38 @@ async def test_a_form_less_page_with_no_session_is_not_a_login(site, tmp_path):
         assert not vault_store.entry("work").get("frozen")
         assert not await _is_home(iid, site)
     assert [p["path"] for p in site.posts] == ["/locked-login"]
+
+
+async def test_a_form_that_submits_to_another_origin_gets_nothing_typed(site, tmp_path):
+    unlocked_vault({"work": _entry(site, "/wrong-action")})
+    async with _browser(tmp_path) as iid:
+        with pytest.raises(ToolError) as caught:
+            await _run(iid)
+        assert "not on a host" in str(caught.value)
+        assert RIGHT not in str(caught.value)
+    assert site.posts == []
+    assert not login_seal.any_sealing()
+
+
+async def test_a_login_form_framed_by_another_page_is_not_typed_into(
+    site, tmp_path, monkeypatch
+):
+    """The field's own frame is on a login host, but the page around it is not:
+    the top frame is checked too. The framing page here is the SAME host the test
+    site serves from, so the top URL is made to read as another origin."""
+    unlocked_vault({"work": _entry(site, "/framed-login")})
+    real = login_flow._frame_url
+
+    def framed_by_a_stranger(tree, frame_id):
+        url = real(tree, frame_id)
+        return "https://framer.example/" if frame_id is None else url
+
+    monkeypatch.setattr(login_flow, "_frame_url", framed_by_a_stranger)
+    async with _browser(tmp_path) as iid:
+        with pytest.raises(ToolError) as caught:
+            await _run(iid)
+        assert "not on a host" in str(caught.value)
+    assert site.posts == []
 
 
 async def test_an_unknown_form_needs_the_user(site, tmp_path):
