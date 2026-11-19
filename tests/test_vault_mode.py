@@ -740,6 +740,9 @@ def test_a_process_is_gone_when_it_does_not_exist_or_is_not_ours(monkeypatch):
         def cmdline(self):
             return self.argv
 
+    from stealth_chrome_devtools_mcp.embedded import pid_alive
+
+    monkeypatch.setattr(pid_alive, "alive", lambda _pid, **_kw: True)  # it is there
     for argv, gone in (
         (["python", "-m", "stealth_chrome_devtools_mcp", "--transport", "http"], False),
         (["C:/tools/stealth-chrome-devtools.exe"], False),
