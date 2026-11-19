@@ -224,8 +224,19 @@ REFUSED = [
     "--DISABLE-FEATURES=BlockInsecurePrivateNetworkRequests",
     "-disable-features=Foo",
     "--enable-blink-features=Foo,Bar",
-    "--disable-blink-features=AutomationControlled",
     "--enable-features=Foo",
+    # F6: only that exact value of --disable-blink-features
+    "--disable-blink-features",
+    "--disable-blink-features=",
+    "--disable-blink-features=Foo",
+    "--disable-blink-features=AutomationControlled,Foo",
+    "--disable-blink-features=Foo,AutomationControlled",
+    "--disable-blink-features=AutomationControlled,",
+    "--disable-blink-features=automationcontrolled",
+    "--disable-blink-features= AutomationControlled",
+    "--disable-blink-features=AutomationControlled;Foo",
+    "--disable-blink-features=AutomationControlled --log-file=x",
+    "--disable-blink-features=SiteIsolation",
     "--disable-features=Foo;Bar",
     "--user-agent",
     "--user-agent=a\nb",
@@ -335,6 +346,7 @@ def test_every_allowed_switch_is_one_the_other_filters_leave_alone():
             "lang": "en",
             "accept-lang": "en",
             "user-agent": "x",
+            "disable-blink-features": "AutomationControlled",
         }.get(name)
         argument = f"--{name}" if pattern is None else f"--{name}={sample}"
         assert pattern is None or pattern.fullmatch(sample), name
@@ -1089,3 +1101,18 @@ async def test_the_state_resources_ask_nothing_with_no_vault(
 
     monkeypatch.setattr(rt, "browser_manager", left_on_a_webui_page)
     await server_mod._refuse_sealed_resource("i")
+
+
+def test_the_refusal_lists_the_one_blink_value_never_the_bare_switch():
+    with pytest.raises(ToolError) as caught:
+        vault_mode.check_browser_args(["--log-file=x"])
+    text = str(caught.value)
+    assert "--disable-blink-features=AutomationControlled" in text
+    assert "--disable-blink-features," not in text
+    assert "--disable-blink-features are" not in text
+
+
+def test_the_blink_value_is_allowed_inside_a_larger_list_of_allowed_switches(mode_on):
+    vault_mode.check_browser_args(
+        ["--window-size=1,2", "--disable-blink-features=AutomationControlled"]
+    )
