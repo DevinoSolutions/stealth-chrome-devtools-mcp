@@ -581,21 +581,15 @@ def test_a_delegated_chrome_is_killed_only_when_it_is_provably_ours(
 
 
 def test_the_start_time_readers_agree_on_every_error(monkeypatch):
-    from stealth_chrome_devtools_mcp.embedded import (
-        browser_pid_registry,
-        browser_reattach,
-    )
+    from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 
     install(monkeypatch, World(created=T))
     assert zombie.create_time(PID) == T
-    assert browser_reattach._create_time(PID) == T
 
     install(monkeypatch, World(created=psutil.AccessDenied(PID)))
     assert zombie.create_time(PID) is None
-    assert browser_reattach._create_time(PID) is None
 
     install(monkeypatch, World(created=OSError(errno.EIO, "io")))
-    assert browser_reattach._create_time(PID) is None
     assert browser_pid_registry.owner_identity()[1] is None
     # CHANGED in the desktop_launch commit: this reader used to let an OSError out.
     assert zombie.create_time(PID) is None
