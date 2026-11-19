@@ -480,7 +480,7 @@ IDENTITY_TABLE = {
         T,
         (False, False, False),
     ),
-    "no start time recorded": (World(created=T), None, (True, True, False)),
+    "no start time recorded": (World(created=T), None, (True, True, True)),
     "the pid is gone": (
         World(ctor=psutil.NoSuchProcess(PID)),
         T,
