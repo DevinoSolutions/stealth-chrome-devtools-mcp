@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
+    browser_cmdline,
     clone_storage,
     profile_copy,
     profile_lock,
@@ -42,6 +43,12 @@ def _hermetic(monkeypatch):
     importlib.import_module("fastmcp.server.dependencies")
     clone_storage._clear_protected_clone_dirs()
     monkeypatch.setattr(clone_storage, "_profile_hold", lambda directory: None)
+    # The other half of every DELETING path's question (``_profile_may_be_held``):
+    # a browser-named process whose command line cannot be read (an elevated or
+    # another user's Chrome) leaves the holder unruled out and the delete is
+    # refused. That is the HOST's answer, and a busy host gives it (a lane run
+    # kept two staging copies on 2026-11-19); nothing here may depend on it.
+    monkeypatch.setattr(browser_cmdline, "unreadable_browsers", lambda _is_name: ())
     yield
     clone_storage._clear_protected_clone_dirs()
 
