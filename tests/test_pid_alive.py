@@ -1,13 +1,15 @@
-"""What every "is this pid there, and is it the same process" reader answers (T-19642).
+"""The one "is this pid there, and is it the same process" home, ``zombie`` (T-19642).
 
-There were eleven separate readers of that one question and they disagreed. This
-file pins what each one DID answer, in one table, before any of them moved, so
-that folding them into ``zombie`` can only change an answer on purpose: the
-expectation table below is the contract, and a row that changes in the same
-commit as a caller migrates is a behaviour change that commit must justify.
+There were eleven separate readers of that question and they disagreed. Before any
+of them moved this file pinned what each one DID answer, in one table; folding
+them into ``zombie`` could then only change an answer on purpose. The tables below
+still hold those answers, and the rows marked CHANGED or DIVERGENCE are the
+behaviour changes the migration made, each with its reason in place. Callers that
+reach ``zombie`` with a different direction for "could not ask" (``unknown=True``
+for holders, ``False`` for killers) keep their own pins further down.
 
 Each scenario is a ``World``: what ``psutil`` answers (or raises) for ONE pid,
-built from psutil's own exception types and constants, so every reader sees the
+built from psutil's own exception types and constants, so every caller sees the
 same machine. POSIX's states (zombies, the Linux exec window, a tearing-down
 process) are scripted rather than made, because the suite also runs on Windows,
 where none of them can exist.
@@ -1080,3 +1082,76 @@ def test_listed_raises_what_psutil_raises(monkeypatch):
 def test_running_is_the_held_process_form(monkeypatch, running, status, answer):
     install(monkeypatch, World(running=running, status=status))
     assert zombie.running(psutil.Process(PID)) is answer
+
+
+# ---------------------------------------------------------------------------
+# One home: nothing under src/ asks the machine these questions except zombie.
+# ---------------------------------------------------------------------------
+
+#: (file, call) pairs allowed outside ``zombie``: a Process the caller already
+#: holds is asked about itself, which is not the "is this NUMBER there" question.
+HELD_PROCESS_READS = {("client_presence.py", "create_time")}
+
+
+def _raw_calls_in(source: str) -> list[tuple[str, int]]:
+    """Every ``pid_exists`` / ``is_running`` / ``create_time`` / ``os.kill(_, 0)``
+    call in *source*, as (name, line)."""
+    import ast
+
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        name = node.func.attr
+        if ast.unparse(node.func.value) == "zombie":
+            continue  # asking the one home is the point
+        if name in {"pid_exists", "is_running", "create_time"}:
+            found.append((name, node.lineno))
+        elif (
+            name == "kill"
+            and ast.unparse(node.func.value) == "os"
+            and len(node.args) == 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == 0
+        ):
+            found.append(("os.kill(_, 0)", node.lineno))
+    return found
+
+
+def test_no_module_but_zombie_asks_whether_a_pid_is_there():
+    from pathlib import Path
+
+    root = Path(zombie.__file__).parent.parent
+    stray = [
+        f"{path.name}:{line} {name}"
+        for path in sorted(root.rglob("*.py"))
+        if path.name != "zombie.py"
+        for name, line in _raw_calls_in(path.read_text(encoding="utf-8"))
+        if (path.name, name) not in HELD_PROCESS_READS
+    ]
+    assert stray == [], (
+        "a second way to ask whether a pid is alive or which process it is; "
+        "ask zombie.alive / listed / same_process / create_time instead"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("psutil.pid_exists(1)", "pid_exists"),
+        ("os.kill(pid, 0)", "os.kill(_, 0)"),
+        ("process.create_time()", "create_time"),
+        ("process.is_running()", "is_running"),
+    ],
+)
+def test_the_one_home_pin_sees_each_raw_probe(source, name):
+    """The scan finds what it forbids (a pin that cannot fail pins nothing)."""
+    assert _raw_calls_in(source) == [(name, 1)]
+
+
+def test_the_one_home_pin_leaves_a_question_put_to_the_home():
+    assert _raw_calls_in("zombie.create_time(pid)") == []
+
+
+def test_the_one_home_pin_leaves_a_signal_that_is_not_a_probe():
+    assert _raw_calls_in("os.kill(pid, signal.SIGTERM)") == []

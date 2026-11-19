@@ -8,7 +8,7 @@ server.py referenced ``psutil.Error`` at the handler but never imported ``psutil
 
 SOFT PIN UPDATED for F-871. What must never change is that the failure is
 survived rather than raised. What the surviving ANSWER is was main's behaviour,
-not an invariant, and main's was not uniform: an unanswerable ``_pid_alive``
+not an invariant, and main's was not uniform: an unanswerable pid-alive question
 counts a profile as held, while an unanswerable process scan counted it free.
 The direction is now uniform — an unanswerable question resolves toward HELD,
 because one extra walk is survivable and two browsers on one profile is not —
