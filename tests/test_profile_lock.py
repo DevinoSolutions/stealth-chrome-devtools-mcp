@@ -173,6 +173,7 @@ class TestProfileHold:
         monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
         monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
         monkeypatch.setattr(browser_cmdline, "_EXE_WITNESS", linux)
+        monkeypatch.setattr(zombie, "_EXE_WITNESS", linux)
 
         def _read(what):
             def read(_self):
@@ -243,7 +244,7 @@ class TestProfileHold:
             monkeypatch, status=status, cmdline=cmdline, exe=exe, linux=linux
         )
 
-        assert profile_lock._pid_alive(9) is False
+        assert zombie.alive(9, unknown=True) is False
         assert browser_cmdline._still_running(9) is False
 
     @pytest.mark.parametrize(
@@ -314,7 +315,7 @@ class TestProfileHold:
             monkeypatch, status=status, cmdline=cmdline, exe=exe, linux=linux
         )
 
-        assert profile_lock._pid_alive(9) is True
+        assert zombie.alive(9, unknown=True) is True
         assert browser_cmdline._still_running(9) is True
 
     @pytest.mark.parametrize(

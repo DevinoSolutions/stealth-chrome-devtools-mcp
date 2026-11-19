@@ -34,6 +34,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     profile_lock,
     spawn_budget,
     spawn_leak,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -589,11 +590,9 @@ class TestLockReadEdges:
             raise raised
 
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
-        # raising=False: before F-1008 there was no such switch, and the pin
-        # must reach the old answer (FREE) rather than fail on a missing name.
-        monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", True, raising=False)
+        monkeypatch.setattr(zombie, "_SIGNAL_ASKS", True)
         # The module's own alias: patching `os.kill` would swap it process-wide.
-        monkeypatch.setattr(profile_lock, "_signal", kill, raising=False)
+        monkeypatch.setattr(zombie, "_signal", kill)
         answer = hold(tmp_path)
         monkeypatch.undo()
 
@@ -604,12 +603,9 @@ class TestLockReadEdges:
         """``os.kill`` TERMINATES on Windows: the question is never asked there."""
         write_singleton(tmp_path, f"{socket.gethostname()}-{dead_pid()}")
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
-        monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", False, raising=False)
+        monkeypatch.setattr(zombie, "_SIGNAL_ASKS", False)
         monkeypatch.setattr(
-            profile_lock,
-            "_signal",
-            lambda *_a: pytest.fail("signalled a pid"),
-            raising=False,
+            zombie, "_signal", lambda *_a: pytest.fail("signalled a pid")
         )
         assert hold(tmp_path) is None
 
@@ -631,7 +627,7 @@ class TestLockReadEdges:
     ):
         asked = []
         monkeypatch.setattr(
-            profile_lock, "_pid_alive", lambda pid: asked.append(pid) or True
+            zombie, "alive", lambda pid, *, unknown: asked.append(pid) or True
         )
         write_singleton(tmp_path, f"{socket.gethostname()}-{2**31 - 1}")
         assert hold(tmp_path) is not None
