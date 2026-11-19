@@ -44,3 +44,11 @@ graphify-out/
 # into the sdist — a local `uv build` produced a 56 MB sdist of which 55 MB was
 # this directory. Ephemeral by construction; never part of the distribution.
 .claude/worktrees/
+
+# Scratch that tools leave in the checkout (a Windows redirect to `nul`, the
+# Playwright MCP console/page dumps, editor-style config backups, raw test
+# logs of the audit baseline). Tracked copies were removed in T-19641.
+nul
+.playwright-mcp/
+*.bak-*
+audit/stage0/run*.log
