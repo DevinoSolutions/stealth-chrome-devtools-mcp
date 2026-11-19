@@ -137,6 +137,9 @@ class Verdict(NamedTuple):
     #: Due for termination but held back by the stand-down rule (``kill`` is
     #: then False: this pass terminates nothing).
     stood_down: bool = False
+    #: Due for termination, but the kill could not be written to the state file
+    #: first, so it was not made (``kill`` is then False too). Retried next pass.
+    unrecorded: bool = False
 
 
 def judge(seen: Observation) -> str:
@@ -278,7 +281,9 @@ def _write_state(path: Path, state: dict[str, object]) -> bool:
     kill it could not record.
     """
     try:
-        atomic_file.write_json(path, state, indent=2)
+        # make_parents=False: a pass must not bring back a state dir the operator
+        # deleted while the scheduled task is still installed.
+        atomic_file.write_json(path, state, indent=2, make_parents=False)
     except OSError as error:
         _logger.warning(
             "supervisor state not written to %s: %s; the clocks and kills of this "
@@ -518,7 +523,10 @@ def run_pass(  # noqa: PLR0913  PERMANENT(function interface)
             history.append(attempt)
             if not persist():
                 history.pop()
-                _logger.warning(
+                verdicts[index] = verdict._replace(kill=False, unrecorded=True)
+                # ERROR, like a stand-down: while the state cannot be written the
+                # watchdog terminates nothing, and that must not read as routine.
+                _logger.error(
                     "backend pid %d on port %d is NOT terminated: the kill could "
                     "not be recorded, and the stand-down counts what is recorded",
                     seen.pid,

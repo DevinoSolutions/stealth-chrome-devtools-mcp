@@ -423,6 +423,12 @@ class TestDocumentedCountsDeriveFromTheRegistry:
                 f"{name} is {size} chars; CLAUDE.md says over {claim.group(1)}K"
             )
 
+    def test_the_size_navmap_names_for_itself_is_a_floor_it_meets(self):
+        navmap = (REPO / "NAVMAP.md").read_text(encoding="utf-8")
+        claim = re.search(r"over (\d+)K chars", navmap)
+        assert claim, "NAVMAP.md names no size for itself"
+        assert len(navmap) >= int(claim.group(1)) * 1000
+
 
 class TestNavmapRowsAreUnique:
     #: Two different files: the package entrypoint and ``embedded/server.py``.

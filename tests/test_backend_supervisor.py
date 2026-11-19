@@ -770,17 +770,24 @@ class TestStateWrite:
         _seed_state(record, clocks, [])
         before = _state_file(record).read_bytes()
 
-        def refuse(path, payload, *, indent=None):
+        def refuse(path, payload, **_):
             raise PermissionError(5, "used by another process")
 
         monkeypatch.setattr(backend_supervisor.atomic_file, "write_json", refuse)
         with caplog.at_level(logging.WARNING, logger=LOGGER):
             verdicts = _pass_over(record, children, t0)  # must not raise
         assert asked == [], "a kill that cannot be counted is not made"
-        assert all(v.kill for v in verdicts), "the verdicts are still reported"
+        assert len(verdicts) == 2, "the verdicts are still reported"
+        assert [(v.kill, v.unrecorded) for v in verdicts] == [(False, True)] * 2, (
+            "and say what happened: not terminated, because the kill was not recorded"
+        )
         text = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any("supervisor state not written" in line for line in text)
-        assert sum("is NOT terminated" in line for line in text) == 2
+        refused = [r for r in caplog.records if "is NOT terminated" in r.getMessage()]
+        assert len(refused) == 2
+        assert {r.levelno for r in refused} == {logging.ERROR}, (
+            "a watchdog that cannot act is announced like a stand-down, at ERROR"
+        )
         assert _state_file(record).read_bytes() == before, "the old file is whole"
 
     def test_a_lost_final_write_leaves_the_kill_counted(
@@ -793,11 +800,11 @@ class TestStateWrite:
         real = backend_supervisor.atomic_file.write_json
         writes: list[int] = []
 
-        def lose_the_last(path, payload, *, indent=None):
+        def lose_the_last(path, payload, **kwargs):
             writes.append(1)
             if len(writes) == 3:  # one write before each kill, then the final one
                 raise PermissionError(5, "used by another process")
-            real(path, payload, indent=indent)
+            real(path, payload, **kwargs)
 
         monkeypatch.setattr(backend_supervisor.atomic_file, "write_json", lose_the_last)
         with caplog.at_level(logging.WARNING, logger=LOGGER):
@@ -834,3 +841,46 @@ class TestStateWrite:
         assert len(asked) == 2
         assert len(backend_supervisor.read_state(_state_file(record))["kills"]) == 2
         assert not [r for r in caplog.records if "not written" in r.getMessage()]
+
+
+class TestStateWriteScope:
+    def test_a_pass_does_not_recreate_a_state_dir_that_is_gone(self, tmp_path):
+        """The scheduled task keeps running after ``~/.stealth-mcp`` is deleted; a
+        state write must not bring the directory back (T-19641 review)."""
+        record = tmp_path / "gone" / "server.json"
+        assert (
+            backend_supervisor.run_pass(
+                record,
+                is_ours=lambda pid: False,
+                healthy=lambda port: False,
+                is_healthy=lambda port: False,
+            )
+            == []
+        )
+        assert not record.parent.exists()
+
+
+class TestVerdictLine:
+    def _verdict(self, **fields):
+        base = {
+            "port": 1,
+            "pid": 2,
+            "state": "red",
+            "unusable_for": 200.0,
+            "kill": False,
+        }
+        return backend_supervisor.Verdict(**{**base, **fields})
+
+    def test_a_kill_that_was_not_recorded_is_not_reported_as_terminating(self):
+        line = cli_supervise._line(self._verdict(unrecorded=True), dry_run=False)
+        assert "-> terminating" not in line
+        assert "NOT terminating" in line
+        assert "could not be recorded" in line
+
+    def test_a_real_kill_and_a_dry_run_keep_their_wording(self):
+        assert cli_supervise._line(self._verdict(kill=True), dry_run=False).endswith(
+            "-> terminating"
+        )
+        assert cli_supervise._line(self._verdict(kill=True), dry_run=True).endswith(
+            "-> would terminate"
+        )

@@ -12,8 +12,8 @@ app:
   as per-parameter schema text (F-946);
 * ``apply_disabled_sections`` unregisters exactly the disabled sections' tools
   via ``mcp.local_provider.remove_tool`` (and swallows an already-removed tool);
-* a count-94 tripwire mirroring M6's ``test_tool_dispatch`` (the live registry
-  and the section map agree at 94).
+* a count tripwire mirroring M6's ``test_tool_dispatch`` (the live registry
+  and the section map agree on the count).
 
 The end-to-end correlation-id + ``tools/list`` schema-snapshot pins live in
 ``test_correlation_id.py`` (unchanged by the move — they drive ``server.mcp``).
@@ -179,7 +179,7 @@ class TestApplyDisabledSections:
 
 class TestCountTripwire:
     """Mirror of M6's F-108 tripwire from the registry's vantage: the live
-    FastMCP registry and the section map agree at 94."""
+    FastMCP registry and the section map agree on the count."""
 
     EXPECTED_TOOL_COUNT = 100
 
