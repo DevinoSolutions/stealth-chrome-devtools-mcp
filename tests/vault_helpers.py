@@ -4,6 +4,7 @@ vault file under a temporary directory. No test logic lives here."""
 from __future__ import annotations
 
 from stealth_chrome_devtools_mcp.embedded import (
+    login_seal,
     secret_registry,
     vault_crypto,
     vault_store,
@@ -56,3 +57,6 @@ def unlocked_vault(entries):
 def reset():
     vault_store.lock()
     secret_registry.clear()
+    login_seal._depth.clear()
+    login_seal._tabs.clear()
+    login_seal._unclosed.clear()
