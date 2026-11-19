@@ -159,7 +159,9 @@ async def test_a_browser_started_before_the_vault_is_pinned_to_the_fixed_folder(
             if landed:
                 break
         assert landed, "the pin was never put back"
-        assert "evil.pth" not in landed, landed  # named by a GUID, never by the page
+        assert not any("evil" in name for name in landed), (
+            landed
+        )  # named by a GUID, never by the page
         for leftover in _files(trap):
             (trap / leftover).unlink()
         count = len(_files(pinned))
@@ -221,7 +223,7 @@ async def test_a_browser_spawned_while_the_vault_exists_is_pinned_from_its_first
         await get_fn("navigate")(instance_id=iid, url=site.url("/login"))
         assert await eval_js(iid, f"return {DOWNLOAD};") == "clicked"
         landed = await _wait_for(lambda: _files(pinned))
-        assert landed and "evil.pth" not in landed, landed
+        assert landed and not any("evil" in name for name in landed), landed
     finally:
         await get_fn("close_instance")(instance_id=iid)
 
