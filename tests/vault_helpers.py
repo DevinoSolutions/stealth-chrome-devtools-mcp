@@ -58,6 +58,7 @@ def reset():
     vault_store.lock()
     secret_registry.clear()
     login_seal._depth.clear()
+    login_seal._ports.clear()
     login_seal._tabs.clear()
     login_seal._unclosed.clear()
     login_seal._holds.clear()

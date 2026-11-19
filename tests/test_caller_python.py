@@ -1,23 +1,29 @@
-"""Caller Python in the backend process and the login vault never coexist (T-19366).
+"""A machine is vault-capable or caller-Python-capable, never both (T-19366).
 
 The third review read the password, the username and the 32-byte vault key through
 ``create_python_binding``: the caller's Python runs in the backend with its own
-authority. ``caller_python`` is the rule (refuse while unlocked, taint on first run,
-no unlock afterwards) and this file pins it, the tools that carry it, the surfaces
-that report it, and a census that fails when a new tool evaluates caller Python
-without being in the set.
+authority. The fourth review showed a per-process "taint" is bookkeeping, because
+such code can persist itself and come back after the restart that clears it. So the
+rule is decided by durable state (``caller_python``): while a vault file exists the
+two tools are refused in every backend; with none they behave as they always did;
+and a vault is not created while a backend has already run one. This file pins the
+rule, the tools that carry it, the CLI side of it, and a census that fails when a
+new tool evaluates caller Python without being in the set.
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
-import base64
+import errno
 import pathlib
 
 import pytest
 
 from fakes import FakeBrowserManager, call_tool
+from stealth_chrome_devtools_mcp import cli_login
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_registry,
     caller_python,
     dynamic_hook_ai_interface,
     dynamic_hook_system,
@@ -50,7 +56,10 @@ def key():
 
 
 @pytest.fixture
-def server_mod(patched_server):
+def server_mod(patched_server, monkeypatch):
+    # the hook table is process-global: a hook made here must not outlive the test
+    # (and a hook another file left must not decide this one)
+    monkeypatch.setattr(dynamic_hook_system.dynamic_hook_system, "hooks", {})
     return patched_server(browser_manager=FakeBrowserManager())
 
 
@@ -65,74 +74,87 @@ def test_the_set_is_the_two_tools_that_run_caller_python():
 
 
 @pytest.mark.parametrize("tool", sorted(caller_python.RUNS_CALLER_PYTHON))
-def test_while_the_vault_is_unlocked_such_a_tool_is_refused_and_taints_nothing(
-    key, tool
-):
-    vault_store.unlock(key, None)
-    with pytest.raises(ToolError) as caught:
-        caller_python.admit(tool)
-    assert tool in str(caught.value)
-    assert "stealthy login lock" in str(caught.value)
-    assert not caller_python.tainted()  # a refused call ran nothing
+def test_with_no_vault_the_tool_runs_as_it_always_did(tool):
+    caller_python.admit(tool)
+    assert caller_python.ran() == tool
 
 
 @pytest.mark.parametrize("tool", sorted(caller_python.RUNS_CALLER_PYTHON))
-def test_once_one_has_run_the_vault_cannot_be_unlocked(key, tool):
-    caller_python.admit(tool)
-    assert caller_python.tainted_by() == tool
-    with pytest.raises(caller_python.Tainted) as caught:
-        vault_store.unlock(key, None)
-    assert tool in str(caught.value)
-    assert "restart" in str(caught.value)
-    assert not vault_store.is_unlocked()  # and nothing was held
+def test_while_a_vault_exists_such_a_tool_is_refused_locked_or_unlocked(key, tool):
+    for unlocked in (False, True):
+        if unlocked:
+            vault_store.unlock(key, None)
+        with pytest.raises(ToolError) as caught:
+            caller_python.admit(tool)
+        text = str(caught.value)
+        assert tool in text
+        assert "stealthy login destroy" in text  # how to remove the vault
+        assert "disabled" in text
+        assert caller_python.ran() is None  # a refused call ran nothing
 
 
-def test_a_wrong_key_is_refused_the_same_way_so_the_state_does_not_leak_a_guess(key):
+def test_removing_the_vault_turns_the_tools_back_on(key):
+    with pytest.raises(ToolError):
+        caller_python.admit("create_python_binding")
+    vault_store.VAULT_PATH.unlink()
     caller_python.admit("create_python_binding")
-    with pytest.raises(caller_python.Tainted):
-        vault_store.unlock(b"\x00" * 32, None)
+    assert caller_python.ran() == "create_python_binding"
 
 
-def test_a_tool_outside_the_set_neither_taints_nor_is_refused(key):
+def test_a_tool_outside_the_set_is_never_refused_and_never_marks(key):
     vault_store.unlock(key, None)
     caller_python.admit("execute_script")
     caller_python.admit("execute_python_in_browser")  # transpiled to page JavaScript
-    assert not caller_python.tainted()
+    assert caller_python.ran() is None
 
 
-def test_the_first_tool_is_the_one_recorded():
+def test_the_first_tool_to_run_is_the_one_recorded():
     caller_python.admit("create_dynamic_hook")
     caller_python.admit("create_python_binding")
-    assert caller_python.tainted_by() == "create_dynamic_hook"
+    assert caller_python.ran() == "create_dynamic_hook"
 
 
-def test_unlock_then_lock_then_a_tool_runs_but_the_vault_stays_shut(key):
-    vault_store.unlock(key, None)
-    vault_store.lock()
+def test_a_vault_path_that_cannot_be_read_counts_as_a_vault(monkeypatch):
+    """Fail closed: the tools stay off when the file cannot be looked at."""
+
+    def denied(_path):
+        raise PermissionError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(caller_python.os, "stat", denied)
+    with pytest.raises(ToolError):
+        caller_python.admit("create_python_binding")
+
+
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.ENOTDIR])
+def test_a_missing_file_or_folder_is_no_vault(monkeypatch, code):
+    def missing(_path):
+        raise OSError(code, "missing")
+
+    monkeypatch.setattr(caller_python.os, "stat", missing)
     caller_python.admit("create_python_binding")
-    with pytest.raises(caller_python.Tainted):
-        vault_store.unlock(key, None)
 
 
-def test_a_hook_that_exists_means_no_key_is_held_or_can_be(key):
-    """Existing bindings and hooks are never left callable across an unlock: with
-    the rule, none can exist at one. A hook is created while the vault is locked;
-    from then on it cannot be unlocked."""
+def test_the_process_is_marked_before_the_file_is_read(monkeypatch):
+    """A vault being created at the same moment must see this tool: the CLI writes
+    the file, then asks; the tool marks, then reads the file. Whichever is later
+    sees the other."""
+    seen = []
+
+    def exists():
+        seen.append(caller_python.ran())
+        return False
+
+    monkeypatch.setattr(caller_python, "vault_exists", exists)
     caller_python.admit("create_dynamic_hook")
-    with pytest.raises(caller_python.Tainted):
-        vault_store.unlock(key, None)
-    assert not vault_store.is_unlocked()
-    with pytest.raises(vault_store.VaultLocked):
-        vault_store.public_entries()
+    assert seen == ["create_dynamic_hook"]
 
 
 # ------------------------------------------------------- through the real tools
 
 
-async def test_the_registry_refuses_create_python_binding_while_unlocked(
+async def test_the_registry_refuses_create_python_binding_while_a_vault_exists(
     server_mod, key
 ):
-    vault_store.unlock(key, None)
     with pytest.raises(ToolError) as caught:
         await call_tool(
             server_mod,
@@ -141,11 +163,13 @@ async def test_the_registry_refuses_create_python_binding_while_unlocked(
             binding_name="leak",
             python_code="def leak(x):\n    return 1\n",
         )
-    assert "refused while the vault is unlocked" in str(caught.value)
-    assert not caller_python.tainted()
+    assert "disabled" in str(caught.value)
+    assert caller_python.ran() is None
 
 
-async def test_the_registry_refuses_create_dynamic_hook_while_unlocked(server_mod, key):
+async def test_the_registry_refuses_create_dynamic_hook_while_a_vault_exists(
+    server_mod, key
+):
     vault_store.unlock(key, None)
     with pytest.raises(ToolError) as caught:
         await call_tool(
@@ -155,12 +179,24 @@ async def test_the_registry_refuses_create_dynamic_hook_while_unlocked(server_mo
             requirements={"url_pattern": "*"},
             function_code="def process_request(request):\n    return None\n",
         )
-    assert "refused while the vault is unlocked" in str(caught.value)
+    assert "disabled" in str(caught.value)
     assert not dynamic_hook_system.dynamic_hook_system.hooks
 
 
-async def test_a_tool_that_runs_taints_even_when_its_code_does_not_load(server_mod):
-    with pytest.raises(Exception):  # noqa: B017, PT011  PERMANENT(any failure: the question is the taint)
+async def test_with_no_vault_the_registry_lets_a_hook_through(server_mod):
+    result = await call_tool(
+        server_mod,
+        "create_dynamic_hook",
+        name="h",
+        requirements={"url_pattern": "*"},
+        function_code="def process_request(request):\n    return None\n",
+    )
+    assert result
+    assert caller_python.ran() == "create_dynamic_hook"
+
+
+async def test_a_tool_that_runs_marks_even_when_its_code_does_not_load(server_mod):
+    with pytest.raises(Exception):  # noqa: B017, PT011  PERMANENT(any failure: the question is the mark)
         await call_tool(
             server_mod,
             "create_python_binding",
@@ -168,10 +204,12 @@ async def test_a_tool_that_runs_taints_even_when_its_code_does_not_load(server_m
             binding_name="b",
             python_code="this is not python (",
         )
-    assert caller_python.tainted_by() == "create_python_binding"
+    assert caller_python.ran() == "create_python_binding"
 
 
-async def test_a_simple_hook_is_not_caller_python_and_needs_no_lock(server_mod, key):
+async def test_a_simple_hook_is_not_caller_python_and_needs_no_vault_decision(
+    server_mod, key
+):
     vault_store.unlock(key, None)
     await call_tool(
         server_mod,
@@ -180,7 +218,7 @@ async def test_a_simple_hook_is_not_caller_python_and_needs_no_lock(server_mod, 
         url_pattern="*",
         action="block",
     )
-    assert not caller_python.tainted()
+    assert caller_python.ran() is None
 
 
 # The payloads are TEXT handed to the template under test, which must keep them as
@@ -219,74 +257,234 @@ def test_simple_hook_headers_must_be_strings(headers):
 # ------------------------------------------------------------ the surfaces
 
 
-def _body(key_bytes):
-    return {"key": base64.b64encode(key_bytes).decode("ascii"), "ttl_seconds": None}
-
-
-async def test_the_unlock_route_answers_409_with_the_sentence_once_tainted(key):
-    caller_python.admit("create_python_binding")
-
-    class Request:
-        async def body(self):
-            import json
-
-            return json.dumps(_body(key)).encode()
-
-        async def json(self):
-
-            return _body(key)
-
-    reply = await vault_routes._unlock(Request())
-    assert reply.status_code == 409
+async def test_the_route_says_which_tool_ran_and_nothing_else():
     import json
 
-    payload = json.loads(reply.body)
-    assert payload["unlock_blocked"] is True
-    assert "create_python_binding" in payload["error"]
-    assert "restart" in payload["error"]
-    assert not vault_store.is_unlocked()
-
-
-def test_status_reports_the_block_without_saying_why_in_code_terms(key):
-    assert vault_store.status()["unlock_blocked"] is False
-    caller_python.admit("create_dynamic_hook")
-    assert vault_store.status()["unlock_blocked"] is True
-
-
-async def test_list_logins_and_login_say_the_vault_cannot_be_unlocked(server_mod):
+    reply = await vault_routes._caller_python(None)
+    assert json.loads(reply.body) == {"ran": None}
     caller_python.admit("create_python_binding")
+    reply = await vault_routes._caller_python(None)
+    assert json.loads(reply.body) == {"ran": "create_python_binding"}
+
+
+def test_the_status_and_the_unlock_route_have_no_taint_left_in_them(key):
+    assert set(vault_store.status()) == {"exists", "unlocked", "expires_in"}
+    assert not hasattr(caller_python, "Tainted")
+    assert not hasattr(caller_python, "unlock_gate")
+
+
+class _Reply:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def _backends(monkeypatch, replies):
+    """Record these backends and answer each port from ``replies``."""
+    import httpx
+
+    entries = [{"port": port, "version": "9.9"} for port in replies]
+    monkeypatch.setattr(backend_registry, "read_backends", lambda _path: entries)
+
+    class Client:
+        def __init__(self, **_kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def get(self, url, headers=None):
+            port = int(url.split(":")[2].split("/")[0])
+            answer = replies[port]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+    monkeypatch.setattr(httpx, "Client", Client)
+
+
+def test_a_clean_backend_and_a_dead_one_do_not_stop_a_vault(monkeypatch):
+    import httpx
+
+    _backends(
+        monkeypatch,
+        {1001: _Reply(200, {"ran": None}), 1002: httpx.ConnectError("gone")},
+    )
+    assert cli_login._backend_problems() == []
+
+
+def test_a_backend_that_ran_a_tool_stops_a_vault_and_the_sentence_names_the_tool(
+    monkeypatch,
+):
+    _backends(monkeypatch, {1001: _Reply(200, {"ran": "create_python_binding"})})
+    problems = cli_login._backend_problems()
+    assert len(problems) == 1
+    assert "1001" in problems[0]
+    assert "create_python_binding" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [_Reply(404, {}), _Reply(200, ValueError("not json")), _Reply(200, {"x": 1})],
+)
+def test_a_backend_that_cannot_say_stops_a_vault_too(monkeypatch, answer):
+    _backends(monkeypatch, {1001: answer})
+    problems = cli_login._backend_problems()
+    assert len(problems) == 1
+    assert "cannot say" in problems[0]
+    assert "9.9" in problems[0]  # an older release is named
+
+
+def test_a_backend_that_times_out_stops_a_vault(monkeypatch):
+    import httpx
+
+    _backends(monkeypatch, {1001: httpx.ReadTimeout("slow")})
+    assert "did not answer" in cli_login._backend_problems()[0]
+
+
+def _cli(monkeypatch, tmp_path, problems, passphrase="x"):
+    """``stealthy login init`` with the prompts answered and the backends faked.
+    ``problems`` is the list of answers ``_backend_problems`` gives in turn."""
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_hidden", lambda _prompt: passphrase)
+    asked = []
+
+    def backend_problems():
+        asked.append(vault_store.VAULT_PATH.exists())
+        return problems.pop(0)
+
+    monkeypatch.setattr(cli_login, "_backend_problems", backend_problems)
+    return asked
+
+
+def _run(command, **fields):
+    return cli_login.cmd_login(argparse.Namespace(login_command=command, **fields))
+
+
+def test_init_says_what_it_disables_before_it_asks_for_a_passphrase(
+    monkeypatch, tmp_path, capsys
+):
+    asked = _cli(monkeypatch, tmp_path, [[], []])
+    order = []
+    monkeypatch.setattr(
+        cli_login, "_hidden", lambda _prompt: order.append("asked") or "x"
+    )
+    assert _run("init") == 0
+    out = capsys.readouterr().out
+    assert "create_python_binding and create_dynamic_hook are DISABLED" in out
+    assert "stealthy login destroy" in out
+    assert out.index("DISABLED") < out.index("created")
+    assert asked == [False, True]  # before the file, and again once it exists
+    assert vault_store.VAULT_PATH.exists()
+    assert order  # and the passphrase was asked after the notice
+
+
+def test_init_refuses_while_a_backend_has_run_caller_python(
+    monkeypatch, tmp_path, capsys
+):
+    asked = _cli(monkeypatch, tmp_path, [["the backend on port 1 has run X"]])
+    monkeypatch.setattr(
+        cli_login, "_hidden", lambda _p: pytest.fail("a passphrase was asked for")
+    )
+    assert _run("init") == 1
+    err = capsys.readouterr().err
+    assert "has run X" in err
+    assert "stealth-chrome-devtools restart" in err
+    assert not vault_store.VAULT_PATH.exists()
+    assert asked == [False]
+
+
+def test_init_takes_the_vault_back_when_a_tool_ran_while_it_was_made(
+    monkeypatch, tmp_path, capsys
+):
+    """The tool was admitted between the first look and the file: the second look
+    sees it, and the file is gone again, so no secret sits beside that code."""
+    _cli(monkeypatch, tmp_path, [[], ["the backend on port 1 has run X"]])
+    assert _run("init") == 1
+    assert "has run X" in capsys.readouterr().err
+    assert not vault_store.VAULT_PATH.exists()
+
+
+def test_status_shows_that_the_tools_are_disabled_only_while_a_vault_exists(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(cli_login, "_request", _no_backend)
+    _run("status")
+    assert "DISABLED" not in capsys.readouterr().out
+    make_vault({"work": password_entry()})
+    _run("status")
+    out = capsys.readouterr().out
+    assert "create_python_binding and create_dynamic_hook are DISABLED" in out
+    assert "stealthy login destroy" in out
+
+
+def _no_backend(*_a, **_k):
+    raise cli_login._NoBackendError("no backend")
+
+
+def test_destroy_deletes_the_vault_after_the_word_and_turns_the_tools_back_on(
+    monkeypatch, capsys
+):
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_request", _no_backend)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
+    with pytest.raises(ToolError):
+        caller_python.admit("create_python_binding")
+    assert _run("destroy") == 0
+    assert not vault_store.VAULT_PATH.exists()
+    caller_python.admit("create_python_binding")
+    assert "deleted" in capsys.readouterr().out
+
+
+def test_destroy_locks_a_backend_that_still_holds_the_key(monkeypatch):
+    make_vault({"work": password_entry()})
+    calls = []
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(
+        cli_login, "_request", lambda *a, **k: calls.append(a) or (200, {})
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
+    assert _run("destroy") == 0
+    assert calls == [("POST", vault_routes.LOCK_PATH)]
+
+
+def test_destroy_does_nothing_without_the_word_or_without_a_vault(monkeypatch, capsys):
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    assert _run("destroy") == 1  # no vault
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+    assert _run("destroy") == 1
+    assert vault_store.VAULT_PATH.exists()
+    assert "nothing was deleted" in capsys.readouterr().err
+
+
+def test_destroy_needs_a_terminal(monkeypatch):
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(cli_login.sys.stdin, "isatty", lambda: False, raising=False)
+    assert _run("destroy") != 0
+    assert vault_store.VAULT_PATH.exists()
+
+
+async def test_list_logins_and_login_answer_locked_with_no_caller_python_talk(
+    server_mod,
+):
     for name, args in (
         ("list_logins", {}),
         ("login", {"instance_id": "i", "label": "work"}),
     ):
         with pytest.raises(ToolError) as caught:
             await call_tool(server_mod, name, **args)
-        text = str(caught.value)
-        assert "locked" in text
-        assert "create_python_binding" in text
-        assert "restart" in text
-
-
-def test_stealthy_login_unlock_prints_the_sentence_plainly(monkeypatch, capsys):
-    from stealth_chrome_devtools_mcp import cli_login
-
-    sentence = caller_python.UNLOCK_REFUSED.format(tool="create_python_binding")
-    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
-    monkeypatch.setattr(cli_login, "_read_header", dict)
-    monkeypatch.setattr(cli_login, "hidden_prompt", lambda *_a: "x", raising=False)
-    monkeypatch.setattr(cli_login, "_hidden", lambda _prompt: "x")
-    from stealth_chrome_devtools_mcp.embedded import vault_crypto as crypto
-
-    monkeypatch.setattr(crypto, "derive_key", lambda *_a: b"k" * 32)
-    monkeypatch.setattr(crypto, "open_sealed", lambda *_a: {})
-    monkeypatch.setattr(cli_login, "_post_key", lambda *_a: (409, {"error": sentence}))
-    import argparse
-
-    code = cli_login.cmd_login(
-        argparse.Namespace(login_command="unlock", duration=None)
-    )
-    assert code != 0
-    assert sentence in capsys.readouterr().err
+        assert "locked" in str(caught.value)
+        assert "restart" not in str(caught.value)
 
 
 # ------------------------------------------------------------------ the census

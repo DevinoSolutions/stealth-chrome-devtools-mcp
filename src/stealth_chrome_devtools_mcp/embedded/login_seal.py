@@ -89,6 +89,9 @@ INSTANCE_WIDE = frozenset(
 
 _lock = threading.Lock()
 _depth: dict[str, int] = {}
+#: Per instance with a login in progress, its browser's debug port (``None``: not
+#: said, which counts for every browser). What ``login_in_flight_on`` reads.
+_ports: dict[str, int | None] = {}
 _tabs: dict[str, set[str]] = {}
 _unclosed: dict[str, set[str]] = {}
 #: Per instance, one frozenset of the targets that existed before each login tab
@@ -105,11 +108,14 @@ _barred: set[str] = set()
 _internal: set[str] = set()
 
 
-def begin(instance_id: str) -> None:
-    """Mark ``instance_id`` as having a seal in progress (re-entrant)."""
+def begin(instance_id: str, port: int | None = None) -> None:
+    """Mark ``instance_id`` as having a seal in progress (re-entrant). ``port`` is
+    its browser's debug port, which is how the guard of THAT browser (and no other)
+    learns a login is running; a login begun with none counts for every browser."""
     with _lock:
         _depth[instance_id] = _depth.get(instance_id, 0) + 1
         _tabs.setdefault(instance_id, set())
+        _ports[instance_id] = port
 
 
 def seal_tab(instance_id: str, target_id: str) -> None:
@@ -133,6 +139,7 @@ def end(instance_id: str, unclosed: str | None = None) -> None:
             _depth[instance_id] = depth
             return
         _depth.pop(instance_id, None)
+        _ports.pop(instance_id, None)
         _tabs.pop(instance_id, None)
 
 
@@ -226,9 +233,23 @@ def mark_internal(target_id: str, internal: bool) -> None:
         (_internal.add if internal else _internal.discard)(str(target_id))
 
 
-def login_in_flight() -> bool:
-    """Whether any login is running or opening its tab, in any instance."""
-    return bool(_depth or _holds)
+def login_in_flight(instance_id: str | None = None) -> bool:
+    """Whether a login is running or opening its tab in ``instance_id``, or in any
+    instance when none is named (a call that names none)."""
+    if instance_id is None:
+        return bool(_depth or _holds)
+    return instance_id in _depth or bool(_holds.get(instance_id))
+
+
+def login_in_flight_on(port: int) -> bool:
+    """Whether a login is running or opening its tab in the browser that listens
+    on ``port``: what the guard of that browser asks before it closes a DevTools
+    window, so a login in one browser never closes a person's window in another."""
+    with _lock:
+        return any(
+            _ports.get(instance_id) in (port, None)
+            for instance_id in {*_depth, *_holds}
+        )
 
 
 def keep(instance_id: str, target_id: str) -> None:
@@ -257,7 +278,7 @@ def is_sealed(instance_id: str, target_id: str | None) -> bool:
     target = str(target_id)
     return (
         target in _barred
-        or (target in _internal and login_in_flight())
+        or (target in _internal and login_in_flight(instance_id))
         or target in _tabs.get(instance_id, ())
         or target in _unclosed.get(instance_id, ())
         or any(target not in known for known in _holds.get(instance_id, ()))
@@ -279,5 +300,5 @@ def refuse_if_sealed(tool: str, kwargs: dict[str, object]) -> None:
     if isinstance(tab_id, str) and is_sealed(instance_id, tab_id):
         # An inspector is refused for what it is, login or not: "a login is
         # running" would be untrue and send the caller to wait for nothing.
-        barred_only = tab_id in _barred and not login_in_flight()
+        barred_only = tab_id in _barred and not login_in_flight(instance_id)
         raise ToolError(INSPECTOR_REFUSAL if barred_only else REFUSAL)

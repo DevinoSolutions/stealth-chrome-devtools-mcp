@@ -11,7 +11,6 @@ rows, and ``login`` returns an outcome.
 """
 
 from stealth_chrome_devtools_mcp.embedded import (
-    caller_python,
     login_flow,
     tab_binding,
     vault_store,
@@ -22,14 +21,6 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 SECTION = "logins"
 
 LOCKED = "the login vault is locked: a person must run `stealthy login unlock`"
-
-
-def _locked() -> ToolError:
-    """The sentence for a locked vault. When caller Python has run in this
-    backend the vault cannot be unlocked at all, and saying so is the useful part
-    (it names the tool, never what its code was)."""
-    refusal = caller_python.unlock_refusal()
-    return ToolError(LOCKED if refusal is None else f"{LOCKED}. {refusal}")
 
 
 async def list_logins() -> dict[str, object]:
@@ -50,7 +41,7 @@ async def list_logins() -> dict[str, object]:
     try:
         logins = vault_store.public_entries()
     except vault_store.VaultLocked:
-        raise _locked() from None
+        raise ToolError(LOCKED) from None
     return {"unlocked": True, "logins": logins}
 
 
@@ -99,7 +90,7 @@ async def login(instance_id: str, label: str) -> dict[str, str | int]:
             tab_binding.caller() or "in-process",
         )
     except vault_store.VaultLocked:
-        raise _locked() from None
+        raise ToolError(LOCKED) from None
     except ToolError:
         raise
     except Exception as error:  # noqa: BLE001  PERMANENT(an unknown failure must reach the caller as its class only)

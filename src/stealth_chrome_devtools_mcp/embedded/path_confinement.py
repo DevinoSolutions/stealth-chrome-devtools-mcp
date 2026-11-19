@@ -40,6 +40,25 @@ may put a profile anywhere, outside every root above. A directory is a profile
 when it carries our clone marker or one of ``profile_seed.LOGIN_WITNESSES`` (the
 repo's own two definitions, not a third), and everything under one is refused.
 
+**Tool-written files must not become code (T-19366, fourth review).** The
+deny-list above protects what a path HOLDS; a file a tool WRITES can also be
+something the machine runs by itself. ``export_debug_logs`` writes bytes the agent
+influenced (a failing tool echoes its argument into the log ring, newline and all,
+and a pickle holds strings raw), so a file named ``evil.pth`` in a ``site-packages``
+directory is a line ``import ...`` that every Python on the machine runs at start,
+the backend, the CLI and the person's own prompt included. Writers therefore also
+pass :func:`code_location_rule` and :func:`code_name_rule`, through
+:func:`refuse_write_path`: (a) a file in a place code is loaded or started from
+(every ``sys.path`` / site directory but the working directory, the Python and
+virtual-environment trees, this package, OS autostart folders, shell and PowerShell
+profile files and folders, ``/etc``), and (b) a file named like something that runs
+or loads by itself (:data:`CODE_EXTENSIONS`, folded case-insensitively after the
+real path is taken, with Win32's trailing dots and spaces dropped; a Windows name
+carrying a stream (``file.txt:stream``) is refused outright). A READ of a caller's
+path (``import_network_data``) takes the secret-location rule too. Not covered:
+``execute_cdp_command`` (raw CDP, e.g. a download directory) and a page's own
+downloads.
+
 **One writer for the export tools.** :func:`open_text` / :func:`open_binary` are
 the only places an export file is opened: the deny-list check, then ``os.open``
 with ``O_EXCL`` (an existing file is refused unless the caller passed
@@ -55,7 +74,9 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import site
 import sys
+import sysconfig
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
@@ -65,6 +86,30 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError, ToolEr
 #: Created files are owner-only. ``os.open``'s mode is masked by the umask, which
 #: can only remove bits, so this is an upper bound that a 022 umask cannot widen.
 PRIVATE_FILE_MODE = 0o600
+
+#: Extensions of files the machine runs, loads or starts by itself, or that a
+#: shell or script host executes when opened. Compared lower-case, on the final
+#: suffix of the name after Win32 folding. A tool-written file never needs one.
+CODE_EXTENSIONS = frozenset(
+    {
+        ".pth", ".py", ".pyw", ".pyc", ".pyo", ".pyd", ".pyz", ".so", ".dylib",
+        ".cmd", ".bat", ".com", ".ps1", ".psm1", ".psd1", ".ps1xml", ".sh", ".bash",
+        ".zsh", ".fish", ".command", ".lnk", ".url", ".exe", ".dll", ".msi", ".scr",
+        ".cpl", ".reg", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta",
+        ".desktop", ".plist", ".service", ".timer", ".jar",
+    }
+)  # fmt: skip
+
+_CODE_EXTENSION_RULE = "a file of a type the machine runs or loads by itself"
+_CODE_STREAM_RULE = "a Windows alternate data stream"
+_CODE_LOCATION_RULE = "a folder code is loaded or started from"
+
+#: Files in the home directory a shell reads when it starts.
+_SHELL_PROFILE_NAMES = (
+    ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+    ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc",
+    ".tcshrc", ".login", ".xprofile", ".xinitrc", ".xsessionrc", ".inputrc",
+)  # fmt: skip
 
 #: ``.env`` variants that are templates, not secrets.
 _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
@@ -354,6 +399,92 @@ def secret_location_rule(path: str | os.PathLike[str]) -> str | None:
     return _profile_rule(real)
 
 
+def _code_roots() -> list[Path]:
+    """Every folder or file a tool-written file must not land in, at call time.
+
+    The working directory is left out of the ``sys.path`` part on purpose: ``python
+    -m`` puts it first, and a person's export folder is very often exactly there;
+    a file named like code is refused by :func:`code_name_rule` wherever it is. A
+    root that contains the home directory (an interpreter installed at ``~``) is
+    left out too, because refusing it would refuse everything.
+    """
+    home = Path.home()
+    roots: list[Path] = []
+
+    def add(*candidates: object) -> None:
+        roots.extend(Path(str(candidate)) for candidate in candidates if candidate)
+
+    with contextlib.suppress(AttributeError, OSError):
+        add(*site.getsitepackages(), site.getusersitepackages())
+    paths = sysconfig.get_paths()
+    add(
+        *(
+            paths.get(key)
+            for key in ("purelib", "platlib", "stdlib", "platstdlib", "scripts")
+        )
+    )
+    add(sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix)
+    working = _fold(_real(Path.cwd()))
+    for entry in sys.path:
+        if entry and Path(entry).is_dir() and _fold(_real(entry)) != working:
+            add(entry)
+    add(Path(__file__).resolve().parent.parent)  # this package
+    roots.extend(home / name for name in _SHELL_PROFILE_NAMES)
+    add(
+        home / ".config" / "autostart", home / ".config" / "systemd",
+        home / ".config" / "fish", home / ".config" / "powershell",
+        home / "Library" / "LaunchAgents", home / ".local" / "share" / "systemd",
+        home / "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
+    )  # fmt: skip
+    for documents in (home / "Documents", *home.glob("OneDrive*/Documents")):
+        add(documents / "PowerShell", documents / "WindowsPowerShell")
+    if os.name == "nt":
+        add(
+            Path(home.anchor)
+            / "ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp"
+        )
+    else:
+        add("/etc", "/Library/LaunchAgents", "/Library/LaunchDaemons")
+    return [root for root in roots if not _is_under(str(home), _real(root))]
+
+
+def code_name_rule(real: str) -> str | None:
+    """The label when the NAME of *real* is something the machine runs or loads by
+    itself (:data:`CODE_EXTENSIONS`), or a Windows alternate data stream."""
+    name = Path(real).name
+    if os.name == "nt":
+        if ":" in name:
+            return _CODE_STREAM_RULE
+        name = _win_canonical(name)
+    return (
+        _CODE_EXTENSION_RULE if Path(name).suffix.lower() in CODE_EXTENSIONS else None
+    )
+
+
+def code_location_rule(real: str) -> str | None:
+    """The label when *real* lies where code is loaded or started from."""
+    for root in _code_roots():
+        if _is_under(real, _real(root)):
+            return _CODE_LOCATION_RULE
+    return None
+
+
+def refuse_write_path(path: str | os.PathLike[str], *, tool: str) -> Path:
+    """:func:`refuse_secret_path` for a file a tool WRITES: also refuses a code
+    location and a code-like name. Returns the real path that was checked."""
+    real = refuse_secret_path(path, tool=tool, action="write to")
+    rule = code_name_rule(str(real)) or code_location_rule(str(real))
+    if rule is not None:
+        raise ToolError(
+            f"{tool} refuses to write {rule}: a file a tool writes may not be one "
+            "the machine would run (Python's site directories and this package, "
+            "startup folders, shell profiles, scripts and programs). Choose a "
+            "plain data file (.json, .txt, .png, .html) in an ordinary folder "
+            "(rule: tool-written files are never code, T-19366)."
+        )
+    return real
+
+
 def refuse_secret_path(path: str | os.PathLike[str], *, tool: str, action: str) -> Path:
     """Return the real path of *path*, or raise :class:`ToolError` naming the rule.
 
@@ -410,7 +541,7 @@ def open_text(
     path: str | os.PathLike[str], *, tool: str, overwrite: bool = False
 ) -> TextIO:
     """Open a UTF-8 text export: deny-list, no silent overwrite, owner-only."""
-    real = refuse_secret_path(path, tool=tool, action="write to")
+    real = refuse_write_path(path, tool=tool)
     fd = _open_fd(real, overwrite=overwrite, tool=tool)
     try:
         return os.fdopen(fd, "w", encoding="utf-8")
@@ -423,7 +554,7 @@ def open_binary(
     path: str | os.PathLike[str], *, tool: str, overwrite: bool = False
 ) -> BinaryIO:
     """:func:`open_text`, for bytes."""
-    real = refuse_secret_path(path, tool=tool, action="write to")
+    real = refuse_write_path(path, tool=tool)
     fd = _open_fd(real, overwrite=overwrite, tool=tool)
     try:
         return os.fdopen(fd, "wb")
@@ -441,7 +572,7 @@ def precreate_private(
     ``(real path, created)``; *created* says whether this call made the file, so
     a failed write can remove exactly the empty file it left.
     """
-    real = refuse_secret_path(path, tool=tool, action="write to")
+    real = refuse_write_path(path, tool=tool)
     try:
         real.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
