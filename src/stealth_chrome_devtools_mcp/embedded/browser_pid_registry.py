@@ -54,7 +54,7 @@ if sys.platform == "win32":
 else:
     import fcntl
 
-from stealth_chrome_devtools_mcp.embedded import atomic_file, zombie
+from stealth_chrome_devtools_mcp.embedded import atomic_file, pid_alive
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -243,7 +243,7 @@ def owner_identity() -> tuple[int, float | None]:
     process, and several tests build their writers through ``__new__``.
     """
     pid = os.getpid()
-    return pid, zombie.create_time(pid)
+    return pid, pid_alive.create_time(pid)
 
 
 @dataclass(frozen=True)

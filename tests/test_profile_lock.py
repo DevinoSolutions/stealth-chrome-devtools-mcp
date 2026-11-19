@@ -41,9 +41,9 @@ from fakes import FakeBrowserManager, a_zombie, held_profile, write_singleton
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     clone_storage,
+    pid_alive,
     profile_lock,
     profile_seed,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.clone_storage import (
     resolve_profile_selection,
@@ -96,7 +96,7 @@ def fake_process_table(monkeypatch, table: dict[int, list[str] | None]) -> None:
     EXITED. The two are different answers and this fixture keeps them apart,
     because the whole of F-931's direction rule turns on it.
 
-    It patches ``zombie.alive`` and never ``psutil.pid_exists``: every module
+    It patches ``pid_alive.alive`` and never ``psutil.pid_exists``: every module
     shares ONE psutil module object, so setting the attribute there would also
     rebind the lock owner's witness. The lock owner and a tree member now ask
     the same function, so the one pid this fixture does not answer from the
@@ -105,12 +105,12 @@ def fake_process_table(monkeypatch, table: dict[int, list[str] | None]) -> None:
     fall-through look like a defect. A seam of ours, in the module that owns the
     question.
     """
-    real_alive = zombie.alive
+    real_alive = pid_alive.alive
     monkeypatch.setattr(
         browser_cmdline, "arguments", lambda pid: list(table.get(pid) or [])
     )
     monkeypatch.setattr(
-        zombie,
+        pid_alive,
         "alive",
         lambda pid, *, unknown: (
             real_alive(pid, unknown=unknown) if pid == os.getpid() else pid in table
@@ -179,9 +179,9 @@ class TestProfileHold:
         ``/proc/<pid>/exe`` link does -- an exception to raise, or the target to
         return -- and ``linux`` whether this platform has that witness at all.
         The answers are POSIX's, zombies included, on any runner."""
-        monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
+        monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", True)
         monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
-        monkeypatch.setattr(zombie, "_EXE_WITNESS", linux)
+        monkeypatch.setattr(pid_alive, "_EXE_WITNESS", linux)
 
         def _read(what):
             def read(_self):
@@ -204,7 +204,7 @@ class TestProfileHold:
                 },
             ),
         )
-        monkeypatch.setattr(zombie.Path, "readlink", _read(exe))
+        monkeypatch.setattr(pid_alive.Path, "readlink", _read(exe))
 
     GONE = FileNotFoundError(errno.ENOENT, "no such file")
     READABLE = "/usr/lib/chromium/chromium"
@@ -244,7 +244,7 @@ class TestProfileHold:
     def test_a_pid_that_cannot_be_a_running_browser_is_not_running_on_either_question(
         self, monkeypatch, status, cmdline, exe, linux
     ):
-        """``zombie.alive`` -- the lock owner's reader and an unreadable tree
+        """``pid_alive.alive`` -- the lock owner's reader and an unreadable tree
         member's -- answers dead for a process that has exited but is still
         listed, whichever way an unanswerable pid would have been read, here by
         what psutil answers rather than by a platform that can make one."""
@@ -252,8 +252,8 @@ class TestProfileHold:
             monkeypatch, status=status, cmdline=cmdline, exe=exe, linux=linux
         )
 
-        assert zombie.alive(9, unknown=True) is False
-        assert zombie.alive(9, unknown=False) is False
+        assert pid_alive.alive(9, unknown=True) is False
+        assert pid_alive.alive(9, unknown=False) is False
 
     @pytest.mark.parametrize(
         ("status", "cmdline", "exe", "linux"),
@@ -323,7 +323,7 @@ class TestProfileHold:
             monkeypatch, status=status, cmdline=cmdline, exe=exe, linux=linux
         )
 
-        assert zombie.alive(9, unknown=True) is True
+        assert pid_alive.alive(9, unknown=True) is True
 
     @pytest.mark.parametrize(
         ("raised", "gone"),
@@ -344,8 +344,8 @@ class TestProfileHold:
                 raise raised
             return raised
 
-        monkeypatch.setattr(zombie.Path, "readlink", readlink)
-        assert zombie._exe_is_gone(9) is gone
+        monkeypatch.setattr(pid_alive.Path, "readlink", readlink)
+        assert pid_alive._exe_is_gone(9) is gone
 
     @pytest.mark.skipif(
         not hasattr(os, "sched_setaffinity"), reason="the exec window is Linux's"
@@ -457,7 +457,7 @@ class TestProfileHold:
     def test_a_pid_scan_that_fails_resolves_toward_held_where_it_is_the_only_witness(
         self, tmp_path
     ):
-        """Never raises, and the direction is uniform with ``zombie.alive(unknown=True)``: an
+        """Never raises, and the direction is uniform with ``pid_alive.alive(unknown=True)``: an
         unanswerable question resolves toward HELD. On POSIX the lock is a
         second witness and answers "free"; on Windows there is none, so the
         profile is not SHOWN free."""
@@ -614,7 +614,7 @@ class TestWhichMemberOfTheTreeHolds:
     def test_a_member_we_could_not_read_still_reads_as_held(
         self, tmp_path, monkeypatch
     ):
-        """The direction, uniform with ``zombie.alive(unknown=True)`` and ``_browser_pids``: a
+        """The direction, uniform with ``pid_alive.alive(unknown=True)`` and ``_browser_pids``: a
         witness we could not READ is not an established negative. The reason
         says so rather than claiming a browser we never saw — that sentence is
         quoted verbatim to the caller by F-914's refusal.

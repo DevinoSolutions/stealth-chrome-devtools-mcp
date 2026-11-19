@@ -4,7 +4,7 @@ On 2026-11-07 the shared backend stopped answering three times. Each time the
 process stayed alive, its log simply went quiet, and killing it was the only fix
 and the only diagnosis: nothing recorded WHERE the loop was. A frozen asyncio loop
 cannot report itself, and a Python thread watching it cannot either when the GIL is
-what it is waiting for (``zombie`` names the call that held it for seconds at a
+what it is waiting for (``pid_alive`` names the call that held it for seconds at a
 time). ``faulthandler``'s watchdog is a C thread that needs neither: armed with a
 deadline, it writes every thread's stack when the deadline passes unless it is
 re-armed first.

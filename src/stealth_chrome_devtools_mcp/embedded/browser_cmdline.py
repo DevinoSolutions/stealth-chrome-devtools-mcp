@@ -15,7 +15,7 @@ both spellings of a flag are accepted because a caller's args reach Chrome
 through ``merge_browser_args`` while nodriver appends its own with ``=``.
 
 A leaf: ``psutil``, stdlib ``socket``, ``debug_logger`` (a skipped process is
-logged), ``zombie`` (whether a pid whose argv came back empty is still running)
+logged), ``pid_alive`` (whether a pid whose argv came back empty is still running)
 and ``browser_pid_registry`` for the two things it must not re-spell — what a
 usable port is, and how two paths are compared. It states FACTS and decides
 nothing: every judgement is ``browser_reattach``'s and ``profile_lock``'s, its
@@ -35,7 +35,7 @@ import psutil
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable, Collection, Iterator
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, zombie
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, pid_alive
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 DEBUG_PORT_FLAG = "--remote-debugging-port"
@@ -258,7 +258,7 @@ def browser_members(pids: Collection[int] | None, expect_dir: str) -> Members:
         if not cmdline:
             # `arguments` collapses "gone" and "refused" into an empty list, so
             # the pid itself is what tells them apart.
-            if zombie.alive(pid, unknown=True):
+            if pid_alive.alive(pid, unknown=True):
                 unreadable.append(pid)
             continue
         if flag_value(cmdline, TYPE_FLAG) is not None:

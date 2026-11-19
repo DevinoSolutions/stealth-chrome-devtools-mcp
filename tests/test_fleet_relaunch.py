@@ -64,7 +64,7 @@ def _a_process_tearing_down(monkeypatch):
     releasing its address space and becoming a zombie: its command line reads empty
     AND ``/proc/<pid>/exe`` is gone. The state cannot be held open on purpose, so
     those two reads are replaced for that one pid (the kernel's own measured answer,
-    see ``zombie._gone``); everything else is real. An empty
+    see ``pid_alive._gone``); everything else is real. An empty
     argv alone is NOT this state: a live browser has one across the sh launcher's
     ``exec``, which ``tests/test_profile_lock.py`` pins."""
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])

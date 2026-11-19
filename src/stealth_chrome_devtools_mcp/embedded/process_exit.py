@@ -49,7 +49,7 @@ draft of this module could have made ``Browser._process.returncode`` read 255
 for a browser that exited cleanly with 0 — a value ``terminate``'s own guard
 reads — and put a spurious WARNING in every close's log.
 
-The wait therefore OBSERVES instead: ``_poll_for_exit`` asks ``zombie.running``,
+The wait therefore OBSERVES instead: ``_poll_for_exit`` asks ``pid_alive.running``,
 which is ``Process.is_running()`` and treats ``STATUS_ZOMBIE`` as exited, so the status
 is never collected and asyncio keeps its reap. A zombie IS an exited process —
 its cookie store is committed and its files are closed — and it is the state
@@ -126,7 +126,7 @@ from typing import TYPE_CHECKING
 import psutil
 from nodriver import cdp
 
-from stealth_chrome_devtools_mcp.embedded import tab_close, tab_open, zombie
+from stealth_chrome_devtools_mcp.embedded import pid_alive, tab_close, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:  # the ladder's rungs are callables, typed but never imported
@@ -193,7 +193,7 @@ def browser_is_alive(browser: object) -> bool:
         try:
             # Unreadable is NOT running (``unknown=False``): a browser we cannot
             # see is not one to keep an instance for.
-            return zombie.alive(int(pid), unknown=False)
+            return pid_alive.alive(int(pid), unknown=False)
         except ValueError:
             return False
 
@@ -259,7 +259,7 @@ def _poll_for_exit(
     started: float,
     deadline: float,
 ) -> Exited:
-    """Ask ``zombie.running`` until it says THIS process has finished (asked
+    """Ask ``pid_alive.running`` until it says THIS process has finished (asked
     without reaping it) or the deadline passes.
 
     Two questions, because neither alone is the answer. ``is_running()`` is
@@ -289,7 +289,7 @@ def _poll_for_exit(
     """
     while True:
         try:
-            if not zombie.running(proc):
+            if not pid_alive.running(proc):
                 return Exited(pid, True, time.monotonic() - started, "exited")
         except psutil.NoSuchProcess:
             # Includes `ZombieProcess`, which subclasses it: both mean the
@@ -474,7 +474,7 @@ def _rung(
         return False
     # The call RETURNING is not the browser going: Chrome tore down for ~15 s after
     # a "successful" terminate (T-9335). "ended" is for a pid seen to be gone.
-    seen_gone = pid is not None and not zombie.listed(pid)
+    seen_gone = pid is not None and not pid_alive.listed(pid)
     debug_logger.log_info(
         "process_exit",
         action,

@@ -1,7 +1,7 @@
 """The zombie question is never asked where there are no zombies (2026-11-07 hangs).
 
 On Windows psutil's ``Process.status()`` is a snapshot of every process and thread
-on the machine taken with the GIL held (``zombie``'s docstring has the account and
+on the machine taken with the GIL held (``pid_alive``'s docstring has the account and
 the measurements). ``process_exit`` asked it every 20 ms for up to 5 s of every
 close, which starved the backend's event loop until no tool call came back. These
 pins hold the call count, not a timing, so they are exact on any runner.
@@ -17,8 +17,8 @@ import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
     devtools_port,
+    pid_alive,
     process_exit,
-    zombie,
 )
 
 
@@ -63,14 +63,14 @@ def sleeper():
 
 
 def test_windows_is_the_platform_without_zombies():
-    assert zombie.ZOMBIES_EXIST is (sys.platform != "win32")
+    assert pid_alive.ZOMBIES_EXIST is (sys.platform != "win32")
 
 
 def test_no_zombies_means_no_status_read(monkeypatch):
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", False)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", False)
     process = _Process(psutil.STATUS_ZOMBIE, forbidden=True)
 
-    assert zombie.is_zombie(process) is False
+    assert pid_alive.is_zombie(process) is False
     assert process.reads == 0
 
 
@@ -79,23 +79,23 @@ def test_no_zombies_means_no_status_read(monkeypatch):
     [(psutil.STATUS_ZOMBIE, True), (psutil.STATUS_RUNNING, False)],
 )
 def test_where_zombies_exist_the_status_decides(monkeypatch, status, expected):
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", True)
     process = _Process(status)
 
-    assert zombie.is_zombie(process) is expected
+    assert pid_alive.is_zombie(process) is expected
     assert process.reads == 1
 
 
 def test_a_reaped_pid_raises_what_status_raises(monkeypatch):
     """Every caller already reads ``NoSuchProcess`` as gone; it is not swallowed."""
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", True)
 
     class _Reaped:
         def status(self):
             raise psutil.NoSuchProcess(9)
 
     with pytest.raises(psutil.NoSuchProcess):
-        zombie.is_zombie(_Reaped())
+        pid_alive.is_zombie(_Reaped())
 
 
 def test_a_close_waiting_on_a_live_browser_never_snapshots_the_machine(
@@ -105,7 +105,7 @@ def test_a_close_waiting_on_a_live_browser_never_snapshots_the_machine(
     fix every poll was a whole-machine snapshot with the GIL held (25-150 ms each
     on the fleet PC, so the 5 s grace held the GIL most of the time); without
     zombies it is none, and the wait still answers."""
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", False)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", False)
 
     waited = process_exit.wait_for_exit(sleeper.pid, timeout=0.3)
 
@@ -115,7 +115,7 @@ def test_a_close_waiting_on_a_live_browser_never_snapshots_the_machine(
 
 
 def test_the_grace_still_sees_the_browser_leave(monkeypatch, status_reads, sleeper):
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", False)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", False)
     sleeper.terminate()
     sleeper.wait(timeout=10)
 
@@ -127,7 +127,7 @@ def test_the_grace_still_sees_the_browser_leave(monkeypatch, status_reads, sleep
 
 def test_where_zombies_exist_the_grace_still_asks(monkeypatch, status_reads, sleeper):
     """POSIX keeps its answer: a zombie is an exited browser (F-910)."""
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", True)
 
     process_exit.wait_for_exit(sleeper.pid, timeout=0.1)
 
@@ -140,13 +140,13 @@ def test_the_other_liveness_readers_ask_the_same_question(
 ):
     """``browser_is_alive``, ``devtools_port``'s identity wait and ``browser_cmdline``'s
     tree members go through the same one home."""
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", False)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", False)
 
     assert process_exit.browser_is_alive(
         type("_Browser", (), {"_process": None, "_process_pid": sleeper.pid})()
     )
-    assert zombie.alive(sleeper.pid, unknown=False) is True
-    assert zombie.alive(sleeper.pid, unknown=True) is True
+    assert pid_alive.alive(sleeper.pid, unknown=False) is True
+    assert pid_alive.alive(sleeper.pid, unknown=True) is True
     assert status_reads == []
 
 

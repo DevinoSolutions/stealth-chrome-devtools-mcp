@@ -35,10 +35,10 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_manager,
     desktop_launch,
     display_context,
+    pid_alive,
     proxy_forwarder,
     tool_errors,
     window_sizing,
-    zombie,
 )
 
 # ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ def delegation(monkeypatch, tmp_path):
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: True)
     # The launched pid is a fake number, so its liveness AND its identity stamp
     # are stated, not observed.
-    monkeypatch.setattr(zombie, "create_time", lambda pid: 1000.0)
+    monkeypatch.setattr(pid_alive, "create_time", lambda pid: 1000.0)
     monkeypatch.setattr(desktop_launch, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(desktop_launch, "PORT_READY_TIMEOUT", 1.0)
 
@@ -388,7 +388,7 @@ async def test_the_raise_happens_once_however_many_polls_it_takes(
 
 async def test_a_dead_pid_is_never_raised(delegation, monkeypatch):
     """A pid whose process exited may already belong to someone else."""
-    monkeypatch.setattr(zombie, "create_time", lambda pid: None)
+    monkeypatch.setattr(pid_alive, "create_time", lambda pid: None)
     delegation.install(FakeSchtasks(pid=4242))
     with pytest.raises(tool_errors.ToolError):
         await desktop_launch.launch_and_attach("chrome.exe", [], "C:/profiles/one")
@@ -590,7 +590,7 @@ async def test_a_chrome_that_died_fails_fast_with_a_precise_reason(
         checked.append(pid)
         return None
 
-    monkeypatch.setattr(zombie, "create_time", dead)
+    monkeypatch.setattr(pid_alive, "create_time", dead)
     monkeypatch.setattr(desktop_launch, "_devtools_ready", lambda port: False)
     with pytest.raises(tool_errors.ToolError) as err:
         await desktop_launch.launch_and_attach("chrome.exe", [], "C:/p")
@@ -862,9 +862,9 @@ def test_backend_launch_reads_this_modules_tr_cap():
 
 def test_zombie_create_time_reads_the_real_process_table():
     """One call answers both questions it is used for: alive, and which one."""
-    mine = zombie.create_time(os.getpid())
+    mine = pid_alive.create_time(os.getpid())
     assert isinstance(mine, float)
-    assert zombie.create_time(_a_pid_that_does_not_exist()) is None
+    assert pid_alive.create_time(_a_pid_that_does_not_exist()) is None
 
 
 def _a_pid_that_does_not_exist() -> int:
