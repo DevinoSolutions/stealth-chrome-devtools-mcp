@@ -47,6 +47,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     process_exit,
     profile_lock,
     tab_open,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded import browser_pid_registry as registry
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
@@ -1260,17 +1261,17 @@ class TestWhatTheCommandLineSays:
             assert browser_cmdline.browser_process(set(table), r"C:\ours") is None
 
     def test_a_pid_psutil_will_not_describe_still_counts_as_running(self):
-        """F-931 N5. ``_still_running`` is what separates ``browser_members``'
+        """F-931 N5. ``zombie.alive`` is what separates ``browser_members``'
         two negatives — a pid that has GONE contributes nothing, one we were
         REFUSED is ``unreadable`` and holds the profile — and it had no witness
         of its own. An unreadable answer resolves toward HELD, the direction
-        ``profile_lock._pid_alive`` and ``reap_guard`` already take."""
+        the lock owner's question and ``reap_guard`` already take."""
         with patch.object(
-            browser_cmdline.psutil, "pid_exists", side_effect=psutil.AccessDenied(9)
+            zombie.psutil, "pid_exists", side_effect=psutil.AccessDenied(9)
         ):
-            assert browser_cmdline._still_running(9) is True
-        with patch.object(browser_cmdline.psutil, "pid_exists", return_value=False):
-            assert browser_cmdline._still_running(9) is False
+            assert zombie.alive(9, unknown=True) is True
+        with patch.object(zombie.psutil, "pid_exists", return_value=False):
+            assert zombie.alive(9, unknown=True) is False
 
     def test_an_argv_we_cannot_read_is_unreadable_and_a_gone_pid_is_not(self):
         """The pair that fact exists for: the scan that produced these pids and
@@ -1279,7 +1280,7 @@ class TestWhatTheCommandLineSays:
         with (
             patch.object(browser_cmdline, "arguments", return_value=[]),
             patch.object(
-                browser_cmdline, "_still_running", side_effect=lambda pid: pid == 41001
+                zombie, "alive", side_effect=lambda pid, *, unknown: pid == 41001
             ),
         ):
             members = browser_cmdline.browser_members({41001, 41002}, r"C:\ours")

@@ -16,7 +16,6 @@ import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
-    browser_cmdline,
     devtools_port,
     process_exit,
     zombie,
@@ -147,7 +146,7 @@ def test_the_other_liveness_readers_ask_the_same_question(
         type("_Browser", (), {"_process": None, "_process_pid": sleeper.pid})()
     )
     assert devtools_port._running(sleeper.pid) is True
-    assert browser_cmdline.command_line_is_gone(sleeper.pid) is False
+    assert zombie.alive(sleeper.pid, unknown=True) is True
     assert status_reads == []
 
 
