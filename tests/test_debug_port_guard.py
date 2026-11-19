@@ -1466,6 +1466,24 @@ async def test_a_webui_target_is_left_alone_with_no_vault(endpoint):
     await guard.stop()
 
 
+async def test_a_webui_target_is_not_marked_with_no_vault_but_is_by_the_next_pass_after_one(
+    endpoint, request
+):
+    """F5: no vault, no mark (so ``any_sealing`` stays false and no tool call binds
+    its arguments); a vault made while the page is open marks it on the next pass."""
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "chrome://settings"))
+    await asyncio.sleep(0.2)
+    assert "T1" not in login_seal._webui
+    assert not login_seal.any_sealing()
+    request.getfixturevalue("mode_on")
+    endpoint.page_url = "chrome://settings"
+    await guard.keep()
+    assert login_seal.is_sealed("any", "T1")
+    assert login_seal.any_sealing()
+    await guard.stop()
+
+
 async def test_the_new_tab_page_is_not_hidden_while_a_vault_exists(endpoint, mode_on):
     guard = await _guard(endpoint)
     await endpoint.emit("Target.targetInfoChanged", _target("T1", "chrome://newtab/"))

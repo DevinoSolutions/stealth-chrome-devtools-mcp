@@ -233,9 +233,18 @@ def unbar(target_id: str) -> None:
 def mark_webui(target_id: str, webui: bool) -> None:
     """Note whether ``target_id`` is a browser WebUI page (``debug_port_guard``'s
     ``webui_url``). Such a target is sealed (:func:`is_sealed`) while vault mode is
-    on: hidden from the tools and refused by ``tab_id``, with or without a login."""
+    on: hidden from the tools and refused by ``tab_id``, with or without a login.
+
+    Marked ONLY while vault mode is on (audit 7 F5): nothing outside the mode reads
+    the mark (:func:`is_sealed` asks the mode too), and a mark would make
+    :func:`any_sealing` true, so every tool call of a user with no vault would bind
+    its arguments for a page that is never refused. A vault made LATER costs nothing:
+    the keeper judges every open target again on each pass while the mode is on, so a
+    page that was already open is marked within ``debug_port_guard.KEEP_SECONDS``
+    (the same window as every other rule that starts with the vault)."""
+    marked = webui and vault_mode.active()
     with _lock:
-        (_webui.add if webui else _webui.discard)(str(target_id))
+        (_webui.add if marked else _webui.discard)(str(target_id))
 
 
 def mark_internal(target_id: str, internal: bool) -> None:
