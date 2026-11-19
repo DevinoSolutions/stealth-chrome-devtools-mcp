@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
+from stealth_chrome_devtools_mcp.embedded import vault_mode
 from stealth_chrome_devtools_mcp.embedded.platform_utils import (
     get_platform_info,
     validate_browser_environment,
@@ -132,7 +133,11 @@ async def export_debug_logs(
             )
         return filepath
     except TimeoutError:
-        return "Export timeout - file too large. Try with smaller limits or 'gzip-pickle' format."
+        # 'gzip-pickle' is refused while a login vault exists (vault mode), so it
+        # must not be suggested then
+        return "Export timeout - file too large. Try with smaller limits" + (
+            "." if vault_mode.active() else " or 'gzip-pickle' format."
+        )
 
 
 async def get_debug_lock_status() -> dict[str, Any]:

@@ -229,3 +229,25 @@ def test_install_is_idempotent_per_server():
     vault_routes.install(server)
     paths = [getattr(route, "path", None) for route in server._additional_http_routes]
     assert paths.count(vault_routes.UNLOCK_PATH) == 1
+
+
+def test_a_key_is_refused_by_a_backend_that_ran_caller_python(client):
+    """A4: the CLI asks every backend first, but a POST straight to the route must
+    meet the same refusal: the check is in ``vault_store.unlock``, where every key
+    enters a backend."""
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
+
+    make_vault({"work": password_entry(password=PASSWORD)})
+    key = good_key()
+    vault_mode._ran = "create_python_binding"
+    try:
+        reply = post_unlock(client, key)
+        assert reply.status_code == 409
+        assert "create_python_binding" in reply.json()["error"]
+        assert PASSWORD not in reply.text
+        assert vault_store.status()["unlocked"] is False
+        with pytest.raises(vault_mode.CallerError):
+            vault_store.unlock(key, None)
+    finally:
+        vault_mode._reset_for_tests()
+    assert post_unlock(client, key).status_code == 200  # a clean backend unlocks

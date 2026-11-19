@@ -89,6 +89,8 @@ async def _unlock(request: Request) -> Response:
         return JSONResponse(
             {"error": "the key does not open the vault"}, status_code=403
         )
+    except vault_mode.CallerError as refusal:
+        return JSONResponse({"error": str(refusal)}, status_code=409)
     return JSONResponse({"unlocked": True, "entries": entries})
 
 

@@ -195,11 +195,17 @@ def unlock(key: bytes, ttl_seconds: float | None) -> int:
     """Hold ``key`` in memory, after proving it opens the vault file.
 
     Raises :class:`vault_crypto.VaultError` (and changes nothing) for a missing
-    file, a wrong key or a damaged file. Registers every password with
+    file, a wrong key or a damaged file, and :class:`vault_mode.CallerError` when this
+    backend has run caller Python (T-19366, A4). Registers every password with
     :mod:`secret_registry`. Returns the number of entries.
     """
     if ttl_seconds is not None and not ttl_seconds > 0:
         raise ValueError("ttl_seconds must be a positive number of seconds")
+    # A4: a backend that ran caller Python holds nothing a key may be given to; this
+    # is the one place a key enters a backend, so a direct POST cannot skip it.
+    taint = vault_mode.ran()
+    if taint is not None:
+        raise vault_mode.CallerError(vault_mode.TAINTED.format(tool=taint))
     entries = _entries_of(vault_crypto.open_sealed(key, _read_document()))
     with _lock:
         global _key, _deadline  # noqa: PLW0603  PERMANENT(the key lives only in this module's memory)

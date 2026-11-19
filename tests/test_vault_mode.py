@@ -657,6 +657,24 @@ def test_unlock_goes_on_when_every_backend_is_clean(monkeypatch, capsys):
     assert "unlocked" in capsys.readouterr().out
 
 
+def test_unlock_says_why_when_the_backend_refuses_the_key_as_tainted(
+    monkeypatch, capsys
+):
+    """A4: the backend's own check (409) reaches the person as its sentence."""
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_backend_problems", list)
+    monkeypatch.setattr(cli_login, "_hidden", lambda _p: "correct horse")
+    monkeypatch.setattr(
+        cli_login,
+        "_post_key",
+        lambda *a: (409, {"error": "this backend has run create_dynamic_hook"}),
+    )
+    assert _run("unlock", duration=None) == 1
+    err = capsys.readouterr().err
+    assert "this backend has run create_dynamic_hook" in err
+
+
 def test_status_reports_a_backend_that_ran_caller_python_and_a_disagreement(
     monkeypatch, capsys
 ):

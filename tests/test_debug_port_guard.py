@@ -200,6 +200,7 @@ class FakeEndpoint:
         self.log: list[tuple[str, str | None]] = []
         self.commands: list[dict] = []
         self.fail_fetch_enable = fail_fetch_enable
+        self.refuse_pin = False
         self.page_url = page_url
         self.socket = None
         self.server = None
@@ -249,7 +250,9 @@ class FakeEndpoint:
                         "waitingForDebugger": False,
                     },
                 )
-            elif method == "Fetch.enable" and self.fail_fetch_enable:
+            elif (method == "Fetch.enable" and self.fail_fetch_enable) or (
+                method == "Browser.setDownloadBehavior" and self.refuse_pin
+            ):
                 reply = {"id": message["id"], "error": {"message": "no"}}
             await socket.send(json.dumps(reply))
 
@@ -1371,3 +1374,157 @@ async def test_a_file_page_already_open_when_the_vault_appears_is_blanked(
     assert login_seal.is_sealed("any", "T1")
     await guard.stop()
     await fake.stop()
+
+
+# ------------------------------------------- WebUI pages and a failed pin (audit 6)
+
+WEBUI = [
+    "chrome://settings",
+    "chrome://settings/downloads",
+    "chrome://net-export/",
+    "CHROME://flags",
+    "chrome-untrusted://terminal/",
+    "devtools://devtools/bundled/inspector.html",
+    "view-source:chrome://version",
+    " chrome://policy",
+    "chrome://\tsettings",
+]
+NOT_WEBUI = [
+    "about:blank",
+    "chrome://newtab/",
+    "chrome://new-tab-page/",
+    "https://example.com/chrome://settings",
+    "http://127.0.0.1:1/",
+    "chrome-extension://abc/page.html",
+    "",
+]
+
+
+@pytest.mark.parametrize("url", WEBUI)
+def test_a_webui_page_is_read_as_one_in_every_spelling(url):
+    assert debug_port_guard.webui_url(url)
+
+
+@pytest.mark.parametrize("url", NOT_WEBUI)
+def test_other_pages_are_not_webui(url):
+    assert not debug_port_guard.webui_url(url)
+
+
+@pytest.mark.parametrize("url", WEBUI)
+def test_the_url_tools_refuse_a_webui_page_only_while_a_vault_exists(url, mode_on):
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
+
+    reason = debug_port_guard.refusal(url)
+    assert reason is not None
+    assert "stealthy login destroy" in reason or reason == (
+        debug_port_guard.INSPECTOR_REFUSAL
+    )
+    assert vault_mode.active()
+
+
+@pytest.mark.parametrize("url", WEBUI)
+def test_with_no_vault_a_webui_page_is_loadable_as_before(url):
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
+
+    assert not vault_mode.active()
+    reason = debug_port_guard.refusal(url)
+    assert reason in (None, debug_port_guard.INSPECTOR_REFUSAL)  # inspectors only
+
+
+@pytest.mark.parametrize(
+    "url", ["about:blank", "chrome://newtab/", "https://example.com/"]
+)
+def test_blank_and_new_tab_still_load_while_a_vault_exists(url, mode_on):
+    assert debug_port_guard.refusal(url) is None
+
+
+async def test_a_webui_target_is_hidden_and_refused_with_the_vault_sentence(
+    endpoint, mode_on
+):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "chrome://settings"))
+    await _wait_until(lambda: login_seal.is_sealed("any", "T1"), "not hidden")
+    with pytest.raises(ToolError) as caught:
+        login_seal.refuse_if_sealed(
+            "switch_tab", {"instance_id": "any", "tab_id": "T1"}
+        )
+    assert "stealthy login destroy" in str(caught.value)
+    assert "login is running" not in str(caught.value)
+    # hidden, NOT blanked: the product's own session restore opens chrome://settings
+    await asyncio.sleep(0.1)
+    assert "Page.navigate" not in endpoint.methods()
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "about:blank"))
+    await _wait_until(lambda: not login_seal.is_sealed("any", "T1"), "still hidden")
+    await guard.stop()
+
+
+async def test_a_webui_target_is_left_alone_with_no_vault(endpoint):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "chrome://settings"))
+    await asyncio.sleep(0.1)
+    assert not login_seal.is_sealed("any", "T1")
+    await guard.stop()
+
+
+async def test_the_new_tab_page_is_not_hidden_while_a_vault_exists(endpoint, mode_on):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "chrome://newtab/"))
+    await asyncio.sleep(0.1)
+    assert not login_seal.is_sealed("any", "T1")
+    await guard.stop()
+
+
+async def test_a_pass_that_cannot_pin_marks_the_browser_and_logins_refuse(
+    mode_on, monkeypatch, caplog
+):
+    """N4: spawn and attach fail closed, a LATER failed pass must not leave a browser
+    driven and unpinned silently: it is marked, logged once at ERROR, and a login in
+    it is refused until a pass succeeds."""
+    monkeypatch.setattr(debug_port_guard, "KEEP_SECONDS", 0.03)
+    fake = FakeEndpoint()
+    await fake.start()
+    guard = await _guard(fake)
+    debug_port_guard._GUARDS[PORT] = guard
+    debug_port_guard._PORTS.add(PORT)
+    browser = SimpleNamespace(config=SimpleNamespace(port=PORT))
+    try:
+        assert not guard.pin_failed
+        fake.refuse_pin = True
+        with caplog.at_level("ERROR", logger=debug_port_guard._logger.name):
+            await _wait_until(lambda: guard.pin_failed, "the failed pass was not seen")
+            await asyncio.sleep(0.2)  # several more failed passes
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1, [r.getMessage() for r in errors]
+        with pytest.raises(ToolError) as caught:
+            await debug_port_guard.verify_clean(browser)
+        assert str(caught.value) == debug_port_guard.PIN_DOWN
+        fake.refuse_pin = False
+        await _wait_until(lambda: not guard.pin_failed, "the pin was never retried")
+        assert not guard.pin_failed
+    finally:
+        await guard.stop()
+        debug_port_guard._GUARDS.pop(PORT, None)
+        debug_port_guard._PORTS.discard(PORT)
+        await fake.stop()
+
+
+async def test_a_failed_pass_with_no_vault_marks_nothing(monkeypatch):
+    monkeypatch.setattr(debug_port_guard, "KEEP_SECONDS", 0.03)
+    fake = FakeEndpoint()
+    await fake.start()
+    guard = await _guard(fake)
+    fake.refuse_pin = True
+    await asyncio.sleep(0.15)
+    assert not guard.pin_failed
+    await guard.stop()
+    await fake.stop()
+
+
+def test_a_browser_with_no_port_has_closed_no_windows_and_no_guard():
+    """N3 (audit 5, NIT): ``0`` is the whole truth there, because the same browser is
+    refused by ``verify_clean`` before any login counts."""
+    assert debug_port_guard.closed_windows(SimpleNamespace(config=None)) == 0
+    assert (
+        debug_port_guard.closed_windows(SimpleNamespace(config=SimpleNamespace(port=0)))
+        == 0
+    )

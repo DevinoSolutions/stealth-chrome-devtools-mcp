@@ -70,6 +70,7 @@ def test_every_restriction_is_listed_once_for_the_notice_and_the_status():
         "raw_cdp",
         "browser_args",
         "file_urls",
+        "browser_pages",
         "export_format",
         "downloads",
     ]
@@ -175,9 +176,6 @@ ALLOWED = [
     "/lang=de",
     "--accept-lang=en-US,fr-CA",
     "--user-agent=Mozilla/5.0 (X11; Linux x86_64) $(x) `y` 'z' \u2018q\u2019",
-    "--disable-features=Foo,Bar",
-    "--enable-blink-features=Foo,Bar",
-    "--disable-blink-features=AutomationControlled",
     "https://example.com/start",
     "about:blank",
 ]
@@ -217,6 +215,15 @@ REFUSED = [
     "--start-maximized=1",
     "--lang=",
     "--lang=en;calc",
+    # the feature-list switches (audit 6, N1): feature names are an open vocabulary
+    # that includes site isolation and private-network protection
+    "--disable-features=Foo,Bar",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--DISABLE-FEATURES=BlockInsecurePrivateNetworkRequests",
+    "-disable-features=Foo",
+    "--enable-blink-features=Foo,Bar",
+    "--disable-blink-features=AutomationControlled",
+    "--enable-features=Foo",
     "--disable-features=Foo;Bar",
     "--user-agent",
     "--user-agent=a\nb",
@@ -326,9 +333,6 @@ def test_every_allowed_switch_is_one_the_other_filters_leave_alone():
             "lang": "en",
             "accept-lang": "en",
             "user-agent": "x",
-            "disable-features": "A",
-            "enable-blink-features": "A",
-            "disable-blink-features": "A",
         }.get(name)
         argument = f"--{name}" if pattern is None else f"--{name}={sample}"
         assert pattern is None or pattern.fullmatch(sample), name
@@ -798,3 +802,199 @@ def test_census_only_the_guard_sets_a_download_folder():
         )
     }
     assert users == {"debug_port_guard.py", "vault_mode.py"}
+
+
+# ------------------------------------------- call-site census (audit 6, N2)
+#
+# The census tests above look at what a TOOL takes (a parameter named like a path, a
+# URL, browser arguments) and at what a tool's own body calls. A tool that hands a
+# differently named parameter to a helper in another module would pass them. A true
+# taint analysis (does a tool's text reach an OS command, a file, a navigation?)
+# across every helper is a project of its own, so these tests work from the SINK
+# side instead: every call site in ``src`` that starts an OS command, writes a file
+# or navigates a page is listed below with the reason it is safe, and a new site, or
+# one that moved to another function, fails until someone has said why. A pin is a
+# (file, enclosing function) pair, so a second site in an already pinned function
+# is NOT seen, so the reason given must hold for the whole function.
+
+_OS_COMMANDS = {
+    "run", "Popen", "call", "check_call", "check_output", "getoutput",
+    "getstatusoutput", "system", "popen", "startfile", "execv", "execve",
+    "execvp", "execl", "execlp", "spawnl", "spawnv", "create_subprocess_exec",
+    "create_subprocess_shell",
+}  # fmt: skip
+_OS_OWNERS = {"subprocess", "os", "asyncio", "webbrowser", "psutil"}
+_NAVIGATIONS = {"navigate", "create_target", "open_tab", "new_tab", "goto"}
+_GET_RECEIVERS = {"tab", "browser", "main_tab", "page", "new_tab"}
+
+
+class _Sites(ast.NodeVisitor):
+    def __init__(self, rel):
+        self.rel, self.stack = rel, []
+        self.commands, self.writes, self.navigations = [], [], []
+
+    def _scope(self, node):
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    def visit_FunctionDef(self, node):  # noqa: N802  PERMANENT(ast.NodeVisitor's own method names)
+        self._scope(node)
+
+    def visit_AsyncFunctionDef(self, node):  # noqa: N802  PERMANENT(ast.NodeVisitor's own method names)
+        self._scope(node)
+
+    def visit_ClassDef(self, node):  # noqa: N802  PERMANENT(ast.NodeVisitor's own method names)
+        self._scope(node)
+
+    def _site(self):
+        return self.rel, ".".join(self.stack) or "<module>"
+
+    def visit_Call(self, node):
+        function = node.func
+        name = (
+            function.attr
+            if isinstance(function, ast.Attribute)
+            else getattr(function, "id", "")
+        )
+        owner = (
+            ast.unparse(function.value) if isinstance(function, ast.Attribute) else ""
+        )
+        last = owner.split(".")[-1]
+        if name in _OS_COMMANDS and (
+            last in _OS_OWNERS or name in {"Popen", "create_subprocess_exec"}
+        ):
+            self.commands.append(self._site())
+        if name in {"write_text", "write_bytes"} or (name == "open" and owner == "os"):
+            self.writes.append(self._site())
+        elif name == "open" and last not in {"webbrowser", "gzip", "zipfile"}:
+            mode = None
+            arguments = node.args
+            if isinstance(function, ast.Attribute):  # path.open(mode)
+                if arguments and isinstance(arguments[0], ast.Constant):
+                    mode = arguments[0].value
+            elif len(arguments) > 1 and isinstance(arguments[1], ast.Constant):
+                mode = arguments[1].value
+            for keyword in node.keywords:
+                if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                    mode = keyword.value.value
+            if isinstance(mode, str) and set("wax+") & set(mode):
+                self.writes.append(self._site())
+        if isinstance(function, ast.Attribute) and (
+            name in _NAVIGATIONS
+            or (name == "get" and last in _GET_RECEIVERS and node.args)
+        ):
+            self.navigations.append(self._site())
+        self.generic_visit(node)
+
+
+def _sites():
+    import collections
+
+    found = {
+        "commands": collections.Counter(),
+        "writes": collections.Counter(),
+        "navigations": collections.Counter(),
+    }
+    for path in sorted(SRC.rglob("*.py")):
+        visitor = _Sites(path.relative_to(SRC).as_posix())
+        visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
+        for kind, counter in found.items():
+            counter.update(getattr(visitor, kind))
+    return found
+
+
+#: Every site that starts an OS program. None takes text from a tool: a fixed argv,
+#: or a path the OPERATOR configured. The one place a tool's text reaches a program's
+#: arguments (``spawn_browser(browser_args)``) is the delegated launch's .ps1, which
+#: ``desktop_launch._ps_quote`` quotes and ``test_launcher_script`` parses.
+OS_COMMAND_SITES = {
+    ("cli_call.py", "_run"): "the `stealthy call` CLI's own subprocess (a shell, no tool)",
+    ("embedded/backend_launch.py", "_popen"): "starts the backend: a fixed argv",
+    ("embedded/desktop_launch.py", "_schtasks"): "schtasks with a fixed argv; the task name is a token",
+    ("embedded/display_context.py", "_macos_context"): "a fixed macOS argv",
+    ("embedded/platform_utils.py", "_probe_browser_major_version"): "`<operator's browser> --version`",
+    ("embedded/scheduling_lag.py", "_spawn_canary"): "a fixed `python -c` canary",
+}  # fmt: skip
+
+#: Every site that writes a file, and why no caller path or caller name decides
+#: where it lands. A caller-NAMED path goes through ``path_confinement`` (the
+#: spy test above proves each writer asks); the rest are the product's own files.
+WRITE_SITES = {
+    ("cli_call.py", "_abandon_stdout"): "the CLI's own stdout redirect",
+    ("cli_supervise.py", "cmd_supervise"): "the supervisor's own log",
+    ("embedded/backend_launch.py", "_open_boot_log"): "the backend's boot log, fixed name",
+    ("embedded/backend_launch.py", "_scheduler_spawn"): "a launch script under the product's state dir",
+    ("embedded/backend_registry.py", "_commit_json"): "server.json, the product's state",
+    ("embedded/backend_supervisor.py", "_write_state"): "the supervisor's state file",
+    ("embedded/backend_token.py", "_create"): "the bearer token file, owner-only",
+    ("embedded/browser_pid_registry.py", "_hold_lock"): "a lock file in the state dir",
+    ("embedded/browser_pid_registry.py", "_write"): "browser_pids.json, the product's state",
+    ("embedded/chrome_log.py", "_claim"): "chrome-*.log in the log dir, a generated name",
+    ("embedded/desktop_launch.py", "write_launcher_script"): "the .ps1 (BOM; every quote doubled; test_launcher_script)",
+    ("embedded/file_based_element_cloner.py", "FileBasedElementCloner._save_to_file"): "a GENERATED name in the operator's clone dir; JSON, no caller text as a name",
+    ("embedded/fleet_session.py", "record_live_seed"): "the fleet seed marker, the product's state",
+    ("embedded/freeze_capture.py", "_write_with_dbghelp"): "a crash dump in the log dir",
+    ("embedded/loop_stall.py", "open_fault_log"): "the stall fault log, fixed name",
+    ("embedded/path_confinement.py", "_open_fd"): "THE opener behind refuse_write_path",
+    ("embedded/profile_lock.py", "_claim_launch"): "a lock file in the profile dir",
+    ("embedded/profile_seed.py", "write_marker"): "a session marker the product writes",
+    ("embedded/response_handler.py", "ResponseHandler.handle_response"): "a GENERATED name for a large response spill",
+    ("embedded/singleton.py", "_exclusive_lock"): "the singleton lock file",
+    ("embedded/singleton.py", "_start_server_process"): "the backend's log file, fixed name",
+    ("embedded/tool_sections/element_interaction.py", "take_screenshot"): "the caller path, checked by precreate_private_off_loop (PATH_TOOLS)",
+    ("embedded/vault_crypto.py", "_file_lock"): "the vault's lock file",
+    ("embedded/vault_crypto.py", "write_file"): "the vault file itself",
+    ("embedded/vault_store.py", "audit"): "the audit log, append only",
+}  # fmt: skip
+
+#: Every site that navigates a page, and where its URL comes from. The tools that
+#: take a caller URL (``navigate``, ``new_tab``) are refused by ``refuse_urls`` in
+#: ``tool_registry`` BEFORE the body runs; every other site has a URL the product
+#: made (a literal, or the login's own ``login_url`` from the vault).
+NAVIGATION_SITES = {
+    ("embedded/browser_manager.py", "BrowserManager._replace_main_tab"): "about:blank (the product's own tab)",
+    ("embedded/browser_manager.py", "BrowserManager.navigate"): "the `navigate` tool: refuse_urls runs first",
+    ("embedded/browser_trust.py", "profile_refusal"): "the product's own page read",
+    ("embedded/login_flow.py", "_open_sealed_tab"): "about:blank",
+    ("embedded/login_flow.py", "_sealed_login"): "the vault entry's login_url (a person's, never an agent's)",
+    ("embedded/login_flow.py", "_confirm"): "the vault entry's login_url",
+    ("embedded/login_persistence.py", "_set_restore_pref"): "chrome://settings, the product's own (why WebUI pages are hidden, not blanked)",
+    ("embedded/navigation_milestone.py", "_send_navigate.send"): "the navigate tool's URL, after refuse_urls",
+    ("embedded/tab_binding.py", "claim"): "about:blank",
+    ("embedded/tab_binding.py", "navigate_callers_tab"): "forwards to BrowserManager.navigate (the `navigate` tool's own)",
+    ("embedded/tab_open.py", "open_tab"): "THE tab opener: its callers are pinned here",
+    ("embedded/tool_sections/tabs.py", "new_tab"): "the `new_tab` tool: refuse_urls runs first",
+}  # fmt: skip
+
+
+def _census(kind, pinned):
+    found = _sites()[kind]
+    new = sorted(set(found) - set(pinned))
+    gone = sorted(set(pinned) - set(found))
+    assert not new, (
+        f"a new {kind} call site in src: say why it cannot be reached with an "
+        f"agent's text, and pin it here: {new}"
+    )
+    assert not gone, f"a pinned {kind} site is gone, drop it from the pins: {gone}"
+
+
+def test_census_every_site_that_starts_an_os_program_is_pinned():
+    _census("commands", OS_COMMAND_SITES)
+
+
+def test_census_every_site_that_writes_a_file_is_pinned():
+    _census("writes", WRITE_SITES)
+
+
+def test_census_every_site_that_navigates_a_page_is_pinned():
+    _census("navigations", NAVIGATION_SITES)
+
+
+def test_the_url_tools_that_navigate_with_a_caller_url_are_checked_before_they_run():
+    """The two navigation pins that carry a caller's URL rest on ``refuse_urls``
+    being called by the registry for them: pin that, not just the call site."""
+    from stealth_chrome_devtools_mcp.embedded import debug_port_guard
+
+    assert {"navigate", "new_tab"} <= set(debug_port_guard.URL_ARGUMENTS)
+    assert set(debug_port_guard.URL_ARGUMENTS) == vault_mode.LOADS_URLS
