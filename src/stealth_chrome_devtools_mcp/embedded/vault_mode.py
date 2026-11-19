@@ -137,8 +137,9 @@ RESTRICTIONS = (
         "browser_args",
         TAKES_BROWSER_ARGS,
         "spawn_browser(browser_args=...) takes only a short list of switches "
-        "(window size and position, language, user agent; the feature-list "
-        "switches are refused) and user_data_dir takes a session NAME, not a path",
+        "(window size and position, language, user agent, and "
+        "--disable-blink-features=AutomationControlled; every other feature-list "
+        "switch is refused) and user_data_dir takes a session NAME, not a path",
     ),
     Restriction(
         "file_urls",
@@ -266,12 +267,17 @@ _ANY = re.compile(r"[^\x00-\x1f\x7f]{1,512}")
 #: what the product's own docs, tests and README use (window size, language, user
 #: agent) plus the window-position and start-maximized switches that belong with the
 #: size. Everything else, including every switch that names a file or a program, is
-#: refused by name. The three FEATURE-LIST switches (``--disable-features``,
-#: ``--enable-blink-features``, ``--disable-blink-features``) are not here either
-#: (audit 6, N1): their names are an open vocabulary of hundreds of Chrome features,
-#: some of which are security controls (site isolation, private-network protection,
-#: the certificate and resolver paths), and no short list of names can be argued from
-#: a use the product documents; the product sets the ones it needs itself.
+#: refused by name. The FEATURE-LIST switches (``--disable-features``,
+#: ``--enable-features``, ``--enable-blink-features``, ``--disable-blink-features``)
+#: are not here (audit 6, N1): their names are an open vocabulary of hundreds of
+#: Chrome features, some of which are security controls (site isolation,
+#: private-network protection, the certificate and resolver paths), and no short list
+#: of names can be argued from a use the product documents; the product sets the ones
+#: it needs itself. ONE exact value of one of them is allowed (audit 7, F6):
+#: ``--disable-blink-features=AutomationControlled``, which stops Chrome telling a
+#: page it is automated and which a caller may need; it names no file, program,
+#: address or security control, and the pattern is that literal alone, so
+#: ``AutomationControlled,Foo`` and every other feature name are still refused.
 #: ``--proxy-server`` is not here: ``browser_trust`` refuses a login in a proxied
 #: browser.
 ALLOWED_SWITCHES: dict[str, tuple[str, re.Pattern[str] | None]] = {
@@ -281,6 +287,10 @@ ALLOWED_SWITCHES: dict[str, tuple[str, re.Pattern[str] | None]] = {
     "lang": ("the browser's UI language", _LOCALE),
     "accept-lang": ("the Accept-Language header", _LOCALES),
     "user-agent": ("the User-Agent string (text only)", _ANY),
+    "disable-blink-features": (
+        "hides the automation marker from pages (this one value only)",
+        re.compile(r"AutomationControlled"),
+    ),
 }
 
 #: Why a switch is not on the list, for the ones people ask about.
@@ -288,6 +298,19 @@ _WHY_NOT = (
     "it can name a file Chrome writes or a program Chrome starts, change name "
     "resolution or certificate checking, or load code"
 )
+
+
+def _allowed_spellings() -> list[str]:
+    """The allow-list as a caller types it: a switch whose one value is fixed is shown
+    with that value (``--disable-blink-features=AutomationControlled``), never as the
+    bare name, which would read as every value."""
+    spellings = []
+    for name, (_why, pattern) in ALLOWED_SWITCHES.items():
+        fixed = pattern is not None and re.escape(pattern.pattern) == pattern.pattern
+        spellings.append(
+            f"--{name}={pattern.pattern}" if fixed and pattern else f"--{name}"
+        )
+    return spellings
 
 
 def _start_page_refusal(argument: str) -> str | None:
@@ -333,8 +356,7 @@ def check_browser_args(arguments: object) -> None:
         if allowed is None:
             raise refused(
                 f"the browser switch --{name}",
-                f"{_WHY_NOT}; only {', '.join('--' + n for n in ALLOWED_SWITCHES)} "
-                "are accepted",
+                f"{_WHY_NOT}; only {', '.join(_allowed_spellings())} are accepted",
             )
         text = browser_trust.canonical_switch(argument).strip()
         value = text.partition("=")[2] if "=" in text else None
