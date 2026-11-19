@@ -462,7 +462,9 @@ T = 1000.0
 
 IDENTITY_READERS = {
     "ProcessCleanup._fallback_pid_identity_ok": ProcessCleanup._fallback_pid_identity_ok,
-    "backend_supervisor._still": backend_supervisor._still,
+    "backend_supervisor (now zombie.same_process, exact, dead if unknown)": (
+        lambda pid, started: zombie.same_process(pid, started, unknown=False)
+    ),
     "client_presence.present": lambda pid, created: client_presence.present(
         (pid, created)
     ),
@@ -478,7 +480,7 @@ IDENTITY_TABLE = {
         T,
         (False, False, False),
     ),
-    "no start time recorded": (World(created=T), None, (True, False, False)),
+    "no start time recorded": (World(created=T), None, (True, True, False)),
     "the pid is gone": (
         World(ctor=psutil.NoSuchProcess(PID)),
         T,
@@ -704,6 +706,41 @@ def test_a_failed_launchs_marker_is_released_only_for_a_pid_the_os_no_longer_has
 
     assert spawn_leak.reap_launched_browsers(cleanup, "/p", object(), "i") == []
     assert released == (["/p"] if reaped else [])
+
+
+@pytest.mark.parametrize(
+    ("world", "judged"),
+    [
+        pytest.param(World(created=T), PID, id="still the process it judged"),
+        pytest.param(World(created=T + 2.0), None, id="the pid was recycled"),
+        pytest.param(
+            World(created=psutil.AccessDenied(PID)), None, id="it cannot be re-read"
+        ),
+        pytest.param(
+            World(ctor=psutil.NoSuchProcess(PID)), None, id="it is already gone"
+        ),
+    ],
+)
+def test_the_supervisor_ends_only_the_process_it_judged(monkeypatch, world, judged):
+    """The pin that keeps a pass from killing a successor: the kill resolves its
+    target through ``pid_on_port`` and trusts it, so that answer is the whole
+    guard, and "cannot be re-read" is not "still the same" (``unknown=False``)."""
+    install(monkeypatch, world)
+    resolved: list[int | None] = []
+    monkeypatch.setattr(
+        backend_eviction,
+        "terminate",
+        lambda port, *, pid_on_port, **_k: resolved.append(pid_on_port(port)) or True,
+    )
+    seen = backend_supervisor.Observation(
+        port=51996, pid=PID, started=T, healthy=False, silence=None, lag=None
+    )
+
+    backend_supervisor.kill(
+        seen, is_ours=lambda _pid: True, is_healthy=lambda _p: False
+    )
+
+    assert resolved == [judged]
 
 
 @pytest.mark.parametrize(
