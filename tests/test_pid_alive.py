@@ -1223,3 +1223,26 @@ def test_the_kernel_is_asked_only_by_the_held_direction(monkeypatch, kernel):
 
     assert zombie.alive(PID, unknown=True) is True
     assert KERNEL_ASKED == [(PID, 0)]
+
+
+def test_the_signal_guard_is_the_platform_it_names():
+    """On Windows ``os.kill(pid, 0)`` TERMINATES the process, so the constant that
+    keeps the probe off there is pinned on every OS rather than patched by tests."""
+    assert zombie._SIGNAL_ASKS is (os.name != "nt")
+
+
+def test_a_probe_signal_leaves_this_machine_only_where_it_is_a_question(monkeypatch):
+    """No test-side patch of ``_SIGNAL_ASKS``: the module's own default decides
+    whether an unlisted pid is ever put to the kernel. Nothing is ever signalled
+    for real; the signal is a recorder."""
+    sent: list[tuple[int, int]] = []
+
+    def record(pid: int, sig: int) -> None:
+        sent.append((pid, sig))
+        raise ProcessLookupError(errno.ESRCH, "no such process")
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda _pid: False)
+    monkeypatch.setattr(zombie, "_signal", record)
+
+    assert zombie.alive(PID, unknown=True) is False
+    assert sent == ([] if os.name == "nt" else [(PID, 0)])
