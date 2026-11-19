@@ -114,8 +114,8 @@ import psutil
 from stealth_chrome_devtools_mcp.embedded import (
     atomic_file,
     browser_cmdline,
+    pid_alive,
     spawn_budget,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
@@ -187,7 +187,7 @@ def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
         # through to the lock exactly as it does for an empty scan.
     elif pids is None and not _LOCK_IS_A_WITNESS:
         # The one witness this platform has did not answer. Every unanswerable
-        # question here resolves toward HELD (`zombie.alive(unknown=True)`) and
+        # question here resolves toward HELD (`pid_alive.alive(unknown=True)`) and
         # for the same reason: one extra walk is survivable, two browsers on one
         # profile is not. Unreachable on POSIX — the lock still answers there.
         return Hold(
@@ -348,7 +348,7 @@ def _tree_hold(profile_dir: Path, pids: Collection[int]) -> Hold | None:
     and there are two, because a directory with two browsers is held whichever
     one is named. A member whose argv could not be READ leaves the question
     open, and an open question resolves toward HELD here exactly as it does in
-    ``zombie.alive(unknown=True)``: one extra walk is survivable, two browsers on one
+    ``pid_alive.alive(unknown=True)``: one extra walk is survivable, two browsers on one
     profile is not. Only "asked every member, none is a browser" is a negative,
     and it is the one the caller may act on.
 
@@ -452,7 +452,7 @@ def _lock_hold(lock: Path, whose: str = f"Chrome's {LOCK_NAME}") -> Hold | None:
     # running (F-998), though it is still listed: it is the lock's owner in the
     # window between a browser's death and its reaping, and reading it as a
     # holder walked a relaunch of ``fleet`` to ``fleet-2``.
-    if zombie.alive(pid, unknown=True):
+    if pid_alive.alive(pid, unknown=True):
         return Hold(pid, f"{whose} is held by live pid {pid}")
     # Chromium: "Orphaned lockfile" -> UnlinkPath -> PROCESS_NONE.
     return None

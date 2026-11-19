@@ -54,8 +54,8 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
     devtools_port,
     display_context,
+    pid_alive,
     proxy_forwarder,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -494,7 +494,7 @@ def _kill_delegated(pid: int, create_time: float | None) -> None:
             f"No identity stamp for delegated pid {pid}; refusing to kill it",
         )
         return
-    process = zombie.identified(pid, create_time, tolerance=PID_IDENTITY_TOLERANCE)
+    process = pid_alive.identified(pid, create_time, tolerance=PID_IDENTITY_TOLERANCE)
     if process is None:
         debug_logger.log_warning(
             "desktop_launch",
@@ -586,7 +586,7 @@ async def _run_task(
             # USER'S — killing it would be us tidying up with their browser.
             # Doubles as the liveness probe (a pid with no start time is a pid with
             # no process) and as the identity stamp: pid alone is not an identity.
-            create_time = await asyncio.to_thread(zombie.create_time, pid)
+            create_time = await asyncio.to_thread(pid_alive.create_time, pid)
             if create_time is None:
                 raise ToolError(
                     f"F-810: the delegated browser (pid {pid}) exited before it "

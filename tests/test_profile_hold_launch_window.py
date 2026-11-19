@@ -30,11 +30,11 @@ from fakes import LaunchedBrowser, nodriver_registry, write_singleton
 from stealth_chrome_devtools_mcp.embedded import (
     browser_manager,
     clone_storage,
+    pid_alive,
     profile_copy,
     profile_lock,
     spawn_budget,
     spawn_leak,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -590,9 +590,9 @@ class TestLockReadEdges:
             raise raised
 
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
-        monkeypatch.setattr(zombie, "_SIGNAL_ASKS", True)
+        monkeypatch.setattr(pid_alive, "_SIGNAL_ASKS", True)
         # The module's own alias: patching `os.kill` would swap it process-wide.
-        monkeypatch.setattr(zombie, "_signal", kill)
+        monkeypatch.setattr(pid_alive, "_signal", kill)
         answer = hold(tmp_path)
         monkeypatch.undo()
 
@@ -603,9 +603,9 @@ class TestLockReadEdges:
         """``os.kill`` TERMINATES on Windows: the question is never asked there."""
         write_singleton(tmp_path, f"{socket.gethostname()}-{dead_pid()}")
         monkeypatch.setattr(profile_lock.psutil, "pid_exists", lambda _pid: False)
-        monkeypatch.setattr(zombie, "_SIGNAL_ASKS", False)
+        monkeypatch.setattr(pid_alive, "_SIGNAL_ASKS", False)
         monkeypatch.setattr(
-            zombie, "_signal", lambda *_a: pytest.fail("signalled a pid")
+            pid_alive, "_signal", lambda *_a: pytest.fail("signalled a pid")
         )
         assert hold(tmp_path) is None
 
@@ -627,7 +627,7 @@ class TestLockReadEdges:
     ):
         asked = []
         monkeypatch.setattr(
-            zombie, "alive", lambda pid, *, unknown: asked.append(pid) or True
+            pid_alive, "alive", lambda pid, *, unknown: asked.append(pid) or True
         )
         write_singleton(tmp_path, f"{socket.gethostname()}-{2**31 - 1}")
         assert hold(tmp_path) is not None

@@ -32,9 +32,9 @@ from stealth_chrome_devtools_mcp.embedded import (
     clone_protection,
     clone_storage,
     login_persistence,
+    pid_alive,
     process_exit,
     tab_open,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -887,7 +887,7 @@ def test_a_zombie_is_an_exited_browser(monkeypatch):
     whole 5 s grace and then kill an already-dead pid on every POSIX close.
     The platform is POSIX's too, so the zombie question is asked on any runner.
     """
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", True)
     monkeypatch.setattr(
         process_exit,
         "psutil",

@@ -43,11 +43,11 @@ from fakes_wire import BrowserSocket
 from stealth_chrome_devtools_mcp.embedded import (
     browser_connect,
     devtools_port,
+    pid_alive,
     spawn_budget,
     spawn_contention,
     spawn_exhaustion,
     spawn_leak,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 from stealth_chrome_devtools_mcp.embedded.models import BrowserOptions
@@ -286,7 +286,7 @@ async def test_a_browser_that_never_says_who_it_is_times_out_by_name(world, prof
 def running_launcher(monkeypatch):
     """Our launcher stays alive, so the patience applies: 0.4 s in all, a 0.05 s floor
     (the ``world`` fixture), asked again once per floor."""
-    monkeypatch.setattr(zombie, "alive", lambda pid, *, unknown: True)
+    monkeypatch.setattr(pid_alive, "alive", lambda pid, *, unknown: True)
     monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.4)
     monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.01)
 

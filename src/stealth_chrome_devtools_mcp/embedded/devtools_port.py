@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import tab_open, zombie
+from stealth_chrome_devtools_mcp.embedded import pid_alive, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -260,7 +260,7 @@ async def _answer(browser: Browser, launched_pid: int) -> list[list]:
             waited = clock() - started
             if waited >= IDENTITY_TIMEOUT_SECONDS and not (
                 waited < IDENTITY_PATIENCE_SECONDS
-                and zombie.alive(launched_pid, unknown=False)
+                and pid_alive.alive(launched_pid, unknown=False)
             ):
                 raise _unverified(waited)
             if clock() >= next_ask:
@@ -303,7 +303,7 @@ async def _ask(browser: Browser, launched_pid: int) -> None:
         named = True
         # The launched pid IS the browser on every direct launch, and owns itself;
         # only a wrapper's descendants need the walk, which is a whole-machine
-        # snapshot taken on the event loop with the GIL held (see ``zombie``).
+        # snapshot taken on the event loop with the GIL held (see ``pid_alive``).
         if launched_pid in browser_pids:
             continue
         if not set(browser_pids) & owned_pids(launched_pid):

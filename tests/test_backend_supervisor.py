@@ -28,7 +28,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
     backend_supervisor,
     browser_pid_registry,
-    zombie,
+    pid_alive,
 )
 
 PORT = 51996
@@ -583,7 +583,7 @@ DEAD_PID = 987_654
 @pytest.fixture()
 def lost_setup(recorded, monkeypatch, tmp_session_root):
     record, proc, started = recorded
-    monkeypatch.setattr(zombie.psutil, "pid_exists", lambda pid: pid != DEAD_PID)
+    monkeypatch.setattr(pid_alive.psutil, "pid_exists", lambda pid: pid != DEAD_PID)
     fleet = str(tmp_session_root["sessions"] / "fleet")
     master = str(tmp_session_root["master"])
     _write_browsers(

@@ -5,7 +5,9 @@ were eleven private readers, and the fixes F-998 and F-1008 each reached only so
 of them):
 
 * :func:`alive` ``(pid, *, unknown)``: is *pid* a RUNNING process. Not listed is
-  dead (after the kernel's own word, F-1008), a zombie is dead, a Linux process
+  dead (after the kernel's own word, F-1008, asked only of an
+  ``unknown=True`` caller: ``kill(tid, 0)`` cannot tell a thread id from a
+  pid), a zombie is dead, a Linux process
   whose address space is already gone is dead (F-998), and an empty argv alone
   is NEVER dead: a live Chrome reads one while its ``sh`` launcher ``exec``s.
   ``unknown`` is the answer for a pid that cannot be asked about, and it has no
@@ -21,7 +23,9 @@ of them):
   that acts on a REMEMBERED pid asks this, not :func:`alive`. :func:`create_time`
   is the read underneath it, for a caller that has to remember the start, and
   :func:`running` is the same question for a ``psutil.Process`` the caller
-  already holds (whose identity psutil keeps itself).
+  already holds (whose identity psutil keeps itself). :func:`identified`
+  returns the very ``Process`` the identity was read from, for a caller
+  about to kill it.
 
 A pid that names no process (zero, negative, ``None``, a bool) is dead to
 :func:`alive` and unknown to nothing: ``psutil.Process(None)`` is the CALLING
@@ -268,7 +272,9 @@ def alive(pid: object, *, unknown: bool) -> bool:
             return unknown and _kernel_has(pid)
     except (psutil.Error, OSError, OverflowError) as error:
         debug_logger.log_warning(
-            "zombie", "alive", f"Could not tell whether pid {pid} is running: {error}"
+            "pid_alive",
+            "alive",
+            f"Could not tell whether pid {pid} is running: {error}",
         )
         return unknown
     return not _gone(pid, unreadable=not unknown)

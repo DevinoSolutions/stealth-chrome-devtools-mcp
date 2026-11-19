@@ -18,10 +18,10 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_pid_registry,
     browser_reattach,
     clone_trash,
+    pid_alive,
     reap_guard,
     serve_startup,
     singleton,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_pid_registry import Entries
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -295,7 +295,7 @@ class ProcessCleanup:
         # ``same_process`` is inclusive and this check never was: a start time
         # exactly one tolerance away is a different process. The largest float
         # below the tolerance is the strict bound, stated rather than moved.
-        return zombie.same_process(
+        return pid_alive.same_process(
             fallback_pid,
             stored_create_time,
             tolerance=math.nextafter(RECORDED_START_TOLERANCE_SECONDS, 0.0),
@@ -370,7 +370,7 @@ class ProcessCleanup:
             # session began — they belong to the current run, not a previous one.
             safe_pids: set[int] = set()
             for pid in pids_to_kill:
-                pid_create_time = zombie.create_time(pid)
+                pid_create_time = pid_alive.create_time(pid)
                 if pid_create_time is None:
                     continue  # gone or inaccessible — skip conservatively
                 if pid_create_time < self._init_time:
@@ -383,7 +383,7 @@ class ProcessCleanup:
                 # Use the stored PID only if it predates this session and
                 # the identity check passes (shared predicate).
                 if self._fallback_pid_identity_ok(fallback_pid, stored_create_time):
-                    started = zombie.create_time(fallback_pid)
+                    started = pid_alive.create_time(fallback_pid)
                     if started is not None and started < self._init_time:
                         pids_to_kill = {fallback_pid}
                     elif started is not None:
@@ -429,7 +429,7 @@ class ProcessCleanup:
             other_id != skip_id
             and self._normalize_path(other.get("user_data_dir")) == normalized
             and isinstance(other.get("pid"), int)
-            and zombie.listed(other["pid"])
+            and pid_alive.listed(other["pid"])
             for other_id, other in list(self.browser_processes.items())
         )
 
@@ -704,7 +704,7 @@ class ProcessCleanup:
                 return False
 
             pid = browser_process.pid
-            create_time = zombie.create_time(pid)
+            create_time = pid_alive.create_time(pid)
             metadata = browser_pid_registry.new_entry(
                 pid,
                 create_time=create_time,
@@ -797,7 +797,7 @@ class ProcessCleanup:
         profile_pids = self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
         if profile_pids:
             return False
-        if isinstance(pid, int) and zombie.listed(pid):
+        if isinstance(pid, int) and pid_alive.listed(pid):
             return False
 
         active_profile_dirs = self._get_active_browser_profile_dirs()
@@ -831,7 +831,7 @@ class ProcessCleanup:
                 continue
 
             pid = metadata.get("pid")
-            if isinstance(pid, int) and zombie.listed(pid):
+            if isinstance(pid, int) and pid_alive.listed(pid):
                 continue
 
             cleaned = self._cleanup_profile_for_metadata(instance_id, metadata)
@@ -868,7 +868,7 @@ class ProcessCleanup:
         — ``reap_guard`` carries that rule and names what it costs (F-918).
         """
         try:
-            if not zombie.listed(pid):
+            if not pid_alive.listed(pid):
                 debug_logger.log_info(
                     "process_cleanup",
                     "kill_process",

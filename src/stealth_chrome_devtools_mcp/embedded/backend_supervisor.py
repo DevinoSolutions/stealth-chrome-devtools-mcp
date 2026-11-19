@@ -71,7 +71,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     backend_liveness,
     backend_registry,
     browser_pid_registry,
-    zombie,
+    pid_alive,
 )
 
 if TYPE_CHECKING:
@@ -209,7 +209,7 @@ def observe(
     pid = backend_registry.recorded_int(entry, "pid")
     if port is None or pid is None or not is_ours(pid):
         return None
-    started = zombie.create_time(pid)
+    started = pid_alive.create_time(pid)
     if started is None:
         return None
     return Observation(
@@ -239,9 +239,9 @@ def kill(
 
     def pinned(_port: int) -> int | None:
         # Exact: both start times came out of psutil in this one pass.
-        same = zombie.same_process(seen.pid, seen.started, unknown=False) and is_ours(
-            seen.pid
-        )
+        same = pid_alive.same_process(
+            seen.pid, seen.started, unknown=False
+        ) and is_ours(seen.pid)
         return seen.pid if same else None
 
     return backend_eviction.terminate(

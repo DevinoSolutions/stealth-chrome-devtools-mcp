@@ -64,13 +64,13 @@ from stealth_chrome_devtools_mcp.embedded import (
     desktop_launch,
     directory_gate,
     fleet_session,
+    pid_alive,
     profile_source,
     reap_guard,
     tab_identity,
     tab_open,
     tool_errors,
     window_sizing,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_claim import Refused
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -762,7 +762,7 @@ def claim(
         pid=candidate.pid,
         entry=browser_pid_registry.new_entry(
             candidate.pid,
-            create_time=zombie.create_time(candidate.pid),
+            create_time=pid_alive.create_time(candidate.pid),
             user_data_dir=candidate.user_data_dir,
             uses_custom_data_dir=True,
             auto_clone=False,

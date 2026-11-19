@@ -18,7 +18,7 @@ from nodriver.core.connection import ProtocolException
 
 from fakes import forbid_real_process_kills
 from fakes_wire import listener_alive, registered, until, wire
-from stealth_chrome_devtools_mcp.embedded import devtools_port, zombie
+from stealth_chrome_devtools_mcp.embedded import devtools_port, pid_alive
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: Far above any pid a machine hands out, so ``psutil`` finds nothing below them.
@@ -122,7 +122,7 @@ def _launcher_exits_after_two(monkeypatch, throwaways) -> None:
     (T-7014 pre-push: 1 throwaway made), so a count pinned to the clock flakes."""
     monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 60.0)
     monkeypatch.setattr(
-        zombie, "alive", lambda pid, *, unknown: len(throwaways.made) < 2
+        pid_alive, "alive", lambda pid, *, unknown: len(throwaways.made) < 2
     )
 
 

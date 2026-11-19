@@ -1,11 +1,11 @@
-"""The one "is this pid there, and is it the same process" home, ``zombie`` (T-19642).
+"""The one "is this pid there, and is it the same process" home, ``pid_alive`` (T-19642).
 
 There were eleven separate readers of that question and they disagreed. Before any
 of them moved this file pinned what each one DID answer, in one table; folding
-them into ``zombie`` could then only change an answer on purpose. The tables below
+them into ``pid_alive`` could then only change an answer on purpose. The tables below
 still hold those answers, and the rows marked CHANGED or DIVERGENCE are the
 behaviour changes the migration made, each with its reason in place. Callers that
-reach ``zombie`` with a different direction for "could not ask" (``unknown=True``
+reach ``pid_alive`` with a different direction for "could not ask" (``unknown=True``
 for holders, ``False`` for killers) keep their own pins further down.
 
 Each scenario is a ``World``: what ``psutil`` answers (or raises) for ONE pid,
@@ -39,11 +39,11 @@ from stealth_chrome_devtools_mcp.embedded import (
     client_presence,
     desktop_launch,
     devtools_port,
+    pid_alive,
     process_exit,
     profile_lock,
     reap_guard,
     spawn_leak,
-    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -142,13 +142,13 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> list[_Process]:
 
     KERNEL_ASKED.clear()
 
-    monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
+    monkeypatch.setattr(pid_alive, "ZOMBIES_EXIST", True)
     monkeypatch.setattr(psutil, "pid_exists", pid_exists)
     monkeypatch.setattr(psutil, "Process", process)
-    monkeypatch.setattr(zombie.Path, "readlink", readlink)
-    monkeypatch.setattr(zombie, "_EXE_WITNESS", world.linux)
-    monkeypatch.setattr(zombie, "_SIGNAL_ASKS", True)
-    monkeypatch.setattr(zombie, "_signal", kernel)
+    monkeypatch.setattr(pid_alive.Path, "readlink", readlink)
+    monkeypatch.setattr(pid_alive, "_EXE_WITNESS", world.linux)
+    monkeypatch.setattr(pid_alive, "_SIGNAL_ASKS", True)
+    monkeypatch.setattr(pid_alive, "_signal", kernel)
     return built
 
 
@@ -164,11 +164,11 @@ class _Browser:
 
 
 READERS = {
-    "held (profile_lock and the tree member): zombie.alive(unknown=True)": (
-        lambda pid: zombie.alive(pid, unknown=True)
+    "held (profile_lock and the tree member): pid_alive.alive(unknown=True)": (
+        lambda pid: pid_alive.alive(pid, unknown=True)
     ),
-    "devtools_port's reader (now zombie.alive, dead if unknown)": lambda pid: (
-        zombie.alive(pid, unknown=False)
+    "devtools_port's reader (now pid_alive.alive, dead if unknown)": lambda pid: (
+        pid_alive.alive(pid, unknown=False)
     ),
     "process_exit.browser_is_alive": lambda pid: process_exit.browser_is_alive(
         _Browser(pid)
@@ -299,8 +299,8 @@ def test_a_negative_pid_reads_dead_everywhere_and_the_kernel_is_not_asked(
         World(listed=False, ctor=ValueError("pid must be positive"), kernel=None),
     )
 
-    assert zombie.alive(-1, unknown=True) is False
-    assert zombie.alive(-1, unknown=False) is False
+    assert pid_alive.alive(-1, unknown=True) is False
+    assert pid_alive.alive(-1, unknown=False) is False
     assert KERNEL_ASKED == []
     assert process_exit.browser_is_alive(_Browser(-1)) is False
 
@@ -427,13 +427,13 @@ async def test_the_identity_wait_goes_on_only_while_the_launcher_is_shown_runnin
     # says nothing about whether the wait went on. A launcher shown running is
     # asked again on every poll; the third time it has "exited", so the wait ends.
     asked: list[bool] = []
-    real_alive = zombie.alive
+    real_alive = pid_alive.alive
 
     def counting(pid: object, *, unknown: bool) -> bool:
         asked.append(real_alive(pid, unknown=unknown))
         return asked[-1] and len(asked) < 4
 
-    monkeypatch.setattr(zombie, "alive", counting)
+    monkeypatch.setattr(pid_alive, "alive", counting)
 
     class _Silent:
         websocket_url = None
@@ -454,7 +454,7 @@ def test_pid_none_is_not_this_process():
     """``psutil.Process(None)`` is the CALLING process, so a missing pid read as
     "alive" in the one reader that built a Process from it directly (CHANGED in
     the devtools_port commit: it is dead now)."""
-    assert zombie.alive(None, unknown=False) is False
+    assert pid_alive.alive(None, unknown=False) is False
 
 
 @pytest.mark.parametrize("pid", [0, None])
@@ -475,8 +475,8 @@ T = 1000.0
 
 IDENTITY_READERS = {
     "ProcessCleanup._fallback_pid_identity_ok": ProcessCleanup._fallback_pid_identity_ok,
-    "backend_supervisor (now zombie.same_process, exact, dead if unknown)": (
-        lambda pid, started: zombie.same_process(pid, started, unknown=False)
+    "backend_supervisor (now pid_alive.same_process, exact, dead if unknown)": (
+        lambda pid, started: pid_alive.same_process(pid, started, unknown=False)
     ),
     "client_presence.present": lambda pid, created: client_presence.present(
         (pid, created)
@@ -616,15 +616,15 @@ def test_the_start_time_readers_agree_on_every_error(monkeypatch):
     from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
 
     install(monkeypatch, World(created=T))
-    assert zombie.create_time(PID) == T
+    assert pid_alive.create_time(PID) == T
 
     install(monkeypatch, World(created=psutil.AccessDenied(PID)))
-    assert zombie.create_time(PID) is None
+    assert pid_alive.create_time(PID) is None
 
     install(monkeypatch, World(created=OSError(errno.EIO, "io")))
     assert browser_pid_registry.owner_identity()[1] is None
     # CHANGED in the desktop_launch commit: this reader used to let an OSError out.
-    assert zombie.create_time(PID) is None
+    assert pid_alive.create_time(PID) is None
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +813,7 @@ def test_the_eviction_guards_default_liveness_is_the_process_table():
         backend_eviction.protected,
     ):
         default = inspect.signature(function).parameters["is_running"].default
-        assert default is zombie.listed, function.__name__
+        assert default is pid_alive.listed, function.__name__
 
 
 @pytest.mark.parametrize(
@@ -902,7 +902,7 @@ def test_finalizing_a_stopped_browser_never_deletes_under_a_pid_still_listed(
 
 
 # ===========================================================================
-# THE ONE HOME (T-19642): ``zombie.alive`` / ``same_process`` / ``create_time``
+# THE ONE HOME (T-19642): ``pid_alive.alive`` / ``same_process`` / ``create_time``
 # ===========================================================================
 #
 # Same worlds, one function. Each row is (unknown=True, unknown=False): what the
@@ -982,8 +982,8 @@ def test_alive_answers_each_world_in_both_directions(monkeypatch, name):
     world, (when_unknown_is_alive, when_unknown_is_dead) = NEW_ALIVE[name]
     install(monkeypatch, world)
 
-    assert zombie.alive(PID, unknown=True) is when_unknown_is_alive, name
-    assert zombie.alive(PID, unknown=False) is when_unknown_is_dead, name
+    assert pid_alive.alive(PID, unknown=True) is when_unknown_is_alive, name
+    assert pid_alive.alive(PID, unknown=False) is when_unknown_is_dead, name
 
 
 @pytest.mark.parametrize("pid", [0, -1, None, True, False, "4242", 4242.0])
@@ -993,39 +993,39 @@ def test_a_pid_that_names_no_process_is_dead_and_nothing_is_asked(monkeypatch, p
     install(monkeypatch, World(kernel=None))
 
     for unknown in (True, False):
-        assert zombie.alive(pid, unknown=unknown) is False
-        assert zombie.same_process(pid, T, unknown=unknown) is False
-    assert zombie.create_time(pid) is None
+        assert pid_alive.alive(pid, unknown=unknown) is False
+        assert pid_alive.same_process(pid, T, unknown=unknown) is False
+    assert pid_alive.create_time(pid) is None
     assert KERNEL_ASKED == []
 
 
 def test_a_pid_too_large_for_a_c_long_is_unknown_not_a_crash():
     for unknown in (True, False):
-        assert zombie.alive(2**40, unknown=unknown) is unknown
+        assert pid_alive.alive(2**40, unknown=unknown) is unknown
 
 
 def test_this_very_process_is_alive_and_the_same_process_as_itself():
     me = os.getpid()
-    started = zombie.create_time(me)
+    started = pid_alive.create_time(me)
     assert isinstance(started, float)
-    assert zombie.alive(me, unknown=True) is True
-    assert zombie.alive(me, unknown=False) is True
-    assert zombie.same_process(me, started, unknown=False) is True
-    assert zombie.same_process(me, started + 5.0, unknown=False) is False
-    assert zombie.listed(me) is True
+    assert pid_alive.alive(me, unknown=True) is True
+    assert pid_alive.alive(me, unknown=False) is True
+    assert pid_alive.same_process(me, started, unknown=False) is True
+    assert pid_alive.same_process(me, started + 5.0, unknown=False) is False
+    assert pid_alive.listed(me) is True
 
 
 def test_a_reaped_child_is_dead_to_every_question():
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait(timeout=60)
-    if zombie.listed(child.pid):
+    if pid_alive.listed(child.pid):
         pytest.skip("the pid was recycled in the instant after the child was reaped")
 
-    assert zombie.alive(child.pid, unknown=True) is False
-    assert zombie.alive(child.pid, unknown=False) is False
-    assert zombie.listed(child.pid) is False
-    assert zombie.create_time(child.pid) is None
-    assert zombie.same_process(child.pid, 1.0, unknown=True) is False
+    assert pid_alive.alive(child.pid, unknown=True) is False
+    assert pid_alive.alive(child.pid, unknown=False) is False
+    assert pid_alive.listed(child.pid) is False
+    assert pid_alive.create_time(child.pid) is None
+    assert pid_alive.same_process(child.pid, 1.0, unknown=True) is False
 
 
 IDENTITY = {
@@ -1100,18 +1100,18 @@ def test_same_process_answers_each_world_in_both_directions(monkeypatch, name):
     install(monkeypatch, world)
 
     assert (
-        zombie.same_process(PID, recorded, tolerance=tolerance, unknown=True)
+        pid_alive.same_process(PID, recorded, tolerance=tolerance, unknown=True)
         is when_true
     )
     assert (
-        zombie.same_process(PID, recorded, tolerance=tolerance, unknown=False)
+        pid_alive.same_process(PID, recorded, tolerance=tolerance, unknown=False)
         is when_false
     )
 
 
 def test_create_time_is_a_value_or_none_never_an_exception(monkeypatch):
     install(monkeypatch, World(created=T))
-    assert zombie.create_time(PID) == T
+    assert pid_alive.create_time(PID) == T
     for refused in (
         psutil.AccessDenied(PID),
         psutil.NoSuchProcess(PID),
@@ -1120,7 +1120,7 @@ def test_create_time_is_a_value_or_none_never_an_exception(monkeypatch):
         OSError(errno.EIO, "io"),
     ):
         install(monkeypatch, World(created=refused))
-        assert zombie.create_time(PID) is None, repr(refused)
+        assert pid_alive.create_time(PID) is None, repr(refused)
 
 
 @pytest.mark.parametrize(
@@ -1138,13 +1138,13 @@ def test_create_time_is_a_value_or_none_never_an_exception(monkeypatch):
 )
 def test_listed_is_the_process_table_and_nothing_else(monkeypatch, world, listed):
     install(monkeypatch, world)
-    assert zombie.listed(PID) is listed
+    assert pid_alive.listed(PID) is listed
 
 
 def test_listed_raises_what_psutil_raises(monkeypatch):
     install(monkeypatch, World(listed=psutil.AccessDenied(PID)))
     with pytest.raises(psutil.AccessDenied):
-        zombie.listed(PID)
+        pid_alive.listed(PID)
 
 
 @pytest.mark.parametrize(
@@ -1157,7 +1157,7 @@ def test_listed_raises_what_psutil_raises(monkeypatch):
 )
 def test_running_is_the_held_process_form(monkeypatch, running, status, answer):
     install(monkeypatch, World(running=running, status=status))
-    assert zombie.running(psutil.Process(PID)) is answer
+    assert pid_alive.running(psutil.Process(PID)) is answer
 
 
 # ---------------------------------------------------------------------------
@@ -1171,7 +1171,7 @@ def test_running_is_the_held_process_form(monkeypatch, running, status, answer):
 HELD_PROCESS_READS = {("client_presence.py", "capture", "create_time")}
 
 #: The module a question is rightly put to; a call on it is the point.
-HOME_NAME = zombie.__name__.rsplit(".", 1)[-1]
+HOME_NAME = pid_alive.__name__.rsplit(".", 1)[-1]
 
 
 _STRAY_NAMES = {"pid_exists", "pids", "STATUS_ZOMBIE"}
@@ -1262,7 +1262,7 @@ def _probes_in(source: str) -> list[tuple[str, str, int]]:
 
 
 def test_no_module_but_zombie_asks_whether_a_pid_is_there():
-    home = Path(zombie.__file__)
+    home = Path(pid_alive.__file__)
     stray = [
         f"{path.name}:{line} {scope or '<module>'} {probe}"
         for path in sorted(home.parent.parent.rglob("*.py"))
