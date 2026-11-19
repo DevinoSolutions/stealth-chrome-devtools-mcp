@@ -557,6 +557,12 @@ def test_a_client_that_was_never_identified_is_present():
         pytest.param(
             World(ctor=psutil.AccessDenied(PID)), T, False, id="cannot be opened"
         ),
+        pytest.param(
+            World(created=psutil.AccessDenied(PID)),
+            T,
+            False,
+            id="opens, but its start cannot be read: not provably ours",
+        ),
     ],
 )
 def test_a_delegated_chrome_is_killed_only_when_it_is_provably_ours(
@@ -574,27 +580,25 @@ def test_a_delegated_chrome_is_killed_only_when_it_is_provably_ours(
 # ---------------------------------------------------------------------------
 
 
-def test_the_start_time_readers_agree_on_psutil_errors_and_one_lets_oserror_out(
-    monkeypatch,
-):
+def test_the_start_time_readers_agree_on_every_error(monkeypatch):
     from stealth_chrome_devtools_mcp.embedded import (
         browser_pid_registry,
         browser_reattach,
     )
 
     install(monkeypatch, World(created=T))
-    assert desktop_launch._process_create_time(PID) == T
+    assert zombie.create_time(PID) == T
     assert browser_reattach._create_time(PID) == T
 
     install(monkeypatch, World(created=psutil.AccessDenied(PID)))
-    assert desktop_launch._process_create_time(PID) is None
+    assert zombie.create_time(PID) is None
     assert browser_reattach._create_time(PID) is None
 
     install(monkeypatch, World(created=OSError(errno.EIO, "io")))
     assert browser_reattach._create_time(PID) is None
     assert browser_pid_registry.owner_identity()[1] is None
-    with pytest.raises(OSError):
-        desktop_launch._process_create_time(PID)
+    # CHANGED in the desktop_launch commit: this reader used to let an OSError out.
+    assert zombie.create_time(PID) is None
 
 
 # ---------------------------------------------------------------------------

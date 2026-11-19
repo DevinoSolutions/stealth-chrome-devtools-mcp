@@ -55,6 +55,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     devtools_port,
     display_context,
     proxy_forwarder,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
@@ -456,19 +457,6 @@ def _read_pid(pid_file: Path) -> int | None:
         return None
 
 
-def _process_create_time(pid: int) -> float | None:
-    """The process's start time, or ``None`` if there is no such process.
-
-    Doubles as the liveness probe — a pid with no start time is a pid with no
-    process — and as the identity stamp: pid alone is not an identity, because
-    the OS recycles the number. Seam; blocking, so call it in a thread.
-    """
-    try:
-        return psutil.Process(pid).create_time()
-    except psutil.Error:
-        return None
-
-
 class _Delegated:
     """What the poll learned about the launched browser, readable even when the
     poll RAISES.
@@ -506,16 +494,18 @@ def _kill_delegated(pid: int, create_time: float | None) -> None:
             f"No identity stamp for delegated pid {pid}; refusing to kill it",
         )
         return
+    if not zombie.same_process(
+        pid, create_time, tolerance=PID_IDENTITY_TOLERANCE, unknown=False
+    ):
+        debug_logger.log_warning(
+            "desktop_launch",
+            "_kill_delegated",
+            f"Pid {pid} is no longer the process we launched (recycled, gone or "
+            "unreadable); refusing to kill one that is not provably ours",
+        )
+        return
     try:
         process = psutil.Process(pid)
-        if abs(process.create_time() - create_time) > PID_IDENTITY_TOLERANCE:
-            debug_logger.log_warning(
-                "desktop_launch",
-                "_kill_delegated",
-                f"Pid {pid} was recycled since we launched it; refusing to kill "
-                "a process that is not ours",
-            )
-            return
         for child in process.children(recursive=True):
             with contextlib.suppress(psutil.Error):
                 child.kill()
@@ -596,7 +586,9 @@ async def _run_task(
             # Deliberately does NOT record into `delegated`: the process is gone,
             # and if it handed off, the live Chrome on that desktop is the
             # USER'S — killing it would be us tidying up with their browser.
-            create_time = await asyncio.to_thread(_process_create_time, pid)
+            # Doubles as the liveness probe (a pid with no start time is a pid with
+            # no process) and as the identity stamp: pid alone is not an identity.
+            create_time = await asyncio.to_thread(zombie.create_time, pid)
             if create_time is None:
                 raise ToolError(
                     f"F-810: the delegated browser (pid {pid}) exited before it "
