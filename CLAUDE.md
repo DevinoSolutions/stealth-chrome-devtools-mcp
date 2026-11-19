@@ -8,8 +8,10 @@ architecture is in [`DESIGN.md`](./DESIGN.md); how to operate the backend is in
 [`RUNBOOK.md`](./RUNBOOK.md); how to build/test/ship is in
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
-> This is a **local, single-user tool, 0 external users**. Priorities:
-> maintainability, operability, performance.
+> This is a **public PyPI package with external users** (third-party machines install it
+> and report errors), run as a single-user local tool. A change to tool behaviour, defaults
+> or schemas is a breaking change for them. Priorities: maintainability, operability,
+> performance.
 
 ---
 
@@ -38,9 +40,12 @@ architecture is in [`DESIGN.md`](./DESIGN.md); how to operate the backend is in
 ## Navigation map
 
 The map of the tree (every module, what it owns, where a change goes) is in
-[`NAVMAP.md`](./NAVMAP.md). It is ~290K chars, so it is kept out of this auto-loaded
+[`NAVMAP.md`](./NAVMAP.md). It is over 390K chars, so it is kept out of this auto-loaded
 file: `grep -n "<module or term>" NAVMAP.md` and read only the matching entries.
 A change that adds, moves or renames a module updates its entry there.
+
+`CHANGELOG.md` is just as large (over 700K chars): grep it for the release, finding or
+ticket you need (`grep -n "T-1234" CHANGELOG.md`); never read it whole.
 
 ---
 

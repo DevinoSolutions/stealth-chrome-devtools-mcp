@@ -368,6 +368,80 @@ class TestDocumentedToolCount:
         assert "100 tools" in text
 
 
+#: The docs a reader (or an agent) takes a tool or section COUNT from. DOCS above
+#: minus nothing, plus the manual QA protocol, which is outside the other pins:
+#: it named "94 tools" for as long as it has been wrong.
+COUNT_DOCS = [*DOCS, "tests/MANUAL_QA_PROTOCOL.md"]
+_NUMBER_WORDS = {"twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15}
+
+
+class TestDocumentedCountsDeriveFromTheRegistry:
+    """NAVMAP carried "97 tool bodies", "all 94" and "94-tool" for a release while
+    the pin above only grepped five literal strings. Any number the docs put in
+    front of "tool(s)" that is larger than a whole section is a claim about the
+    TOTAL, so it is compared with the registry rather than with a list of
+    numbers that used to be right."""
+
+    def test_every_total_the_docs_name_is_the_registry_total(self):
+        total = sum(len(v) for v in server.SECTION_TOOLS.values())
+        largest_section = max(len(v) for v in server.SECTION_TOOLS.values())
+        wrong = []
+        for doc in COUNT_DOCS:
+            text = (REPO / doc).read_text(encoding="utf-8")
+            for m in re.finditer(r"(?<![\w.])(\d{2,3})[ -]tools?\b", text):
+                n = int(m.group(1))
+                if n > largest_section and n != total:
+                    wrong.append(f"{doc}: {m.group(0)!r} (registry: {total})")
+        assert not wrong, "\n".join(wrong)
+
+    def test_every_section_count_the_docs_name_is_the_registry_count(self):
+        sections = len(server.SECTION_TOOLS)
+        wrong = []
+        for doc in COUNT_DOCS:
+            text = (REPO / doc).read_text(encoding="utf-8")
+            for m in re.finditer(
+                r"\b(\d{2}|twelve|thirteen|fourteen|fifteen) sections\b",
+                text,
+                re.IGNORECASE,
+            ):
+                word = m.group(1).lower()
+                n = _NUMBER_WORDS.get(word) or int(word)
+                if n != sections:
+                    wrong.append(f"{doc}: {m.group(0)!r} (registry: {sections})")
+        assert not wrong, "\n".join(wrong)
+
+    def test_the_sizes_claude_md_names_are_floors_the_files_meet(self):
+        """CLAUDE.md keeps NAVMAP and CHANGELOG out of every session by their size
+        ("~290K chars" while NAVMAP was 403K). A size it names must be one the file
+        still has."""
+        claude = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        for name in ("NAVMAP.md", "CHANGELOG.md"):
+            size = len((REPO / name).read_text(encoding="utf-8"))
+            claim = re.search(r"over (\d+)K chars", claude[claude.index(name) :])
+            assert claim, f"CLAUDE.md names no size for {name}"
+            assert size >= int(claim.group(1)) * 1000, (
+                f"{name} is {size} chars; CLAUDE.md says over {claim.group(1)}K"
+            )
+
+
+class TestNavmapRowsAreUnique:
+    #: Two different files: the package entrypoint and ``embedded/server.py``.
+    ALLOWED_TWICE: ClassVar[set[str]] = {"server.py"}
+
+    def test_one_row_per_module(self):
+        rows = re.findall(
+            r"^\| `([^`]+)` \|",
+            (REPO / "NAVMAP.md").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        twice = {
+            key for key in rows if rows.count(key) > 1 and key not in self.ALLOWED_TWICE
+        }
+        assert not twice, (
+            f"NAVMAP rows that name the same module twice: {sorted(twice)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # F-923 — CHANGELOG PLACEMENT, which `TestChangelogIntegrity` did not guard
 # ---------------------------------------------------------------------------

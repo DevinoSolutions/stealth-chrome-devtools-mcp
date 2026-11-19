@@ -4,8 +4,9 @@ How to clone, install, test, and land a change. Architecture rationale is in
 [`DESIGN.md`](./DESIGN.md); the file map + conventions are in
 [`CLAUDE.md`](./CLAUDE.md).
 
-> Local, single-user tool, 0 external users. Priorities: maintainability, operability,
-> performance. Every change is reviewed against four lenses — **modularity ·
+> Public PyPI package with external users, run as a single-user local tool; a change to
+> tool behaviour or defaults is breaking for them. Priorities: maintainability,
+> operability, performance. Every change is reviewed against four lenses — **modularity ·
 > deduplication · clarity · conventions** — and the sharp one: *a fix that introduces a
 > second way of doing something is a defect.*
 

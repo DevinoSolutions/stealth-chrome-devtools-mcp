@@ -8,9 +8,10 @@ break without understanding *why they exist*. It is the *why*; `CLAUDE.md` + `NA
 are pinned in the glossary in [`CLAUDE.md`](./CLAUDE.md#glossary); this document uses
 them in exactly that sense.
 
-> Context that shapes every decision below: this is a **local, single-user tool**
-> with **0 external users**. Priorities, in order: **maintainability, operability,
-> performance**. Four lenses are binding on every change — **modularity ·
+> Context that shapes every decision below: this is a **single-user local tool**
+> published on PyPI with **external users** (third-party machines run it and report
+> errors), so a change to tool behaviour or defaults is breaking for them.
+> Priorities, in order: **maintainability, operability, performance**. Four lenses are binding on every change — **modularity ·
 > deduplication · clarity · conventions**. The conventions lens has a sharp edge:
 > *a fix that introduces a second way of doing something is a defect.*
 
