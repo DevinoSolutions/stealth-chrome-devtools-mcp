@@ -21,8 +21,10 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_trust,
     debug_logger,
     debug_port_guard,
+    login_seal,
     path_confinement,
     platform_utils,
+    tab_binding,
     tool_registry,
     tool_sections,
     vault_mode,
@@ -999,3 +1001,91 @@ def test_the_url_tools_that_navigate_with_a_caller_url_are_checked_before_they_r
 
     assert {"navigate", "new_tab"} <= set(debug_port_guard.URL_ARGUMENTS)
     assert set(debug_port_guard.URL_ARGUMENTS) == vault_mode.LOADS_URLS
+
+
+# ----------------------------------------- the tab a call resolves with no tab_id (F1)
+
+
+class _Tab:
+    def __init__(self, target_id: str) -> None:
+        self.target = type("T", (), {"target_id": target_id, "type_": "page"})()
+
+
+@pytest.fixture
+def left_on_a_webui_page(monkeypatch):
+    """The instance's current tab is ``WEBUI``, a ``chrome://`` page a person left
+    there; ``ok`` is a tab of the caller's own."""
+    monkeypatch.setattr(tab_binding, "caller", lambda: None)
+    monkeypatch.setattr(login_seal, "_webui", {"WEBUI"})
+    tabs = {"i": _Tab("WEBUI")}
+    return FakeBrowserManager(tabs=tabs)
+
+
+async def test_a_call_with_no_tab_id_is_refused_on_a_hidden_page_in_vault_mode(
+    left_on_a_webui_page, mode_on
+):
+    with pytest.raises(ToolError) as caught:
+        await tab_binding.tab_for_caller(left_on_a_webui_page, "i")
+    text = str(caught.value)
+    _assert_names_the_vault(caught.value)
+    assert "call new_tab" in text
+    assert "login is running" not in text
+    assert "WEBUI" not in text
+
+
+async def test_the_same_call_acts_on_that_page_as_before_with_no_vault(
+    left_on_a_webui_page,
+):
+    assert not vault_mode.active()
+    tab = await tab_binding.tab_for_caller(left_on_a_webui_page, "i")
+    assert tab.target.target_id == "WEBUI"
+
+
+async def test_a_bound_tab_that_turns_into_a_hidden_page_is_refused_too(
+    left_on_a_webui_page, mode_on, monkeypatch
+):
+    """``go_back`` over pre-vault history: the caller's OWN tab becomes a WebUI page."""
+    monkeypatch.setattr(tab_binding, "caller", lambda: "A")
+    monkeypatch.setattr(tab_binding, "_bound", {("A", "i"): "OWN"})
+
+    class Browser:
+        def __init__(self) -> None:
+            self.tabs = [_Tab("OWN")]
+
+        async def update_targets(self) -> None:
+            return None
+
+    left_on_a_webui_page._browsers["i"] = Browser()
+    monkeypatch.setattr(login_seal, "_webui", {"OWN"})
+    with pytest.raises(ToolError, match="stealthy login destroy"):
+        await tab_binding.tab_for_caller(left_on_a_webui_page, "i")
+    monkeypatch.setattr(login_seal, "_webui", set())
+    assert (await tab_binding.tab_for_caller(left_on_a_webui_page, "i")) is not None
+
+
+async def test_a_tab_of_the_callers_own_is_still_resolved_in_vault_mode(
+    mode_on, monkeypatch
+):
+    monkeypatch.setattr(tab_binding, "caller", lambda: None)
+    monkeypatch.setattr(login_seal, "_webui", {"OTHER"})
+    manager = FakeBrowserManager(tabs={"i": _Tab("MINE")})
+    assert (await tab_binding.tab_for_caller(manager, "i")).target.target_id == "MINE"
+
+
+async def test_the_state_resources_refuse_a_hidden_current_tab_in_vault_mode(
+    server_mod, left_on_a_webui_page, mode_on, monkeypatch
+):
+    from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
+
+    monkeypatch.setattr(rt, "browser_manager", left_on_a_webui_page)
+    with pytest.raises(ToolError, match="stealthy login destroy"):
+        await server_mod._refuse_sealed_resource("i")
+
+
+async def test_the_state_resources_ask_nothing_with_no_vault(
+    server_mod, left_on_a_webui_page, monkeypatch
+):
+    from stealth_chrome_devtools_mcp.embedded import tool_runtime as rt
+
+    monkeypatch.setattr(rt, "browser_manager", left_on_a_webui_page)
+    await server_mod._refuse_sealed_resource("i")

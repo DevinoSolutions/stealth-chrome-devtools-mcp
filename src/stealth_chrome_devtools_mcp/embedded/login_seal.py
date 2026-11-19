@@ -310,10 +310,38 @@ def refuse_if_sealed(tool: str, kwargs: dict[str, object]) -> None:
     tab_id = kwargs.get("tab_id")
     if sealing(instance_id) and tool in INSTANCE_WIDE:
         raise ToolError(REFUSAL)
-    if isinstance(tab_id, str) and is_sealed(instance_id, tab_id):
-        # An inspector is refused for what it is, login or not: "a login is
-        # running" would be untrue and send the caller to wait for nothing.
-        barred_only = tab_id in _barred and not login_in_flight(instance_id)
-        if tab_id in _webui and not barred_only and not login_in_flight(instance_id):
-            raise ToolError(vault_mode.webui_refusal())
-        raise ToolError(INSPECTOR_REFUSAL if barred_only else REFUSAL)
+    if isinstance(tab_id, str):
+        _refuse_tab(instance_id, tab_id)
+
+
+def _refuse_tab(instance_id: str, tab_id: str, hint: str = "") -> None:
+    """Raise when ``tab_id`` is a sealed tab of ``instance_id``; ``hint`` is added to
+    the two sentences that name a page the caller can simply leave (a WebUI page, an
+    inspector), never to "a login is running"."""
+    if not is_sealed(instance_id, tab_id):
+        return
+    # An inspector is refused for what it is, login or not: "a login is
+    # running" would be untrue and send the caller to wait for nothing.
+    barred_only = tab_id in _barred and not login_in_flight(instance_id)
+    if tab_id in _webui and not barred_only and not login_in_flight(instance_id):
+        raise ToolError(vault_mode.webui_refusal() + hint)
+    raise ToolError(INSPECTOR_REFUSAL + hint if barred_only else REFUSAL)
+
+
+#: Said when a call that names no tab would act on one it may not use (T-19366
+#: audit 7 F1): the caller's way out is a tab of its own.
+CURRENT_TAB_HINT = (
+    " The tab this call would act on is not one you opened: call new_tab, or pass "
+    "the tab_id of a tab you did."
+)
+
+
+def refuse_current_tab(instance_id: str, target_id: str) -> None:
+    """Raise when the tab a call resolved WITHOUT a ``tab_id`` (the caller's bound
+    tab, or the instance's current one) is sealed or barred while vault mode is on:
+    a person can leave the browser on a ``chrome://`` page, and ``go_back`` can reach
+    one, so ``refuse_if_sealed`` (which reads only a ``tab_id`` the call passed) is
+    not the only place to ask. Costs two dict truthiness checks with nothing sealed,
+    and one ``lstat`` only while a sealed target exists."""
+    if any_sealing() and vault_mode.active():
+        _refuse_tab(instance_id, str(target_id), CURRENT_TAB_HINT)

@@ -251,6 +251,40 @@ async def test_a_file_page_is_barred_and_blanked_wherever_it_came_from(
         assert not seen.startswith("file:"), seen
 
 
+async def test_a_page_tool_with_no_tab_id_refuses_a_chrome_page_left_current(
+    site, tmp_path, fast_guard
+):
+    """Audit 7 F1: the instance's current tab was left on ``chrome://version`` BEFORE
+    the vault; a call that names no tab must not act on it, and a tab of its own
+    still works."""
+    async with flow._browser(tmp_path) as iid:
+        # no vault yet: the page loads and is the current tab
+        await get_fn("navigate")(instance_id=iid, url="chrome://version")
+        assert "version" in (await get_fn("get_page_content")(instance_id=iid))["url"]
+        _make_vault_file()
+        assert vault_mode.active()
+        await asyncio.sleep(FAST * 4)  # the keeper has judged the target by now
+        for call in (
+            lambda: get_fn("execute_script")(instance_id=iid, script="1 + 1"),
+            lambda: get_fn("get_page_content")(instance_id=iid),
+            lambda: get_fn("take_screenshot")(instance_id=iid),
+            lambda: get_fn("go_back")(instance_id=iid),
+        ):
+            with pytest.raises(ToolError) as caught:
+                await call()
+            text = str(caught.value)
+            assert "stealthy login destroy" in text, text
+            assert "new_tab" in text, text
+        # a tab of its own is not touched by the rule
+        opened = await get_fn("new_tab")(instance_id=iid, url="about:blank")
+        own = opened["tab_id"]
+        answer = await get_fn("execute_script")(
+            instance_id=iid, script="1 + 1", tab_id=own
+        )
+        assert "2" in str(answer), answer
+        assert await get_fn("get_page_content")(instance_id=iid, tab_id=own)
+
+
 async def test_a_browser_spawned_while_the_vault_exists_is_pinned_from_its_first_moment(
     site, tmp_path, monkeypatch
 ):
