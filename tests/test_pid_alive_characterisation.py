@@ -136,8 +136,6 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> list[_Process]:
     monkeypatch.setattr(psutil, "Process", process)
     monkeypatch.setattr(browser_cmdline, "_EXE_WITNESS", world.linux)
     monkeypatch.setattr(browser_cmdline.Path, "readlink", readlink)
-    monkeypatch.setattr(profile_lock, "_SIGNAL_ASKS", True)
-    monkeypatch.setattr(profile_lock, "_signal", kernel)
     monkeypatch.setattr(zombie, "_EXE_WITNESS", world.linux)
     monkeypatch.setattr(zombie, "_SIGNAL_ASKS", True)
     monkeypatch.setattr(zombie, "_signal", kernel)
@@ -156,7 +154,9 @@ class _Browser:
 
 
 READERS = {
-    "profile_lock._pid_alive": profile_lock._pid_alive,
+    "profile_lock's reader (now zombie.alive, held)": lambda pid: zombie.alive(
+        pid, unknown=True
+    ),
     "browser_cmdline._still_running": browser_cmdline._still_running,
     "devtools_port._running": devtools_port._running,
     "process_exit.browser_is_alive": lambda pid: process_exit.browser_is_alive(
@@ -271,20 +271,75 @@ def test_every_reader_answers_what_it_always_did(monkeypatch, name):
 # ---------------------------------------------------------------------------
 
 
-def test_a_negative_pid_reads_dead_everywhere_but_the_lock_owners_kernel_probe(
+def test_a_negative_pid_reads_dead_everywhere_and_the_kernel_is_not_asked(
     monkeypatch,
 ):
     """``os.kill(-1, 0)`` signals EVERY process the user may signal, so on POSIX a
-    kernel probe of -1 answers "exists". Only ``profile_lock`` reaches it, and its
-    one caller guards ``pid > 0``, which is all that kept this latent."""
-    install(monkeypatch, World(listed=False, ctor=ValueError("pid must be positive")))
+    kernel probe of -1 answers "exists". The lock owner's reader used to reach it
+    (its one caller guarded ``pid > 0``, which is all that kept this latent); the
+    one home answers a pid that names no process without asking anything."""
+    install(
+        monkeypatch,
+        World(listed=False, ctor=ValueError("pid must be positive"), kernel=None),
+    )
 
-    assert profile_lock._pid_alive(-1) is False  # the scripted kernel says gone
-    assert KERNEL_ASKED == [(-1, 0)]  # but it WAS asked
+    assert zombie.alive(-1, unknown=True) is False
+    assert KERNEL_ASKED == []
     assert browser_cmdline._still_running(-1) is False
     assert process_exit.browser_is_alive(_Browser(-1)) is False
     with pytest.raises(ValueError):
         devtools_port._running(-1)
+
+
+@pytest.mark.parametrize(
+    ("world", "held"),
+    [
+        pytest.param(World(), True, id="a live owner"),
+        pytest.param(
+            World(ctor=psutil.AccessDenied(PID)), True, id="an owner we cannot open"
+        ),
+        pytest.param(
+            World(status=psutil.AccessDenied(PID)),
+            True,
+            id="an owner whose status is refused",
+        ),
+        pytest.param(
+            World(listed=OverflowError("big")), True, id="a pid psutil cannot take"
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
+            True,
+            id="an owner only the kernel can see",
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID)), False, id="a dead one"
+        ),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            False,
+            id="a zombie owner",
+        ),
+        pytest.param(
+            World(cmdline=(), exe=GONE), False, id="an owner tearing down (Linux)"
+        ),
+        pytest.param(
+            World(cmdline=(), exe=READABLE), True, id="an owner mid-exec (Linux)"
+        ),
+    ],
+)
+def test_a_profile_is_held_by_its_lock_owner_unless_that_owner_is_shown_dead(
+    tmp_path, monkeypatch, world, held
+):
+    """The lock owner's direction, through the caller that spends the answer: an
+    owner we cannot ask about holds the profile (two browsers on one profile is
+    the cost of the other answer)."""
+    install(monkeypatch, world)
+    monkeypatch.setattr(profile_lock.socket, "gethostname", lambda: "host")
+    # A plain file, not a symlink: ``install`` scripts ``Path.readlink`` for the
+    # executable link, and a symlink lock would be read through it.
+    (tmp_path / profile_lock.LOCK_NAME).write_text(f"host-{PID}", encoding="utf-8")
+
+    assert (profile_lock.profile_hold(tmp_path, lambda _dir: set()) is not None) is held
 
 
 def test_pid_none_is_this_process_to_psutil_and_one_reader_believes_it():

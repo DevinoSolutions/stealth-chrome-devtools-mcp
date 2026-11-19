@@ -115,6 +115,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     atomic_file,
     browser_cmdline,
     spawn_budget,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
@@ -140,11 +141,6 @@ _UNLINK_PAUSE_SECONDS = 0.025
 
 # The largest pid Chromium's `StringToInt` parses; above it a lock names no pid.
 _PID_MAX = 2**31 - 1
-
-# Whether `os.kill(pid, 0)` is a QUESTION: on Windows any signal but the console
-# ones terminates the process.
-_SIGNAL_ASKS = os.name != "nt"
-_signal = os.kill
 
 # Whether Chrome leaves a readable owner in the profile — i.e. whether witness 2
 # exists on this platform at all (see the module docstring). False on Windows.
@@ -191,9 +187,9 @@ def profile_hold(profile_dir: Path, live_pids: PidScan) -> Hold | None:
         # through to the lock exactly as it does for an empty scan.
     elif pids is None and not _LOCK_IS_A_WITNESS:
         # The one witness this platform has did not answer. Every unanswerable
-        # question here resolves toward HELD (see `_pid_alive`) and for the same
-        # reason: one extra walk is survivable, two browsers on one profile is
-        # not. Unreachable on POSIX — the lock still answers there.
+        # question here resolves toward HELD (`zombie.alive(unknown=True)`) and
+        # for the same reason: one extra walk is survivable, two browsers on one
+        # profile is not. Unreachable on POSIX — the lock still answers there.
         return Hold(
             None,
             "the process table could not be read and Chrome on this platform "
@@ -352,7 +348,7 @@ def _tree_hold(profile_dir: Path, pids: Collection[int]) -> Hold | None:
     and there are two, because a directory with two browsers is held whichever
     one is named. A member whose argv could not be READ leaves the question
     open, and an open question resolves toward HELD here exactly as it does in
-    :func:`_pid_alive`: one extra walk is survivable, two browsers on one
+    ``zombie.alive(unknown=True)``: one extra walk is survivable, two browsers on one
     profile is not. Only "asked every member, none is a browser" is a negative,
     and it is the one the caller may act on.
 
@@ -451,7 +447,12 @@ def _lock_hold(lock: Path, whose: str = f"Chrome's {LOCK_NAME}") -> Hold | None:
             f"{whose} names another host ({hostname}), so this "
             "profile cannot be shown free from here",
         )
-    if pid > 0 and _pid_alive(pid):
+    # Unanswerable is HELD (``unknown=True``): the profile is then not SHOWN free,
+    # which is the survivable answer. A pid whose command line has GONE is not
+    # running (F-998), though it is still listed: it is the lock's owner in the
+    # window between a browser's death and its reaping, and reading it as a
+    # holder walked a relaunch of ``fleet`` to ``fleet-2``.
+    if zombie.alive(pid, unknown=True):
         return Hold(pid, f"{whose} is held by live pid {pid}")
     # Chromium: "Orphaned lockfile" -> UnlinkPath -> PROCESS_NONE.
     return None
@@ -521,45 +522,3 @@ def _this_host() -> str:
             f"Could not read this machine's hostname: {error}",
         )
         return ""
-
-
-def _pid_alive(pid: int) -> bool:
-    """Whether *pid* is running. A pid we cannot ask about counts as alive:
-    the profile is then not SHOWN free, which is the survivable answer. A pid
-    whose command line has GONE is not running (F-998), though it is still
-    listed: it is the lock's owner in the window between a browser's death and
-    its reaping, and reading it as a holder walked a relaunch of ``fleet`` to
-    ``fleet-2``. A pid the process table does not list is still asked of the
-    kernel (F-1008): see :func:`_kernel_has`."""
-    try:
-        if not psutil.pid_exists(pid):
-            return _kernel_has(pid)
-        return not browser_cmdline.command_line_is_gone(pid)
-    except (psutil.Error, OSError, OverflowError) as error:
-        debug_logger.log_warning(
-            "profile_lock",
-            "pid_alive",
-            f"Could not tell whether pid {pid} is running: {error}",
-        )
-        return True
-
-
-def _kernel_has(pid: int) -> bool:
-    """Whether the kernel still has *pid* though ``psutil`` did not list it.
-
-    ``psutil`` answers from ``/proc``, and ``/proc`` mounted ``hidepid=2`` lists
-    only the caller's own processes, so another user's live browser read as
-    gone and its lock as orphaned (F-1008). ``kill(pid, 0)`` delivers nothing
-    and asks the kernel instead: ``EPERM`` is a process that exists and is not
-    ours. POSIX only — on Windows ``os.kill`` terminates, and Chrome writes no
-    lock there to ask about.
-    """
-    if not _SIGNAL_ASKS:
-        return False
-    try:
-        _signal(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
