@@ -69,6 +69,14 @@ const otps = inputs.filter((el) => el.type !== 'password' && isOtp(el));
 const textual = (el) => ['text', 'email', 'tel', 'search', ''].includes(el.type);
 const named = (el) => /(^|\\s)(username|email)(\\s|$)/.test(autocomplete(el))
     || el.type === 'email';
+// An explicit error the page is SHOWING: an alert with text, or a field marked
+// invalid. It is what tells a rejected password from a page that merely blanked
+// the field while its request is in flight.
+const errors = () => Array.from(document.querySelectorAll(
+    '[role=alert], [aria-live=assertive], [aria-invalid=true]'
+)).filter((el) => visible(el) && (
+    el.getAttribute('aria-invalid') === 'true' || (el.innerText || '').trim() !== ''
+));
 const usernames = () => {
     const direct = inputs.filter((el) => !isOtp(el) && textual(el) && named(el));
     if (direct.length) return direct;
@@ -84,7 +92,8 @@ const usernames = () => {
 };
 """
 
-#: Answers ``{"username", "password", "otp", "password_has_value"}``, all booleans.
+#: Answers ``{"username", "password", "otp", "password_has_value", "error"}``, all
+#: booleans.
 PROBE_JS = (
     "(() => {"
     + _LIB_JS
@@ -94,6 +103,7 @@ PROBE_JS = (
         password: passwords.length > 0,
         otp: otps.length > 0,
         password_has_value: passwords.some((el) => el.value !== ''),
+        error: errors().length > 0,
     };
 })()"""
 )
@@ -172,7 +182,9 @@ async def probe(tab: Tab, frame_id: str | None = None) -> dict[str, bool]:
     With ``frame_id`` that one frame; without, the top document and its direct
     child frames together (a flag is true when any of them has it)."""
     frames = [cdp.page.FrameId(frame_id)] if frame_id else await _frame_ids(tab)
-    answer = dict.fromkeys(("username", "password", "otp", "password_has_value"), False)
+    answer = dict.fromkeys(
+        ("username", "password", "otp", "password_has_value", "error"), False
+    )
     for frame in frames:
         world = await _world(tab, frame)
         if world is None:
