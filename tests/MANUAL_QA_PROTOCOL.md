@@ -98,7 +98,7 @@ evidence.
 ### MQ-2: Stdio server starts and completes MCP handshake
 **Manual**: configure an MCP host (Claude Desktop, Cursor, etc.) with the stdio
 transport; watch for `initialize` → server responds with name + version +
-`tools/list` returning all 94 tools.
+`tools/list` returning every tool in the registry.
 **Evidence**: planned — planned-pytest:
 `tests/test_e2e_transport.py::test_handshake_and_tools_list`.
 
@@ -1565,7 +1565,7 @@ leaves no process behind.
 The node imports **only** the official `mcp` SDK for the protocol — no `fastmcp`
 client, no `embedded/server.py` — so W1's FastMCP result cannot stand in for it:
 if the wire only answered our own client, this node could not pass. It asserts
-`serverInfo.name`, a non-empty version and protocol version, the full 94-tool
+`serverInfo.name`, a non-empty version and protocol version, the full tool
 registry, a real `inputSchema` on a representative tool, a successful
 `list_instances`, and the M6-pinned bytes `Instance not found: <id>` on the
 error path. The `mcp` pin is declared in `pyproject.toml`'s **test** extra only;
