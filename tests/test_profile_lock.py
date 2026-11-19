@@ -457,7 +457,7 @@ class TestProfileHold:
     def test_a_pid_scan_that_fails_resolves_toward_held_where_it_is_the_only_witness(
         self, tmp_path
     ):
-        """Never raises, and the direction is uniform with ``_pid_alive``: an
+        """Never raises, and the direction is uniform with ``zombie.alive(unknown=True)``: an
         unanswerable question resolves toward HELD. On POSIX the lock is a
         second witness and answers "free"; on Windows there is none, so the
         profile is not SHOWN free."""
@@ -614,7 +614,7 @@ class TestWhichMemberOfTheTreeHolds:
     def test_a_member_we_could_not_read_still_reads_as_held(
         self, tmp_path, monkeypatch
     ):
-        """The direction, uniform with ``_pid_alive`` and ``_browser_pids``: a
+        """The direction, uniform with ``zombie.alive(unknown=True)`` and ``_browser_pids``: a
         witness we could not READ is not an established negative. The reason
         says so rather than claiming a browser we never saw — that sentence is
         quoted verbatim to the caller by F-914's refusal.

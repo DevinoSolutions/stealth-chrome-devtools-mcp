@@ -138,8 +138,8 @@ def test_where_zombies_exist_the_grace_still_asks(monkeypatch, status_reads, sle
 def test_the_other_liveness_readers_ask_the_same_question(
     monkeypatch, status_reads, sleeper
 ):
-    """``browser_is_alive``, ``devtools_port._running`` and ``browser_cmdline``'s
-    gone-pid witness go through the same one home."""
+    """``browser_is_alive``, ``devtools_port``'s identity wait and ``browser_cmdline``'s
+    tree members go through the same one home."""
     monkeypatch.setattr(zombie, "ZOMBIES_EXIST", False)
 
     assert process_exit.browser_is_alive(
