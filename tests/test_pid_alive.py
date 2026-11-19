@@ -479,7 +479,14 @@ IDENTITY_ORDER = tuple(IDENTITY_READERS)
 IDENTITY_TABLE = {
     "same pid, same start": (World(created=T), T, (True, True, True)),
     "start time 0.5 s apart": (World(created=T + 0.5), T, (True, False, False)),
-    "start time 1.0 s apart": (World(created=T + 1.0), T, (True, False, False)),
+    "start time just under 1.0 s apart": (
+        World(created=T + 0.999),
+        T,
+        (True, False, False),
+    ),
+    # The cleanup check was strict (``< 1.0``) before T-19642 and stays so: a
+    # refactor does not move a kill-identity boundary.
+    "start time 1.0 s apart": (World(created=T + 1.0), T, (False, False, False)),
     "start time 2 s apart (a reused pid)": (
         World(created=T + 2.0),
         T,
