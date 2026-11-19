@@ -70,6 +70,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     tab_open,
     tool_errors,
     window_sizing,
+    zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.browser_claim import Refused
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -761,7 +762,7 @@ def claim(
         pid=candidate.pid,
         entry=browser_pid_registry.new_entry(
             candidate.pid,
-            create_time=_create_time(candidate.pid),
+            create_time=zombie.create_time(candidate.pid),
             user_data_dir=candidate.user_data_dir,
             uses_custom_data_dir=True,
             auto_clone=False,
@@ -772,14 +773,6 @@ def claim(
         owner_create_time=owner_create_time,
         owner_alive=cleanup._owner_backend_alive,
     )
-
-
-def _create_time(pid: int) -> float | None:
-    """*pid*'s start time, or None — the second half of a pid's identity."""
-    try:
-        return psutil.Process(pid).create_time()
-    except (psutil.Error, OSError):
-        return None
 
 
 async def _adopt_one(
