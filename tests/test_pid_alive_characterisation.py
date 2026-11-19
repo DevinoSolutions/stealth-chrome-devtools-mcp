@@ -36,6 +36,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     process_exit,
     profile_lock,
     reap_guard,
+    spawn_leak,
     zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
@@ -654,6 +655,52 @@ def test_a_reap_of_a_zombie_still_goes_on_to_identify_and_end_it(monkeypatch):
 
     assert _cleanup({})._kill_process_by_pid(PID, "x") is True
     assert asked == [PID]
+
+
+@pytest.mark.parametrize(
+    ("world", "reaped"),
+    [
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID)),
+            True,
+            id="the OS no longer has it: the launch marker goes now",
+        ),
+        pytest.param(World(), False, id="still there: the marker waits"),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            False,
+            id="a zombie is still listed: the marker waits",
+        ),
+        pytest.param(
+            World(cmdline=(), exe=GONE),
+            False,
+            id="tearing down is still listed: the marker waits (F-998)",
+        ),
+        pytest.param(
+            World(listed=psutil.AccessDenied(PID)),
+            False,
+            id="unanswerable: the marker is kept",
+        ),
+    ],
+)
+def test_a_failed_launchs_marker_is_released_only_for_a_pid_the_os_no_longer_has(
+    monkeypatch, world, reaped
+):
+    """``spawn_leak``'s comment: in its exec window a live Chrome reads an EMPTY
+    argv, so only a pid the OS no longer LISTS counts."""
+    install(monkeypatch, world)
+    released: list[str] = []
+    monkeypatch.setattr(spawn_leak, "launched_pid", lambda _attempt: PID)
+    monkeypatch.setattr(
+        profile_lock, "launch_reaped", lambda directory: released.append(directory)
+    )
+    cleanup = _cleanup({})
+    monkeypatch.setattr(
+        cleanup, "_get_browser_pids_for_profile", lambda _dir: set(), raising=False
+    )
+
+    assert spawn_leak.reap_launched_browsers(cleanup, "/p", object(), "i") == []
+    assert released == (["/p"] if reaped else [])
 
 
 @pytest.mark.parametrize(

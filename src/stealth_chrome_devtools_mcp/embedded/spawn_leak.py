@@ -117,7 +117,7 @@ from typing import TYPE_CHECKING
 import psutil
 from nodriver.core.util import get_registered_instances
 
-from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock
+from stealth_chrome_devtools_mcp.embedded import process_exit, profile_lock, zombie
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -264,7 +264,7 @@ def reap_launched_browsers(
                 profile_lock.launch_reaped(user_data_dir)
             return reaped
         with contextlib.suppress(psutil.Error, OSError):  # unanswerable: kept
-            if not psutil.pid_exists(launched):
+            if not zombie.listed(launched):
                 profile_lock.launch_reaped(user_data_dir)
     elif _nothing_survives(attempt):
         profile_lock.launch_reaped(user_data_dir)
