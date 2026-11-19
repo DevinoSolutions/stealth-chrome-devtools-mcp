@@ -9,6 +9,7 @@ import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
+    browser_trust,
     login_flow,
     login_seal,
     vault_crypto,
@@ -72,16 +73,167 @@ def test_each_forbidden_flag_refuses_in_its_value_form(flag):
     assert flag in reason
 
 
-def test_the_forbidden_list_is_the_documented_seven():
-    assert set(login_flow.FORBIDDEN_FLAGS) == {
-        "--host-resolver-rules",
-        "--host-rules",
-        "--ignore-certificate-errors",
-        "--ignore-certificate-errors-spki-list",
-        "--allow-insecure-localhost",
-        "--unsafely-treat-insecure-origin-as-secure",
-        "--proxy-server",
+def test_the_forbidden_list_names_every_switch_the_review_found_and_more():
+    names = {flag.removeprefix("--") for flag in login_flow.FORBIDDEN_FLAGS}
+    assert names >= {
+        "host-resolver-rules",
+        "host-rules",
+        "ignore-certificate-errors",
+        "ignore-certificate-errors-spki-list",
+        "allow-insecure-localhost",
+        "unsafely-treat-insecure-origin-as-secure",
+        "proxy-server",
+        "proxy-pac-url",
+        "proxy-auto-detect",
+        "proxy-bypass-list",
+        "disable-web-security",
+        "allow-running-insecure-content",
+        "test-type",
+        "load-extension",
+        "ssl-key-log-file",
     }
+    # a proxy-disabling switch is safe and is not on the list
+    assert "no-proxy-server" not in names
+    assert "user-agent" not in names
+
+
+SPELLINGS = [
+    "--{n}",
+    "-{n}",
+    "/{n}",
+    "--{N}",
+    "-{N}",
+    "/{N}",
+    "--{n}=x y",
+    "-{n}=MAP * evil.example",
+    "/{N}=value",
+    "  --{n}",
+]
+
+
+@pytest.mark.parametrize("name", sorted(browser_trust.REFUSED_SWITCHES))
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_every_spelling_chrome_accepts_of_every_refused_switch_refuses(name, spelling):
+    argument = spelling.format(n=name, N=name.upper())
+    reason = login_flow.launch_refusal(SimpleNamespace(proxy=None), [*CLEAN, argument])
+    assert reason is not None, argument
+    assert name in reason
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--no-proxy-server",
+        "--user-agent=Mozilla/5.0",
+        "--lang=fr",
+        "--window-size=800,600",
+        "--disable-gpu",
+        "--proxy-server-note=1",
+        "-",
+        "--",
+        "/",
+        "about:blank",
+        "https://example.com/proxy-server",
+        "",
+    ],
+)
+def test_harmless_arguments_do_not_refuse(argument):
+    assert (
+        login_flow.launch_refusal(SimpleNamespace(proxy=None), [*CLEAN, argument])
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("argument", "name"),
+    [
+        ("--proxy-server=a:1", "proxy-server"),
+        ("-Proxy-Server=a:1", "proxy-server"),
+        ("/PROXY-SERVER", "proxy-server"),
+        ("--", None),
+        ("-", None),
+        ("plain", None),
+        ("--=x", None),
+    ],
+)
+def test_switch_name_reads_arguments_as_chrome_does(argument, name):
+    assert browser_trust.switch_name(argument) == name
+
+
+def test_the_review_repro_spellings_refuse():
+    for argument in (
+        "-ignore-certificate-errors",
+        "/ignore-certificate-errors",
+        "--Ignore-Certificate-Errors",
+        "-host-resolver-rules=MAP accounts.example.com 127.0.0.1:443",
+    ):
+        assert login_flow.launch_refusal(
+            SimpleNamespace(proxy=None), [*CLEAN, argument]
+        )
+
+
+# ------------------------------------------------- environment, profile, policy
+
+
+def test_an_unreadable_environment_refuses():
+    assert "could not be read" in browser_trust.environment_refusal(None)
+
+
+def test_a_key_log_variable_refuses_whatever_its_case():
+    assert "SSLKEYLOGFILE" in browser_trust.environment_refusal(
+        {"SSLKEYLOGFILE": "k.log"}
+    )
+    assert "sslkeylogfile" in browser_trust.environment_refusal({"sslkeylogfile": "k"})
+    assert browser_trust.environment_refusal({"SSLKEYLOGFILE": " "}) is None
+
+
+def test_proxy_variables_refuse_where_chrome_honours_them(monkeypatch):
+    monkeypatch.setattr(browser_trust.sys, "platform", "linux")
+    assert browser_trust.environment_refusal({"HTTPS_PROXY": "http://p:1"})
+    assert browser_trust.environment_refusal({"all_proxy": "socks5://p:1"})
+    monkeypatch.setattr(browser_trust.sys, "platform", "win32")
+    assert browser_trust.environment_refusal({"HTTPS_PROXY": "http://p:1"}) is None
+
+
+def test_a_clean_environment_may_log_in():
+    assert browser_trust.environment_refusal({"PATH": "x", "HOME": "y"}) is None
+
+
+def test_chrome_flags_experiments_in_the_profile_refuse(tmp_path):
+    (tmp_path / "Local State").write_text(
+        json.dumps(
+            {"browser": {"enabled_labs_experiments": ["allow-insecure-localhost"]}}
+        ),
+        encoding="utf-8",
+    )
+    assert "chrome://flags" in browser_trust.profile_refusal(str(tmp_path))
+
+
+def test_a_profile_without_experiments_or_state_may_log_in(tmp_path):
+    assert browser_trust.profile_refusal(str(tmp_path)) is None
+    (tmp_path / "Local State").write_text('{"browser": {}}', encoding="utf-8")
+    assert browser_trust.profile_refusal(str(tmp_path)) is None
+    (tmp_path / "Local State").write_text("not json", encoding="utf-8")
+    assert browser_trust.profile_refusal(str(tmp_path)) is None
+    assert browser_trust.profile_refusal(None) is None
+
+
+def test_a_proxy_policy_refuses(tmp_path):
+    (tmp_path / "p.json").write_text('{"ProxyMode": "fixed_servers"}', encoding="utf-8")
+    assert "ProxyMode".lower() in browser_trust.policy_refusal(set(), (tmp_path,))
+    assert browser_trust.policy_refusal({"proxyserver"}, ()) is not None
+
+
+def test_an_unrelated_policy_does_not_refuse(tmp_path):
+    (tmp_path / "p.json").write_text('{"HomepageLocation": "x"}', encoding="utf-8")
+    assert browser_trust.policy_refusal(set(), (tmp_path,)) is None
+    assert browser_trust.policy_refusal({"homepagelocation"}, ()) is None
+
+
+def test_the_user_data_dir_is_read_from_argv():
+    cmdline = ["chrome", "--User-Data-Dir=C:/profiles/p", "--lang=fr"]
+    assert browser_trust.user_data_dir_of(cmdline) == "C:/profiles/p"
+    assert browser_trust.user_data_dir_of(["chrome"]) is None
 
 
 def test_a_proxy_option_refuses():

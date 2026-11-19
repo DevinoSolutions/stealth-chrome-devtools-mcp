@@ -361,3 +361,36 @@ async def test_every_attempt_is_audited_without_a_secret(site, tmp_path):
     assert audit_outcomes() == ["logged_in"]
     assert RIGHT not in text
     assert USER not in text
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "-ignore-certificate-errors",
+        "/ignore-certificate-errors",
+        "--Ignore-Certificate-Errors",
+        "-host-resolver-rules=MAP accounts.example.com 127.0.0.1:1",
+    ],
+)
+async def test_a_browser_started_with_another_spelling_of_a_forbidden_flag_is_refused(
+    site, tmp_path, argument
+):
+    """Chrome reads ``-flag``, ``/flag`` and any case as the flag (the review's repro)."""
+    unlocked_vault({"work": _entry(site)})
+    spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
+    spawned = await spawn(
+        headless=True,
+        user_data_dir=str(tmp_path / "spelling"),
+        browser_args=[argument],
+        **sandbox_kwargs(),
+    )
+    iid = spawned["instance_id"]
+    try:
+        with pytest.raises(ToolError) as caught:
+            await _run(iid)
+        assert "vault logins are refused" in str(caught.value)
+        assert RIGHT not in str(caught.value)
+    finally:
+        await close(instance_id=iid)
+    assert site.posts == []
+    assert not login_seal.any_sealing()

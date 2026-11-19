@@ -46,6 +46,7 @@ from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
+    browser_trust,
     login_form,
     login_seal,
     secret_registry,
@@ -65,16 +66,9 @@ if TYPE_CHECKING:
     from stealth_chrome_devtools_mcp.embedded.browser_manager import BrowserManager
 
 #: Flags that let a page, a resolver or a certificate be something it is not: with
-#: any of them the "this is the host in ``hosts``" check proves nothing.
-FORBIDDEN_FLAGS = (
-    "--host-resolver-rules",
-    "--host-rules",
-    "--ignore-certificate-errors",
-    "--ignore-certificate-errors-spki-list",
-    "--allow-insecure-localhost",
-    "--unsafely-treat-insecure-origin-as-secure",
-    "--proxy-server",
-)
+#: any of them the "this is the host in ``hosts``" check proves nothing. Owned by
+#: ``browser_trust``, which also reads the environment, the profile and policy.
+FORBIDDEN_FLAGS = browser_trust.FORBIDDEN_FLAGS
 
 FIELD_WAIT_S = 15.0
 OUTCOME_WAIT_S = 15.0
@@ -102,16 +96,9 @@ def launch_refusal(options: object, cmdline: list[str]) -> str | None:
 
     A proxy, a host-resolver rule or a relaxed certificate check lets the page on
     the other end be a different host than its URL says, so the origin check below
-    would pass a phishing page. ``--flag`` and ``--flag=value`` both count."""
-    if getattr(options, "proxy", None):
-        return "this browser was started with a proxy; vault logins are refused in it"
-    for argument in cmdline:
-        flag = argument.partition("=")[0]
-        if flag in FORBIDDEN_FLAGS:
-            return (
-                f"this browser was started with {flag}; vault logins are refused in it"
-            )
-    return None
+    would pass a phishing page. Every spelling Chrome accepts counts (``--flag``,
+    ``-flag``, ``/flag``, any case, ``=value``): see :mod:`browser_trust`."""
+    return browser_trust.switch_refusal(options, cmdline)
 
 
 def origin_allowed(url: str, hosts: list[str]) -> bool:
@@ -237,7 +224,17 @@ async def _check_launch(options: object, browser: object) -> None:
             "the browser's command line could not be read, so it cannot be shown "
             "free of proxy and certificate overrides; vault logins are refused"
         )
-    reason = launch_refusal(options, cmdline)
+    reason = (
+        launch_refusal(options, cmdline)
+        or browser_trust.environment_refusal(
+            browser_trust.process_environment(pid) if pid else None
+        )
+        or browser_trust.profile_refusal(
+            getattr(options, "user_data_dir", None)
+            or browser_trust.user_data_dir_of(cmdline)
+        )
+        or browser_trust.policy_refusal()
+    )
     if reason:
         raise ToolError(reason)
 
