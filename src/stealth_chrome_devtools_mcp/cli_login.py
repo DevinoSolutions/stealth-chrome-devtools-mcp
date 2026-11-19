@@ -435,7 +435,15 @@ def _backend_gone(entry: dict[str, object]) -> bool:
     # "cannot say", so unknown=True (never read as dead)
     if not pid_alive.alive(pid, unknown=True):
         return True
-    try:  # alive: is it still this product, or a pid something else reused?
+    # alive: is it still this product, or a pid something else reused? NOT
+    # ``pid_alive.same_process`` / ``identified``: they identify a process by the
+    # pid PLUS the start time that was recorded with it, and a ``server.json`` entry
+    # (``backend_registry.record_backend``: port, version, pid, source_fingerprint,
+    # display_context) records no start time, so there is nothing to compare. The
+    # command line is the one identity this record can be checked against (audit 7
+    # F3); when the entry gains a start time, replace this with ``same_process``
+    # (``unknown=True``).
+    try:
         return not any(
             "stealth" in part.lower() for part in psutil.Process(pid).cmdline()
         )
