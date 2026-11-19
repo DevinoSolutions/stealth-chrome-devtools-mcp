@@ -154,7 +154,12 @@ def test_lock_drops_the_key(client):
 
 def test_status_reports_without_unlocking(client):
     reply = client.get(vault_routes.STATUS_PATH, headers=AUTH)
-    assert reply.json() == {"exists": False, "unlocked": False, "expires_in": None}
+    assert reply.json() == {
+        "exists": False,
+        "unlocked": False,
+        "expires_in": None,
+        "unlock_blocked": False,
+    }
     make_vault({"work": password_entry()})
     assert client.get(vault_routes.STATUS_PATH, headers=AUTH).json()["exists"] is True
     post_unlock(client, good_key())
@@ -208,6 +213,7 @@ def test_no_route_returns_an_entry_a_username_a_password_or_a_key(client, method
         "locked",
         "exists",
         "expires_in",
+        "unlock_blocked",
     }
 
 

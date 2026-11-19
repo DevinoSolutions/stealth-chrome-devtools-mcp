@@ -265,19 +265,31 @@ def test_status_before_and_after():
         "exists": False,
         "unlocked": False,
         "expires_in": None,
+        "unlock_blocked": False,
     }
     key = make_vault()
     assert vault_store.status() == {
         "exists": True,
         "unlocked": False,
         "expires_in": None,
+        "unlock_blocked": False,
     }
     vault_store.unlock(key, None)
     assert vault_store.status() == {
         "exists": True,
         "unlocked": True,
         "expires_in": None,
+        "unlock_blocked": False,
     }
+
+
+def test_status_says_when_the_vault_cannot_be_unlocked_in_this_process():
+    """F1: once caller Python has run, status carries the fact (never what ran)."""
+    from stealth_chrome_devtools_mcp.embedded import caller_python
+
+    assert vault_store.status()["unlock_blocked"] is False
+    caller_python.admit("create_python_binding")
+    assert vault_store.status()["unlock_blocked"] is True
 
 
 def test_status_reports_the_time_left(monkeypatch):
