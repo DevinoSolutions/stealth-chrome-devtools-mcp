@@ -299,6 +299,7 @@ async def test_a_one_step_login_signs_the_profile_in(site, tmp_path):
         result = await _run(iid)
         assert result["outcome"] == "logged_in", result
         assert result["label"] == "work"
+        assert result["closed_devtools_windows"] == 0  # F5: always said
         assert RIGHT not in str(result)
         assert set(await _tab_ids(iid)) <= set(before)
         assert await _is_home(iid, site)
@@ -638,20 +639,23 @@ async def test_a_cancel_after_chrome_makes_the_login_tab_leaves_no_blank_tab(
 
     async with _browser(tmp_path) as iid:
         # the spawn's own background work opens tabs through the same function
-        await login_persistence.settle_session_restore(
-            await runtime.browser_manager.get_browser(iid)
-        )
+        browser = await runtime.browser_manager.get_browser(iid)
+        await login_persistence.settle_session_restore(browser)
         monkeypatch.setattr(tab_open, "open_tab", open_then_cancelled)
-        before = await _tab_ids(iid)
+        await tab_open.update_targets(browser)
+        # F7: every target there is NOW, the spawn's own internal ones included.
+        # A tab that goes away on its own (the session-restore tab) must not make
+        # this test fail; only a tab that is NEW and stays is the defect.
+        known = {str(t.target.target_id) for t in browser.tabs}
         with pytest.raises(asyncio.CancelledError):
             await _run(iid)
         await asyncio.gather(*getattr(login_flow, "_STRAYS", ()))
         await asyncio.sleep(1)
         assert not login_seal.sealing(iid)
-        assert await _tab_ids(iid) == before
-        browser = await runtime.browser_manager.get_browser(iid)
         await tab_open.update_targets(browser)
-        assert len(list(browser.tabs)) == len(before)
+        now = {str(t.target.target_id) for t in browser.tabs}
+        assert now - known == set(), "the login's tab was left behind"
+        assert not set(await _tab_ids(iid)) - known
 
 
 async def test_a_tab_that_will_not_close_stays_sealed_and_is_reported(

@@ -139,9 +139,14 @@ def origin_allowed(url: str, hosts: list[str]) -> bool:
     )
 
 
+#: What ``run`` answers: outcome, label and detail (text), and how many DevTools
+#: windows the login closed in that browser (``closed_devtools_windows``).
+LoginResult = dict[str, str | int]
+
+
 async def run(
     browser_manager: BrowserManager, instance_id: str, label: str, caller: str
-) -> dict[str, str]:
+) -> LoginResult:
     """Log ``label``'s account in to ``instance_id``'s browser. See the module
     docstring. Returns ``{"outcome", "label", "detail"}``; raises ``ToolError``
     for a refusal (locked, unknown, frozen, a browser or a page that fails a
@@ -164,7 +169,7 @@ async def run(
 
 async def _run(
     browser_manager: BrowserManager, instance_id: str, label: str, caller: str
-) -> dict[str, str]:
+) -> LoginResult:
     try:
         entry = vault_store.entry(label)
     except KeyError:
@@ -180,13 +185,24 @@ async def _run(
     await _check_launch(data.get("options"), browser)
     login_seal.begin(instance_id)
     tab = None
-    result: dict[str, str] = {}
+    result: LoginResult = {}
+    closed_before = debug_port_guard.closed_windows()
     try:
-        tab = await _open_sealed_tab(browser, instance_id)
-        outcome, detail = await _sealed_login(tab, entry)
-        if outcome == "rejected":
-            detail += _FROZEN_NOTE if _freeze(label) else _NOT_FROZEN_NOTE
-        result = {"outcome": outcome, "label": label, "detail": detail}
+        # If the guard ends mid-login (its connection dropped, the browser lives)
+        # the login is cancelled, its cleanup clears what it typed, and the caller
+        # is told why.
+        async with debug_port_guard.watch(browser):
+            tab = await _open_sealed_tab(browser, instance_id)
+            outcome, detail = await _sealed_login(tab, entry)
+            if outcome == "rejected":
+                detail += _FROZEN_NOTE if _freeze(label) else _NOT_FROZEN_NOTE
+            result = {
+                "outcome": outcome,
+                "label": label,
+                "detail": detail,
+                "closed_devtools_windows": debug_port_guard.closed_windows()
+                - closed_before,
+            }
     finally:
         closed = await _finish(browser_manager, instance_id, tab)
     if not closed:
@@ -258,7 +274,7 @@ async def _provider(
     label: str,
     caller: str,
     entry: dict[str, object],
-) -> dict[str, str]:
+) -> LoginResult:
     via = str(entry["via"])
     inner = await run(browser_manager, instance_id, via, caller)
     if inner["outcome"] in ("logged_in", "already_logged_in"):
@@ -267,8 +283,14 @@ async def _provider(
             "label": label,
             "detail": "the provider account is signed in; use the site's own "
             "sign-in-with button, then choose that account",
+            "closed_devtools_windows": inner.get("closed_devtools_windows", 0),
         }
-    return {"outcome": inner["outcome"], "label": label, "detail": inner["detail"]}
+    return {
+        "outcome": inner["outcome"],
+        "label": label,
+        "detail": inner["detail"],
+        "closed_devtools_windows": inner.get("closed_devtools_windows", 0),
+    }
 
 
 _FROZEN_NOTE = "; this login is now frozen"

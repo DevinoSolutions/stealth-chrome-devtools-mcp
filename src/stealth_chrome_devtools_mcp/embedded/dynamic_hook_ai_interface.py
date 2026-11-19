@@ -17,7 +17,12 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import CallerError
 def _simple_hook_code(
     action: str, target_url: str | None, custom_headers: dict[str, str] | None
 ) -> str:
-    """The template for a simple hook, or ``CallerError`` for input it cannot use."""
+    """The template for a simple hook, or ``CallerError`` for input it cannot use.
+
+    The caller's values are written into the code as Python LITERALS (``repr`` of a
+    string), never as text, so no value can end the string it sits in and add code:
+    a simple hook runs a fixed template and is not "caller Python"
+    (``caller_python.RUNS_CALLER_PYTHON``)."""
     if action == "block":
         function_code = """
 def process_request(request):
@@ -26,14 +31,20 @@ def process_request(request):
     elif action == "redirect":
         if not target_url:
             raise CallerError("target_url required for redirect action")
-        function_code = f'''
+        if not isinstance(target_url, str):
+            raise CallerError("target_url must be a string")
+        function_code = f"""
 def process_request(request):
-    return HookAction(action="redirect", url="{target_url}")
-'''
+    return HookAction(action="redirect", url={target_url!r})
+"""
     elif action == "add_headers":
         if not custom_headers:
             raise CallerError("custom_headers required for add_headers action")
-        headers_str = str(custom_headers).replace("'", '"')
+        if not isinstance(custom_headers, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in custom_headers.items()
+        ):
+            raise CallerError("custom_headers must map header names to strings")
+        headers_str = repr(dict(custom_headers))
         function_code = f"""
 def process_request(request):
     new_headers = request["headers"].copy()

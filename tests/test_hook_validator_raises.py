@@ -105,20 +105,21 @@ class TestTheValidatorRaises:
 
 
 class TestTheSimpleToolRaises:
-    async def test_a_target_url_that_breaks_the_template_raises(
+    async def test_a_target_url_with_a_quote_is_data_not_code(
         self, patched_server, system
     ):
-        with pytest.raises(CallerError, match="Syntax error"):
-            await _call(
-                patched_server(),
-                "create_simple_dynamic_hook",
-                name="h",
-                url_pattern="*",
-                action="redirect",
-                target_url='https://x/"',
-            )
+        """It used to break the template (a SyntaxError) and, worse, a crafted one
+        ended the string and added Python. The value is a literal now."""
+        await _call(
+            patched_server(),
+            "create_simple_dynamic_hook",
+            name="h",
+            url_pattern="*",
+            action="redirect",
+            target_url='https://x/"',
+        )
 
-        assert system.hooks == {}
+        assert len(system.hooks) == 1
 
     @pytest.mark.parametrize(
         ("kwargs", "text"),

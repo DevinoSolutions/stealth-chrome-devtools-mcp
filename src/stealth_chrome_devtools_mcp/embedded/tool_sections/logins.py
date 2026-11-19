@@ -11,6 +11,7 @@ rows, and ``login`` returns an outcome.
 """
 
 from stealth_chrome_devtools_mcp.embedded import (
+    caller_python,
     login_flow,
     tab_binding,
     vault_store,
@@ -21,6 +22,14 @@ from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 SECTION = "logins"
 
 LOCKED = "the login vault is locked: a person must run `stealthy login unlock`"
+
+
+def _locked() -> ToolError:
+    """The sentence for a locked vault. When caller Python has run in this
+    backend the vault cannot be unlocked at all, and saying so is the useful part
+    (it names the tool, never what its code was)."""
+    refusal = caller_python.unlock_refusal()
+    return ToolError(LOCKED if refusal is None else f"{LOCKED}. {refusal}")
 
 
 async def list_logins() -> dict[str, object]:
@@ -41,11 +50,11 @@ async def list_logins() -> dict[str, object]:
     try:
         logins = vault_store.public_entries()
     except vault_store.VaultLocked:
-        raise ToolError(LOCKED) from None
+        raise _locked() from None
     return {"unlocked": True, "logins": logins}
 
 
-async def login(instance_id: str, label: str) -> dict[str, str]:
+async def login(instance_id: str, label: str) -> dict[str, str | int]:
     """
     Sign a stored login in to a browser instance's profile.
 
@@ -57,12 +66,23 @@ async def login(instance_id: str, label: str) -> dict[str, str]:
     Use list_logins for the labels. A login that fails once is frozen so it is
     not retried into an account lockout; a person unfreezes it.
 
+    While it runs, the browser is yours only in part. Every browser-internal page
+    (chrome://, chrome-extension://, devtools:// and the like) is hidden from
+    list_tabs and refused by every tool, and navigate and new_tab refuse to load
+    one; about:blank and the new-tab page still work. go_back and go_forward are
+    refused. Any DevTools window open in that browser is CLOSED, and the result
+    says how many (closed_devtools_windows). A site that keeps showing its login
+    form after the sign-in reads needs_user: only a form that comes back in a new
+    page, or a new error message, counts as a refused password.
+
     Args:
         instance_id (str): Browser instance ID.
         label (str): The login's label, from list_logins.
 
     Returns:
-        Dict[str, str]: outcome, label and detail. outcome is one of:
+        Dict[str, str | int]: outcome, label, detail and
+            closed_devtools_windows (how many open DevTools windows the login
+            closed in this browser). outcome is one of:
             logged_in (signed in), already_logged_in (the page needed no
             sign-in), needs_totp (a one-time code is asked for, which this tool
             cannot give), needs_user (a step it cannot take: a passkey, a device
@@ -79,7 +99,7 @@ async def login(instance_id: str, label: str) -> dict[str, str]:
             tab_binding.caller() or "in-process",
         )
     except vault_store.VaultLocked:
-        raise ToolError(LOCKED) from None
+        raise _locked() from None
     except ToolError:
         raise
     except Exception as error:  # noqa: BLE001  PERMANENT(an unknown failure must reach the caller as its class only)

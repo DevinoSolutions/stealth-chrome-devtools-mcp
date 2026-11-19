@@ -942,7 +942,7 @@ async def navigate(
 
 async def go_back(instance_id: str) -> bool:
     """
-    Navigate back in history.
+    Navigate back in history. Refused while a vault `login` runs in this browser.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -957,7 +957,7 @@ async def go_back(instance_id: str) -> bool:
 
 async def go_forward(instance_id: str) -> bool:
     """
-    Navigate forward in history.
+    Navigate forward in history. Refused while a vault `login` runs in this browser.
 
     Args:
         instance_id (str): Browser instance ID.

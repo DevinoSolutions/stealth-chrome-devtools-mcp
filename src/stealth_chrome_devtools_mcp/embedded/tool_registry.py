@@ -34,6 +34,7 @@ from collections import defaultdict
 from fastmcp.tools import Tool
 
 from stealth_chrome_devtools_mcp.embedded import (
+    caller_python,
     debug_port_guard,
     login_seal,
     tab_binding,
@@ -98,8 +99,11 @@ def _refusing_sealed_tabs(func):
     signature = inspect.signature(func)
 
     loads_url = name in debug_port_guard.URL_ARGUMENTS
+    runs_python = name in caller_python.RUNS_CALLER_PYTHON
 
     def check(args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        if runs_python:
+            caller_python.admit(name)  # T-19366: never beside an unlocked vault
         if not (loads_url or login_seal.any_sealing()):
             return
         try:

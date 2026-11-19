@@ -325,11 +325,30 @@ def _debug_port_guard_hygiene(request):
         debug_port_guard.verify_clean = verify_clean
     debug_port_guard._PORTS.clear()
     login_seal._barred.clear()
+    login_seal._internal.clear()
     yield
     debug_port_guard.protect = original
     debug_port_guard.verify_clean = original_verify
     debug_port_guard._PORTS.clear()
     login_seal._barred.clear()
+    login_seal._internal.clear()
+
+
+@pytest.fixture(autouse=True)
+def _caller_python_hygiene():
+    """No test may leave the process "tainted" for the next (T-19366).
+
+    A tool that runs caller Python (``create_dynamic_hook``, ``create_python_binding``)
+    marks the PROCESS, and a marked process refuses every vault unlock until the
+    backend restarts. Tests run in one process, so without this a hook test would
+    make every later vault test fail to unlock. ``tests/test_caller_python.py`` pins
+    the rule itself.
+    """
+    from stealth_chrome_devtools_mcp.embedded import caller_python
+
+    caller_python._reset_for_tests()
+    yield
+    caller_python._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)

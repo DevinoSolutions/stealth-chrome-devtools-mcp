@@ -524,6 +524,8 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
         return 0
     if code == HTTPStatus.UNAUTHORIZED:
         raise _RefusedError("the backend refused this shell's token (HTTP 401)")
+    if code == HTTPStatus.CONFLICT and isinstance(reply.get("error"), str):
+        raise _RefusedError(reply["error"])  # caller Python ran in it: say so plainly
     raise _RefusedError(f"the backend did not unlock (HTTP {code})")
 
 
@@ -555,6 +557,11 @@ def _cmd_status(_args: argparse.Namespace) -> int:
         )
     if not state.get("unlocked"):
         print("backend: locked")
+        if state.get("unlock_blocked"):
+            print(
+                "backend: it cannot be unlocked: a tool has run caller Python in it. "
+                "Restart it (`stealth-chrome-devtools restart`), then unlock again."
+            )
     elif state.get("expires_in") is None:
         print("backend: unlocked until it exits")
     else:
