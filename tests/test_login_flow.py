@@ -31,6 +31,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     login_persistence,
     login_seal,
     tab_open,
+    text_entry,
     vault_crypto,
     vault_store,
 )
@@ -309,6 +310,34 @@ async def test_a_one_step_login_signs_the_profile_in(site, tmp_path):
         assert set(await _tab_ids(iid)) <= set(before)
         assert await _is_home(iid, site)
     assert site.posts == [{"path": "/login", "username": USER, "password": RIGHT}]
+    assert not login_seal.sealing(iid)
+
+
+async def test_a_dropped_key_is_needs_user_and_never_a_wrong_submit_or_a_freeze(
+    site, tmp_path, monkeypatch
+):
+    """Headed Chrome once dropped the first key of the first field (the username
+    reached the site one character short, the site rejected it and the entry was
+    FROZEN). A field that does not hold what was typed must end the login as
+    ``needs_user`` with nothing submitted and the entry untouched."""
+    unlocked_vault({"work": _entry(site)})
+    real = text_entry.press_key
+    sent = []
+
+    async def dropping_first(tab, **kwargs):
+        sent.append(kwargs.get("key"))
+        if len(sent) == 1:
+            return None  # the key that never arrives
+        return await real(tab, **kwargs)
+
+    monkeypatch.setattr(text_entry, "press_key", dropping_first)
+    async with _browser(tmp_path) as iid:
+        result = await _run(iid)
+        assert result["outcome"] == "needs_user", result
+        assert "username" in result["detail"]
+        assert USER not in str(result) and RIGHT not in str(result)
+    assert site.posts == []
+    assert not vault_store.entry("work").get("frozen")
     assert not login_seal.sealing(iid)
 
 

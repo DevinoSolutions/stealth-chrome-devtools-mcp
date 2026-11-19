@@ -57,6 +57,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     text_entry,
     vault_crypto,
     vault_store,
+    window_sizing,
 )
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import (
@@ -227,6 +228,15 @@ async def _open_sealed_tab(browser: Browser, instance_id: str) -> Tab:
         tab = await tab_open.open_tab(browser, "about:blank", background=True)
         tab_open.mark_internal(browser, tab)
         login_seal.seal_tab(instance_id, str(tab.target.target_id))
+        # The tab is opened BEHIND the window's current one, so in a headed browser it
+        # is hidden and unfocused: its page reads ``visibilityState: hidden`` and
+        # ``hasFocus() == false``, and Chrome drops the key events typed into it (both
+        # fields stayed empty, measured, Chrome 158). The product's one cure for a
+        # background tab (F-1011) is focus emulation, which makes the PAGE read visible
+        # and focused with no window switch and no OS focus taken; it is applied here
+        # because this tab is never adopted (``tab_binding``) and so never armed. Before
+        # the first navigation, so the login page loads as a visible one.
+        await window_sizing.enable_focus_emulation(tab)
     except BaseException:
         task = asyncio.ensure_future(_discard_strays(browser, instance_id, known, hold))
         _STRAYS.add(task)
@@ -498,7 +508,8 @@ async def _sealed_login(tab: Tab, entry: dict[str, object]) -> tuple[str, str]:
     if state["otp"] and not (state["username"] or state["password"]):
         return _TOTP
     if state["username"]:
-        await _type_into(tab, "username", entry["username"], hosts)
+        if not await _type_into(tab, "username", entry["username"], hosts):
+            return "needs_user", "the username field did not take all of the typed text"
         if not state["password"]:
             stopped = await _after_username(tab, hosts)
             if stopped is not None:
@@ -541,9 +552,9 @@ class _Baseline(NamedTuple):
 async def _password_step(
     tab: Tab, entry: dict[str, object], hosts: list[str]
 ) -> tuple[str, str]:
-    await _type_into(tab, "password", entry["password"], hosts)
+    took = await _type_into(tab, "password", entry["password"], hosts)
     typed = await login_form.probe(tab)
-    if not typed["password_has_value"]:
+    if not (took and typed["password_has_value"]):
         return "needs_user", "the password field did not take the typed text"
     url, before = await _main(tab)
     urls = login_evidence.urls_for(hosts, url)
@@ -586,11 +597,16 @@ def _moved_on(url: str, hosts: list[str], login_url: str) -> bool:
     ) != (there.hostname, there.path.rstrip("/"))
 
 
-async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> None:
+async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> bool:
     """Type ``text`` into the visible ``kind`` field, after three checks, each read
     from the browser (never from page script): the field's own frame is on a login
     host, the TOP frame is too (a login host's page framed inside another site is
-    not typed into), and the form around the field submits to a login host."""
+    not typed into), and the form around the field submits to a login host.
+
+    ``True`` when the field then holds as many characters as were typed. A dropped
+    key would otherwise submit a WRONG username or password, which the site rejects
+    and the vault then FREEZES a good entry for; ``False`` ends the login as
+    ``needs_user`` with nothing submitted."""
     await debug_port_guard.verify_clean(tab.browser)
     found = await login_form.find_field(tab, kind)
     if found is None:
@@ -605,7 +621,9 @@ async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> Non
     if action is not None and not origin_allowed(action, hosts):
         raise ToolError(_GENERIC_ORIGIN_REFUSAL)
     value = text.reveal() if isinstance(text, secret_registry.Secret) else str(text)
+    await login_form.wait_for_frame(tab, frame_id)
     await text_entry.type_characters(tab, element, value, KEY_DELAY_S)
+    return await login_form.holds(element, len(value))
 
 
 async def _snapshot(tab: Tab) -> tuple[dict[str, bool], str, str | None]:
