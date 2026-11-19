@@ -494,9 +494,8 @@ def _kill_delegated(pid: int, create_time: float | None) -> None:
             f"No identity stamp for delegated pid {pid}; refusing to kill it",
         )
         return
-    if not zombie.same_process(
-        pid, create_time, tolerance=PID_IDENTITY_TOLERANCE, unknown=False
-    ):
+    process = zombie.identified(pid, create_time, tolerance=PID_IDENTITY_TOLERANCE)
+    if process is None:
         debug_logger.log_warning(
             "desktop_launch",
             "_kill_delegated",
@@ -505,7 +504,6 @@ def _kill_delegated(pid: int, create_time: float | None) -> None:
         )
         return
     try:
-        process = psutil.Process(pid)
         for child in process.children(recursive=True):
             with contextlib.suppress(psutil.Error):
                 child.kill()

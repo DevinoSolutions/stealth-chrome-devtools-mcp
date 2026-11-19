@@ -580,6 +580,18 @@ def test_a_delegated_chrome_is_killed_only_when_it_is_provably_ours(
     assert any(p.killed for p in built) is kills
 
 
+def test_the_delegated_kill_acts_on_the_process_it_identified(monkeypatch):
+    """One ``Process`` is built, its start time compared, and THAT object is
+    killed: a second ``Process(pid)`` after the check would accept a pid recycled
+    in between, with an identity nobody compares."""
+    built = install(monkeypatch, World(created=T))
+
+    desktop_launch._kill_delegated(PID, T)
+
+    assert len(built) == 1
+    assert built[0].killed == ["kill"]
+
+
 # ---------------------------------------------------------------------------
 # "When did this pid start": the create_time-or-None reads.
 # ---------------------------------------------------------------------------

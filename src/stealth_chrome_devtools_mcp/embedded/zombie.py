@@ -292,6 +292,36 @@ def create_time(pid: object) -> float | None:
         return None
 
 
+def _identify(
+    pid: object, started: float | None, tolerance: float, unknown: bool
+) -> psutil.Process | bool:
+    """The ONE identity check: the ``Process`` it was made on when *pid* is shown
+    to be the process that started at *started*, else the bool answer."""
+    if not _names_a_process(pid):
+        return False
+    try:
+        process = psutil.Process(pid)
+        actual = process.create_time()
+    except psutil.NoSuchProcess:  # incl. ZombieProcess
+        return False
+    except (psutil.Error, OSError):
+        return unknown
+    if started is None or abs(actual - started) <= tolerance:
+        return process
+    return False
+
+
+def identified(
+    pid: object, started: float | None, *, tolerance: float = 0.0
+) -> psutil.Process | None:
+    """The ``Process`` for *pid*, only when it is shown to be the one that started
+    at *started*; None otherwise, an unaskable pid included. For a caller about to
+    ACT on it: act on THIS object, never on a second ``Process(pid)`` built after
+    the check, which is the recycle the check exists to refuse. Never raises."""
+    found = _identify(pid, started, tolerance, False)
+    return None if isinstance(found, bool) else found
+
+
 def same_process(
     pid: object,
     started: float | None,
@@ -299,7 +329,8 @@ def same_process(
     tolerance: float = 0.0,
     unknown: bool,
 ) -> bool:
-    """Whether *pid* is still the process that started at *started*. Never raises.
+    """Whether *pid* is still the process that started at *started*. Never raises
+    for a pid (any object); *started* must be a number or None.
 
     The pair, never the pid: a number is recycled, and a caller acting on a
     remembered one would end (or spare) a stranger. A process that is gone, a
@@ -316,12 +347,4 @@ def same_process(
     record that carries no start time: only that the pid is there and readable
     is asked (best effort, as it always was).
     """
-    if not _names_a_process(pid):
-        return False
-    try:
-        actual = psutil.Process(pid).create_time()
-    except psutil.NoSuchProcess:  # incl. ZombieProcess
-        return False
-    except (psutil.Error, OSError):
-        return unknown
-    return started is None or abs(actual - started) <= tolerance
+    return _identify(pid, started, tolerance, unknown) is not False
