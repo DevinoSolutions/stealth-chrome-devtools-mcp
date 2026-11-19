@@ -49,14 +49,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
 
-import psutil
-
 if sys.platform == "win32":
     import msvcrt
 else:
     import fcntl
 
-from stealth_chrome_devtools_mcp.embedded import atomic_file
+from stealth_chrome_devtools_mcp.embedded import atomic_file, zombie
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -245,10 +243,7 @@ def owner_identity() -> tuple[int, float | None]:
     process, and several tests build their writers through ``__new__``.
     """
     pid = os.getpid()
-    create_time = None
-    with contextlib.suppress(psutil.Error, OSError):
-        create_time = psutil.Process(pid).create_time()
-    return pid, create_time
+    return pid, zombie.create_time(pid)
 
 
 @dataclass(frozen=True)
