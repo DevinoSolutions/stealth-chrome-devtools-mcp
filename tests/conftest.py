@@ -352,6 +352,43 @@ def _sse_app_status_reset():
     reset()
 
 
+#: Markers whose tests are about the HOST's process table itself: ``integration``
+#: tests run against the real machine on purpose, and ``real_process_table`` marks
+#: the hermetic ones that pin the unreadable-browser rule or build their own table.
+REAL_PROCESS_TABLE_MARKERS = ("integration", "real_process_table")
+
+
+def sees_the_real_process_table(node) -> bool:
+    """Whether *node* is one of the tests that must NOT have the host's
+    unreadable browsers stubbed away."""
+    return any(node.get_closest_marker(name) for name in REAL_PROCESS_TABLE_MARKERS)
+
+
+@pytest.fixture(autouse=True)
+def _the_host_has_no_unreadable_browser(request, monkeypatch):
+    """No hermetic test may depend on the HOST's browser processes (T-19642).
+
+    Every DELETING path asks ``browser_cmdline.unreadable_browsers`` as well as
+    "does a browser hold this directory" (T-5968): a browser-named process whose
+    command line raises ``AccessDenied`` (an elevated or another user's Chrome,
+    or one mid-start or mid-exit) leaves the holder unruled out, so the profile or
+    staging copy is KEPT. That is right, and it is a fact about the machine the
+    suite runs on: a busy host kept ``sess-auto`` once and two staging copies on
+    another run, and a test about what a sweep does with a directory nobody holds
+    then fails for a reason that is not in the repo. Stubbed to "none" here, once,
+    for every test except the ones marked ``integration`` (real browsers, real
+    host) or ``real_process_table`` (they pin the rule or build their own table).
+    ``test_host_process_table_isolation`` is the pin.
+
+    The import is function-local for the reason ``_in_memory_storage_hygiene`` gives.
+    """
+    if sees_the_real_process_table(request.node):
+        return
+    from stealth_chrome_devtools_mcp.embedded import browser_cmdline
+
+    monkeypatch.setattr(browser_cmdline, "unreadable_browsers", lambda _is_name: ())
+
+
 @pytest.fixture(autouse=True)
 def _reset_settings_cache():
     """Every test gets a fresh Settings read. ``get_settings()`` is process-cached

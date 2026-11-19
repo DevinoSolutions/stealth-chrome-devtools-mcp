@@ -109,6 +109,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: tests that spawn real browsers (need Chrome installed)",
+    "real_process_table: a hermetic test that pins the unreadable-browser rule or builds its own process table, so the conftest default that stubs browser_cmdline.unreadable_browsers to none does not apply (integration tests are never stubbed either)",
     "characterization: pins CURRENT observable behavior (quirks/known bugs included) so an intended M5a/M4/M5b change surfaces as a failing test to update deliberately",
     "transport: real-stdio release-gate E2E (plan_RELEASE W1) — spawns the installed console launcher over stdio JSON-RPC and drives a real-Chrome journey via tools/call",
     "stealth: deterministic offline stealth-invariant probes (plan_RELEASE W4) — the offline-stealth gate lane runs `stealth and not online`; W2 wires the empty edge, W4 lands the tests",
