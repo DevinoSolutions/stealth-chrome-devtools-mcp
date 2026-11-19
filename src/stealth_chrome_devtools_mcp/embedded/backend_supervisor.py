@@ -65,14 +65,13 @@ import math
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
-import psutil
-
 from stealth_chrome_devtools_mcp.embedded import (
     atomic_file,
     backend_eviction,
     backend_liveness,
     backend_registry,
     browser_pid_registry,
+    zombie,
 )
 
 if TYPE_CHECKING:
@@ -210,9 +209,8 @@ def observe(
     pid = backend_registry.recorded_int(entry, "pid")
     if port is None or pid is None or not is_ours(pid):
         return None
-    try:
-        started = psutil.Process(pid).create_time()
-    except (psutil.Error, OSError):
+    started = zombie.create_time(pid)
+    if started is None:
         return None
     return Observation(
         port=port,
@@ -222,14 +220,6 @@ def observe(
         silence=backend_liveness.silence(record, port),
         lag=backend_liveness.reported_lag(record, port),
     )
-
-
-def _still(pid: int, started: float) -> bool:
-    """True iff ``pid`` is still the process this pass judged."""
-    try:
-        return psutil.Process(pid).create_time() == started
-    except (psutil.Error, OSError):
-        return False
 
 
 def kill(
@@ -248,7 +238,10 @@ def kill(
     """
 
     def pinned(_port: int) -> int | None:
-        same = _still(seen.pid, seen.started) and is_ours(seen.pid)
+        # Exact: both start times came out of psutil in this one pass.
+        same = zombie.same_process(seen.pid, seen.started, unknown=False) and is_ours(
+            seen.pid
+        )
         return seen.pid if same else None
 
     return backend_eviction.terminate(
@@ -385,9 +378,7 @@ def lost_browsers(record: Path, pid: int) -> str | None:
     instance ids and session names are written: no profile path, no URL, no
     cookie (the record holds none, and the line reads three fields of it).
     """
-    owned = backend_eviction.owned_entries(
-        record.parent, pid, is_running=psutil.pid_exists
-    )
+    owned = backend_eviction.owned_entries(record.parent, pid)
     clones = sorted(
         instance_id
         for instance_id, entry in owned.items()
