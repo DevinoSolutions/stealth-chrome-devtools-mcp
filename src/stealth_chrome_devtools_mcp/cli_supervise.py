@@ -47,6 +47,8 @@ def _line(verdict: Verdict, dry_run: bool) -> str:
     action = ""
     if verdict.stood_down:
         action = "  -> standing down (too many recent kills)"
+    elif verdict.unrecorded:
+        action = "  -> NOT terminating (the kill could not be recorded)"
     elif verdict.kill:
         action = "  -> would terminate" if dry_run else "  -> terminating"
     return (

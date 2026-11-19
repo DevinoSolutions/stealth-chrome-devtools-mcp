@@ -97,7 +97,13 @@ def write_text(
         raise
 
 
-def write_json(path: Path, payload: object, *, indent: int | None = None) -> None:
+def write_json(
+    path: Path,
+    payload: object,
+    *,
+    indent: int | None = None,
+    make_parents: bool = True,
+) -> None:
     """:func:`write_text` of ``json.dumps(payload)``, serialised BEFORE anything
     is staged, so an unserialisable payload leaves nothing on disk."""
-    write_text(path, json.dumps(payload, indent=indent))
+    write_text(path, json.dumps(payload, indent=indent), make_parents=make_parents)

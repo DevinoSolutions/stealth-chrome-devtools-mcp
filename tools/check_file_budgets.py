@@ -14,6 +14,10 @@ SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
 LOC_BUDGET = 1000
 
 GRANDFATHER: dict[str, tuple[int, str]] = {
+    # T-19641 DELETES the ``embedded/process_cleanup.py`` row (cap 1004): the
+    # dead ``is_process_alive`` and ``get_tracked_processes`` left, the file is
+    # 980 lines, and a grandfathered cap on a file that fits the default is a
+    # standing permission to grow. Do NOT re-add a row for a file that fits.
     # plan_SERVERSPLIT slice 12 (closing) DELETES the ``embedded/server.py``
     # row that stood here through plan_M4ph1 / M3 / M10a / F808 / F809 and the
     # twelve ratchets of the split itself (4425 -> 3411 -> 524). The file is

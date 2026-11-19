@@ -53,7 +53,7 @@ respawns the shared backend on every single proxy start. Entries on OTHER ports
 are untouched — including ``UNVERIFIED`` ones, which may be live backends on a
 platform we genuinely cannot classify.
 
-A leaf module: stdlib plus ``display_context`` (itself a leaf). Never
+A leaf module: stdlib plus ``display_context`` and ``atomic_file`` (both leaves). Never
 ``singleton``, never ``server``.
 """
 

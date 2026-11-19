@@ -373,8 +373,8 @@ async def beat(
     prober cannot establish and has no other way to obtain.
 
     The WRITE itself goes to a worker thread: it is an ``os.replace`` of a
-    sub-kilobyte file, but ``_commit``'s Windows sharing retry can sleep up to
-    0.1 s, and the event loop this exists to demonstrate is turning must not be
+    sub-kilobyte file, but ``atomic_file.commit``'s Windows sharing retry can sleep up
+    to 80 ms, and the event loop this exists to demonstrate is turning must not be
     the thing blocked to demonstrate it. The loop is still the thing being
     measured — it has to schedule the hand-off and be resumed afterwards.
 
