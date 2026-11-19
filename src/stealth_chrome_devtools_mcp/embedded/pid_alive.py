@@ -5,8 +5,8 @@ were eleven private readers, and the fixes F-998 and F-1008 each reached only so
 of them):
 
 * :func:`alive` ``(pid, *, unknown)``: is *pid* a RUNNING process. Not listed is
-  dead (after the kernel's own word, F-1008, asked only of an
-  ``unknown=True`` caller: ``kill(tid, 0)`` cannot tell a thread id from a
+  dead (after the kernel's own word, F-1008, which only a caller passing
+  ``kernel=True`` gets: ``kill(tid, 0)`` cannot tell a thread id from a
   pid), a zombie is dead, a Linux process
   whose address space is already gone is dead (F-998), and an empty argv alone
   is NEVER dead: a live Chrome reads one while its ``sh`` launcher ``exec``s.
@@ -240,7 +240,7 @@ def _gone(pid: int, *, unreadable: bool) -> bool:
         return False
 
 
-def alive(pid: object, *, unknown: bool) -> bool:
+def alive(pid: object, *, unknown: bool, kernel: bool = False) -> bool:
     """Whether *pid* is a RUNNING process. Never raises.
 
     *unknown* is what a pid that cannot be asked about counts as, and it is
@@ -252,24 +252,26 @@ def alive(pid: object, *, unknown: bool) -> bool:
     call, which is the whole of F-998's and F-1008's lesson: a reader that picks
     its direction by accident drifts.
 
-    A pid the process table does not list is asked of the kernel (F-1008,
-    :func:`_kernel_has`) ONLY by a caller that passed ``unknown=True``. The probe
-    cannot tell a pid from a thread id (``kill(tid, 0)`` succeeds; psutil's own
-    Linux ``pid_exists`` reads ``/proc/<pid>/status`` for ``Tgid`` precisely to
-    refuse one, and under ``hidepid=2`` that read is the very thing denied), so
-    its word is only good for a caller whose wrong "alive" costs one more look
-    (a held profile), never for one whose wrong "alive" keeps a dead instance
-    (``unknown=False``: it owns a browser its own user can always see). A listed
-    pid is dead when it is a zombie or is tearing down (:func:`_gone`).
-    Anything that raises, ``OverflowError`` for a pid too
-    large for a C long included, is *unknown*, and is logged: nothing else in
-    here is.
+    *kernel* opts in to F-1008: a pid the process table does not list is then
+    asked of the kernel (:func:`_kernel_has`), because ``/proc`` mounted
+    ``hidepid=2`` hides another user's live browser. It is ``profile_lock``'s
+    alone, as it was before the readers were folded together, and it is not a
+    default: the probe cannot tell a pid from a thread id (``kill(tid, 0)``
+    succeeds; psutil's own Linux ``pid_exists`` reads ``/proc/<pid>/status`` for
+    ``Tgid`` precisely to refuse one, and under ``hidepid=2`` that read is the
+    very thing denied), and it names the runner's real pid table, so a caller
+    that did not ask for it must not reach it. A pid the process table LISTS is
+    never asked of the kernel: a zombie answers ``kill(pid, 0)`` too.
+
+    A listed pid is dead when it is a zombie or is tearing down
+    (:func:`_gone`). Anything that raises, ``OverflowError`` for a pid too large
+    for a C long included, is *unknown*, and is logged: nothing else in here is.
     """
     if not _names_a_process(pid):
         return False
     try:
         if not listed(pid):
-            return unknown and _kernel_has(pid)
+            return kernel and _kernel_has(pid)
     except (psutil.Error, OSError, OverflowError) as error:
         debug_logger.log_warning(
             "pid_alive",

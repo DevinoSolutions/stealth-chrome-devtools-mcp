@@ -451,8 +451,10 @@ def _lock_hold(lock: Path, whose: str = f"Chrome's {LOCK_NAME}") -> Hold | None:
     # which is the survivable answer. A pid whose command line has GONE is not
     # running (F-998), though it is still listed: it is the lock's owner in the
     # window between a browser's death and its reaping, and reading it as a
-    # holder walked a relaunch of ``fleet`` to ``fleet-2``.
-    if pid_alive.alive(pid, unknown=True):
+    # holder walked a relaunch of ``fleet`` to ``fleet-2``. And a pid ``/proc``
+    # hides (``hidepid=2``) that the kernel still has is the lock owner's too
+    # (F-1008): this is the one reader that asks it (``kernel=True``).
+    if pid_alive.alive(pid, unknown=True, kernel=True):
         return Hold(pid, f"{whose} is held by live pid {pid}")
     # Chromium: "Orphaned lockfile" -> UnlinkPath -> PROCESS_NONE.
     return None
