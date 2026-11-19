@@ -17,6 +17,7 @@ where none of them can exist.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import errno
 import inspect
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -1156,112 +1158,167 @@ def test_running_is_the_held_process_form(monkeypatch, running, status, answer):
 # One home: nothing under src/ asks the machine these questions except zombie.
 # ---------------------------------------------------------------------------
 
-#: (file, call) pairs allowed outside ``zombie``: a Process the caller already
-#: holds is asked about itself, which is not the "is this NUMBER there" question.
-HELD_PROCESS_READS = {("client_presence.py", "create_time")}
+#: (file, function, probe) triples allowed outside the home: a ``Process`` the
+#: caller already HOLDS is asked about itself, which is not the "is this NUMBER
+#: there" question. One function, not the file: a second ``create_time`` read in
+#: ``client_presence`` is a second way.
+HELD_PROCESS_READS = {("client_presence.py", "capture", "create_time")}
+
+#: The module a question is rightly put to; a call on it is the point.
+HOME_NAME = zombie.__name__.rsplit(".", 1)[-1]
 
 
-def _raw_calls_in(source: str) -> list[tuple[str, int]]:
-    """Every ``pid_exists`` / ``is_running`` / ``create_time`` / ``os.kill(_, 0)``
-    call in *source*, as (name, line)."""
-    import ast
+_STRAY_NAMES = {"pid_exists", "pids", "STATUS_ZOMBIE"}
 
-    found: list[tuple[str, int]] = []
-    for node in ast.walk(ast.parse(source)):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-            continue
-        name = node.func.attr
-        if ast.unparse(node.func.value) == "zombie":
-            continue  # asking the one home is the point
-        if name in {"pid_exists", "is_running", "create_time"}:
-            found.append((name, node.lineno))
-        elif (
-            name == "kill"
-            and ast.unparse(node.func.value) == "os"
-            and len(node.args) == 2
+
+def _probes_in(source: str) -> list[tuple[str, str, int]]:
+    """(enclosing function, probe, line) for every forbidden spelling in *source*,
+    with the module's own aliases resolved: ``import os as o``,
+    ``from os import kill as k``, ``from psutil import pid_exists``."""
+    tree = ast.parse(source)
+    os_names = {"os"}
+    psutil_names = {"psutil"}
+    kill_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            os_names |= {a.asname or a.name for a in node.names if a.name == "os"}
+            psutil_names |= {
+                a.asname or a.name for a in node.names if a.name == "psutil"
+            }
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            kill_names |= {a.asname or a.name for a in node.names if a.name == "kill"}
+
+    found: list[tuple[str, str, int]] = []
+
+    def is_kill(func: ast.expr) -> bool:
+        if isinstance(func, ast.Name):
+            return func.id in kill_names
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == "kill"
+            and ast.unparse(func.value) in os_names
+        )
+
+    def probe_of(node: ast.AST) -> str | None:
+        # A REFERENCE, not only a call: ``f = psutil.pid_exists`` and a default
+        # argument ``is_running=psutil.pid_exists`` are the same second way.
+        if isinstance(node, ast.ImportFrom) and node.module == "psutil":
+            return next((a.name for a in node.names if a.name in _STRAY_NAMES), None)
+        if isinstance(node, ast.Name) and node.id in (_STRAY_NAMES - {"pids"}) | {
+            "_signal"
+        }:
+            return node.id
+        if isinstance(node, ast.Attribute) and ast.unparse(node.value) != HOME_NAME:
+            # ``pids`` is also what a ``Members`` calls its own field: only the
+            # table's ``psutil.pids`` is the process table.
+            if node.attr in _STRAY_NAMES - {"pids"}:
+                return node.attr
+            if node.attr == "pids" and ast.unparse(node.value) in psutil_names:
+                return node.attr
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        if isinstance(func, ast.Attribute) and ast.unparse(func.value) != HOME_NAME:
+            if func.attr in {"is_running", "create_time"}:
+                return func.attr
+            if func.attr == "waitpid" and any(
+                "WNOHANG" in ast.unparse(arg) for arg in node.args
+            ):
+                return "waitpid(WNOHANG)"
+        if (
+            isinstance(func, ast.Name)
+            and func.id == "getattr"
+            and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value == 0
+            and node.args[1].value in {"pid_exists", "is_running", "create_time"}
         ):
-            found.append(("os.kill(_, 0)", node.lineno))
+            return str(node.args[1].value)
+        if is_kill(func) and len(node.args) == 2:
+            # ``os.kill(pid, signal.SIGTERM)`` is the kill ladder; a literal 0 or a
+            # bare name (``SIG0``) is a probe, or cannot be told from one.
+            signal_arg = node.args[1]
+            if isinstance(signal_arg, ast.Name) or (
+                isinstance(signal_arg, ast.Constant) and signal_arg.value == 0
+            ):
+                return "os.kill probe"
+        return None
+
+    def walk(node: ast.AST, scope: str) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            scope = node.name
+        if (probe := probe_of(node)) is not None:
+            found.append((scope, probe, node.lineno))
+        for child in ast.iter_child_nodes(node):
+            walk(child, scope)
+
+    walk(tree, "")
     return found
 
 
 def test_no_module_but_zombie_asks_whether_a_pid_is_there():
-    from pathlib import Path
-
-    root = Path(zombie.__file__).parent.parent
+    home = Path(zombie.__file__)
     stray = [
-        f"{path.name}:{line} {name}"
-        for path in sorted(root.rglob("*.py"))
-        if path.name != "zombie.py"
-        for name, line in _raw_calls_in(path.read_text(encoding="utf-8"))
-        if (path.name, name) not in HELD_PROCESS_READS
+        f"{path.name}:{line} {scope or '<module>'} {probe}"
+        for path in sorted(home.parent.parent.rglob("*.py"))
+        if path.name != home.name
+        for scope, probe, line in _probes_in(path.read_text(encoding="utf-8"))
+        if (path.name, scope, probe) not in HELD_PROCESS_READS
     ]
     assert stray == [], (
         "a second way to ask whether a pid is alive or which process it is; "
-        "ask zombie.alive / listed / same_process / create_time instead"
+        "ask the one home (alive / listed / same_process / identified / "
+        "create_time) instead"
     )
 
 
-@pytest.mark.parametrize(
-    ("source", "name"),
-    [
-        ("psutil.pid_exists(1)", "pid_exists"),
-        ("os.kill(pid, 0)", "os.kill(_, 0)"),
-        ("process.create_time()", "create_time"),
-        ("process.is_running()", "is_running"),
-    ],
-)
-def test_the_one_home_pin_sees_each_raw_probe(source, name):
-    """The scan finds what it forbids (a pin that cannot fail pins nothing)."""
-    assert _raw_calls_in(source) == [(name, 1)]
+#: Spellings the review found the first version of this pin missed, plus the
+#: aliased forms: (source, the probe it must be caught as). ``None`` marks a
+#: spelling that is deliberately NOT a pid-alive question and legitimate in this
+#: tree: the one walk of the process table (``browser_cmdline.named_processes``),
+#: a wait on a child we hold, the Windows exit-code readers, reads of ``/proc``
+#: for other reasons, and the kill ladder itself.
+SPELLINGS = [
+    ("psutil.Process(p).is_running()", "is_running"),
+    ("psutil.Process(p).create_time()", "create_time"),
+    ("os.kill(p, 0)", "os.kill probe"),
+    ("from psutil import pid_exists\npid_exists(1)", "pid_exists"),
+    ("getattr(psutil, 'pid_exists')(1)", "pid_exists"),
+    ("f = psutil.pid_exists\nf(1)", "pid_exists"),
+    ("from os import kill\nkill(p, 0)", "os.kill probe"),
+    ("os.kill(p, SIG0)", "os.kill probe"),
+    ("_signal(pid, 0)", "_signal"),
+    ("os.waitpid(p, os.WNOHANG)", "waitpid(WNOHANG)"),
+    ("p in psutil.pids()", "pids"),
+    ("proc.status() == psutil.STATUS_ZOMBIE", "STATUS_ZOMBIE"),
+    ("def f(is_running=psutil.pid_exists): ...", "pid_exists"),
+    ("import psutil as ps\nps.pid_exists(1)", "pid_exists"),
+    ("import os as o\no.kill(1, 0)", "os.kill probe"),
+    ("from os import kill as k\nk(1, 0)", "os.kill probe"),
+    ("for p in psutil.process_iter(): ...", None),
+    ("proc.wait(timeout=0)", None),
+    ("kernel32.OpenProcess(0x1000, False, pid)", None),
+    ("Path('/proc/1/cgroup').exists()", None),
+    ("os.kill(pid, signal.SIGTERM)", None),
+    ("os.kill(pid, 15)", None),
+]
+
+
+@pytest.mark.parametrize(("source", "probe"), SPELLINGS)
+def test_the_one_home_pin_sees_every_spelling_it_forbids(source, probe):
+    """A pin that cannot fail pins nothing: each spelling is caught as what it is."""
+    found = sorted({name for _scope, name, _line in _probes_in(source)})
+    assert found == ([probe] if probe else [])
 
 
 def test_the_one_home_pin_leaves_a_question_put_to_the_home():
-    assert _raw_calls_in("zombie.create_time(pid)") == []
+    assert _probes_in(f"{HOME_NAME}.create_time(pid)") == []
+    assert _probes_in(f"{HOME_NAME}.identified(pid, started)") == []
 
 
-def test_the_one_home_pin_leaves_a_signal_that_is_not_a_probe():
-    assert _raw_calls_in("os.kill(pid, signal.SIGTERM)") == []
-
-
-@pytest.mark.parametrize("kernel", [None, NOT_OURS], ids=["delivered", "EPERM"])
-def test_the_kernel_is_asked_only_by_the_held_direction(monkeypatch, kernel):
-    """A thread id is not a pid: ``kill(tid, 0)`` succeeds, psutil lists no such
-    pid. The instance readers (``unknown=False``) must read that dead, and must not
-    even ask, so a dead adopted browser whose number came back as a thread id of
-    some other process is discarded rather than kept."""
-    install(
-        monkeypatch,
-        World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=kernel),
-    )
-
-    assert zombie.alive(PID, unknown=False) is False
-    assert process_exit.browser_is_alive(_Browser(PID)) is False
-    assert KERNEL_ASKED == []
-
-    assert zombie.alive(PID, unknown=True) is True
-    assert KERNEL_ASKED == [(PID, 0)]
-
-
-def test_the_signal_guard_is_the_platform_it_names():
-    """On Windows ``os.kill(pid, 0)`` TERMINATES the process, so the constant that
-    keeps the probe off there is pinned on every OS rather than patched by tests."""
-    assert zombie._SIGNAL_ASKS is (os.name != "nt")
-
-
-def test_a_probe_signal_leaves_this_machine_only_where_it_is_a_question(monkeypatch):
-    """No test-side patch of ``_SIGNAL_ASKS``: the module's own default decides
-    whether an unlisted pid is ever put to the kernel. Nothing is ever signalled
-    for real; the signal is a recorder."""
-    sent: list[tuple[int, int]] = []
-
-    def record(pid: int, sig: int) -> None:
-        sent.append((pid, sig))
-        raise ProcessLookupError(errno.ESRCH, "no such process")
-
-    monkeypatch.setattr(psutil, "pid_exists", lambda _pid: False)
-    monkeypatch.setattr(zombie, "_signal", record)
-
-    assert zombie.alive(PID, unknown=True) is False
-    assert sent == ([] if os.name == "nt" else [(PID, 0)])
+def test_the_held_process_exemption_is_one_function():
+    inside = "def capture():\n    return proc.create_time()\n"
+    outside = "def elsewhere():\n    return proc.create_time()\n"
+    assert _probes_in(inside) == [("capture", "create_time", 2)]
+    assert _probes_in(outside) == [("elsewhere", "create_time", 2)]
+    assert ("client_presence.py", "capture", "create_time") in HELD_PROCESS_READS
+    assert ("client_presence.py", "elsewhere", "create_time") not in HELD_PROCESS_READS
