@@ -120,6 +120,10 @@ REFUSED = [
     "chrome://serviceworker%2Dinternals/",
     "chrome://inspect:80/#pages",
     "chrome://user@inspect/#pages",
+    # fourth review F2: UTS 46 drops and maps more than NFKC does
+    "chrome://i\u00adnspect/",
+    "chrome://inspect\u3002/",
+    "chrome://inspect%E3%80%82",
 ]
 
 
