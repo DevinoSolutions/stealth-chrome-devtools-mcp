@@ -42,6 +42,7 @@ from vault_helpers import (
     password_entry,
     provider_entry,
     reset,
+    sealed_state,
     spawn_before_the_vault,
     unlocked_vault,
 )
@@ -421,7 +422,7 @@ async def test_a_form_that_submits_to_another_origin_gets_nothing_typed(site, tm
         assert "not on a host" in str(caught.value)
         assert RIGHT not in str(caught.value)
     assert site.posts == []
-    assert not login_seal.any_sealing()
+    assert not login_seal.any_sealing(), sealed_state()
 
 
 async def test_a_login_form_framed_by_another_page_is_not_typed_into(
@@ -467,7 +468,7 @@ async def test_a_login_page_on_another_host_gets_nothing_typed(site, tmp_path):
         assert RIGHT not in str(caught.value)
         assert set(await _tab_ids(iid)) <= set(before)
     assert site.posts == []
-    assert not login_seal.any_sealing()
+    assert not login_seal.any_sealing(), sealed_state()
 
 
 async def test_the_seal_and_the_tab_are_dropped_when_the_flow_raises(
@@ -573,7 +574,7 @@ async def test_a_browser_started_with_another_spelling_of_a_forbidden_flag_is_re
     finally:
         await close(instance_id=iid)
     assert site.posts == []
-    assert not login_seal.any_sealing()
+    assert not login_seal.any_sealing(), sealed_state()
 
 
 async def _wait_for_sealed_tab(iid):

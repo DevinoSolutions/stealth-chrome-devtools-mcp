@@ -27,6 +27,7 @@ from e2e_helpers import eval_js, get_fn, sandbox_kwargs
 from stealth_chrome_devtools_mcp.embedded import (
     debug_port_guard,
     login_persistence,
+    login_seal,
     tab_open,
     vault_mode,
     vault_store,
@@ -263,7 +264,9 @@ async def test_a_page_tool_with_no_tab_id_refuses_a_chrome_page_left_current(
         assert "version" in (await get_fn("get_page_content")(instance_id=iid))["url"]
         _make_vault_file()
         assert vault_mode.active()
-        await asyncio.sleep(FAST * 4)  # the keeper has judged the target by now
+        # the keeper has judged the target: its first pass resolves the path rules,
+        # which takes seconds on a cold machine, so wait for the mark, not a time
+        assert await _wait_for(login_seal.any_sealing, seconds=30.0), "never marked"
         for call in (
             lambda: get_fn("execute_script")(instance_id=iid, script="1 + 1"),
             lambda: get_fn("get_page_content")(instance_id=iid),

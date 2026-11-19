@@ -22,6 +22,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     debug_port_guard,
     login_seal,
     platform_utils,
+    tab_open,
 )
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -1482,6 +1483,78 @@ async def test_a_webui_target_is_not_marked_with_no_vault_but_is_by_the_next_pas
     assert login_seal.is_sealed("any", "T1")
     assert login_seal.any_sealing()
     await guard.stop()
+
+
+def _endpoint_port(endpoint):
+    return int(endpoint.url.split(":")[2].split("/")[0])
+
+
+async def _run_guard_to_its_end(endpoint):
+    guard = debug_port_guard._Guard(endpoint.url, _endpoint_port(endpoint))
+    await guard.start()
+    task = asyncio.create_task(guard.run())
+    await endpoint.emit("Target.targetInfoChanged", _target("W1", "chrome://settings"))
+    await _wait_until(lambda: "W1" in login_seal._webui, "never marked")
+    return guard, task
+
+
+async def test_the_marks_of_a_browser_that_is_gone_are_dropped(endpoint, mode_on):
+    """Nothing sends ``targetDestroyed`` for a browser that exited: without this its
+    marks keep ``login_seal.any_sealing()`` true for the life of the backend (the
+    seven Linux CI failures, where one process runs every real-Chrome file)."""
+    guard, task = await _run_guard_to_its_end(endpoint)
+    await endpoint.socket.close()
+    await endpoint.stop()  # the port now refuses: the browser is gone
+    await asyncio.wait_for(task, 10)
+    assert "W1" not in login_seal._webui
+    assert not login_seal.any_sealing()
+    assert not guard.marked
+
+
+async def test_the_marks_stay_when_only_the_connection_dropped(endpoint, mode_on):
+    """The port still answers: the browser may be alive, so the page stays hidden."""
+    guard, task = await _run_guard_to_its_end(endpoint)
+    await endpoint.socket.close()
+    await asyncio.wait_for(task, 10)
+    assert "W1" in login_seal._webui
+    assert login_seal.is_sealed("any", "W1")
+
+
+async def test_the_marks_are_dropped_when_close_instance_closed_the_browser(
+    endpoint, mode_on
+):
+    """The normal close path: ``close_instance`` marks the browser closed before it
+    ends the socket. The port may still answer for a moment while Chrome exits, so
+    this is decided by that mark, not by the port."""
+    guard, task = await _run_guard_to_its_end(endpoint)
+    guard.browser = SimpleNamespace()
+    tab_open.mark_closed(guard.browser)
+    await endpoint.socket.close()  # the server stays up: the port still answers
+    await asyncio.wait_for(task, 10)
+    assert "W1" not in login_seal._webui
+    assert not login_seal.any_sealing()
+
+
+async def test_a_browser_nobody_closed_whose_port_answers_keeps_its_marks(
+    endpoint, mode_on
+):
+    guard, task = await _run_guard_to_its_end(endpoint)
+    guard.browser = SimpleNamespace()  # not marked closed
+    await endpoint.socket.close()
+    await asyncio.wait_for(task, 10)
+    assert "W1" in login_seal._webui
+
+
+def test_a_port_that_refuses_is_gone_and_a_port_that_answers_is_not():
+    import socket
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    assert debug_port_guard._port_open(port)
+    server.close()
+    assert not debug_port_guard._port_open(port)
 
 
 async def test_the_new_tab_page_is_not_hidden_while_a_vault_exists(endpoint, mode_on):

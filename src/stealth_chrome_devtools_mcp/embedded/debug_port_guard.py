@@ -123,6 +123,7 @@ import itertools
 import json
 import logging
 import re
+import socket
 import unicodedata
 import urllib.parse
 from typing import TYPE_CHECKING, cast
@@ -478,6 +479,7 @@ async def protect(browser: Browser) -> None:
         )
     _PORTS.add(int(port))
     guard = _Guard(str(url), int(port))
+    guard.browser = browser
     try:
         async with asyncio.timeout(CONNECT_BUDGET_SECONDS):
             await guard.start()
@@ -496,6 +498,26 @@ async def protect(browser: Browser) -> None:
 def _obj(value: object) -> Json:
     """``value`` when it is a JSON object, else an empty one."""
     return cast("Json", value) if isinstance(value, dict) else {}
+
+
+#: How long :func:`_port_open` waits for an answer. A refused connection to a closed
+#: loopback port takes about 2 s on Windows (the stack retries the SYN before it
+#: reports the refusal; measured), and instantly on POSIX, so less than that reads a
+#: gone browser as a starved one.
+PORT_PROBE_SECONDS = 5.0
+
+
+def _port_open(port: int) -> bool:
+    """Whether something still accepts a connection on loopback ``port``. BLOCKING
+    (a thread). Only a REFUSAL says the browser is gone: a timeout (a starved
+    browser) or any other error counts as open, so the marks stay (fail closed)."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=PORT_PROBE_SECONDS):
+            return True
+    except ConnectionRefusedError:
+        return False
+    except OSError:
+        return True
 
 
 class _Guard:
@@ -518,6 +540,13 @@ class _Guard:
         #: Targets first seen at an ordinary URL, and the inspectors seen so far.
         self.clean: set[str] = set()
         self.inspectors: set[str] = set()
+        #: Targets this guard marked internal or WebUI in ``login_seal``: dropped
+        #: when the browser is gone (:meth:`run`), since no event will ever say so.
+        self.marked: set[str] = set()
+        #: The browser this guard protects (``protect`` sets it): ``close_instance``
+        #: marks it closed (``tab_open.mark_closed``) before it ends the socket, which
+        #: is how this guard knows the close was ours.
+        self.browser: Browser | None = None
         #: Resolved when this guard ends (:func:`watch` waits on it).
         self.done: asyncio.Future[None] | None = None
         #: Whether this browser's downloads are pinned by vault mode, and the task
@@ -644,7 +673,26 @@ class _Guard:
             # Nothing is un-barred here: a guard that is gone is exactly when a
             # DevTools window must stay out of reach (it is un-barred when Chrome
             # says the target is destroyed, which only a live guard hears).
+            # The internal / WebUI marks are different: they are dropped when the
+            # BROWSER is gone (its port refuses a connection), because nothing will
+            # ever send ``targetDestroyed`` for them, and a mark that is never
+            # dropped keeps ``login_seal.any_sealing()`` true for the life of the
+            # backend. Gone means: ``close_instance`` closed it (``is_closed``), or the
+            # port refuses a connection. A connection that merely dropped (the port
+            # still answers) keeps them: fail closed.
+            if self.marked and await self._browser_is_gone():
+                for target in list(self.marked):
+                    login_seal.mark_internal(target, False)
+                    login_seal.mark_webui(target, False)
+                self.marked.clear()
             await self.stop()
+
+    async def _browser_is_gone(self) -> bool:
+        """Whether this guard's browser is gone for good, so no ``targetDestroyed``
+        will ever arrive: this backend closed it, or its debug port refuses."""
+        if self.browser is not None and tab_open.is_closed(self.browser):
+            return True
+        return not await asyncio.to_thread(_port_open, self.port)
 
     async def command(
         self,
@@ -709,6 +757,7 @@ class _Guard:
             self.parents.pop(session, None)
         login_seal.mark_internal(target, False)
         login_seal.mark_webui(target, False)
+        self.marked.discard(target)
         if target in self.inspectors:
             self.inspectors.discard(target)
             login_seal.unbar(target)
@@ -731,6 +780,7 @@ class _Guard:
             self.clean.add(target)
             login_seal.mark_internal(target, internal_url(info.get("url")))
             login_seal.mark_webui(target, webui_url(info.get("url")))
+            self.marked.add(target)
             if target in self.inspectors:  # it was blanked: no longer one
                 self.inspectors.discard(target)
                 login_seal.unbar(target)
