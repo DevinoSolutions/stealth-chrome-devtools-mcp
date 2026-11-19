@@ -47,6 +47,14 @@ A barred target is refused and unlisted like a sealed one, whether or not any lo
 is running (:func:`is_sealed`), and :func:`login_in_flight` tells the guard when to
 close such a window and not merely hide it. ``go_back`` and ``go_forward`` are
 :data:`INSTANCE_WIDE` too: history can return a tab to a page the URL tools refuse.
+A barred window with no login running is refused with :data:`INSPECTOR_REFUSAL`,
+which must not claim that a login is running.
+
+**Browser-internal pages while a login runs.** :func:`mark_internal` notes a target
+whose committed URL is a ``chrome:`` / ``chrome-extension:`` / ``devtools:`` ... page
+(``debug_port_guard.internal_url``). Such a target is sealed (:func:`is_sealed`)
+ONLY while a login is running in its instance, so it is hidden and refused for
+exactly that long and ordinary ``chrome://`` use is not touched.
 
 In memory, like ``tab_binding`` and ``session_lease``: a backend restart forgets
 every seal, and so does the login that was holding it (it died with the process).
@@ -67,6 +75,11 @@ if TYPE_CHECKING:
 #: caller already knows both, and an error that echoed a sealed target id would
 #: tell a model which target to go after by other means.
 REFUSAL = "a vault login is running in this browser; retry when it finishes"
+#: The sentence for a target that is barred while NO login runs: a browser
+#: inspector (a DevTools window), which no tool may use, login or not.
+INSPECTOR_REFUSAL = (
+    "that tab is a browser inspector (a DevTools window), which no tool can use"
+)
 
 #: Tools that can reach a sealed tab without naming it, refused for the whole
 #: instance while a seal is in progress.
@@ -85,6 +98,11 @@ _holds: dict[str, list[frozenset[str]]] = {}
 #: in ANY instance: never listed and never addressable by a tool, whether or not a
 #: login is running (``debug_port_guard`` fills it from the browser's own events).
 _barred: set[str] = set()
+#: Targets at a browser-internal URL (``chrome://``, ``chrome-extension://``, ...,
+#: ``debug_port_guard.internal_url``), in ANY instance. They are hidden and refused
+#: only WHILE a login runs (:func:`is_sealed`): outside one, ordinary
+#: ``chrome://version`` use is untouched.
+_internal: set[str] = set()
 
 
 def begin(instance_id: str) -> None:
@@ -201,6 +219,13 @@ def unbar(target_id: str) -> None:
         _barred.discard(str(target_id))
 
 
+def mark_internal(target_id: str, internal: bool) -> None:
+    """Record whether ``target_id`` is at a browser-internal URL (``False`` once it
+    is not, or is gone)."""
+    with _lock:
+        (_internal.add if internal else _internal.discard)(str(target_id))
+
+
 def login_in_flight() -> bool:
     """Whether any login is running or opening its tab, in any instance."""
     return bool(_depth or _holds)
@@ -232,6 +257,7 @@ def is_sealed(instance_id: str, target_id: str | None) -> bool:
     target = str(target_id)
     return (
         target in _barred
+        or (target in _internal and login_in_flight())
         or target in _tabs.get(instance_id, ())
         or target in _unclosed.get(instance_id, ())
         or any(target not in known for known in _holds.get(instance_id, ()))
@@ -248,7 +274,10 @@ def refuse_if_sealed(tool: str, kwargs: dict[str, object]) -> None:
     if not isinstance(instance_id, str):
         return
     tab_id = kwargs.get("tab_id")
-    if (sealing(instance_id) and tool in INSTANCE_WIDE) or (
-        isinstance(tab_id, str) and is_sealed(instance_id, tab_id)
-    ):
+    if sealing(instance_id) and tool in INSTANCE_WIDE:
         raise ToolError(REFUSAL)
+    if isinstance(tab_id, str) and is_sealed(instance_id, tab_id):
+        # An inspector is refused for what it is, login or not: "a login is
+        # running" would be untrue and send the caller to wait for nothing.
+        barred_only = tab_id in _barred and not login_in_flight()
+        raise ToolError(INSPECTOR_REFUSAL if barred_only else REFUSAL)

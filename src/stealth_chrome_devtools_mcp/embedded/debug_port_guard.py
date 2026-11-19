@@ -60,6 +60,24 @@ ever a DevTools frontend or a page that opens one** (:func:`inspector_url`).
   refuses before EVERY field it types, unless the browser's guard is running and no
   inspector exists; one that will not close refuses the login. A guard whose
   connection dropped while the browser lives fails closed the same way.
+* *Read the way Chrome reads a URL* (:func:`_decoded`, :func:`_inspector_host`):
+  case, a trailing dot, a port, userinfo, ``about:``, ``view-source:`` and a
+  percent-encoded or full-width host (``chrome://%69nspect/#pages``) are all
+  ``inspect``. Judging the text as typed was the hole the third review found.
+* *Fail closed when the guard ends.* A bar is lifted only by Chrome's own
+  ``targetDestroyed``, which only a live guard hears, so a guard whose socket drops
+  leaves its bars in place; and a login in flight runs under :func:`watch`, which
+  cancels it (its ``finally`` clears what it typed) and raises ``GUARD_DOWN``.
+
+**The class rule while a login runs.** The inspector list is a denylist of pages
+that open a debugger; it cannot be complete for a Chrome that has not shipped yet.
+So for the duration of a login EVERY ``chrome:``, ``chrome-untrusted:``,
+``devtools:``, ``chrome-devtools:``, ``chrome-extension:`` and ``chrome-search:``
+target is barred (:func:`internal_url`, ``login_seal.mark_internal``) and the URL
+tools refuse to load one (:func:`refusal`); ``about:blank`` and the new-tab page
+still work. Outside a login only the narrow refusal applies, so ordinary
+``chrome://`` use is untouched. A login closes every DevTools window open in its
+browser, counted by :func:`closed_windows` and reported by ``login``.
 
 **What is NOT covered**: a process running as the same OS user, which can open the
 loopback port directly (``RUNBOOK`` "Local trust boundary"); a browser started by an
@@ -77,6 +95,7 @@ import contextlib
 import itertools
 import json
 import logging
+import unicodedata
 import urllib.parse
 from typing import TYPE_CHECKING, cast
 
@@ -86,7 +105,7 @@ from stealth_chrome_devtools_mcp.embedded import login_seal, tab_open
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine
 
     from nodriver import Browser
     from websockets.asyncio.client import ClientConnection
@@ -112,6 +131,8 @@ _PORTS: set[int] = set()
 #: The running guard of each protected port (what ``protected_ports`` stands on).
 _GUARDS: dict[int, _Guard] = {}
 _TASKS: set[asyncio.Task[None]] = set()
+#: DevTools windows this module has closed (by id), for the answer of ``login``.
+_CLOSED: set[str] = set()
 _COUNTER = itertools.count(1)
 
 CONNECT_BUDGET_SECONDS = 15.0
@@ -146,10 +167,34 @@ INSPECTOR_SCHEMES = frozenset({"devtools", "chrome-devtools"})
 #:
 #: Chrome reads ``about:inspect`` and ``about://inspect`` as ``chrome://inspect``.
 INSPECTOR_PAGES = frozenset({"inspect", "serviceworker-internals", "extensions"})
+#: While a login runs, EVERY target of these schemes is hidden from the tools and no
+#: URL tool may load one (:func:`internal_url`): a class rule, not a list of pages,
+#: because every ``chrome://`` WebUI page can ``chrome.send`` to its browser-side
+#: handlers and "has no debugger action" would have to be re-proved per Chrome
+#: release. Outside a login only :data:`INSPECTOR_PAGES` is refused.
+INTERNAL_SCHEMES = frozenset(
+    {
+        "chrome",
+        "chrome-untrusted",
+        "devtools",
+        "chrome-devtools",
+        "chrome-extension",
+        "chrome-search",
+    }
+)
+#: The new-tab page stays usable during a login (it is what a fresh tab shows).
+NEW_TAB_HOSTS = frozenset(
+    {"newtab", "new-tab-page", "new-tab-page-third-party", "local-ntp"}
+)
+INTERNAL_REFUSAL = (
+    "a vault login is running in this browser: chrome:// and other browser-internal "
+    "pages cannot be opened until it finishes"
+)
 #: What a URL parser drops before it reads a scheme: C0 controls and space at both
 #: ends, tab and newlines anywhere (the WHATWG URL rules Chrome follows).
 _URL_EDGE = "".join(chr(code) for code in range(33))
 _URL_INNER = dict.fromkeys((9, 10, 13))
+_DECODE_ROUNDS = 4
 #: Types of target that can make requests, each given the port interception.
 GUARDED_TYPES = frozenset(
     {"page", "iframe", "worker", "service_worker", "shared_worker"}
@@ -195,14 +240,28 @@ def url_port(url: object) -> int | None:
         return None
 
 
+def _decoded(text: str) -> str:
+    """``text`` percent-decoded as far as it goes and NFKC-normalised, which is what
+    Chrome's host canonicalisation amounts to for a ``chrome:`` URL (``%69nspect``
+    and a full-width spelling of ``inspect`` are ``inspect``). Decoding to a fixed
+    point reads MORE spellings as the same page than Chrome does: the safe side."""
+    for _ in range(_DECODE_ROUNDS):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return unicodedata.normalize("NFKC", text)
+
+
 def _inspector_host(url: str) -> tuple[str, str]:
     """``(scheme, host)`` of ``url`` as Chrome reads it, both lower case; the host
-    of ``chrome:inspect`` and ``about:inspect`` is read from the path."""
+    of ``chrome:inspect`` and ``about:inspect`` is read from the path. Userinfo and
+    a port are not part of the host, a trailing dot and the case are dropped."""
     text = url.translate(_URL_INNER).strip(_URL_EDGE).replace("\\", "/")
     parts = urllib.parse.urlsplit(text)
     scheme = parts.scheme.lower()
-    host = parts.hostname or parts.path.lstrip("/").split("/")[0]
-    return scheme, host.lower().rstrip(".")
+    host = parts.hostname or parts.path.lstrip("/").split("/")[0].split(":")[0]
+    return scheme, _decoded(host).lower().rstrip(".")
 
 
 def is_frontend(url: object) -> bool:
@@ -234,16 +293,36 @@ def inspector_url(url: object) -> bool:
     return scheme in ("chrome", "about") and host in INSPECTOR_PAGES
 
 
+def internal_url(url: object) -> bool:
+    """Whether ``url`` is a browser-internal page of the class
+    :data:`INTERNAL_SCHEMES` (the new-tab page excepted). ``view-source:`` is read
+    through; ``about:`` pages are not of the class (``about:blank`` is one)."""
+    if not isinstance(url, str):
+        return False
+    try:
+        scheme, host = _inspector_host(url)
+        if scheme == "view-source":
+            return internal_url(url.strip(_URL_EDGE)[len("view-source:") :])
+    except ValueError:
+        return False
+    if scheme not in INTERNAL_SCHEMES:
+        return False
+    return not (scheme != "chrome-extension" and host in NEW_TAB_HOSTS)
+
+
 def refusal(url: object) -> str | None:
     """Why ``url`` may not be loaded, or ``None``.
 
-    Refused when it is a browser inspector (:func:`inspector_url`), or when its
+    Refused when it is a browser inspector (:func:`inspector_url`), when a login is
+    running and it is a browser-internal page (:func:`internal_url`), or when its
     port is the debug port of any browser of this backend, WHATEVER the host:
     ``127.0.0.1``, ``localhost``, ``localhost.``, ``[::1]``, ``0.0.0.0``,
     ``2130706433``, ``0x7f.1`` and ``0177.0.0.1`` all name the same listener, so
     the port, not the spelling, is what is checked."""
     if inspector_url(url):
         return INSPECTOR_REFUSAL
+    if login_seal.login_in_flight() and internal_url(url):
+        return INTERNAL_REFUSAL
     port = url_port(url)
     return REFUSAL if port is not None and port in _PORTS else None
 
@@ -323,6 +402,8 @@ class _Guard:
         #: Targets first seen at an ordinary URL, and the inspectors seen so far.
         self.clean: set[str] = set()
         self.inspectors: set[str] = set()
+        #: Resolved when this guard ends (:func:`watch` waits on it).
+        self.done: asyncio.Future[None] | None = None
 
     async def start(self) -> None:
         import websockets
@@ -330,6 +411,7 @@ class _Guard:
         self.socket = await websockets.connect(
             self.url, max_size=None, ping_interval=None, open_timeout=10
         )
+        self.done = asyncio.get_running_loop().create_future()
         self.reader = asyncio.create_task(self._read())
         await self.command("Target.setDiscoverTargets", {"discover": True})
         await self._auto_attach(None)
@@ -369,6 +451,8 @@ class _Guard:
         )
 
     async def stop(self) -> None:
+        if self.done is not None and not self.done.done():
+            self.done.set_result(None)
         if self.reader is not None:
             self.reader.cancel()
         if self.socket is not None:
@@ -389,8 +473,9 @@ class _Guard:
             _PORTS.discard(self.port)
             if _GUARDS.get(self.port) is self:
                 del _GUARDS[self.port]
-            for target in self.inspectors:
-                login_seal.unbar(target)
+            # Nothing is un-barred here: a guard that is gone is exactly when a
+            # DevTools window must stay out of reach (it is un-barred when Chrome
+            # says the target is destroyed, which only a live guard hears).
             await self.stop()
 
     async def command(
@@ -454,6 +539,7 @@ class _Guard:
         session = self.sessions.pop(target, None)
         if session is not None:
             self.parents.pop(session, None)
+        login_seal.mark_internal(target, False)
         if target in self.inspectors:
             self.inspectors.discard(target)
             login_seal.unbar(target)
@@ -474,6 +560,7 @@ class _Guard:
             return
         if not inspector_url(info.get("url")):
             self.clean.add(target)
+            login_seal.mark_internal(target, internal_url(info.get("url")))
             if target in self.inspectors:  # it was blanked: no longer one
                 self.inspectors.discard(target)
                 login_seal.unbar(target)
@@ -501,6 +588,8 @@ class _Guard:
                 return
         with contextlib.suppress(Exception):
             await self.command("Target.closeTarget", {"targetId": target})
+            if close:
+                _CLOSED.add(target)
 
     async def _leave_endpoint(self, target: str) -> None:
         """A document of ``target`` committed at the endpoint's own origin (the one
@@ -610,6 +699,45 @@ async def verify_clean(browser: Browser) -> None:
             login_seal.bar(str(info.target_id))
             with contextlib.suppress(Exception):
                 await tab_open.send(browser, cdp.target.close_target, info.target_id)
+                if is_frontend(info.url):
+                    _CLOSED.add(str(info.target_id))
         if attempt < _CLEAN_ATTEMPTS - 1:
             await asyncio.sleep(_CLEAN_RETRY_S)
     raise ToolError(INSPECTOR_OPEN)
+
+
+def closed_windows() -> int:
+    """How many DevTools windows this process has closed so far. A login reports
+    the difference between its end and its start."""
+    return len(_CLOSED)
+
+
+@contextlib.asynccontextmanager
+async def watch(browser: Browser) -> AsyncIterator[None]:
+    """Run a login under the guard of its browser. When the guard ends (its
+    connection dropped while the browser lives) the surrounding task is cancelled
+    and the block raises ``ToolError`` (:data:`GUARD_DOWN`), so the login's own
+    cleanup clears the fields it typed and closes its tab. Raises at once when
+    there is no guard."""
+    port = getattr(getattr(browser, "config", None), "port", None)
+    guard = _GUARDS.get(int(port)) if port else None
+    task = asyncio.current_task()
+    if guard is None or guard.done is None or task is None:
+        raise ToolError(GUARD_DOWN)
+    outside = task.cancelling()
+    fired = False
+
+    def ended(_future: asyncio.Future[None]) -> None:
+        nonlocal fired
+        fired = True
+        task.cancel()
+
+    guard.done.add_done_callback(ended)
+    try:
+        yield
+    except asyncio.CancelledError:
+        if fired and task.uncancel() <= outside:
+            raise ToolError(GUARD_DOWN) from None
+        raise
+    finally:
+        guard.done.remove_done_callback(ended)

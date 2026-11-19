@@ -342,7 +342,10 @@ async def create_python_binding(
 
     The Python code runs with `exec` and full builtins inside the backend process
     on the host. There is no sandbox: the function can read files and start
-    programs like any code this process runs. The binding answers only script in
+    programs like any code this process runs. Because it can read everything the
+    backend holds, this tool is refused while the login vault is unlocked, and once
+    it has run the vault cannot be unlocked again until the backend is restarted.
+    The binding answers only script in
     the page context that was current on this tab when it was created, and is
     dropped when that page navigates or reloads. Script in that page can still
     call it, including same-origin frames, so create one only on a page you trust.

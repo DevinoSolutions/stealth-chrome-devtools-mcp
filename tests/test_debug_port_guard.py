@@ -671,6 +671,22 @@ INSPECTOR_URLS = [
     "\x00chrome://inspect",
     "view-source:chrome://inspect",
     "chrome://inspect.",
+    # re-review F2: Chrome decodes and canonicalises the host
+    "chrome://%69nspect/#pages",
+    "chrome://%49nspect",
+    "chrome://%65xtensions/",
+    "chrome://serviceworker%2Dinternals/",
+    "chrome://%2569nspect",  # decoded twice by a careless reader: refused too
+    "chrome://inspect:80/",
+    "chrome://user:secret@inspect/",
+    "chrome://inspect./#pages",
+    "chrome://\uff49nspect/",  # full-width i
+    "chrome://\uff29\uff2e\uff33\uff30\uff25\uff23\uff34/",
+    "about:%69nspect",
+    "about://%49NSPECT/",
+    "view-source:chrome://%69nspect",
+    "  chrome://%69nspect  ",
+    "chrome://inspect\\#pages",
 ]
 
 
@@ -830,14 +846,231 @@ async def test_inspectors_already_open_when_the_guard_starts_are_barred():
     await fake.stop()
 
 
-async def test_the_bars_are_lifted_when_the_guard_ends(endpoint):
+async def test_the_bars_stay_when_the_guard_ends(endpoint):
+    """Re-review F4: a guard that is gone is when a DevTools window must stay out
+    of reach, so its bars are not lifted with it. Only Chrome saying the target is
+    destroyed lifts one, and only a live guard hears that."""
     guard = await _guard(endpoint)
     await endpoint.emit("Target.targetCreated", _target("D3", FRONTEND))
     await _wait_until(lambda: login_seal.is_sealed("any", "D3"), "not barred")
     task = asyncio.create_task(guard.run())
     await endpoint.socket.close()
     await asyncio.wait_for(task, 5)
-    assert not login_seal.is_sealed("any", "D3")
+    assert login_seal.is_sealed("any", "D3")
+    assert PORT not in debug_port_guard.protected_ports()
+
+
+async def test_a_login_under_watch_is_cancelled_and_told_when_the_guard_ends(
+    endpoint,
+):
+    guard = await _guard(endpoint)
+    browser = SimpleNamespace(config=SimpleNamespace(port=PORT))
+    debug_port_guard._GUARDS[PORT] = guard
+    task = asyncio.create_task(guard.run())
+    cleaned = []
+
+    async def login():
+        try:
+            async with debug_port_guard.watch(browser):
+                await asyncio.sleep(30)
+        finally:
+            cleaned.append(True)  # the login's own cleanup ran
+
+    running = asyncio.create_task(login())
+    await asyncio.sleep(0.05)
+    await endpoint.socket.close()
+    with pytest.raises(ToolError) as caught:
+        await asyncio.wait_for(running, 5)
+    assert str(caught.value) == debug_port_guard.GUARD_DOWN
+    assert cleaned == [True]
+    await asyncio.wait_for(task, 5)
+
+
+async def test_watch_with_no_guard_refuses_at_once():
+    browser = SimpleNamespace(config=SimpleNamespace(port=PORT + 3))
+    with pytest.raises(ToolError):
+        async with debug_port_guard.watch(browser):
+            pass
+
+
+async def test_an_outer_cancel_is_not_turned_into_a_guard_error(endpoint):
+    guard = await _guard(endpoint)
+    browser = SimpleNamespace(config=SimpleNamespace(port=PORT))
+    debug_port_guard._GUARDS[PORT] = guard
+
+    async def login():
+        async with debug_port_guard.watch(browser):
+            await asyncio.sleep(30)
+
+    running = asyncio.create_task(login())
+    await asyncio.sleep(0.05)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    debug_port_guard._GUARDS.pop(PORT, None)
+    await guard.stop()
+
+
+# ------------------------------------------ the class rule while a login runs (F3)
+
+INTERNAL = [
+    "chrome://version",
+    "chrome://history/",
+    "chrome://settings",
+    "chrome://net-export",
+    "chrome://accessibility",
+    "chrome://%76ersion",
+    "CHROME://VERSION",
+    "chrome-untrusted://print/",
+    "chrome-extension://abcdefghijklmnop/page.html",
+    "chrome-search://most-visited/title.html",
+    "devtools://devtools/bundled/inspector.html",
+    "chrome-devtools://devtools/bundled/inspector.html",
+    "view-source:chrome://version",
+]
+ORDINARY = [
+    "about:blank",
+    "https://example.com/chrome://version",
+    "http://127.0.0.1:1/",
+    "data:text/html,chrome://version",
+    "chrome-error://chromewebdata/",
+    "chrome://newtab/",
+    "chrome://new-tab-page/",
+    "chrome-untrusted://new-tab-page/",
+    "chrome-search://local-ntp/",
+    "",
+    None,
+    7,
+]
+
+
+@pytest.mark.parametrize("url", INTERNAL)
+def test_a_browser_internal_page_is_of_the_class(url):
+    assert debug_port_guard.internal_url(url), repr(url)
+
+
+@pytest.mark.parametrize("url", ORDINARY)
+def test_other_pages_and_the_new_tab_page_are_not(url):
+    assert not debug_port_guard.internal_url(url), repr(url)
+
+
+@pytest.mark.parametrize("url", INTERNAL)
+def test_while_a_login_runs_the_url_tools_refuse_the_class(url):
+    assert debug_port_guard.refusal(url) is None or debug_port_guard.inspector_url(url)
+    login_seal.begin("inst")
+    try:
+        assert debug_port_guard.refusal(url) is not None
+        with pytest.raises(ToolError):
+            debug_port_guard.refuse_urls("navigate", {"url": url})
+        with pytest.raises(ToolError):
+            debug_port_guard.refuse_urls("new_tab", {"url": url})
+    finally:
+        login_seal.end("inst")
+
+
+@pytest.mark.parametrize(
+    "url", [u for u in INTERNAL if "inspect" not in u and "devtools" not in u]
+)
+def test_outside_a_login_only_the_inspector_pages_stay_refused(url):
+    assert debug_port_guard.refusal(url) is None, url
+
+
+@pytest.mark.parametrize("url", ORDINARY)
+def test_during_a_login_about_blank_and_the_new_tab_page_still_load(url):
+    login_seal.begin("inst")
+    try:
+        assert debug_port_guard.refusal(url) is None, repr(url)
+    finally:
+        login_seal.end("inst")
+
+
+async def test_an_internal_page_is_hidden_only_while_a_login_runs(endpoint):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetCreated", _target("V1", "chrome://version/"))
+    await endpoint.emit("Target.targetCreated", _target("N1", "chrome://newtab/"))
+    await endpoint.emit("Target.targetCreated", _target("W1", "https://example.com/"))
+    await _wait_until(lambda: "V1" in login_seal._internal, "not noted")
+    assert not login_seal.is_sealed("inst", "V1")  # no login: ordinary use
+    login_seal.begin("inst")
+    try:
+        assert login_seal.is_sealed("inst", "V1")
+        assert not login_seal.is_sealed("inst", "N1")
+        assert not login_seal.is_sealed("inst", "W1")
+        with pytest.raises(ToolError) as caught:
+            login_seal.refuse_if_sealed(
+                "execute_script", {"instance_id": "inst", "tab_id": "V1"}
+            )
+        assert str(caught.value) == login_seal.REFUSAL
+    finally:
+        login_seal.end("inst")
+    assert not login_seal.is_sealed("inst", "V1")  # and shown again afterwards
+    await endpoint.emit("Target.targetDestroyed", {"targetId": "V1"})
+    await _wait_until(lambda: "V1" not in login_seal._internal, "not forgotten")
+    await guard.stop()
+
+
+async def test_a_page_that_navigates_to_an_internal_page_is_hidden_and_back_again(
+    endpoint,
+):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetCreated", _target("P1", "https://example.com/"))
+    await endpoint.emit("Target.targetInfoChanged", _target("P1", "chrome://version/"))
+    await _wait_until(lambda: "P1" in login_seal._internal, "not noted")
+    await endpoint.emit(
+        "Target.targetInfoChanged", _target("P1", "https://example.com/")
+    )
+    await _wait_until(lambda: "P1" not in login_seal._internal, "not cleared")
+    await guard.stop()
+
+
+# ----------------------------------------- honest refusals and the window count (F5)
+
+
+def test_a_barred_window_with_no_login_is_not_called_a_login():
+    login_seal.bar("D9")
+    arguments = {"instance_id": "inst", "tab_id": "D9"}
+    with pytest.raises(ToolError) as caught:
+        login_seal.refuse_if_sealed("execute_script", arguments)
+    assert str(caught.value) == login_seal.INSPECTOR_REFUSAL
+    assert "login" not in str(caught.value)
+    login_seal.begin("inst")
+    try:
+        with pytest.raises(ToolError) as caught:
+            login_seal.refuse_if_sealed("execute_script", arguments)
+        assert str(caught.value) == login_seal.REFUSAL
+    finally:
+        login_seal.end("inst")
+
+
+async def test_the_windows_a_login_closes_are_counted_once_each(guarded):
+    before = debug_port_guard.closed_windows()
+    browser = ListedBrowser(
+        [
+            _info("D1", FRONTEND),
+            _info("I1", "chrome://inspect"),
+            _info("T1", "about:blank"),
+        ]
+    )
+    await debug_port_guard.verify_clean(browser)
+    assert debug_port_guard.closed_windows() - before == 1  # the frontend, not the page
+    again = ListedBrowser([_info("D1", FRONTEND)])
+    await debug_port_guard.verify_clean(again)
+    assert debug_port_guard.closed_windows() - before == 1  # the same id: not twice
+
+
+async def test_the_guards_own_close_of_a_frontend_is_counted(endpoint):
+    before = debug_port_guard.closed_windows()
+    guard = await _guard(endpoint)
+    login_seal.begin("inst")
+    try:
+        await endpoint.emit("Target.targetCreated", _target("D7", FRONTEND))
+        await _settle(endpoint, "Target.closeTarget")
+        await _wait_until(
+            lambda: debug_port_guard.closed_windows() > before, "not counted"
+        )
+    finally:
+        login_seal.end("inst")
+    await guard.stop()
 
 
 # ------------------------------------------ the check before a login types

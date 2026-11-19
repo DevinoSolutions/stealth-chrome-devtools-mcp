@@ -114,6 +114,12 @@ REFUSED = [
     "chrome://serviceworker-internals",
     f"{FRONTEND}?ws=127.0.0.1:1/devtools/page/x",
     "chrome-devtools://devtools/bundled/inspector.html",
+    # re-review F2: Chrome decodes the host, so the up-front refusal must too
+    "chrome://%69nspect/#pages",
+    "chrome://%65xtensions/",
+    "chrome://serviceworker%2Dinternals/",
+    "chrome://inspect:80/#pages",
+    "chrome://user@inspect/#pages",
 ]
 
 
@@ -214,13 +220,16 @@ async def test_a_devtools_window_that_was_already_open_is_hidden_then_closed(
         await asyncio.sleep(0.5)
         assert all(not _is_inspector(url) for _t, url in await _listed(iid))
         assert window not in [t for t, _u in await _listed(iid)]
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError) as caught:
             await get_fn("execute_script")(
                 instance_id=iid, tab_id=window, script="location.href"
             )
+        # F5: no login is running, so the refusal must not say one is
+        assert str(caught.value) == login_seal.INSPECTOR_REFUSAL
         assert window in [t for t, _u in await _inspectors_in_chrome(browser)]
         result = await _run(iid)
         assert result["outcome"] == "logged_in", result
+        assert result["closed_devtools_windows"] == 1, result  # F5: it says so
         assert await _inspectors_in_chrome(browser) == []
 
 
@@ -259,16 +268,128 @@ async def test_a_tab_sent_to_chrome_inspect_over_cdp_is_blanked(site, tmp_path):
         await get_fn("execute_cdp_command")(
             instance_id=iid, command="Page.navigate", params={"url": INSPECTOR_URL}
         )
+        now = {}
         for _ in range(100):
             await asyncio.sleep(0.05)
-            now = await get_fn("execute_script")(
-                instance_id=iid, script="location.href"
-            )
+            try:
+                now = await get_fn("execute_script")(
+                    instance_id=iid, script="location.href"
+                )
+            except Exception:  # noqa: BLE001  PERMANENT(F7: the guard is navigating the page away under this very script; that is the thing being waited for)
+                continue
             if "inspect" not in str(now.get("result")):
                 break
         assert str(now.get("result")) == "about:blank", now
         browser = await _browser_of(iid)
         assert await _inspectors_in_chrome(browser) == []
+
+
+# ------------------------------------- the class rule while a login runs (F3)
+
+
+async def test_during_a_login_no_browser_internal_page_loads_is_listed_or_scriptable(
+    site, tmp_path, monkeypatch
+):
+    """Outside a login ``chrome://version`` is ordinary use. While one runs, every
+    ``chrome://`` (and ``chrome-extension://``, ``chrome-untrusted://`` ...) page is
+    hidden, unaddressable and cannot be loaded; ``about:blank`` and the new-tab page
+    still work; afterwards the page is back."""
+    monkeypatch.setattr(login_flow, "KEY_DELAY_S", 0.2)
+    unlocked_vault({"work": _entry(site)})
+    async with _browser(tmp_path) as iid:
+        await get_fn("navigate")(instance_id=iid, url="chrome://version/")
+        mine = next(t for t, u in await _listed(iid) if u.startswith("chrome://"))
+        # navigate acts on the tab it is given: give it one that is not under test
+        await get_fn("new_tab")(instance_id=iid, url="about:blank")
+        scratch = next(t for t, _u in await _listed(iid) if t != mine)
+        login = asyncio.create_task(_run(iid))
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            if login_seal.sealing(iid):
+                break
+        listed, refused, loaded = set(), 0, []
+        for url in ("chrome://version/", "chrome://history/", "chrome-extension://x/y"):
+            for tool in ("navigate", "new_tab"):
+                try:
+                    where = {"tab_id": scratch} if tool == "navigate" else {}
+                    await get_fn(tool)(instance_id=iid, url=url, **where)
+                    loaded.append((tool, url))
+                except ToolError:
+                    refused += 1
+        for url in ("about:blank", "chrome://newtab/"):
+            await get_fn("navigate")(instance_id=iid, tab_id=scratch, url=url)
+            await get_fn("new_tab")(instance_id=iid, url=url)
+        reached = []
+        while not login.done():
+            listed |= {t for t, _u in await _listed(iid)}
+            was = login_seal.sealing(iid)
+            try:
+                await get_fn("execute_script")(
+                    instance_id=iid, tab_id=mine, script="location.href"
+                )
+                # the login may end between the two looks; it may not end later
+                # than the call and still have had the page reachable inside it
+                reached.append(was and login_seal.sealing(iid))
+            except ToolError:
+                pass
+            await asyncio.sleep(0.1)
+        assert (await login)["outcome"] == "logged_in"
+        assert loaded == []
+        assert refused == 6
+        assert not any(reached), "the page was scriptable during the login"
+        assert mine not in listed
+        # the login is over: the page is shown again
+        assert mine in [t for t, _u in await _listed(iid)]
+        await get_fn("execute_script")(instance_id=iid, tab_id=mine, script="1")
+
+
+# ---------------------------------------- the guard dropping, fail closed (F4)
+
+
+async def test_a_barred_window_stays_barred_when_the_guard_drops(site, tmp_path):
+    async with _browser(tmp_path) as iid:
+        browser = await _browser_of(iid)
+        window = await _open_frontend_privileged(browser)
+        await asyncio.sleep(0.5)
+        port = int(browser.config.port)
+        await debug_port_guard._GUARDS[port].socket.close()
+        for _ in range(100):
+            if port not in debug_port_guard.protected_ports():
+                break
+            await asyncio.sleep(0.05)
+        assert window not in [t for t, _u in await _listed(iid)]
+        with pytest.raises(ToolError):
+            await get_fn("execute_script")(
+                instance_id=iid, tab_id=window, script="location.href"
+            )
+
+
+async def test_a_login_aborts_when_the_guard_drops_in_the_middle_of_it(
+    site, tmp_path, monkeypatch
+):
+    """The guard's link drops after the password is typed and before Enter: the
+    login stops there, clears what it typed, closes its tab, and nothing is sent."""
+    unlocked_vault({"work": _entry(site)})
+    async with _browser(tmp_path) as iid:
+        browser = await _browser_of(iid)
+        port = int(browser.config.port)
+
+        async def drop_then_hang(_tab):
+            await debug_port_guard._GUARDS[port].socket.close()
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(login_flow.text_entry, "press_enter", drop_then_hang)
+        before = {t for t, _u in await _listed(iid)}
+        with pytest.raises(ToolError) as caught:
+            await asyncio.wait_for(_run(iid), 30)
+        assert str(caught.value) == debug_port_guard.GUARD_DOWN
+        assert not login_seal.sealing(iid)
+        assert {t for t, _u in await _listed(iid)} <= before
+        await tab_open.update_targets(browser)
+        assert all(
+            "login" not in str(getattr(t.target, "url", "")) for t in browser.tabs
+        )
+    assert site.posts == []  # Enter was never pressed: nothing reached the site
 
 
 # ------------------------------------------------------------- the guard (N5)

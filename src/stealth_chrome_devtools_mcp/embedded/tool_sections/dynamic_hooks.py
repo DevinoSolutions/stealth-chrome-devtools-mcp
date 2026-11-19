@@ -46,6 +46,12 @@ async def create_dynamic_hook(
     are given are a convenience, not a sandbox: they are not a security boundary, and
     the code can reach the host (for example through the `fnmatch` module it is given).
 
+    Login vault: because that code can read everything the backend holds, this tool
+    is refused while the login vault is unlocked, and once it has run the vault
+    cannot be unlocked again until the backend is restarted. Use
+    `create_simple_dynamic_hook` (a fixed template, no Python of yours) when you
+    only need to block, redirect, add headers or log.
+
     Args:
         name (str): Human-readable hook name
         requirements (Dict[str, Any]): Matching criteria (url_pattern, method, resource_type, custom_condition)

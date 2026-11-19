@@ -10,9 +10,13 @@ holds the passphrase.
   "ttl_seconds": <number>|null}``: the CLI derived the key locally; the backend
   proves it by decrypting the vault file and keeps it in memory only. Answers
   ``{"unlocked": true, "entries": n}``, ``403`` for a key that does not open the
-  file (and changes nothing), ``400`` for a malformed request.
+  file (and changes nothing), ``400`` for a malformed request, ``409`` (with
+  ``{"error": <the sentence>, "unlock_blocked": true}``, whatever the key) once a
+  tool has run caller Python in this backend process: the key would be readable by
+  it, so there is no unlock until the backend restarts (``caller_python``).
 * ``POST /_stealth/vault/lock``: drops the key. ``{"locked": true}``.
-* ``GET /_stealth/vault/status``: ``{"exists", "unlocked", "expires_in"}``.
+* ``GET /_stealth/vault/status``: ``{"exists", "unlocked", "expires_in",
+  "unlock_blocked"}``.
 
 **No route returns an entry, a username, a password or a key**, and no error text
 echoes what was posted.
@@ -26,7 +30,11 @@ from typing import TYPE_CHECKING
 
 from starlette.responses import JSONResponse
 
-from stealth_chrome_devtools_mcp.embedded import vault_crypto, vault_store
+from stealth_chrome_devtools_mcp.embedded import (
+    caller_python,
+    vault_crypto,
+    vault_store,
+)
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -76,6 +84,10 @@ async def _unlock(request: Request) -> Response:
         return _bad_request(parsed)
     try:
         entries = vault_store.unlock(*parsed)
+    except caller_python.Tainted as refusal:
+        return JSONResponse(
+            {"error": str(refusal), "unlock_blocked": True}, status_code=409
+        )
     except vault_crypto.VaultError:
         return JSONResponse(
             {"error": "the key does not open the vault"}, status_code=403
