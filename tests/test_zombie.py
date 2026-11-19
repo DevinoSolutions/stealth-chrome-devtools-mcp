@@ -145,7 +145,7 @@ def test_the_other_liveness_readers_ask_the_same_question(
     assert process_exit.browser_is_alive(
         type("_Browser", (), {"_process": None, "_process_pid": sleeper.pid})()
     )
-    assert devtools_port._running(sleeper.pid) is True
+    assert zombie.alive(sleeper.pid, unknown=False) is True
     assert zombie.alive(sleeper.pid, unknown=True) is True
     assert status_reads == []
 
