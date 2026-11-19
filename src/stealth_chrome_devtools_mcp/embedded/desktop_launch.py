@@ -38,6 +38,7 @@ this module launches anything.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import os
 import subprocess
@@ -392,9 +393,25 @@ def _tr_command(script: Path) -> str:
     return command
 
 
+#: Every character Windows PowerShell reads as a single quote: the ASCII one and the
+#: four typographic ones (U+2018, U+2019, U+201A, U+201B). Inside a single-quoted
+#: literal a quote character followed by ANY quote character is one literal quote,
+#: so each is doubled with itself and the literal holds the value byte for byte.
+_PS_QUOTES = "'\u2018\u2019\u201a\u201b"
+
+
 def _ps_quote(value: str) -> str:
-    """Single-quote a PowerShell literal. Paths here routinely contain spaces."""
-    return "'" + str(value).replace("'", "''") + "'"
+    """Single-quote a PowerShell literal. Paths here routinely contain spaces.
+
+    Nothing inside a single-quoted literal is interpreted (no ``$(...)``, no
+    backtick, no ``$var``) except the quote characters :data:`_PS_QUOTES`, each of
+    which ends it unless doubled. T-19366 (audit 5, A5): only the ASCII one was
+    doubled, so a caller's ``browser_args`` entry holding a typographic quote left
+    the literal and ran PowerShell as the user."""
+    text = str(value)
+    for quote in _PS_QUOTES:
+        text = text.replace(quote, quote + quote)
+    return "'" + text + "'"
 
 
 def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
@@ -432,6 +449,17 @@ def _launcher_script(executable: str, args: list[str], pid_file: Path) -> str:
         f"{_ps_quote(TASK_CHILD_PRIORITY_NAME)} }} catch {{}}\n"
         f"Set-Content -LiteralPath {_ps_quote(str(pid_file))} -Value $p.Id\n"
     )
+
+
+def write_launcher_script(path: Path, text: str) -> None:
+    """Write the launcher with a UTF-8 BOM. Windows PowerShell 5.1 reads a file
+    without one in the ANSI code page, where the bytes of a Cyrillic or accented
+    letter can be quote characters (``D0 92`` is a U+0412 and, read as cp1252, a
+    ``Ð`` and a right single quote), so the script an agent's argument ends up in was
+    not the script that was written (T-19366, audit 5, A5)."""
+    # Bytes, not ``write_text``: that would turn every newline inside an argument
+    # into CRLF on Windows, and the literal would no longer be the argument.
+    path.write_bytes(codecs.BOM_UTF8 + text.encode("utf-8"))
 
 
 def _devtools_ready(port: int) -> bool:
@@ -666,9 +694,7 @@ async def launch_and_attach(
     # directory created, no task to delete and no 20s deadline to burn.
     command = _tr_command(script)
     launch_dir.mkdir(parents=True, exist_ok=True)
-    script.write_text(
-        _launcher_script(browser_executable, args, pid_file), encoding="utf-8"
-    )
+    write_launcher_script(script, _launcher_script(browser_executable, args, pid_file))
     delegated = _Delegated()
     attached = False
     try:
