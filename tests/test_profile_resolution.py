@@ -163,18 +163,37 @@ class TestCopyProfileDelta:
         assert (dst / "data.txt").exists()
 
     def test_incremental_only_copies_changed(self, tmp_path):
+        """What the delta skips is exactly "same size and same whole-second
+        mtime": a target that matches is left alone even when its bytes differ,
+        and a source that changed size, or moved on in time, is copied."""
         src = tmp_path / "src"
         dst = tmp_path / "dst"
         src.mkdir()
         dst.mkdir()
-        (src / "a.txt").write_text("original")
+        (src / "same.txt").write_text("original")
+        (src / "grew.txt").write_text("short")
+        (src / "touched.txt").write_text("before!!")
         _copy_profile_delta(src, dst)
-        # Modify dst to have different content but same size
-        (dst / "a.txt").write_text("modified")
-        # src unchanged — delta should skip (same size, same mtime)
+
+        # same.txt: the target holds DIFFERENT bytes of the same size at the same
+        # mtime. A copy would put "original" back; a skip leaves the marker.
+        (dst / "same.txt").write_text("MARKER!!")
+        same = (src / "same.txt").stat().st_mtime
+        os.utime(dst / "same.txt", (same, same))
+        # grew.txt changed size at the source; touched.txt kept its size but is
+        # newer by more than a second.
+        (src / "grew.txt").write_text("a good deal longer")
+        (src / "touched.txt").write_text("AFTER!!!")
+        later = (src / "touched.txt").stat().st_mtime + 10
+        os.utime(src / "touched.txt", (later, later))
+
         _copy_profile_delta(src, dst)
-        # The file was overwritten because mtime comparison uses int precision
-        # and both were created in the same second — this is expected behavior
+
+        assert (dst / "same.txt").read_text() == "MARKER!!", (
+            "an unchanged file is skipped"
+        )
+        assert (dst / "grew.txt").read_text() == "a good deal longer"
+        assert (dst / "touched.txt").read_text() == "AFTER!!!"
 
 
 # ---------------------------------------------------------------------------
