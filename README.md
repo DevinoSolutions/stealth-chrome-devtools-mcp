@@ -505,7 +505,6 @@ adopted that app's `PORT`, `DEBUG`, and `SENTRY_DSN` as the server's own.
 | `BROWSER_MASTER_USER_DATA_DIR` | `<root>/master` | the `default` session's directory (name is historical) |
 | `BROWSER_MASTER_SNAPSHOT_DIR` | `<root>/master-snapshot` | its seed: what a new session is copied from |
 | `BROWSER_PROFILE_CLONE_ROOT` | `<root>/sessions` | Folder for profile copies |
-| `BROWSER_PROFILE_REFRESH_DAYS` | `7` | **Currently inert.** Its only reader was deleted as dead code in F-892 — nothing refreshes a copy after N days, and nothing has since the setting was introduced. The field is kept so an existing `.env` naming it still loads; see `audit/stage2/finding_F892_*.md` §6. |
 | `STEALTH_MCP_CLONE_STORAGE_CAP_GB` | `10` | Cap on total auto-clone storage; oldest **idle** clones are reclaimed when exceeded (`0` = disable). Named profiles and in-use clones are never touched. |
 | `STEALTH_MCP_BROWSER_SESSION_STORAGE_CAP_GB` | `20` | Cap on total `sessions/` storage; when exceeded, the largest **idle** named profiles are trimmed of regenerable cache/model dirs — logins kept (`0` = disable). *(Renamed from `STEALTH_MCP_SESSION_STORAGE_CAP_GB`; update your config — the old name is no longer read.)* |
 | `STEALTH_MCP_CLONE_TRASH_RETENTION_HOURS` | `24` | How long a cap-evicted clone stays recoverable in `sessions/.trash/` before purge (`0` = purge on next sweep). |

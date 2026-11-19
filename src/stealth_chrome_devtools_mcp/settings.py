@@ -29,6 +29,7 @@ Design invariants:
   ``get_settings.cache_clear()`` (see the autouse conftest fixture).
 """
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -37,6 +38,21 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_PREFIX = "STEALTH_MCP_"
+
+_logger = logging.getLogger(__name__)
+
+#: Settings a release RETIRED, by the name they were read under. A retired key is
+#: accepted and ignored with ONE warning, never a startup crash: the package is on
+#: PyPI, and ``extra="forbid"`` would turn a line in a user's ``~/.stealth-mcp/.env``
+#: (or a client config) into a backend that cannot start. Add a row when a field
+#: is removed; the text says what happened to it, because "unknown setting" is no
+#: help to someone who set it when it worked.
+_RETIRED_SETTINGS: dict[str, str] = {
+    "BROWSER_PROFILE_REFRESH_DAYS": (
+        "nothing ever refreshed a profile copy after N days (its only reader was "
+        "deleted in F-892), so it did nothing"
+    ),
+}
 
 # The backend is a SHARED singleton, and MCP clients launch it with cwd set to
 # whatever project folder the user happened to open. A cwd-relative ``.env``
@@ -182,15 +198,6 @@ class Settings(BaseSettings):
     browser_master_snapshot_dir: str | None = Field(
         None, validation_alias="BROWSER_MASTER_SNAPSHOT_DIR"
     )
-    # INERT since F-892 and kept deliberately: its only reader
-    # (``clone_storage._clone_needs_refresh``) had no callers of its own and was
-    # deleted with it, so nothing refreshes a copy after N days. The field stays
-    # because ``extra="forbid"`` makes an existing ``.env`` that names it a
-    # startup crash; it is commented out of ``.env.example`` and README calls it
-    # inert. Give it a reader or drop the field — do not leave it half-alive.
-    browser_profile_refresh_days: int = Field(
-        7, validation_alias="BROWSER_PROFILE_REFRESH_DAYS"
-    )
     browser_orphan_profile_max_age: int = Field(
         21600, validation_alias="BROWSER_ORPHAN_PROFILE_MAX_AGE", ge=0
     )
@@ -223,6 +230,35 @@ class Settings(BaseSettings):
     # DSN as its own opt-in (issue #55). Negative-form flag to match the house
     # opt-out idiom above (``no_auto_recovery``).
     no_error_reporting: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_retired_settings(cls, data: object) -> object:
+        """A retired key in ``~/.stealth-mcp/.env`` or in the environment is
+        dropped with one WARNING instead of failing ``extra="forbid"``.
+
+        The ``.env`` FILE is where ``extra="forbid"`` bites (an environment
+        variable the model has no field for is never read, so it never failed);
+        the environment is looked at too, only so the warning is not file-only.
+        """
+        named: set[str] = set()
+        if isinstance(data, dict):
+            for key in [k for k in data if str(k).upper() in _RETIRED_SETTINGS]:
+                named.add(str(key).upper())
+                del data[key]
+        named.update(
+            key
+            for key in os.environ  # noqa: TID251  PERMANENT(canonical env home)
+            if key.upper() in _RETIRED_SETTINGS
+        )
+        for key in sorted(named):
+            _logger.warning(
+                "%s is a retired setting and is ignored: %s. Remove it from "
+                "~/.stealth-mcp/.env or from the environment.",
+                key,
+                _RETIRED_SETTINGS[key],
+            )
+        return data
 
     @classmethod
     def _known_env_names(cls) -> set[str]:

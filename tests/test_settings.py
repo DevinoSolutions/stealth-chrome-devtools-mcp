@@ -187,3 +187,48 @@ def test_env_example_documents_every_field():
         alias = field.validation_alias
         env_name = alias if isinstance(alias, str) else f"STEALTH_MCP_{name}".upper()
         assert env_name in example, f"{env_name} is not documented in .env.example"
+
+
+class TestRetiredSettings:
+    """A setting a release removed must not turn an operator's old line into a
+    backend that cannot start (the package is on PyPI; ``extra="forbid"`` rejects
+    an unknown key in ``~/.stealth-mcp/.env``). ``BROWSER_PROFILE_REFRESH_DAYS``
+    never did anything after F-892 and was retired in T-19641."""
+
+    KEY = "BROWSER_PROFILE_REFRESH_DAYS"
+
+    def test_it_is_no_longer_a_field(self):
+        assert "browser_profile_refresh_days" not in Settings.model_fields
+        assert self.KEY not in Settings._known_env_names()
+
+    def test_a_retired_key_in_the_env_file_loads_and_warns_once(self, tmp_path, caplog):
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{self.KEY}=7\nDEBUG=false\n", encoding="utf-8")
+        with caplog.at_level("WARNING", logger="stealth_chrome_devtools_mcp.settings"):
+            settings = Settings(_env_file=env_file)
+        assert settings.debug is False, "the rest of the file still applies"
+        warned = [r.getMessage() for r in caplog.records if self.KEY in r.getMessage()]
+        assert len(warned) == 1
+        assert "retired" in warned[0]
+        assert "Remove it" in warned[0]
+
+    def test_a_retired_key_in_the_environment_warns_and_changes_nothing(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(self.KEY, "7")
+        with caplog.at_level("WARNING", logger="stealth_chrome_devtools_mcp.settings"):
+            Settings(_env_file=None)
+        assert [r for r in caplog.records if self.KEY in r.getMessage()]
+
+    def test_without_it_there_is_no_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv(self.KEY, raising=False)
+        with caplog.at_level("WARNING", logger="stealth_chrome_devtools_mcp.settings"):
+            Settings(_env_file=None)
+        assert not caplog.records
+
+    def test_an_unknown_key_in_the_env_file_still_fails_loudly(self, tmp_path):
+        """Only the listed names are forgiven; a typo is still a typo."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("BROWSER_PROFILE_REFRESH_DAY=7\n", encoding="utf-8")
+        with pytest.raises(ValidationError):
+            Settings(_env_file=env_file)
