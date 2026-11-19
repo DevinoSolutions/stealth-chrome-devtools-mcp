@@ -19,7 +19,7 @@ import pytest
 from nodriver.core.connection import ProtocolException
 
 from fakes import FakeBrowser, FakeBrowserManager, FakeTab, fake_instance
-from stealth_chrome_devtools_mcp.embedded import captcha_clicker, page_natives
+from stealth_chrome_devtools_mcp.embedded import captcha_clicker, page_natives, tab_open
 from stealth_chrome_devtools_mcp.embedded.captcha_clicker import (
     CHALLENGE,
     CHECKBOX_OFFSETS,
@@ -841,6 +841,25 @@ class TestMonitor:
         await until(lambda: monitor.status("i1")["clicks"])
         assert monitor.status("i1")["clicks"][0]["type"] == "hcaptcha"
         assert not mouse_events(quiet)
+
+    async def test_the_backends_own_tab_is_never_scanned_or_clicked(self, monitor):
+        """The vault's sealed login tab is marked internal: the monitor, which the
+        agent can switch on before a login, sees the tools' view of the tabs."""
+        sealed = CaptchaTab(frame(), target_id="T-sealed")
+        visible = CaptchaTab(frame("hcaptcha"), target_id="T-2")
+        browser = FakeBrowser(tabs=[sealed, visible])
+        tab_open.mark_internal(browser, sealed)
+        manager = FakeBrowserManager(
+            instances=[fake_instance("i1")],
+            tabs={"i1": visible},
+            browsers={"i1": browser},
+        )
+        monitor.start("i1", manager)
+        await until(lambda: monitor.status("i1")["clicks"])
+        await scans(visible, 2)
+        assert not sealed.cdp_frames
+        assert not mouse_events(sealed)
+        assert mouse_events(visible)
 
     async def test_a_tab_that_fails_does_not_stop_the_others(self, monitor):
         class Broken(CaptchaTab):

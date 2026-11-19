@@ -86,7 +86,7 @@ from urllib.parse import parse_qs, urlsplit
 from nodriver import Browser, Tab, cdp
 from nodriver.core.connection import ProtocolException
 
-from stealth_chrome_devtools_mcp.embedded import page_natives
+from stealth_chrome_devtools_mcp.embedded import page_natives, tab_open
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 
 if TYPE_CHECKING:
@@ -731,7 +731,8 @@ class CaptchaMonitor:
         running = self._scans.setdefault(instance_id, {})
         tabs = {
             _tab_key(tab): tab
-            for tab in cast("list[Tab]", list(browser.tabs))
+            # the tools' own view: the vault's sealed login tab is not listed
+            for tab in cast("list[Tab]", tab_open.visible_tabs(browser))
             if hasattr(tab, "send")
         }
         for gone in set(running) - set(tabs):
