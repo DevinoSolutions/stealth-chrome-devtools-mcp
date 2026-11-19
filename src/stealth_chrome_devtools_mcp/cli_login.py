@@ -426,10 +426,16 @@ def _backend_gone(entry: dict[str, object]) -> bool:
     that is still running (or cannot be read) is "cannot say", never "gone"."""
     import psutil
 
+    from stealth_chrome_devtools_mcp.embedded import pid_alive
+
     pid = entry.get("pid")
     if not isinstance(pid, int):
         return False
-    try:
+    # THE one liveness question (T-19642); a pid that cannot be asked about is
+    # "cannot say", so unknown=True (never read as dead)
+    if not pid_alive.alive(pid, unknown=True):
+        return True
+    try:  # alive: is it still this product, or a pid something else reused?
         return not any(
             "stealth" in part.lower() for part in psutil.Process(pid).cmdline()
         )
