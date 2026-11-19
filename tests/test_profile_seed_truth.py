@@ -209,18 +209,16 @@ class TestLoginWitnesses:
     def test_the_dead_refresh_window_is_gone(self):
         """`_clone_needs_refresh` and `_profile_refresh_days` had no callers and
         carried the second spelling of the marker name (review M2). The knob
-        they read, `BROWSER_PROFILE_REFRESH_DAYS`, KEEPS its Settings field —
-        a `.env` naming a field the model no longer has is an `extra="forbid"`
-        crash — but nothing presents it as live: it is COMMENTED OUT in
-        `.env.example` (the name stays, which is all
-        `test_env_example_documents_every_field` asks) and REMOVED from both
-        shipped example configs, which used to set it."""
+        they read, `BROWSER_PROFILE_REFRESH_DAYS`, is retired (T-19641): no
+        Settings field, no `.env.example` line, no shipped example config, and
+        a `.env` that still names it is ignored with a warning, not a crash
+        (`tests/test_settings.py`)."""
         assert not hasattr(clone_storage, "_clone_needs_refresh")
         assert not hasattr(clone_storage, "_profile_refresh_days")
-        assert hasattr(get_settings(), "browser_profile_refresh_days")
+        assert not hasattr(get_settings(), "browser_profile_refresh_days")
         repo_root = Path(__file__).resolve().parent.parent
         env_example = (repo_root / ".env.example").read_text(encoding="utf-8")
-        assert "#BROWSER_PROFILE_REFRESH_DAYS" in env_example
+        assert "BROWSER_PROFILE_REFRESH_DAYS" not in env_example
         for example in ("examples/claude.mcp.json", "examples/codex.config.toml"):
             text = (repo_root / example).read_text(encoding="utf-8")
             assert "BROWSER_PROFILE_REFRESH_DAYS" not in text, example
