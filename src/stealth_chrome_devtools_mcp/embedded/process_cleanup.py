@@ -1,6 +1,7 @@
 """Robust process and temp-profile cleanup for browser instances."""
 
 import atexit
+import math
 import signal
 import sys
 import tempfile
@@ -286,14 +287,18 @@ class ProcessCleanup:
         """Check whether *fallback_pid* still belongs to the process we recorded.
 
         Returns True when ``stored_create_time`` is None (best-effort parity) or
-        the live process's create_time matches the stored value within
-        :data:`RECORDED_START_TOLERANCE_SECONDS`. Returns False when the process
-        is gone, inaccessible, or the create_time diverges (recycled PID).
+        the live process's create_time is STRICTLY within
+        :data:`RECORDED_START_TOLERANCE_SECONDS` of the stored value. Returns False
+        when the process is gone, inaccessible, or the create_time diverges
+        (recycled PID).
         """
+        # ``same_process`` is inclusive and this check never was: a start time
+        # exactly one tolerance away is a different process. The largest float
+        # below the tolerance is the strict bound, stated rather than moved.
         return zombie.same_process(
             fallback_pid,
             stored_create_time,
-            tolerance=RECORDED_START_TOLERANCE_SECONDS,
+            tolerance=math.nextafter(RECORDED_START_TOLERANCE_SECONDS, 0.0),
             unknown=False,
         )
 
