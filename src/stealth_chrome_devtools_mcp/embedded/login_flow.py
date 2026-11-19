@@ -47,6 +47,7 @@ from nodriver import cdp
 from stealth_chrome_devtools_mcp.embedded import (
     browser_cmdline,
     browser_trust,
+    login_evidence,
     login_form,
     login_seal,
     secret_registry,
@@ -81,6 +82,10 @@ _ARGV_RETRY_S = 0.2
 #: Outside-the-login-hosts must be seen on this many polls in a row (a redirect
 #: chain passes through hosts on its way).
 _STABLE_POLLS = 2
+#: A login form that is back after the password must be SEEN THIS MANY consistent
+#: polls in a row before it counts as a rejection (and freezes the entry): a page
+#: that clears the field while its request is still in flight shows it for one.
+_REJECT_POLLS = 3
 
 _GENERIC_ORIGIN_REFUSAL = (
     "the page is not on a host this login may be used on; nothing was typed"
@@ -425,9 +430,11 @@ async def _password_step(
     await _type_into(tab, "password", entry["password"], hosts)
     if not (await login_form.probe(tab))["password_has_value"]:
         return "needs_user", "the password field did not take the typed text"
-    _url, before = await _main(tab)
+    url, before = await _main(tab)
+    urls = login_evidence.urls_for(hosts, url)
+    marks = await login_evidence.session_marks(tab, urls)
     await text_entry.press_enter(tab)
-    return await _outcome(tab, hosts, before)
+    return await _outcome(tab, hosts, before, (urls, marks))
 
 
 def _left(url: str, hosts: list[str]) -> bool:
@@ -475,32 +482,77 @@ async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> Non
     await text_entry.type_characters(tab, element, value, KEY_DELAY_S)
 
 
-async def _outcome(tab: Tab, hosts: list[str], before: str) -> tuple[str, str]:
-    """After the password's Enter: what did the page do?"""
+async def _snapshot(tab: Tab) -> tuple[dict[str, bool], str, str | None]:
+    """``(probe, main URL, loader id)`` of ONE document: the loader id is read before
+    and after the probe, and is ``None`` when they differ (a navigation committed
+    between the reads, so the probe may describe the page that was just left)."""
+    _url, first = await _main(tab)
+    state = await login_form.probe(tab)
+    url, second = await _main(tab)
+    return state, url, second if first == second else None
+
+
+async def _outcome(
+    tab: Tab,
+    hosts: list[str],
+    before: str,
+    evidence: tuple[list[str], frozenset[login_evidence.Mark]],
+) -> tuple[str, str]:
+    """After the password's Enter: what did the page do?
+
+    ``logged_in`` needs positive evidence (:mod:`login_evidence`); a form that came
+    back is a rejection only once it has stayed for :data:`_REJECT_POLLS` polls."""
+    urls, marks = evidence
     deadline = time.monotonic() + OUTCOME_WAIT_S
-    settled = 0
+    settled = back = 0
     while True:
-        state = await login_form.probe(tab)
-        url, loader = await _main(tab)
-        reloaded = loader != before
-        if state["otp"] and not state["password"]:
-            return "needs_totp", "a one-time code is being asked for"
-        if state["password"]:
-            settled = 0
-            if reloaded or not state["password_has_value"]:
-                return (
-                    "rejected",
-                    "the password field came back after the attempt; this login "
-                    "is now frozen",
-                )
-        elif state["username"] and reloaded:
-            return "needs_user", "the page went back to its first step"
-        elif _left(url, hosts) or reloaded:
-            settled += 1
-            if settled >= _STABLE_POLLS:
-                return "logged_in", "signed in"
+        state, url, loader = await _snapshot(tab)
+        if loader is None:
+            settled = back = 0
         else:
-            settled = 0
+            reloaded = loader != before
+            if state["otp"] and not state["password"]:
+                return "needs_totp", "a one-time code is being asked for"
+            if state["password"]:
+                settled = 0
+                back = back + 1 if reloaded or not state["password_has_value"] else 0
+                if back >= _REJECT_POLLS:
+                    return (
+                        "rejected",
+                        "the password field came back after the attempt; this login "
+                        "is now frozen",
+                    )
+            elif state["username"] and reloaded:
+                return "needs_user", "the page went back to its first step"
+            elif _left(url, hosts) or reloaded:
+                back = 0
+                settled += 1
+                if settled >= _STABLE_POLLS:
+                    return await _verdict(tab, hosts, url, urls, marks)
+            else:
+                settled = back = 0
         if time.monotonic() >= deadline:
             return "needs_user", "the page gave no clear answer within the time limit"
         await asyncio.sleep(POLL_S)
+
+
+async def _verdict(
+    tab: Tab,
+    hosts: list[str],
+    url: str,
+    urls: list[str],
+    marks: frozenset[login_evidence.Mark],
+) -> tuple[str, str]:
+    """The page settled with no login form: ``logged_in`` only on evidence."""
+    if _left(url, hosts):
+        return "logged_in", "signed in (the page left the login's hosts)"
+    now = await login_evidence.session_marks(
+        tab, login_evidence.urls_for(hosts, url) or urls
+    )
+    if login_evidence.gained(marks, now):
+        return "logged_in", "signed in (the site set a session cookie)"
+    return (
+        "needs_user",
+        "the page changed after the password but gave no sign of a session (no "
+        "cookie was set and it did not leave the login's hosts); look at it",
+    )

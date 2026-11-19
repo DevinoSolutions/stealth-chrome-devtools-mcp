@@ -94,6 +94,14 @@ def _handler(site):
                 return self._send(302, "", [("Location", "/home")])
             if path == "/login":
                 return self._send(200, LOGIN_FORM.format(action="/login", note=""))
+            if path == "/locked-login":
+                return self._send(
+                    200, LOGIN_FORM.format(action="/locked-login", note="")
+                )
+            if path == "/locked-page":
+                return self._send(
+                    200, "<html><body>Too many attempts. Account locked.</body></html>"
+                )
             if path == "/two/login":
                 return self._send(200, USERNAME_STEP)
             if path == "/home":
@@ -117,6 +125,9 @@ def _handler(site):
                 )
             )
             site.posts.append({"path": self.path, **fields})
+            if self.path == "/locked-login":
+                # a form-less page on the same host, and no session cookie
+                return self._send(302, "", [("Location", "/locked-page")])
             if self.path == "/login":
                 if fields.get("username") == USER and fields.get("password") == RIGHT:
                     sid = secrets.token_hex(8)
@@ -266,6 +277,20 @@ async def test_an_already_signed_in_profile_says_so(site, tmp_path):
         second = await _run(iid)
         assert second["outcome"] == "already_logged_in", second
     assert len(site.posts) == 1
+
+
+async def test_a_form_less_page_with_no_session_is_not_a_login(site, tmp_path):
+    """The reviewer's case: the POST is answered with an account-locked page that
+    has no form. A new document is not evidence of a session: ``needs_user``, not
+    ``logged_in`` and not ``rejected``, and the entry is not frozen."""
+    unlocked_vault({"work": _entry(site, "/locked-login")})
+    async with _browser(tmp_path) as iid:
+        result = await _run(iid)
+        assert result["outcome"] == "needs_user", result
+        assert "no sign of a session" in result["detail"]
+        assert not vault_store.entry("work").get("frozen")
+        assert not await _is_home(iid, site)
+    assert [p["path"] for p in site.posts] == ["/locked-login"]
 
 
 async def test_an_unknown_form_needs_the_user(site, tmp_path):
