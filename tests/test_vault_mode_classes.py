@@ -939,6 +939,7 @@ WRITE_SITES = {
     ("cli_supervise.py", "cmd_supervise"): "the supervisor's own log",
     ("embedded/atomic_file.py", "write_text"): "THE atomic writer: its callers pass the product's own state files",
     ("embedded/atomic_file.py", "write_json"): "the same writer, serialising first",
+    ("embedded/atomic_file.py", "_stage_private"): "the same writer for a PRIVATE file (the vault): owner-only before the first byte",
     ("embedded/clone_trash.py", "discard"): "a trash marker beside a disposable clone, the pid and a time",
     ("embedded/profile_copy.py", "replace_tree"): "the staging owner marker (a pid) inside a profile copy",
     ("embedded/backend_launch.py", "_open_boot_log"): "the backend's boot log, fixed name",
@@ -959,7 +960,7 @@ WRITE_SITES = {
     ("embedded/singleton.py", "_start_server_process"): "the backend's log file, fixed name",
     ("embedded/tool_sections/element_interaction.py", "take_screenshot"): "the caller path, checked by precreate_private_off_loop (PATH_TOOLS)",
     ("embedded/vault_crypto.py", "_file_lock"): "the vault's lock file",
-    ("embedded/vault_crypto.py", "write_file"): "the vault file itself",
+    ("embedded/vault_crypto.py", "write_file"): "the vault file itself, through atomic_file as a private file",
     ("embedded/vault_store.py", "audit"): "the audit log, append only",
 }  # fmt: skip
 

@@ -196,9 +196,10 @@ def _file_lock(path: Path) -> Iterator[None]:
 
 
 def write_file(path: Path, document: Document, expect: object = None) -> None:
-    """Publish ``document`` at ``path``: a sibling scratch file made owner-only
-    BEFORE any byte is written, then an atomic replace, so a reader sees the
-    whole old file or the whole new one and no other OS user ever sees either.
+    """Publish ``document`` at ``path`` through ``atomic_file`` as a PRIVATE file (a
+    sibling temp made owner-only BEFORE any byte is written, then an atomic replace),
+    so a reader sees the whole old file or the whole new one and no other OS user
+    ever sees either.
 
     The replace happens under :func:`_file_lock`. ``expect`` is the ``nonce`` of
     the document the new one was made from: when the file on disk no longer has
@@ -213,19 +214,12 @@ def write_file(path: Path, document: Document, expect: object = None) -> None:
                 current = None
             if current != expect:
                 raise VaultChanged("the vault file changed since it was read")
-        scratch = path.with_name(
-            f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        atomic_file.write_text(
+            path,
+            json.dumps(document, separators=(",", ":")),
+            make_parents=False,
+            narrow=backend_token.owner_only,
         )
-        try:
-            descriptor = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                backend_token.owner_only(scratch)
-                handle.write(json.dumps(document, separators=(",", ":")))
-                handle.flush()
-                os.fsync(handle.fileno())
-            atomic_file.commit(scratch, path)
-        finally:
-            scratch.unlink(missing_ok=True)
 
 
 def _kdf_parameters(header: Document) -> tuple[int, int, int, bytes]:

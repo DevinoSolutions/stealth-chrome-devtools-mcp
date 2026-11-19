@@ -32,7 +32,16 @@ name.
 NOT fsynced, as none of the sites it replaced was: what they relied on is
 atomicity against a concurrent reader and a crashed process, not durability
 across a power cut, and the heartbeat stamp rides this path every few seconds.
-Adding an fsync is a decision for a change of its own.
+Adding an fsync is a decision for a change of its own. The one exception is a
+file written with ``narrow`` (below): a secret the person cannot re-create, which
+is flushed to disk before it replaces the old one.
+
+PRIVATE files (``narrow=``): ``vault_crypto`` publishes the login vault through
+here too, so the staging dance still has one spelling. A caller that passes
+``narrow`` (``backend_token.owner_only``, which this leaf cannot import) gets a
+temp file created owner-only (``0o600``, ``O_EXCL``) and narrowed BEFORE the first
+byte is written, then flushed with ``fsync``, then replaced: no other OS user ever
+sees the bytes, in the temp file or at the target.
 
 A leaf: it imports nothing from this package, so any module may use it. It does
 not swallow ``OSError``: what a failed write MEANS differs per caller (the
@@ -49,6 +58,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 #: Windows refuses an atomic replace while another process holds the target
@@ -74,22 +84,48 @@ def commit(tmp: Path, path: Path) -> None:
             return
 
 
+def _stage_private(
+    tmp: Path, text: str, encoding: str, narrow: Callable[[Path], None]
+) -> None:
+    """Write ``text`` into ``tmp`` readable by its owner alone from the first byte:
+    created ``0o600`` and exclusively (a leftover of a dead writer with this pid is
+    removed first when it can be, and never followed: ``O_EXCL`` refuses what is still
+    there), narrowed with ``narrow``, then flushed."""
+    with contextlib.suppress(OSError):
+        tmp.unlink(missing_ok=True)
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+        narrow(tmp)
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def write_text(
-    path: Path, text: str, *, encoding: str = "utf-8", make_parents: bool = True
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    make_parents: bool = True,
+    narrow: Callable[[Path], None] | None = None,
 ) -> None:
     """Publish ``text`` at ``path`` atomically (see the module docstring).
 
     Creates the parent directory unless ``make_parents`` is False: a caller
     whose directory may be deleted under it (a profile being discarded) must
-    fail rather than bring that directory back. Raises ``OSError`` when the
-    write or the replace cannot be done; the previous file is then whole and no
-    temp file is left behind.
+    fail rather than bring that directory back. ``narrow`` makes the file
+    PRIVATE (see the module docstring). Raises ``OSError`` when the write or the
+    replace cannot be done; the previous file is then whole and no temp file is
+    left behind.
     """
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(text, encoding=encoding)
+        if narrow is None:
+            tmp.write_text(text, encoding=encoding)
+        else:
+            _stage_private(tmp, text, encoding, narrow)
         commit(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

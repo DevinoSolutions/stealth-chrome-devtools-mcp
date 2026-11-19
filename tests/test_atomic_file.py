@@ -185,3 +185,118 @@ class TestCrashBetweenWriteAndReplace:
         leftovers = [n for n in _names(tmp_path) if n != "state.json"]
         assert len(leftovers) <= 1
         assert all(n.endswith(".tmp") for n in leftovers)
+
+
+class TestPrivate:
+    """``narrow=``: the vault's owner-only publish goes through the one writer
+    (audit 7, F2), with the guarantees it had as a private copy."""
+
+    def test_the_temp_is_narrowed_before_the_first_byte_and_flushed(
+        self, tmp_path, monkeypatch
+    ):
+        target = tmp_path / "vault.json"
+        seen: list[tuple[str, int]] = []
+        synced: list[int] = []
+        real_fsync = os.fsync
+
+        def narrow(path: Path) -> None:
+            seen.append((path.name, path.stat().st_size))
+
+        def fsync(descriptor: int) -> None:
+            synced.append(descriptor)
+            real_fsync(descriptor)
+
+        monkeypatch.setattr(atomic_file.os, "fsync", fsync)
+        atomic_file.write_text(target, '{"a":1}', narrow=narrow)
+        assert target.read_text(encoding="utf-8") == '{"a":1}'
+        assert seen == [(f"vault.json.{os.getpid()}.tmp", 0)]
+        assert len(synced) == 1
+        assert _names(tmp_path) == ["vault.json"]
+
+    def test_the_temp_is_created_exclusively_with_mode_0600(
+        self, tmp_path, monkeypatch
+    ):
+        """The POSIX mode check, scripted so it runs on every platform: what the
+        file is created with is what ``os.open`` is asked for."""
+        asked: list[tuple[int, int]] = []
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, **kwargs):
+            asked.append((flags, mode))
+            return real_open(path, flags, mode, **kwargs)
+
+        monkeypatch.setattr(atomic_file.os, "open", spy)
+        atomic_file.write_text(tmp_path / "v.json", "{}", narrow=lambda path: None)
+        [(flags, mode)] = asked
+        assert mode == 0o600
+        assert flags & os.O_EXCL
+        assert flags & os.O_CREAT
+        assert flags & os.O_WRONLY
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    def test_the_published_file_has_no_group_or_other_bits(self, tmp_path):
+        target = tmp_path / "v.json"
+        atomic_file.write_text(target, "{}", narrow=lambda path: None)
+        assert target.stat().st_mode & 0o077 == 0
+
+    def test_the_real_narrowing_publishes_a_readable_file(self, tmp_path):
+        """On Windows this is the DACL call; the file is still ours to read."""
+        from stealth_chrome_devtools_mcp.embedded import backend_token
+
+        target = tmp_path / "v.json"
+        atomic_file.write_text(target, '{"k":"v"}', narrow=backend_token.owner_only)
+        atomic_file.write_text(target, '{"k":"w"}', narrow=backend_token.owner_only)
+        assert json.loads(target.read_text(encoding="utf-8")) == {"k": "w"}
+        assert _names(tmp_path) == ["v.json"]
+
+    def test_a_leftover_of_a_dead_writer_with_this_pid_is_replaced_not_followed(
+        self, tmp_path
+    ):
+        target = tmp_path / "v.json"
+        stale = tmp_path / f"v.json.{os.getpid()}.tmp"
+        stale.write_text("old leftover", encoding="utf-8")
+        atomic_file.write_text(target, "new", narrow=lambda path: None)
+        assert target.read_text(encoding="utf-8") == "new"
+        assert _names(tmp_path) == ["v.json"]
+
+    def test_a_failing_narrowing_leaves_the_old_file_whole_and_nothing_staged(
+        self, tmp_path
+    ):
+        target = tmp_path / "v.json"
+        atomic_file.write_text(target, "old")
+
+        def refuse(path: Path) -> None:
+            raise OSError("cannot restrict")
+
+        with pytest.raises(OSError, match="cannot restrict"):
+            atomic_file.write_text(target, "new", narrow=refuse)
+        assert target.read_text(encoding="utf-8") == "old"
+        assert _names(tmp_path) == ["v.json"]
+
+    def test_a_write_with_no_narrowing_is_as_it_was_and_is_not_flushed(
+        self, tmp_path, monkeypatch
+    ):
+        def no_fsync(descriptor: int) -> None:
+            raise AssertionError("an ordinary state write is not fsynced")
+
+        monkeypatch.setattr(atomic_file.os, "fsync", no_fsync)
+        atomic_file.write_json(tmp_path / "s.json", {"v": 1})
+        assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8")) == {"v": 1}
+
+    def test_the_vault_file_is_published_through_the_one_writer(
+        self, tmp_path, monkeypatch
+    ):
+        from stealth_chrome_devtools_mcp.embedded import backend_token, vault_crypto
+
+        calls: list[dict[str, object]] = []
+        real = atomic_file.write_text
+
+        def spy(path, text, **kwargs):
+            calls.append(kwargs)
+            real(path, text, **kwargs)
+
+        monkeypatch.setattr(atomic_file, "write_text", spy)
+        vault_crypto.write_file(tmp_path / "v.json", {"v": 1})
+        assert calls == [
+            {"make_parents": False, "narrow": backend_token.owner_only},
+        ]
