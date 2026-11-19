@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import inspect
 import os
 import subprocess
 import sys
@@ -28,8 +29,10 @@ import psutil
 import pytest
 
 from stealth_chrome_devtools_mcp.embedded import (
+    backend_eviction,
     backend_supervisor,
     browser_cmdline,
+    browser_pid_registry,
     client_presence,
     desktop_launch,
     devtools_port,
@@ -701,6 +704,49 @@ def test_a_failed_launchs_marker_is_released_only_for_a_pid_the_os_no_longer_has
 
     assert spawn_leak.reap_launched_browsers(cleanup, "/p", object(), "i") == []
     assert released == (["/p"] if reaped else [])
+
+
+@pytest.mark.parametrize(
+    ("world", "counted"),
+    [
+        pytest.param(World(), True, id="a live browser"),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            True,
+            id="a zombie: still listed, so still counted",
+        ),
+        pytest.param(World(cmdline=(), exe=GONE), True, id="tearing down: counted"),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID)), False, id="gone"
+        ),
+    ],
+)
+def test_the_eviction_guard_counts_a_browser_the_process_table_still_lists(
+    monkeypatch, tmp_path, world, counted
+):
+    """``backend_eviction.owned_entries`` documents the direction: over-reporting a
+    browser spares a backend (one extra process), under-reporting one closes it.
+    So its default asks the table, which still lists a zombie, not ``alive``."""
+    install(monkeypatch, world)
+    record = {"i": {"pid": PID, browser_pid_registry.OWNER_PID: 77}}
+    monkeypatch.setattr(browser_pid_registry, "read_entries", lambda _path: record)
+
+    owned = backend_eviction.owned_entries(tmp_path, 77)
+
+    assert (owned == record) is counted
+
+
+def test_the_eviction_guards_default_liveness_is_the_process_table():
+    """The direction lives in ONE default, so the callers that used to bind
+    ``psutil.pid_exists`` each stopped doing it (T-19642); an override stays
+    possible and is a test's."""
+    for function in (
+        backend_eviction.owned_entries,
+        backend_eviction.owned_browsers,
+        backend_eviction.protected,
+    ):
+        default = inspect.signature(function).parameters["is_running"].default
+        assert default is zombie.listed, function.__name__
 
 
 @pytest.mark.parametrize(

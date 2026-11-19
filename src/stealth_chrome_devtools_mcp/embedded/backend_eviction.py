@@ -107,7 +107,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from stealth_chrome_devtools_mcp.embedded import browser_pid_registry
+from stealth_chrome_devtools_mcp.embedded import browser_pid_registry, zombie
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -213,7 +213,7 @@ def owned_entries(
     state_dir: Path,
     owner_pid: object,
     *,
-    is_running: Callable[[int], bool],
+    is_running: Callable[[int], bool] = zombie.listed,
 ) -> browser_pid_registry.Entries:
     """The recorded browsers ``owner_pid`` owns that are still running, keyed by
     instance id.
@@ -224,7 +224,8 @@ def owned_entries(
     here. Anything that is not an int owns no browsers rather than every
     browser.
 
-    Liveness is the caller's ``is_running`` and is asked of the BROWSER pid
+    Liveness is ``is_running``'s (by default ``zombie.listed``: the process
+    table, in which a zombie still counts) and is asked of the BROWSER pid
     alone, deliberately not of the ``(pid, create_time)`` pair
     ``browser_pid_registry.is_reapable`` compares. A pid recycled onto an
     unrelated process makes this over-report, i.e. spares a backend that could
@@ -250,7 +251,7 @@ def owned_browsers(
     state_dir: Path,
     owner_pid: object,
     *,
-    is_running: Callable[[int], bool],
+    is_running: Callable[[int], bool] = zombie.listed,
 ) -> list[int]:
     """The pids of the browsers ``owner_pid`` recorded that are still running
     (:func:`owned_entries`, as pids)."""
@@ -267,7 +268,7 @@ def protected(  # noqa: PLR0913  PERMANENT(function interface)
     state_dir: Path,
     identity_matches: Callable[[BackendEntry | None], bool],
     is_ours: Callable[[object], bool],
-    is_running: Callable[[int], bool],
+    is_running: Callable[[int], bool] = zombie.listed,
     silence: Callable[[], float | None] | None = None,
 ) -> list[int]:
     """The live browsers that make ``entry``'s backend UNEVICTABLE — empty when
