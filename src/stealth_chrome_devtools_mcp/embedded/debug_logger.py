@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from stealth_chrome_devtools_mcp.embedded import secret_registry
+from stealth_chrome_devtools_mcp.embedded import secret_registry, vault_mode
 from stealth_chrome_devtools_mcp.embedded.logging_setup import correlation_id_var
 from stealth_chrome_devtools_mcp.embedded.path_confinement import open_binary, open_text
 
@@ -542,7 +542,9 @@ class DebugLogger:
             max_errors: Max errors to export. None for all.
             max_warnings: Max warnings to export. None for all.
             max_info: Max info logs to export. None for all.
-            fmt: Export format ('json'/'pickle'/'gzip-pickle'/'auto').
+            fmt: Export format ('json'/'pickle'/'gzip-pickle'/'auto'). While a
+                login vault exists (``vault_mode``) it is JSON whatever is asked,
+                and an explicit pickle is refused.
             overwrite: Replace *filepath* if it exists; otherwise an existing
                 file is refused (F-1025).
 
@@ -550,6 +552,8 @@ class DebugLogger:
             str: The filepath where logs were exported.
         """
         import time
+
+        fmt = vault_mode.export_format(fmt)  # T-19366: the ONE place a format is chosen
 
         try:
             self._emit_stderr(

@@ -79,6 +79,22 @@ still work. Outside a login only the narrow refusal applies, so ordinary
 ``chrome://`` use is untouched. A login closes every DevTools window open in its
 browser, counted by :func:`closed_windows` and reported by ``login``.
 
+**Vault mode (T-19366, ``vault_mode``).** While a login vault exists the guard also
+keeps two things true of EVERY browser it protects, spawned or re-attached (both go
+through :func:`protect`, before anyone is handed the browser), and re-asserts them
+every :data:`KEEP_SECONDS` so a vault created after the browser was started, or a
+download folder an agent set before it existed, is taken back within that time:
+
+* *no page of a browser reads a local file*: a target at a ``file:`` URL (or
+  ``view-source:file:``, case, tabs and a drive path spelling included) is barred
+  from the tools and blanked exactly like an inspector (:func:`barred_url`), by
+  whichever route it got there (``navigate``, a redirect, ``go_back``);
+* *downloads go to one folder under generated names*: ``Browser.setDownloadBehavior``
+  is sent to the browser with :func:`vault_mode.download_pin` (``allowAndName``,
+  ``~/Downloads/stealth-mcp-downloads``, or ``deny``). No tool can change it back:
+  ``execute_cdp_command`` is refused in the mode. When the mode ends the guard sends
+  ``default``.
+
 **What is NOT covered**: a process running as the same OS user, which can open the
 loopback port directly (``RUNBOOK`` "Local trust boundary"); a browser started by an
 older backend with ``--remote-allow-origins=*`` (covered by 2 only); an inspector
@@ -95,13 +111,14 @@ import contextlib
 import itertools
 import json
 import logging
+import re
 import unicodedata
 import urllib.parse
 from typing import TYPE_CHECKING, cast
 
 from nodriver import cdp
 
-from stealth_chrome_devtools_mcp.embedded import login_seal, tab_open
+from stealth_chrome_devtools_mcp.embedded import login_seal, tab_open, vault_mode
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
@@ -136,6 +153,8 @@ _TASKS: set[asyncio.Task[None]] = set()
 _CLOSED: dict[int, set[str]] = {}
 _COUNTER = itertools.count(1)
 
+#: How often a guard re-asserts vault mode (the download pin, no ``file:`` page).
+KEEP_SECONDS = 5.0
 CONNECT_BUDGET_SECONDS = 15.0
 COMMAND_BUDGET_SECONDS = 10.0
 REFUSAL = (
@@ -321,6 +340,34 @@ def inspector_url(url: object) -> bool:
     return scheme in ("chrome", "about") and host in INSPECTOR_PAGES
 
 
+_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def file_url(url: object) -> bool:
+    """Whether ``url`` reads a local file: the ``file`` scheme as Chrome reads it
+    (case, a tab or newline inside, leading control characters, ``view-source:``), or
+    a Windows drive or UNC path written where a URL goes. A URL this parser cannot
+    read but that starts with the scheme counts too (the safe error)."""
+    if not isinstance(url, str):
+        return False
+    text = url.translate(_URL_INNER).strip(_URL_EDGE)
+    if _DRIVE_PATH.match(text) or text.startswith("\\\\"):
+        return True
+    try:
+        scheme, _host = _inspector_host(url)
+    except ValueError:
+        return text.lower().startswith(("file:", "view-source:file:"))
+    if scheme == "view-source":
+        return file_url(text[len("view-source:") :])
+    return scheme == "file"
+
+
+def barred_url(url: object) -> bool:
+    """Whether a target at ``url`` is kept from every tool: an inspector, always, and
+    a ``file:`` page while vault mode is on."""
+    return inspector_url(url) or (file_url(url) and vault_mode.active())
+
+
 def internal_url(url: object) -> bool:
     """Whether ``url`` is a browser-internal page of the class
     :data:`INTERNAL_SCHEMES` (the new-tab page excepted). ``view-source:`` is read
@@ -341,7 +388,8 @@ def internal_url(url: object) -> bool:
 def refusal(url: object, instance_id: object = None) -> str | None:
     """Why ``url`` may not be loaded, or ``None``.
 
-    Refused when it is a browser inspector (:func:`inspector_url`), when a login is
+    Refused when it is a browser inspector (:func:`inspector_url`), when it is a
+    ``file:`` URL while vault mode is on (:func:`file_url`), when a login is
     running in ``instance_id`` (any instance when the call names none) and it is a
     browser-internal page (:func:`internal_url`), or when its
     port is the debug port of any browser of this backend, WHATEVER the host:
@@ -350,6 +398,8 @@ def refusal(url: object, instance_id: object = None) -> str | None:
     the port, not the spelling, is what is checked."""
     if inspector_url(url):
         return INSPECTOR_REFUSAL
+    if file_url(url) and vault_mode.active():
+        return vault_mode.file_url_refusal()
     instance = instance_id if isinstance(instance_id, str) else None
     if login_seal.login_in_flight(instance) and internal_url(url):
         return INTERNAL_REFUSAL
@@ -434,6 +484,10 @@ class _Guard:
         self.inspectors: set[str] = set()
         #: Resolved when this guard ends (:func:`watch` waits on it).
         self.done: asyncio.Future[None] | None = None
+        #: Whether this browser's downloads are pinned by vault mode, and the task
+        #: that re-asserts the pin and the ``file:`` bar every KEEP_SECONDS.
+        self.pinned = False
+        self.keeper: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         import websockets
@@ -457,6 +511,41 @@ class _Guard:
         # The attach events are handled in tasks: wait until every target that was
         # already open has its interception before the browser is handed on.
         await self.idle()
+        # Vault mode before the browser is handed on: a pin that cannot be made
+        # fails the guard, and with it the spawn or the re-attach.
+        await self.keep()
+        self.keeper = asyncio.create_task(self._keep_loop())
+
+    async def keep(self) -> None:
+        """Make vault mode true of this browser, or lift what it set (one pass).
+
+        Outside the mode this is one ``stat`` and, when a pin was set before, one
+        ``Browser.setDownloadBehavior`` back to ``default``. Inside it: the pin, then
+        every open target is judged again, so a ``file:`` page that was already open
+        when the vault appeared is barred and blanked, not left readable."""
+        pin = await asyncio.to_thread(vault_mode.download_pin)
+        if pin is None:
+            if self.pinned:
+                await self.command(
+                    "Browser.setDownloadBehavior", {"behavior": "default"}
+                )
+                self.pinned = False
+            return
+        await self.command("Browser.setDownloadBehavior", pin)
+        self.pinned = True
+        found = await self.command("Target.getTargets")
+        for info in cast("list[Json]", found.get("targetInfos", [])):
+            self._judge(info)
+
+    async def _keep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(KEEP_SECONDS)
+            try:
+                await self.keep()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001  PERMANENT(a failed pass is tried again; the guard ends with its socket)
+                _logger.warning("vault mode could not be kept for %s", self.port)
 
     async def idle(self) -> None:
         """Return once no handler task is running. Not ``gather`` over
@@ -481,6 +570,8 @@ class _Guard:
         )
 
     async def stop(self) -> None:
+        if self.keeper is not None:
+            self.keeper.cancel()
         if self.done is not None and not self.done.done():
             self.done.set_result(None)
         if self.reader is not None:
@@ -588,7 +679,7 @@ class _Guard:
         target = str(info.get("targetId", ""))
         if not target:
             return
-        if not inspector_url(info.get("url")):
+        if not barred_url(info.get("url")):
             self.clean.add(target)
             login_seal.mark_internal(target, internal_url(info.get("url")))
             if target in self.inspectors:  # it was blanked: no longer one

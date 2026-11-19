@@ -71,6 +71,7 @@ the mode of a file that already exists).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
@@ -580,6 +581,28 @@ def precreate_private(
     created = not real.exists()
     os.close(_open_fd(real, overwrite=overwrite, tool=tool))
     return real, created
+
+
+async def precreate_private_off_loop(
+    path: str | os.PathLike[str], *, tool: str, overwrite: bool = False
+) -> tuple[Path, bool]:
+    """:func:`precreate_private` on a worker thread: the rules resolve dozens of
+    roots (a second on a cold disk), and the shared backend's event loop must not
+    stall for that (T-19366, B6). A cancellation that lands while the thread works
+    still gets the empty file it made removed."""
+    task = asyncio.ensure_future(
+        asyncio.to_thread(precreate_private, path, tool=tool, overwrite=overwrite)
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_discard_late)
+        raise
+
+
+def _discard_late(task: asyncio.Future[tuple[Path, bool]]) -> None:
+    if not task.cancelled() and task.exception() is None:
+        discard_precreated(*task.result())
 
 
 def discard_precreated(real: Path, created: bool) -> None:

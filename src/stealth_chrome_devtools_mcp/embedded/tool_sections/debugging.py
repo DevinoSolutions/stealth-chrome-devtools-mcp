@@ -102,9 +102,10 @@ async def export_debug_logs(
                      - Small data (<100 items): JSON (human readable)
                      - Medium data (100-1000 items): Pickle (fast binary)
                      - Large data (>1000 items): Gzip-Pickle (fastest, compressed)
+                     While a login vault exists the file is JSON whatever is asked
+                     ('auto' means JSON) and an explicit pickle is refused.
         overwrite (bool): Replace an explicit `filename` that already exists
-            (default: False, an existing file is refused). The file is created owner-only (0600) and
-            may not lie in a credential store, browser profile or this server's state.
+            (default: False, an existing file is refused). Created owner-only (0600). Refused: a credential store, browser profile or this server's state; a folder code is loaded or started from (site-packages, the Python and virtual-environment trees, this package, startup and shell-profile folders); and a file name code runs by (.py, .pth, .bat, .ps1, .sh, .exe ...).
 
     Returns:
         str: Path to the exported file.

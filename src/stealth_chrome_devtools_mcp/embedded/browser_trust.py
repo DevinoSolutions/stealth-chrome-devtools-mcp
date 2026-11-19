@@ -93,6 +93,17 @@ REFUSED_SWITCHES = frozenset(
         # a record of the traffic
         "log-net-log",
         "net-log-capture-mode",
+        "net-log",
+        # a program Chrome starts, or a file it writes at a name its caller chose:
+        # code as the OS user for anyone who can pass a switch (T-19366, audit 5).
+        # ``--log-file`` is judged by its value: the product's own persistent-profile
+        # launch passes one (``chrome_log``), under its own log directory.
+        "renderer-cmd-prefix",
+        "utility-cmd-prefix",
+        "gpu-launcher",
+        "browser-subprocess-path",
+        "ppapi-plugin-launcher",
+        "trace-startup-file",
     }
 )
 
@@ -160,13 +171,34 @@ def canonical_switch(argument: str) -> str:
     return f"--{name}{equals}{value}"
 
 
+def _own_chrome_log(argument: str) -> bool:
+    """Whether a ``--log-file=`` argument names one of the product's own Chrome logs
+    (``chrome_log``): ``chrome-*.log`` directly in the backend's log directory."""
+    from stealth_chrome_devtools_mcp.embedded import logging_setup
+
+    value = os.path.expandvars(argument.strip().partition("=")[2].strip().strip('"'))
+    try:
+        path = Path(value)
+        folder = os.path.normcase(os.path.realpath(path.parent))
+        ours = os.path.normcase(os.path.realpath(logging_setup.resolve_log_dir()))
+    except (OSError, ValueError):
+        return False
+    return (
+        path.name.startswith(logging_setup.CHROME_LOG_PREFIX)
+        and path.suffix == ".log"
+        and folder == ours
+    )
+
+
 def switch_refusal(options: object, cmdline: list[str]) -> str | None:
     """Why the browser's launch arguments forbid a login, or ``None``."""
     if getattr(options, "proxy", None):
         return "this browser was started with a proxy; vault logins are refused in it"
     for argument in cmdline:
         name = switch_name(argument)
-        if name in REFUSED_SWITCHES:
+        if name in REFUSED_SWITCHES or (
+            name == "log-file" and not _own_chrome_log(argument)
+        ):
             return (
                 f"this browser was started with --{name}; "
                 "vault logins are refused in it"

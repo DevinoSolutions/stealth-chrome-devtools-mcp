@@ -4,7 +4,7 @@ The third review read the password, the username and the 32-byte vault key throu
 ``create_python_binding``: the caller's Python runs in the backend with its own
 authority. The fourth review showed a per-process "taint" is bookkeeping, because
 such code can persist itself and come back after the restart that clears it. So the
-rule is decided by durable state (``caller_python``): while a vault file exists the
+rule is decided by durable state (``vault_mode``): while a vault file exists the
 two tools are refused in every backend; with none they behave as they always did;
 and a vault is not created while a backend has already run one. This file pins the
 rule, the tools that carry it, the CLI side of it, and a census that fails when a
@@ -24,10 +24,10 @@ from fakes import FakeBrowserManager, call_tool
 from stealth_chrome_devtools_mcp import cli_login
 from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
-    caller_python,
     dynamic_hook_ai_interface,
     dynamic_hook_system,
     vault_crypto,
+    vault_mode,
     vault_routes,
     vault_store,
 )
@@ -44,6 +44,9 @@ def _vault(tmp_path, monkeypatch):
     monkeypatch.setattr(vault_crypto, "SCRYPT_N", 2**10)
     monkeypatch.setattr(vault_store, "VAULT_PATH", tmp_path / "vault.json")
     monkeypatch.setattr(vault_store, "AUDIT_PATH", tmp_path / "audit.jsonl")
+    # the CLI asks the registry's backends: never the real ones
+    monkeypatch.setattr(backend_registry, "SERVER_STATE_FILE", tmp_path / "server.json")
+    monkeypatch.setattr(backend_registry, "read_backends", lambda _path: [])
     monkeypatch.setenv(LOOPBACK_ENV, "1")
     reset()
     yield
@@ -70,48 +73,48 @@ def test_the_set_is_the_two_tools_that_run_caller_python():
     assert {
         "create_python_binding",
         "create_dynamic_hook",
-    } == caller_python.RUNS_CALLER_PYTHON
+    } == vault_mode.RUNS_CALLER_PYTHON
 
 
-@pytest.mark.parametrize("tool", sorted(caller_python.RUNS_CALLER_PYTHON))
+@pytest.mark.parametrize("tool", sorted(vault_mode.RUNS_CALLER_PYTHON))
 def test_with_no_vault_the_tool_runs_as_it_always_did(tool):
-    caller_python.admit(tool)
-    assert caller_python.ran() == tool
+    vault_mode.admit(tool)
+    assert vault_mode.ran() == tool
 
 
-@pytest.mark.parametrize("tool", sorted(caller_python.RUNS_CALLER_PYTHON))
+@pytest.mark.parametrize("tool", sorted(vault_mode.RUNS_CALLER_PYTHON))
 def test_while_a_vault_exists_such_a_tool_is_refused_locked_or_unlocked(key, tool):
     for unlocked in (False, True):
         if unlocked:
             vault_store.unlock(key, None)
         with pytest.raises(ToolError) as caught:
-            caller_python.admit(tool)
+            vault_mode.admit(tool)
         text = str(caught.value)
         assert tool in text
         assert "stealthy login destroy" in text  # how to remove the vault
         assert "disabled" in text
-        assert caller_python.ran() is None  # a refused call ran nothing
+        assert vault_mode.ran() is None  # a refused call ran nothing
 
 
 def test_removing_the_vault_turns_the_tools_back_on(key):
     with pytest.raises(ToolError):
-        caller_python.admit("create_python_binding")
+        vault_mode.admit("create_python_binding")
     vault_store.VAULT_PATH.unlink()
-    caller_python.admit("create_python_binding")
-    assert caller_python.ran() == "create_python_binding"
+    vault_mode.admit("create_python_binding")
+    assert vault_mode.ran() == "create_python_binding"
 
 
 def test_a_tool_outside_the_set_is_never_refused_and_never_marks(key):
     vault_store.unlock(key, None)
-    caller_python.admit("execute_script")
-    caller_python.admit("execute_python_in_browser")  # transpiled to page JavaScript
-    assert caller_python.ran() is None
+    vault_mode.admit("execute_script")
+    vault_mode.admit("execute_python_in_browser")  # transpiled to page JavaScript
+    assert vault_mode.ran() is None
 
 
 def test_the_first_tool_to_run_is_the_one_recorded():
-    caller_python.admit("create_dynamic_hook")
-    caller_python.admit("create_python_binding")
-    assert caller_python.ran() == "create_dynamic_hook"
+    vault_mode.admit("create_dynamic_hook")
+    vault_mode.admit("create_python_binding")
+    assert vault_mode.ran() == "create_dynamic_hook"
 
 
 class _Path:
@@ -130,13 +133,13 @@ def test_a_vault_path_that_cannot_be_read_counts_as_a_vault(monkeypatch):
     denied = PermissionError(errno.EACCES, "denied")
     monkeypatch.setattr(vault_store, "VAULT_PATH", _Path(denied))
     with pytest.raises(ToolError):
-        caller_python.admit("create_python_binding")
+        vault_mode.admit("create_python_binding")
 
 
 @pytest.mark.parametrize("code", [errno.ENOENT, errno.ENOTDIR])
 def test_a_missing_file_or_folder_is_no_vault(monkeypatch, code):
     monkeypatch.setattr(vault_store, "VAULT_PATH", _Path(OSError(code, "missing")))
-    caller_python.admit("create_python_binding")
+    vault_mode.admit("create_python_binding")
 
 
 def test_the_process_is_marked_before_the_file_is_read(monkeypatch):
@@ -146,11 +149,11 @@ def test_the_process_is_marked_before_the_file_is_read(monkeypatch):
     seen = []
 
     def exists():
-        seen.append(caller_python.ran())
+        seen.append(vault_mode.ran())
         return False
 
-    monkeypatch.setattr(caller_python, "vault_exists", exists)
-    caller_python.admit("create_dynamic_hook")
+    monkeypatch.setattr(vault_mode, "vault_exists", exists)
+    vault_mode.admit("create_dynamic_hook")
     assert seen == ["create_dynamic_hook"]
 
 
@@ -169,7 +172,7 @@ async def test_the_registry_refuses_create_python_binding_while_a_vault_exists(
             python_code="def leak(x):\n    return 1\n",
         )
     assert "disabled" in str(caught.value)
-    assert caller_python.ran() is None
+    assert vault_mode.ran() is None
 
 
 async def test_the_registry_refuses_create_dynamic_hook_while_a_vault_exists(
@@ -197,7 +200,7 @@ async def test_with_no_vault_the_registry_lets_a_hook_through(server_mod):
         function_code="def process_request(request):\n    return None\n",
     )
     assert result
-    assert caller_python.ran() == "create_dynamic_hook"
+    assert vault_mode.ran() == "create_dynamic_hook"
 
 
 async def test_a_tool_that_runs_marks_even_when_its_code_does_not_load(server_mod):
@@ -209,7 +212,7 @@ async def test_a_tool_that_runs_marks_even_when_its_code_does_not_load(server_mo
             binding_name="b",
             python_code="this is not python (",
         )
-    assert caller_python.ran() == "create_python_binding"
+    assert vault_mode.ran() == "create_python_binding"
 
 
 async def test_a_simple_hook_is_not_caller_python_and_needs_no_vault_decision(
@@ -223,7 +226,7 @@ async def test_a_simple_hook_is_not_caller_python_and_needs_no_vault_decision(
         url_pattern="*",
         action="block",
     )
-    assert caller_python.ran() is None
+    assert vault_mode.ran() is None
 
 
 # The payloads are TEXT handed to the template under test, which must keep them as
@@ -267,15 +270,15 @@ async def test_the_route_says_which_tool_ran_and_nothing_else():
 
     reply = await vault_routes._caller_python(None)
     assert json.loads(reply.body) == {"ran": None}
-    caller_python.admit("create_python_binding")
+    vault_mode.admit("create_python_binding")
     reply = await vault_routes._caller_python(None)
     assert json.loads(reply.body) == {"ran": "create_python_binding"}
 
 
 def test_the_status_and_the_unlock_route_have_no_taint_left_in_them(key):
     assert set(vault_store.status()) == {"exists", "unlocked", "expires_in"}
-    assert not hasattr(caller_python, "Tainted")
-    assert not hasattr(caller_python, "unlock_gate")
+    assert not hasattr(vault_mode, "Tainted")
+    assert not hasattr(vault_mode, "unlock_gate")
 
 
 class _Reply:
@@ -289,12 +292,19 @@ class _Reply:
         return self._payload
 
 
-def _backends(monkeypatch, replies):
-    """Record these backends and answer each port from ``replies``."""
+def _backends(monkeypatch, replies, *, gone=True, pids=None):
+    """Record these backends and answer each port from ``replies``. ``gone`` is what
+    a refused connection means for their processes (dead, or still running)."""
     import httpx
 
-    entries = [{"port": port, "version": "9.9"} for port in replies]
+    entries = [
+        {"port": port, "version": "9.9", **({"pid": pids[port]} if pids else {})}
+        for port in replies
+    ]
     monkeypatch.setattr(backend_registry, "read_backends", lambda _path: entries)
+    monkeypatch.setattr(cli_login, "_backend_gone", lambda _entry: gone)
+    monkeypatch.setattr(backend_registry, "read_record", lambda _path: {})
+    requests = []
 
     class Client:
         def __init__(self, **_kw):
@@ -306,14 +316,16 @@ def _backends(monkeypatch, replies):
         def __exit__(self, *_a):
             return False
 
-        def get(self, url, headers=None):
+        def request(self, method, url, headers=None):
             port = int(url.split(":")[2].split("/")[0])
+            requests.append((method, port, url.split(str(port))[1]))
             answer = replies[port]
             if isinstance(answer, Exception):
                 raise answer
             return answer
 
     monkeypatch.setattr(httpx, "Client", Client)
+    return requests
 
 
 def test_a_clean_backend_and_a_dead_one_do_not_stop_a_vault(monkeypatch):
@@ -384,9 +396,11 @@ def test_init_says_what_it_disables_before_it_asks_for_a_passphrase(
     )
     assert _run("init") == 0
     out = capsys.readouterr().out
-    assert "create_python_binding and create_dynamic_hook are DISABLED" in out
+    for line in vault_mode.describe():  # EVERY restriction, from the one list
+        assert line in out
+    assert "VAULT MODE" in out
     assert "stealthy login destroy" in out
-    assert out.index("DISABLED") < out.index("created")
+    assert out.index("VAULT MODE") < out.index("created")
     assert asked == [False, True]  # before the file, and again once it exists
     assert vault_store.VAULT_PATH.exists()
     assert order  # and the passphrase was asked after the notice
@@ -423,12 +437,15 @@ def test_status_shows_that_the_tools_are_disabled_only_while_a_vault_exists(
 ):
     monkeypatch.setattr(cli_login, "_request", _no_backend)
     _run("status")
-    assert "DISABLED" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "vault mode: OFF" in out
+    assert "are disabled" not in out
     make_vault({"work": password_entry()})
     _run("status")
     out = capsys.readouterr().out
-    assert "create_python_binding and create_dynamic_hook are DISABLED" in out
-    assert "stealthy login destroy" in out
+    assert "vault mode: ON" in out
+    for line in vault_mode.describe():
+        assert line in out
 
 
 def _no_backend(*_a, **_k):
@@ -443,10 +460,10 @@ def test_destroy_deletes_the_vault_after_the_word_and_turns_the_tools_back_on(
     monkeypatch.setattr(cli_login, "_request", _no_backend)
     monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
     with pytest.raises(ToolError):
-        caller_python.admit("create_python_binding")
+        vault_mode.admit("create_python_binding")
     assert _run("destroy") == 0
     assert not vault_store.VAULT_PATH.exists()
-    caller_python.admit("create_python_binding")
+    vault_mode.admit("create_python_binding")
     assert "deleted" in capsys.readouterr().out
 
 
@@ -459,7 +476,7 @@ def test_destroy_locks_a_backend_that_still_holds_the_key(monkeypatch):
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
     assert _run("destroy") == 0
-    assert calls == [("POST", vault_routes.LOCK_PATH)]
+    assert calls == [("POST", vault_routes.LOCK_PATH)]  # the one this shell resolves
 
 
 def test_destroy_does_nothing_without_the_word_or_without_a_vault(monkeypatch, capsys):
@@ -584,7 +601,7 @@ def test_every_site_that_evaluates_python_is_pinned_to_a_tool_or_to_a_reason():
     unpinned = sorted(found - set(PINNED))
     assert not unpinned, (
         "a new exec / eval / compile / import-by-name site: if a tool can reach it "
-        "with a caller's text, add that tool to caller_python.RUNS_CALLER_PYTHON and "
+        "with a caller's text, add that tool to vault_mode.RUNS_CALLER_PYTHON and "
         f"pin the site in PINNED; otherwise pin it with the reason: {unpinned}"
     )
     vanished = sorted(set(PINNED) - found)
@@ -600,5 +617,308 @@ def test_every_pinned_tool_is_in_the_set_and_is_a_registered_tool():
         for tool in module.TOOLS
     }
     reached = {tool for tool in PINNED.values() if tool is not None}
-    assert reached == caller_python.RUNS_CALLER_PYTHON
-    assert registered >= caller_python.RUNS_CALLER_PYTHON
+    assert reached == vault_mode.RUNS_CALLER_PYTHON
+    assert registered >= vault_mode.RUNS_CALLER_PYTHON
+
+
+# ----------------------------------------- unlock, status, destroy, init (audit 5)
+
+
+def test_unlock_runs_the_census_before_a_passphrase_is_asked(monkeypatch, capsys):
+    """A vault restored from a backup never went through ``init``: A4."""
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(
+        cli_login, "_backend_problems", lambda: ["the backend on port 7 has run X"]
+    )
+    monkeypatch.setattr(
+        cli_login, "_hidden", lambda _p: pytest.fail("a passphrase was asked for")
+    )
+    posted = []
+    monkeypatch.setattr(cli_login, "_post_key", lambda *a: posted.append(a))
+    assert _run("unlock", duration=None) == 1
+    err = capsys.readouterr().err
+    assert "has run X" in err
+    assert "nothing was unlocked" in err
+    assert not posted
+
+
+def test_unlock_goes_on_when_every_backend_is_clean(monkeypatch, capsys):
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_backend_problems", list)
+    monkeypatch.setattr(cli_login, "_hidden", lambda _p: "correct horse")
+    monkeypatch.setattr(cli_login, "_post_key", lambda *a: (200, {"entries": 1}))
+    assert _run("unlock", duration=None) == 0
+    assert "unlocked" in capsys.readouterr().out
+
+
+def test_status_reports_a_backend_that_ran_caller_python_and_a_disagreement(
+    monkeypatch, capsys
+):
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(
+        cli_login, "_backend_problems", lambda: ["the backend on port 7 has run X"]
+    )
+    monkeypatch.setattr(
+        cli_login,
+        "_request",
+        lambda *a, **k: (200, {"exists": False, "unlocked": False, "expires_in": None}),
+    )
+    assert _run("status") == 0
+    out = capsys.readouterr().out
+    assert "backends: ! the backend on port 7 has run X" in out
+    assert "disagree" in out  # this shell sees a vault the backend does not
+
+
+def test_status_says_so_when_every_backend_is_clean(monkeypatch, capsys):
+    monkeypatch.setattr(cli_login, "_backend_problems", list)
+    monkeypatch.setattr(cli_login, "_request", _no_backend)
+    assert _run("status") == 0
+    assert "no registered backend has run caller Python" in capsys.readouterr().out
+
+
+def test_an_older_release_is_named_in_the_sentence_that_refuses(monkeypatch):
+    _backends(monkeypatch, {1001: _Reply(404, {})})
+    (problem,) = cli_login._backend_problems()
+    assert "9.9" in problem
+    assert "before vault mode" in problem
+
+
+def test_a_refused_connection_to_a_live_process_is_cannot_say_not_dead(monkeypatch):
+    import httpx
+
+    _backends(
+        monkeypatch, {1001: httpx.ConnectError("refused")}, gone=False, pids={1001: 42}
+    )
+    (problem,) = cli_login._backend_problems()
+    assert "1001" in problem
+    assert "pid 42" in problem
+    assert "still running" in problem
+
+
+def test_a_refused_connection_to_a_gone_process_is_dead(monkeypatch):
+    import httpx
+
+    _backends(monkeypatch, {1001: httpx.ConnectError("refused")}, gone=True)
+    assert cli_login._backend_problems() == []
+
+
+def test_a_process_is_gone_when_it_does_not_exist_or_is_not_ours(monkeypatch):
+    import psutil
+
+    assert cli_login._backend_gone({"pid": 2**22 + 12345}) is True
+    assert cli_login._backend_gone({}) is False  # no pid recorded: cannot say
+    assert cli_login._backend_gone({"pid": None}) is False
+
+    class Process:
+        def __init__(self, argv):
+            self.argv = argv
+
+        def cmdline(self):
+            return self.argv
+
+    for argv, gone in (
+        (["python", "-m", "stealth_chrome_devtools_mcp", "--transport", "http"], False),
+        (["C:/tools/stealth-chrome-devtools.exe"], False),
+        (["notepad.exe"], True),  # the pid was reused by something else
+    ):
+        monkeypatch.setattr(psutil, "Process", lambda _pid, argv=argv: Process(argv))
+        assert cli_login._backend_gone({"pid": 5}) is gone, argv
+
+    def denied(_pid):
+        raise psutil.AccessDenied(_pid)
+
+    monkeypatch.setattr(psutil, "Process", denied)
+    assert cli_login._backend_gone({"pid": 5}) is False  # cannot read it: cannot say
+
+
+def test_an_unreadable_registry_is_cannot_say_and_a_missing_one_is_no_backends():
+    registry = backend_registry.SERVER_STATE_FILE
+    assert cli_login._registry_problem() is None  # no file: no backends recorded
+    registry.write_text("{not json", encoding="utf-8")
+    assert "unreadable" in cli_login._registry_problem()
+    registry.write_text('{"schema": 3, "backends": []}', encoding="utf-8")
+    assert cli_login._registry_problem() is None
+    registry.unlink()
+    registry.mkdir()  # there, and not a file anyone can read
+    assert "unreadable" in cli_login._registry_problem()
+
+
+def test_init_refuses_when_the_registry_cannot_be_read(monkeypatch, capsys):
+    backend_registry.SERVER_STATE_FILE.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(
+        cli_login, "_hidden", lambda _p: pytest.fail("a passphrase was asked for")
+    )
+    assert _run("init") == 1
+    assert "server.json" in capsys.readouterr().err
+    assert not vault_store.VAULT_PATH.exists()
+
+
+def test_destroy_locks_every_registered_backend_not_only_the_resolved_one(
+    monkeypatch, capsys
+):
+    make_vault({"work": password_entry()})
+    requests = _backends(
+        monkeypatch,
+        {1001: _Reply(200, {}), 1002: _Reply(200, {}), 1003: _Reply(200, {})},
+    )
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_request", _no_backend)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
+    assert _run("destroy") == 0
+    assert sorted(requests) == [
+        ("POST", port, vault_routes.LOCK_PATH) for port in (1001, 1002, 1003)
+    ]
+    assert not vault_store.VAULT_PATH.exists()
+    assert capsys.readouterr().err == ""
+
+
+def test_destroy_deletes_anyway_and_says_which_backend_may_still_hold_the_key(
+    monkeypatch, capsys
+):
+    import httpx
+
+    make_vault({"work": password_entry()})
+    _backends(
+        monkeypatch,
+        {
+            1001: _Reply(500, {}),
+            1002: httpx.ReadTimeout("slow"),
+            1003: httpx.ConnectError("refused"),
+        },
+        gone=False,
+        pids={1001: 1, 1002: 2, 1003: 3},
+    )
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_request", _no_backend)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
+    assert _run("destroy") == 0
+    err = capsys.readouterr().err
+    for port in ("1001", "1002", "1003"):
+        assert f"port {port}" in err
+    assert "may still hold the key" in err
+    assert not vault_store.VAULT_PATH.exists()
+
+
+def test_destroy_on_a_directory_is_a_clean_error_and_the_mode_stays_on(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "a-directory"
+    path.mkdir()
+    monkeypatch.setattr(vault_store, "VAULT_PATH", path)
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("asked to confirm")
+    )
+    assert _run("destroy") == 1
+    err = capsys.readouterr().err
+    assert "is a directory" in err
+    assert "Traceback" not in err
+    assert vault_mode.vault_exists()
+    with pytest.raises(ToolError):
+        vault_mode.admit("create_python_binding")
+
+
+def test_destroy_that_cannot_delete_says_so_and_the_mode_stays_on(monkeypatch, capsys):
+    make_vault({"work": password_entry()})
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    monkeypatch.setattr(cli_login, "_request", _no_backend)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "DESTROY")
+
+    def deny(self, *a, **k):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", deny)
+    assert _run("destroy") == 1
+    err = capsys.readouterr().err
+    assert "could not delete" in err
+    assert "stays on" in err
+    assert "Traceback" not in err
+
+
+def test_an_interrupted_init_takes_the_file_back_and_says_nothing_false(
+    monkeypatch, tmp_path, capsys
+):
+    """B2: the second look is interrupted AFTER the file was written."""
+    _cli(monkeypatch, tmp_path, [[]])
+    calls = []
+
+    def problems():
+        calls.append(vault_store.VAULT_PATH.exists())
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return []
+
+    monkeypatch.setattr(cli_login, "_backend_problems", problems)
+    assert _run("init") != 0
+    assert calls == [False, True]
+    assert not vault_store.VAULT_PATH.exists()  # so "nothing was changed" is true
+    assert "nothing was changed" in capsys.readouterr().err
+
+
+def test_a_crash_in_the_second_look_takes_the_file_back_too(monkeypatch, tmp_path):
+    _cli(monkeypatch, tmp_path, [[]])
+    calls = []
+
+    def problems():
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return []
+
+    monkeypatch.setattr(cli_login, "_backend_problems", problems)
+    with pytest.raises(RuntimeError):
+        cli_login._cmd_init(argparse.Namespace())
+    assert not vault_store.VAULT_PATH.exists()
+
+
+def test_an_interrupted_init_that_cannot_remove_the_file_says_what_remains(
+    monkeypatch, tmp_path, capsys
+):
+    _cli(monkeypatch, tmp_path, [[]])
+    calls = []
+
+    def problems():
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return []
+
+    def deny(self, *a, **k):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(cli_login, "_backend_problems", problems)
+    monkeypatch.setattr(pathlib.Path, "unlink", deny)
+    assert _run("init") == 1
+    err = capsys.readouterr().err
+    assert "was created" in err
+    assert "could not be removed" in err
+    assert "stealthy login destroy" in err
+    assert "nothing was changed" not in err
+
+
+def test_init_warns_about_a_short_passphrase_and_not_about_a_long_one(
+    monkeypatch, tmp_path, capsys
+):
+    _cli(monkeypatch, tmp_path, [[], []], passphrase="short")
+    assert _run("init") == 0
+    assert "fewer than 12" in capsys.readouterr().err
+    vault_store.VAULT_PATH.unlink()
+    _cli(monkeypatch, tmp_path, [[], []], passphrase="a long enough passphrase")
+    assert _run("init") == 0
+    assert "fewer than" not in capsys.readouterr().err
+
+
+def test_init_refuses_over_a_dangling_link(tmp_path, monkeypatch, capsys):
+    link = tmp_path / "link.json"
+    try:
+        link.symlink_to(tmp_path / "nowhere.json")
+    except OSError:
+        pytest.skip("this machine does not let the test make a symbolic link")
+    monkeypatch.setattr(vault_store, "VAULT_PATH", link)
+    monkeypatch.setattr(cli_login, "_require_terminal", lambda _what: None)
+    assert _run("init") == 1
+    assert "already exists" in capsys.readouterr().err
+    assert link.is_symlink()  # not replaced

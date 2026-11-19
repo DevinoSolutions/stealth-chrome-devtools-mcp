@@ -163,11 +163,11 @@ def test_status_reports_without_unlocking(client):
 
 
 def test_caller_python_route_names_the_tool_that_ran_and_nothing_else(client):
-    from stealth_chrome_devtools_mcp.embedded import caller_python
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
 
     url = vault_routes.CALLER_PYTHON_PATH
     assert client.get(url, headers=AUTH).json() == {"ran": None}
-    caller_python.admit("create_dynamic_hook")
+    vault_mode.admit("create_dynamic_hook")
     assert client.get(url, headers=AUTH).json() == {"ran": "create_dynamic_hook"}
 
 

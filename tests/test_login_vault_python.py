@@ -5,7 +5,7 @@ the backend process, and with the vault unlocked that code read the password, th
 username and the 32-byte key (``vault_store.entry("work")``, ``vault_store._key``)
 with no browser trick. The fourth review: a per-process taint does not help, since
 such code can persist itself and come back after a restart. The rule is now about
-what is on disk (``caller_python``): while a vault file exists, in every backend,
+what is on disk (``vault_mode``): while a vault file exists, in every backend,
 locked or not, the tools are refused; with none they work as they always did.
 
 Real Chrome and the real tools. The password is compared inside the test, never
@@ -18,7 +18,7 @@ import pytest
 
 import test_login_flow as flow
 from e2e_helpers import get_fn
-from stealth_chrome_devtools_mcp.embedded import caller_python, vault_store
+from stealth_chrome_devtools_mcp.embedded import vault_mode, vault_store
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from vault_helpers import make_vault, unlocked_vault
 
@@ -71,7 +71,7 @@ async def test_create_python_binding_is_refused_while_the_vault_is_unlocked(
         assert "disabled" in str(caught.value)
         assert not _holds_a_secret(str(caught.value))
         assert await _no_such_binding(iid, "leak")  # the binding does not exist
-        assert caller_python.ran() is None
+        assert vault_mode.ran() is None
 
 
 async def test_a_locked_vault_is_just_as_closed_to_both_tools(site, tmp_path):
@@ -93,7 +93,7 @@ async def test_a_locked_vault_is_just_as_closed_to_both_tools(site, tmp_path):
                 instance_ids=[iid],
             )
         assert await _no_such_binding(iid, "leak")
-        assert caller_python.ran() is None
+        assert vault_mode.ran() is None
         # and the vault still unlocks and signs in
         key = make_vault({"work": _entry(site)})
         vault_store.unlock(key, None)
@@ -109,7 +109,7 @@ async def test_with_no_vault_the_binding_works_exactly_as_it_did(site, tmp_path)
         )
         answer = await get_fn("execute_script")(instance_id=iid, script=CALL % "ping")
         assert "pong-x" in str(answer)
-        assert caller_python.ran() == "create_python_binding"
+        assert vault_mode.ran() == "create_python_binding"
         await get_fn("create_dynamic_hook")(
             name="h",
             requirements={"url_pattern": "*"},

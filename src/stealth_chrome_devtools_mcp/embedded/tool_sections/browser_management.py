@@ -102,7 +102,7 @@ async def spawn_browser(
         viewport_height (int): Requested browser WINDOW height in pixels, same
             best-effort clamping as viewport_width.
         proxy (Optional[str]): Proxy server URL.
-        browser_args (List[str]): Additional browser launch args.
+        browser_args (List[str]): Additional browser launch args. While a login vault exists only --window-size, --window-position, --start-maximized, --lang, --accept-lang, --user-agent, --disable-features, --enable-blink-features, --disable-blink-features and http(s) start pages are accepted; any other switch is refused (`stealthy login destroy` removes the vault).
         timezone_id (Optional[str]): IANA timezone ID applied via CDP timezone override.
         idle_timeout_seconds (Optional[int]): Idle timeout override in seconds for automatic instance cleanup.
         block_resources (List[str]): List of resource types to block (e.g., ['image', 'font', 'stylesheet']).
@@ -225,7 +225,7 @@ async def spawn_browser(
             it resolves to exactly the same profile ``session`` does — it is the
             same argument under the older word, not a second one — so passing
             both with DIFFERENT values is an error rather than a precedence you
-            cannot see. Everything said about ``session`` above applies to it.
+            cannot see. Everything said about ``session`` above applies to it; while a login vault exists it takes a NAME, never a path.
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.
 
     Network interception captures request/response metadata by default, but
@@ -908,7 +908,7 @@ async def navigate(
 
     Args:
         instance_id (str): Browser instance ID.
-        url (str): URL to navigate to.
+        url (str): URL to navigate to (a file: URL is refused while a login vault exists).
         wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.
         timeout (int): Navigation timeout in ms (default 30000, max 60000). Most pages load in under 10s — only increase if you have evidence the page is slow. Values above 60000 are capped.
         referrer (Optional[str]): Referrer URL, sent exactly as given with this navigation only. It does not touch the tab's extra headers and is not remembered for later navigations.

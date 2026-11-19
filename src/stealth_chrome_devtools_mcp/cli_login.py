@@ -13,13 +13,14 @@ at its line cap, on ``cli_supervise``'s precedent.
 parser has no ``--password VALUE`` option, and abbreviations are off so a
 half-typed flag cannot turn into one.
 
-**The vault and caller Python (``embedded.caller_python``).** While a vault file
-exists, ``create_python_binding`` and ``create_dynamic_hook`` are disabled in every
-backend, because they run the caller's Python where the key is. So ``init`` says
-so before it asks for a passphrase, refuses while any backend the registry knows
-has run such a tool, and checks again once the file exists (one of the two always
-sees the other); ``status`` shows it, and ``destroy`` is how the person turns the
-tools back on.
+**Vault mode (``embedded.vault_mode``).** While a vault file exists every raw or
+unbounded tool capability is refused in every backend: caller Python, raw CDP,
+browser switches off a short list, ``file:`` URLs, pickle exports and page
+downloads outside one folder. So ``init`` lists them all before it asks for a
+passphrase, refuses while any backend the registry knows has run caller Python
+(or cannot say), and checks again once the file exists (one of the two always sees
+the other); ``unlock`` and ``status`` run the same census; ``destroy`` locks every
+backend the registry records and deletes the file, which turns the mode off.
 
 **Who may type the passphrase.** ``init`` and ``unlock`` refuse to run unless
 stdin is a terminal, so a script or an agent cannot feed them. ``add``, ``edit``
@@ -38,15 +39,19 @@ import argparse
 import contextlib
 import getpass
 import json
+import os
 import re
 import sys
 import urllib.parse
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import ModuleType
+
+    import httpx
 
     from stealth_chrome_devtools_mcp.embedded.vault_crypto import Document
 
@@ -55,6 +60,7 @@ VERB = "login"
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)")
 _UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 _AUDIT_DEFAULT_LINES = 20
+_SHORT_PASSPHRASE = 12
 
 
 class _RefusedError(Exception):
@@ -183,8 +189,8 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     verb("status", "is there a vault, and is it unlocked")
     verb(
         "destroy",
-        "delete the vault and every stored login (a terminal only); turns "
-        "create_python_binding and create_dynamic_hook back on",
+        "delete the vault and every stored login (a terminal only); turns vault "
+        "mode off, so the tools it restricts work again",
     )
 
     audit = verb("audit", "print the login attempts the backend recorded")
@@ -370,114 +376,256 @@ def _reload_backend(key: bytes) -> None:
 # -------------------------------------------------------------------- commands
 
 
-_CALLER_PYTHON_TOOLS = "create_python_binding and create_dynamic_hook"
-_INIT_NOTICE = (
-    f"Note: while this vault exists, {_CALLER_PYTHON_TOOLS} are DISABLED in every "
-    "backend on this machine. They run an agent's Python inside the backend, "
-    "which could read the vault's key and passwords. `stealthy login destroy` "
-    "deletes the vault and turns them back on. JavaScript tools are not affected."
-)
+def _init_notice() -> str:
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
+
+    lines = "\n".join(f"  - {line}" for line in vault_mode.describe())
+    return (
+        "Note: while this vault exists VAULT MODE is on in every backend on this "
+        "machine. An agent's tools could otherwise reach the vault's key and "
+        f"passwords, so these are restricted:\n{lines}\n"
+        "JavaScript tools (execute_script and the like) are not affected. "
+        "`stealthy login destroy` deletes the vault and turns every one of these "
+        "back on."
+    )
 
 
-def _backend_problems() -> list[str]:
-    """One sentence per backend the registry knows that has run caller Python, or
-    cannot say it has not. Empty means every backend is clean. A recorded backend
-    nothing answers for is dead and is not asked again."""
+@dataclass
+class _Answer:
+    """What one recorded backend said to one request."""
+
+    port: int
+    entry: dict[str, object]
+    reply: httpx.Response
+
+
+def _registry_problem() -> str | None:
+    """Why the backend registry cannot list the running backends, or ``None``. A
+    missing file is no backends (documented); one that is there and cannot be read
+    is "cannot say"."""
+    from stealth_chrome_devtools_mcp.embedded import backend_registry
+
+    path = backend_registry.SERVER_STATE_FILE
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        pass  # there, and not even readable: the same answer as a corrupt file
+    if backend_registry.read_record(path) is None:
+        return (
+            "the backend registry (server.json) is unreadable, so the running "
+            "backends cannot be listed"
+        )
+    return None
+
+
+def _backend_gone(entry: dict[str, object]) -> bool:
+    """Whether a recorded backend that refused a connection is DEAD: its process is
+    gone, or the pid now belongs to something that is not this product. A process
+    that is still running (or cannot be read) is "cannot say", never "gone"."""
+    import psutil
+
+    pid = entry.get("pid")
+    if not isinstance(pid, int):
+        return False
+    try:
+        return not any(
+            "stealth" in part.lower() for part in psutil.Process(pid).cmdline()
+        )
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.Error:
+        return False
+
+
+def _ask_each_backend(
+    path: str, method: str = "GET"
+) -> tuple[list[_Answer], list[str]]:
+    """Ask every backend the registry records: ``(answers, problems)``. A problem is
+    a backend nobody can vouch for: it did not answer, or refused a connection while
+    its process runs, or the registry itself cannot be read."""
     import httpx
 
     from stealth_chrome_devtools_mcp.embedded import (
         backend_registry,
         backend_token,
         singleton,
-        vault_routes,
     )
 
+    answers: list[_Answer] = []
     problems = []
+    registry = _registry_problem()
+    if registry is not None:
+        problems.append(registry)
     for entry in backend_registry.read_backends(backend_registry.SERVER_STATE_FILE):
         port = entry.get("port")
         if not isinstance(port, int):
             continue
         url = urllib.parse.urlsplit(singleton._backend_http_url(port))._replace(
-            path=vault_routes.CALLER_PYTHON_PATH
+            path=path
         )
         try:
             with httpx.Client(trust_env=False, timeout=5.0) as client:
-                reply = client.get(url.geturl(), headers=backend_token.auth_headers())
+                reply = client.request(
+                    method, url.geturl(), headers=backend_token.auth_headers()
+                )
         except httpx.ConnectError:
+            if not _backend_gone(entry):
+                problems.append(
+                    f"the backend on port {port} (pid {entry.get('pid', '?')}) "
+                    "refused a connection but its process is still running"
+                )
             continue
         except httpx.HTTPError as exc:
             problems.append(
                 f"the backend on port {port} did not answer ({type(exc).__name__})"
             )
             continue
-        ran = 0  # anything but a clear answer is "cannot say"
-        if reply.status_code == HTTPStatus.OK:
+        answers.append(_Answer(port, entry, reply))
+    return answers, problems
+
+
+def _backend_problems() -> list[str]:
+    """One sentence per backend the registry knows that has run caller Python, or
+    cannot say it has not. Empty means every backend is clean."""
+    from stealth_chrome_devtools_mcp.embedded import vault_routes
+
+    answers, problems = _ask_each_backend(vault_routes.CALLER_PYTHON_PATH)
+    for answer in answers:
+        ran: object = 0  # anything but a clear answer is "cannot say"
+        if answer.reply.status_code == HTTPStatus.OK:
             with contextlib.suppress(ValueError):
-                payload = reply.json()
+                payload = answer.reply.json()
                 if isinstance(payload, dict) and "ran" in payload:
                     ran = payload["ran"]
         if ran is None:
             continue
         problems.append(
-            f"the backend on port {port} has run {ran} in this session"
+            f"the backend on port {answer.port} has run {ran} in this session"
             if isinstance(ran, str)
-            else f"the backend on port {port} (release {entry.get('version', '?')}) "
-            f"cannot say whether it has run {_CALLER_PYTHON_TOOLS} (HTTP "
-            f"{reply.status_code})"
+            else f"the backend on port {answer.port} (release "
+            f"{answer.entry.get('version', '?')}) cannot say whether it has run "
+            f"caller Python (HTTP {answer.reply.status_code}); a release before "
+            "vault mode has no such gate"
         )
     return problems
 
 
-def _refuse_while_resident(problems: list[str]) -> None:
+def _refuse_while_resident(problems: list[str], outcome: str) -> None:
     if problems:
         raise _RefusedError(
-            "no vault was created: "
+            f"{outcome}: "
             + "; ".join(problems)
             + ". Code those tools ran could read the vault's key, so restart "
-            "each backend (`stealth-chrome-devtools restart`), then run "
-            "`stealthy login init` again."
+            "each backend (`stealth-chrome-devtools restart`), then run the "
+            "command again."
         )
 
 
+#: Said once, in words, when ``init`` is interrupted after the file was written.
+_LEFT_BEHIND = (
+    "the vault file was created at {path} and could not be removed ({reason}); "
+    "`stealthy login destroy` removes it"
+)
+
+
 def _cmd_init(_args: argparse.Namespace) -> int:
-    from stealth_chrome_devtools_mcp.embedded import vault_crypto
+    from stealth_chrome_devtools_mcp.embedded import vault_crypto, vault_mode
 
     _require_terminal("init")
     path = _store().VAULT_PATH
-    if path.exists():
+    if vault_mode.vault_exists():
         raise _RefusedError(f"a vault already exists at {path}; nothing was changed")
-    _refuse_while_resident(_backend_problems())
-    print(_INIT_NOTICE)
+    _refuse_while_resident(_backend_problems(), "no vault was created")
+    print(_init_notice())
     header = vault_crypto.new_header()
-    key = vault_crypto.derive_key(_new_secret("new passphrase"), header)
-    _write(header, key, {})
-    # The file exists now, so every tool admitted from here on is refused. One that
-    # was admitted before it is seen here: take the vault back rather than keep a
-    # key's worth of secrets next to code that is already running.
-    problems = _backend_problems()
-    if problems:
-        path.unlink(missing_ok=True)
-        _refuse_while_resident(problems)
+    passphrase = _new_secret("new passphrase")
+    if len(passphrase) < _SHORT_PASSPHRASE:
+        print(
+            f"warning: this passphrase has fewer than {_SHORT_PASSPHRASE} "
+            "characters. Anyone who gets a copy of the vault file can try "
+            "guesses offline; `stealthy login destroy` and `init` start over.",
+            file=sys.stderr,
+        )
+    key = vault_crypto.derive_key(passphrase, header)
+    try:
+        _write(header, key, {})
+        # The file exists now, so every tool admitted from here on is refused. One
+        # that was admitted before it is seen here: take the vault back rather than
+        # keep a key's worth of secrets next to code that is already running.
+        problems = _backend_problems()
+        if problems:
+            path.unlink(missing_ok=True)
+            _refuse_while_resident(problems, "no vault was created")
+    except BaseException:
+        # An interrupt, or a crash, between writing the file and finishing the
+        # check: the file goes, or the person is told it stays.
+        if vault_mode.vault_exists():
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise _RefusedError(
+                    _LEFT_BEHIND.format(
+                        path=path, reason=exc.strerror or type(exc).__name__
+                    )
+                ) from None
+        raise
     print(f"created {path}")
     return 0
 
 
-def _cmd_destroy(_args: argparse.Namespace) -> int:
+def _lock_everywhere() -> list[str]:
+    """Drop the key in every backend the registry records and in the one this shell
+    resolves; the sentences are the ones that could not be locked."""
     from stealth_chrome_devtools_mcp.embedded import vault_routes
+
+    answers, warnings = _ask_each_backend(vault_routes.LOCK_PATH, "POST")
+    warnings.extend(
+        f"the backend on port {a.port} did not lock (HTTP {a.reply.status_code})"
+        for a in answers
+        if a.reply.status_code != HTTPStatus.OK
+    )
+    try:
+        code, _ = _request("POST", vault_routes.LOCK_PATH)  # the resolved one
+    except _NoBackendError:
+        return warnings
+    if code != HTTPStatus.OK:
+        warnings.append(f"the backend this shell resolves did not lock (HTTP {code})")
+    return warnings
+
+
+def _cmd_destroy(_args: argparse.Namespace) -> int:
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
 
     _require_terminal("destroy")
     path = _store().VAULT_PATH
-    if not path.exists():
+    if not vault_mode.vault_exists():
         raise _RefusedError("there is no vault to delete")
+    if path.is_dir() and not path.is_symlink():
+        raise _RefusedError(
+            f"{path} is a directory, not a vault file; remove it yourself if it is "
+            "in the way (vault mode stays on while anything is at that path)"
+        )
     print(
         f"This deletes {path} and every login in it (the audit log stays), and "
-        f"turns {_CALLER_PYTHON_TOOLS} back on in every backend."
+        "turns vault mode off in every backend: the tools it restricts work again."
     )
     if input("type DESTROY to go on: ").strip() != "DESTROY":
         raise _RefusedError("nothing was deleted")
-    with contextlib.suppress(_NoBackendError):
-        _request("POST", vault_routes.LOCK_PATH)  # drop a key a backend still holds
-    path.unlink()
+    warnings = _lock_everywhere()  # drop every key a backend still holds, first
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise _RefusedError(
+            f"could not delete {path} ({exc.strerror or type(exc).__name__}); "
+            "vault mode stays on"
+        ) from None
+    for warning in warnings:
+        print(
+            f"warning: {warning}; it may still hold the key until it restarts",
+            file=sys.stderr,
+        )
     print("deleted the vault")
     return 0
 
@@ -622,6 +770,9 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
 
     _require_terminal("unlock")
     document = _read_header()
+    # A vault restored from a backup, or copied here, never went through ``init``:
+    # the census runs here too, before a passphrase is typed.
+    _refuse_while_resident(_backend_problems(), "nothing was unlocked")
     try:
         key = vault_crypto.derive_key(_hidden("passphrase: "), document)
         vault_crypto.open_sealed(key, document)
@@ -654,13 +805,21 @@ def _cmd_lock(_args: argparse.Namespace) -> int:
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
+    from stealth_chrome_devtools_mcp.embedded import vault_mode
+
     path = _store().VAULT_PATH
-    print(f"vault: {path} ({'exists' if path.exists() else 'not created'})")
-    if path.exists():
-        print(
-            f"caller Python: {_CALLER_PYTHON_TOOLS} are DISABLED while the vault "
-            "exists (`stealthy login destroy` removes it)"
-        )
+    here = vault_mode.vault_exists()
+    print(f"vault: {path} ({'exists' if here else 'not created'})")
+    print(f"vault mode: {'ON' if here else 'OFF'}")
+    if here:
+        for line in vault_mode.describe():
+            print(f"  - {line}")
+    problems = _backend_problems()
+    if problems:
+        for problem in problems:
+            print(f"backends: ! {problem}")
+    else:
+        print("backends: no registered backend has run caller Python")
     try:
         code, state = _request("GET", _status_path())
     except _NoBackendError as exc:
@@ -669,6 +828,13 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     if code != HTTPStatus.OK:
         raise _RefusedError(
             f"the backend did not answer the status request (HTTP {code})"
+        )
+    if state.get("exists") is not here:
+        print(
+            "warning: this shell and the backend disagree about whether a vault "
+            f"exists (shell: {here}, backend: {state.get('exists')}); they are "
+            "using different home directories, and the backend is not in vault mode "
+            "unless it sees the file"
         )
     if not state.get("unlocked"):
         print("backend: locked")
