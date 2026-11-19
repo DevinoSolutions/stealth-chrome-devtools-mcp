@@ -18,7 +18,7 @@ from nodriver.core.connection import ProtocolException
 
 from fakes import forbid_real_process_kills
 from fakes_wire import listener_alive, registered, until, wire
-from stealth_chrome_devtools_mcp.embedded import devtools_port
+from stealth_chrome_devtools_mcp.embedded import devtools_port, zombie
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 #: Far above any pid a machine hands out, so ``psutil`` finds nothing below them.
@@ -121,7 +121,9 @@ def _launcher_exits_after_two(monkeypatch, throwaways) -> None:
     loaded host one late wake of the loop spends a 0.3 s patience after a single ask
     (T-7014 pre-push: 1 throwaway made), so a count pinned to the clock flakes."""
     monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 60.0)
-    monkeypatch.setattr(devtools_port, "_running", lambda pid: len(throwaways.made) < 2)
+    monkeypatch.setattr(
+        zombie, "alive", lambda pid, *, unknown: len(throwaways.made) < 2
+    )
 
 
 def _lost_browser(*processes: tuple[str, int]) -> SimpleNamespace:

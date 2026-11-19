@@ -15,10 +15,12 @@ where none of them can exist.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +38,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     zombie,
 )
 from stealth_chrome_devtools_mcp.embedded.process_cleanup import ProcessCleanup
+from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 PID = 4242
 READABLE = "/usr/lib/chromium/chromium"
@@ -159,7 +162,9 @@ READERS = {
     "tree member's reader (now zombie.alive, held)": lambda pid: zombie.alive(
         pid, unknown=True
     ),
-    "devtools_port._running": devtools_port._running,
+    "devtools_port's reader (now zombie.alive, dead if unknown)": lambda pid: (
+        zombie.alive(pid, unknown=False)
+    ),
     "process_exit.browser_is_alive": lambda pid: process_exit.browser_is_alive(
         _Browser(pid)
     ),
@@ -182,7 +187,7 @@ ALIVE_TABLE = {
     # the browser_cmdline commit: the tree member's reader now asks it too.
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, True, False, False),
+        (True, True, True, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -205,7 +210,7 @@ ALIVE_TABLE = {
     ),
     "listed, is_running refused (AccessDenied)": (
         World(running=psutil.AccessDenied(PID)),
-        (True, True, False, False),
+        (True, True, True, False),
     ),
     "listed, status refused (AccessDenied)": (
         World(status=psutil.AccessDenied(PID)),
@@ -213,14 +218,14 @@ ALIVE_TABLE = {
     ),
     "pid_exists itself refused (AccessDenied)": (
         World(listed=psutil.AccessDenied(PID)),
-        (True, True, True, True),
+        (True, True, False, True),
     ),
     # DIVERGENCE 3: ``_still_running`` let an OverflowError out; the lock
     # owner's reader answers alive. CHANGED in the browser_cmdline commit: one
     # function now, and it answers alive.
     "pid_exists raises OverflowError": (
         World(listed=OverflowError("too large")),
-        (True, True, True, True),
+        (True, True, False, True),
     ),
     # The exec-window trap: a live Chrome reads an EMPTY argv while its launcher
     # execs, and must never be read as dead.
@@ -239,11 +244,11 @@ ALIVE_TABLE = {
     # DIVERGENCE 4 (F-998): only the two witness readers see a teardown.
     "tearing down: empty argv, executable gone": (
         World(cmdline=(), exe=GONE),
-        (False, False, True, True),
+        (False, False, False, True),
     ),
     "tearing down: empty argv, ESRCH on the executable": (
         World(cmdline=(), exe=NOT_THERE),
-        (False, False, True, True),
+        (False, False, False, True),
     ),
     "empty argv, executable gone, but not Linux": (
         World(cmdline=(), exe=GONE, linux=False),
@@ -287,11 +292,9 @@ def test_a_negative_pid_reads_dead_everywhere_and_the_kernel_is_not_asked(
     )
 
     assert zombie.alive(-1, unknown=True) is False
+    assert zombie.alive(-1, unknown=False) is False
     assert KERNEL_ASKED == []
-    assert zombie.alive(-1, unknown=True) is False
     assert process_exit.browser_is_alive(_Browser(-1)) is False
-    with pytest.raises(ValueError):
-        devtools_port._running(-1)
 
 
 @pytest.mark.parametrize(
@@ -384,10 +387,56 @@ def test_a_tree_member_we_could_not_read_is_unreadable_not_absent(
     assert members.unreadable == unreadable
 
 
-def test_pid_none_is_this_process_to_psutil_and_one_reader_believes_it():
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("world", "patient"),
+    [
+        pytest.param(World(), True, id="a launcher that is running gets the patience"),
+        pytest.param(
+            World(ctor=psutil.AccessDenied(PID)),
+            False,
+            id="a launcher that cannot be read gets none",
+        ),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
+            False,
+            id="a launcher that has exited gets none",
+        ),
+    ],
+)
+async def test_the_identity_wait_goes_on_only_while_the_launcher_is_shown_running(
+    monkeypatch, world, patient
+):
+    """The devtools_port direction (``unknown=False``), through the caller that
+    spends it: patience is for a launcher we can SEE running; an unreadable one is
+    not a reason to hold a spawn for ``IDENTITY_PATIENCE_SECONDS``."""
+    install(monkeypatch, world)
+    monkeypatch.setattr(devtools_port, "IDENTITY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(devtools_port, "IDENTITY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(devtools_port, "IDENTITY_PATIENCE_SECONDS", 0.6)
+
+    class _Silent:
+        websocket_url = None
+
+        async def send(self, _command):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            pass
+
+    started = time.monotonic()
+    with pytest.raises(ToolError, match="did not say which process it is"):
+        await devtools_port.confirm_ours(_Silent(), PID)
+    waited = time.monotonic() - started
+
+    assert (waited >= 0.5) is patient, waited
+
+
+def test_pid_none_is_not_this_process():
     """``psutil.Process(None)`` is the CALLING process, so a missing pid read as
-    "alive" in the one reader that built a Process from it directly."""
-    assert devtools_port._running(None) is True  # type: ignore[arg-type]
+    "alive" in the one reader that built a Process from it directly (CHANGED in
+    the devtools_port commit: it is dead now)."""
+    assert zombie.alive(None, unknown=False) is False
 
 
 @pytest.mark.parametrize("pid", [0, None])

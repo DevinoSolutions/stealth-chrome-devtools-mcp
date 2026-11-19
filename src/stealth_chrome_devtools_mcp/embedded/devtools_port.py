@@ -151,15 +151,6 @@ async def _drop(browser: Browser) -> None:
     await _disconnect(browser)
 
 
-def _running(pid: int) -> bool:
-    """Is *pid* a live process? One pid, not a scan; unreadable counts as not."""
-    try:
-        process = psutil.Process(pid)
-        return process.is_running() and not zombie.is_zombie(process)
-    except psutil.Error:
-        return False
-
-
 async def _ask_afresh(websocket_url: str) -> list:
     """The same query over a THROWAWAY connection to the same browser endpoint.
 
@@ -268,7 +259,8 @@ async def _answer(browser: Browser, launched_pid: int) -> list[list]:
         while not (answers := asks.answers()):
             waited = clock() - started
             if waited >= IDENTITY_TIMEOUT_SECONDS and not (
-                waited < IDENTITY_PATIENCE_SECONDS and _running(launched_pid)
+                waited < IDENTITY_PATIENCE_SECONDS
+                and zombie.alive(launched_pid, unknown=False)
             ):
                 raise _unverified(waited)
             if clock() >= next_ask:
