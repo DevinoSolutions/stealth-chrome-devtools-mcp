@@ -49,8 +49,8 @@ draft of this module could have made ``Browser._process.returncode`` read 255
 for a browser that exited cleanly with 0 — a value ``terminate``'s own guard
 reads — and put a spurious WARNING in every close's log.
 
-The wait therefore OBSERVES instead: ``_has_exited`` polls
-``Process.is_running()`` and treats ``STATUS_ZOMBIE`` as exited, so the status
+The wait therefore OBSERVES instead: ``_poll_for_exit`` asks ``zombie.running``,
+which is ``Process.is_running()`` and treats ``STATUS_ZOMBIE`` as exited, so the status
 is never collected and asyncio keeps its reap. A zombie IS an exited process —
 its cookie store is committed and its files are closed — and it is the state
 the browser is genuinely in for the moment between its exit and asyncio's
@@ -191,9 +191,10 @@ def browser_is_alive(browser: object) -> bool:
     pid = getattr(browser, "_process_pid", None)
     if pid:
         try:
-            proc = psutil.Process(int(pid))
-            return proc.is_running() and not zombie.is_zombie(proc)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            # Unreadable is NOT running (``unknown=False``): a browser we cannot
+            # see is not one to keep an instance for.
+            return zombie.alive(int(pid), unknown=False)
+        except ValueError:
             return False
 
     return True
@@ -233,8 +234,33 @@ def browser_pid(process: object | None, fallback_pid: int | None) -> int | None:
     return pid
 
 
-def _has_exited(proc: psutil.Process) -> bool:
-    """True when THIS process has finished — asked without reaping it.
+def wait_for_exit(pid: int | None, timeout: float = EXIT_GRACE_SECONDS) -> Exited:
+    """Wait until *pid* exits on its own, or until *timeout*. Never raises.
+
+    It POLLS and never calls ``wait()``, because on POSIX that would REAP a
+    child asyncio is already waiting on — the module docstring carries the
+    measurement-grade account and the two CPython line numbers.
+    """
+    started = time.monotonic()
+    if pid is None:
+        return Exited(None, False, 0.0, "no-browser-pid")
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return Exited(pid, True, time.monotonic() - started, "already-gone")
+    except (psutil.Error, OSError) as err:
+        return Exited(pid, False, time.monotonic() - started, f"unreadable: {err}")
+    return _poll_for_exit(proc, pid, started, started + timeout)
+
+
+def _poll_for_exit(
+    proc: psutil.Process,
+    pid: int,
+    started: float,
+    deadline: float,
+) -> Exited:
+    """Ask ``zombie.running`` until it says THIS process has finished (asked
+    without reaping it) or the deadline passes.
 
     Two questions, because neither alone is the answer. ``is_running()`` is
     also the pid-REUSE guard: psutil compares the ``(pid, create_time)`` pair
@@ -261,40 +287,9 @@ def _has_exited(proc: psutil.Process) -> bool:
     we waited for is in: it has exited and is waiting only for its parent's
     ``waitpid``, and that parent is asyncio, not us.
     """
-    if not proc.is_running():
-        return True
-    return zombie.is_zombie(proc)  # never a status() read on Windows: see ``zombie``
-
-
-def wait_for_exit(pid: int | None, timeout: float = EXIT_GRACE_SECONDS) -> Exited:
-    """Wait until *pid* exits on its own, or until *timeout*. Never raises.
-
-    It POLLS and never calls ``wait()``, because on POSIX that would REAP a
-    child asyncio is already waiting on — the module docstring carries the
-    measurement-grade account and the two CPython line numbers.
-    """
-    started = time.monotonic()
-    if pid is None:
-        return Exited(None, False, 0.0, "no-browser-pid")
-    try:
-        proc = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return Exited(pid, True, time.monotonic() - started, "already-gone")
-    except (psutil.Error, OSError) as err:
-        return Exited(pid, False, time.monotonic() - started, f"unreadable: {err}")
-    return _poll_for_exit(proc, pid, started, started + timeout)
-
-
-def _poll_for_exit(
-    proc: psutil.Process,
-    pid: int,
-    started: float,
-    deadline: float,
-) -> Exited:
-    """Ask ``_has_exited`` until it says yes or the deadline passes."""
     while True:
         try:
-            if _has_exited(proc):
+            if not zombie.running(proc):
                 return Exited(pid, True, time.monotonic() - started, "exited")
         except psutil.NoSuchProcess:
             # Includes `ZombieProcess`, which subclasses it: both mean the
@@ -479,7 +474,7 @@ def _rung(
         return False
     # The call RETURNING is not the browser going: Chrome tore down for ~15 s after
     # a "successful" terminate (T-9335). "ended" is for a pid seen to be gone.
-    seen_gone = pid is not None and not psutil.pid_exists(pid)
+    seen_gone = pid is not None and not zombie.listed(pid)
     debug_logger.log_info(
         "process_exit",
         action,

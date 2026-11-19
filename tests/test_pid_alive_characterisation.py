@@ -187,7 +187,7 @@ ALIVE_TABLE = {
     # the browser_cmdline commit: the tree member's reader now asks it too.
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, True, True, False),
+        (True, True, True, True),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -210,7 +210,7 @@ ALIVE_TABLE = {
     ),
     "listed, is_running refused (AccessDenied)": (
         World(running=psutil.AccessDenied(PID)),
-        (True, True, True, False),
+        (True, True, True, True),
     ),
     "listed, status refused (AccessDenied)": (
         World(status=psutil.AccessDenied(PID)),
@@ -218,14 +218,14 @@ ALIVE_TABLE = {
     ),
     "pid_exists itself refused (AccessDenied)": (
         World(listed=psutil.AccessDenied(PID)),
-        (True, True, False, True),
+        (True, True, False, False),
     ),
     # DIVERGENCE 3: ``_still_running`` let an OverflowError out; the lock
     # owner's reader answers alive. CHANGED in the browser_cmdline commit: one
     # function now, and it answers alive.
     "pid_exists raises OverflowError": (
         World(listed=OverflowError("too large")),
-        (True, True, False, True),
+        (True, True, False, False),
     ),
     # The exec-window trap: a live Chrome reads an EMPTY argv while its launcher
     # execs, and must never be read as dead.
@@ -244,11 +244,11 @@ ALIVE_TABLE = {
     # DIVERGENCE 4 (F-998): only the two witness readers see a teardown.
     "tearing down: empty argv, executable gone": (
         World(cmdline=(), exe=GONE),
-        (False, False, False, True),
+        (False, False, False, False),
     ),
     "tearing down: empty argv, ESRCH on the executable": (
         World(cmdline=(), exe=NOT_THERE),
-        (False, False, False, True),
+        (False, False, False, False),
     ),
     "empty argv, executable gone, but not Linux": (
         World(cmdline=(), exe=GONE, linux=False),
@@ -442,6 +442,10 @@ def test_pid_none_is_not_this_process():
 @pytest.mark.parametrize("pid", [0, None])
 def test_a_browser_with_no_pid_is_assumed_up(pid):
     assert process_exit.browser_is_alive(_Browser(pid)) is True
+
+
+def test_a_browser_whose_recorded_pid_is_not_a_number_is_not_running():
+    assert process_exit.browser_is_alive(_Browser("not a pid")) is False
 
 
 # ---------------------------------------------------------------------------
