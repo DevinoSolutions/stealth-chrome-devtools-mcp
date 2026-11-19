@@ -133,11 +133,10 @@ async def export_debug_logs(
             )
         return filepath
     except TimeoutError:
-        # 'gzip-pickle' is refused while a login vault exists (vault mode), so it
-        # must not be suggested then
-        return "Export timeout - file too large. Try with smaller limits" + (
-            "." if vault_mode.active() else " or 'gzip-pickle' format."
-        )
+        message = "Export timeout - file too large. Try with smaller limits or 'gzip-pickle' format."
+        if vault_mode.active():  # 'gzip-pickle' is refused while a vault exists
+            message = message.replace(" or 'gzip-pickle' format", "")
+        return message
 
 
 async def get_debug_lock_status() -> dict[str, Any]:
