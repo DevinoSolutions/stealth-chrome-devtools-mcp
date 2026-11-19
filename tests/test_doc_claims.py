@@ -376,6 +376,20 @@ class TestDocumentedToolCount:
             assert stale not in text, f"stale tool count '{stale}' still in docs"
         assert "102 tools" in text
 
+    def test_no_doc_cites_a_stale_count_in_the_other_phrasings(self):
+        """The tool count is also written as "The tool count is N", "the N tool
+        bodies", "N bodies", "the N-count tripwire" and "all N names" (DESIGN.md,
+        NAVMAP.md); the "N tools" scan above does not see those."""
+        import re
+
+        stale = re.compile(
+            r"tool count is (?!102(?!\d))\d+|the (?!102(?!\d))\d+ tool bodies|"
+            r"The (?!102(?!\d))\d+ bodies|the (?!102(?!\d))\d+-count|"
+            r"binds all (?!102(?!\d))\d+ names|All (?!FOURTEEN(?![A-Z]))[A-Z]+ sections:"
+        )
+        found = stale.findall(_doc_text())
+        assert not found, f"stale tool count in the docs: {found}"
+
 
 #: The docs a reader (or an agent) takes a tool or section COUNT from. DOCS above
 #: minus nothing, plus the manual QA protocol, which is outside the other pins:
