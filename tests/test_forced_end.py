@@ -29,6 +29,7 @@ from stealth_chrome_devtools_mcp.embedded import (
     browser_health,
     forced_end,
     process_exit,
+    zombie,
 )
 
 INSTANCE_ID = "i-fleet"
@@ -373,7 +374,7 @@ class TestAnUnverifiedProcessIsNeverKilled:
         """An empty argv of a LIVE pid is "could not be asked", not "not a
         browser": ``browser_members`` reports it as unreadable."""
         monkeypatch.setattr(psutil, "pid_exists", lambda _pid: True)
-        monkeypatch.setattr(browser_cmdline, "command_line_is_gone", lambda _pid: False)
+        monkeypatch.setattr(zombie, "alive", lambda _pid, *, unknown: True)
         kill = _Kill()
 
         reason = await _run(kill, [])

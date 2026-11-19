@@ -134,8 +134,7 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> list[_Process]:
     monkeypatch.setattr(zombie, "ZOMBIES_EXIST", True)
     monkeypatch.setattr(psutil, "pid_exists", pid_exists)
     monkeypatch.setattr(psutil, "Process", process)
-    monkeypatch.setattr(browser_cmdline, "_EXE_WITNESS", world.linux)
-    monkeypatch.setattr(browser_cmdline.Path, "readlink", readlink)
+    monkeypatch.setattr(zombie.Path, "readlink", readlink)
     monkeypatch.setattr(zombie, "_EXE_WITNESS", world.linux)
     monkeypatch.setattr(zombie, "_SIGNAL_ASKS", True)
     monkeypatch.setattr(zombie, "_signal", kernel)
@@ -157,7 +156,9 @@ READERS = {
     "profile_lock's reader (now zombie.alive, held)": lambda pid: zombie.alive(
         pid, unknown=True
     ),
-    "browser_cmdline._still_running": browser_cmdline._still_running,
+    "tree member's reader (now zombie.alive, held)": lambda pid: zombie.alive(
+        pid, unknown=True
+    ),
     "devtools_port._running": devtools_port._running,
     "process_exit.browser_is_alive": lambda pid: process_exit.browser_is_alive(
         _Browser(pid)
@@ -177,10 +178,11 @@ ALIVE_TABLE = {
         (False, False, False, False),
     ),
     # DIVERGENCE 1 (F-1008): only the lock owner's reader asks the kernel when
-    # psutil does not list the pid (``/proc`` mounted ``hidepid=2``).
+    # psutil does not list the pid (``/proc`` mounted ``hidepid=2``). CHANGED in
+    # the browser_cmdline commit: the tree member's reader now asks it too.
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, False, False, False),
+        (True, True, False, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -213,11 +215,12 @@ ALIVE_TABLE = {
         World(listed=psutil.AccessDenied(PID)),
         (True, True, True, True),
     ),
-    # DIVERGENCE 3: ``_still_running`` lets an OverflowError out; the lock
-    # owner's reader answers alive.
+    # DIVERGENCE 3: ``_still_running`` let an OverflowError out; the lock
+    # owner's reader answers alive. CHANGED in the browser_cmdline commit: one
+    # function now, and it answers alive.
     "pid_exists raises OverflowError": (
         World(listed=OverflowError("too large")),
-        (True, OverflowError, True, True),
+        (True, True, True, True),
     ),
     # The exec-window trap: a live Chrome reads an EMPTY argv while its launcher
     # execs, and must never be read as dead.
@@ -285,7 +288,7 @@ def test_a_negative_pid_reads_dead_everywhere_and_the_kernel_is_not_asked(
 
     assert zombie.alive(-1, unknown=True) is False
     assert KERNEL_ASKED == []
-    assert browser_cmdline._still_running(-1) is False
+    assert zombie.alive(-1, unknown=True) is False
     assert process_exit.browser_is_alive(_Browser(-1)) is False
     with pytest.raises(ValueError):
         devtools_port._running(-1)
@@ -340,6 +343,45 @@ def test_a_profile_is_held_by_its_lock_owner_unless_that_owner_is_shown_dead(
     (tmp_path / profile_lock.LOCK_NAME).write_text(f"host-{PID}", encoding="utf-8")
 
     assert (profile_lock.profile_hold(tmp_path, lambda _dir: set()) is not None) is held
+
+
+@pytest.mark.parametrize(
+    ("world", "unreadable"),
+    [
+        pytest.param(
+            World(status=psutil.AccessDenied(PID), cmdline=psutil.AccessDenied(PID)),
+            (PID,),
+            id="refused its status and its argv: held, not ruled out",
+        ),
+        pytest.param(
+            World(cmdline=psutil.AccessDenied(PID)),
+            (PID,),
+            id="refused its argv only",
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID)),
+            (),
+            id="gone between the scan and the read: an established negative",
+        ),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=psutil.ZombieProcess(PID)),
+            (),
+            id="a zombie: an established negative",
+        ),
+    ],
+)
+def test_a_tree_member_we_could_not_read_is_unreadable_not_absent(
+    monkeypatch, world, unreadable
+):
+    """``browser_members``' two negatives, through the caller that spends them: a
+    pid whose argv came back empty is UNREADABLE (the profile stays held) unless
+    it is shown to have gone."""
+    install(monkeypatch, world)
+
+    members = browser_cmdline.browser_members({PID}, "/profile")
+
+    assert members.browsers == ()
+    assert members.unreadable == unreadable
 
 
 def test_pid_none_is_this_process_to_psutil_and_one_reader_believes_it():
