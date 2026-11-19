@@ -61,3 +61,4 @@ def reset():
     login_seal._tabs.clear()
     login_seal._unclosed.clear()
     login_seal._holds.clear()
+    login_seal._barred.clear()

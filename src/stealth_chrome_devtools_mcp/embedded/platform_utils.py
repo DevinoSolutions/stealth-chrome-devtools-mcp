@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from nodriver import cdp
 
+from stealth_chrome_devtools_mcp.embedded import browser_trust
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.settings import get_settings
 
@@ -239,7 +240,10 @@ def filter_stealth_args(user_args: list[str]) -> tuple:
     warnings: list[str] = []
 
     for arg in user_args:
-        lower = arg.lower().strip()
+        # one spelling: Chrome reads ``-name`` and ``/name`` as ``--name`` (the one
+        # normaliser is ``browser_trust``'s, T-19366), so a stripped switch cannot
+        # come back through a prefix this filter did not know about
+        lower = browser_trust.canonical_switch(arg).lower().strip()
         matched = False
         for prefix, reason in blocked.items():
             if lower.startswith(prefix):

@@ -1,46 +1,73 @@
-"""THE one home for keeping a page out of Chrome's own DevTools endpoint (T-19366).
+"""THE one home for keeping a page out of Chrome's own DevTools (T-19366).
 
-Chrome is launched with ``--remote-debugging-port=N``. A page that can speak to
-that port can attach to ANY tab of the browser, including the backend's sealed
-login tab, and read what the vault typed: the whole of ``login_seal`` is bypassed
-by a WebSocket from page script. The port is no secret from an agent
-(``chrome://version`` prints the command line), so two things have to be true, and
-this module is where both are made so:
+Two doors lead from a page to every tab of the browser, the sealed login tab
+included, and this module is where both are shut.
 
-1. **Chrome must not accept a foreign page's WebSocket.** nodriver launches with
+**Door 1: the debug port.** Chrome is launched with ``--remote-debugging-port=N``.
+A page that can speak to that port can attach to ANY tab and read what the vault
+typed. The port is no secret from an agent (``chrome://version`` prints the command
+line), so two things are made true here:
+
+1. *Chrome must not accept a foreign page's WebSocket.* nodriver launches with
    ``--remote-allow-origins=*``, which accepts ANY Origin. :func:`install` takes
-   that flag out of nodriver's defaults for every launch (and
-   ``platform_utils`` strips it from caller ``browser_args``). Without it Chrome
-   answers 403 to a handshake whose Origin is not the endpoint's own, and
-   nodriver, whose client sends no Origin at all, connects as before (measured:
-   the whole spawn path works without the flag, see
-   ``tests/test_debug_port_guard.py``).
-2. **No page may BE the endpoint's own origin**, the one Origin Chrome still
-   accepts (``http://127.0.0.1:N``): a tab navigated to
-   ``http://127.0.0.1:N/json/version`` can open the socket. So requests to the
-   debug port are refused in two places. :func:`refuse_urls` turns a tool call
-   whose URL names it into a ``ToolError`` (a clear answer, not the guarantee).
-   :func:`protect` is the guarantee: a second CDP connection to the browser
-   auto-attaches to every new page BEFORE it can run (``waitForDebuggerOnStart``),
-   puts a narrow ``Fetch`` interception on that session that fails every request
-   to ``*://*:N/*`` (any host, so a spelling of loopback cannot get past it), and
-   only then lets the page run. It covers navigations, redirects, iframes,
-   ``window.open`` popups, ``fetch`` and XHR, for every page, internal or not. The
-   session belongs to this module's own connection, which no tool can reach, so a
-   page's own ``execute_cdp_command`` session cannot undo it.
+   that flag out of nodriver's defaults for every launch (and ``platform_utils``
+   strips every spelling of it from caller ``browser_args``). Without it Chrome
+   answers 403 to a handshake whose Origin is not the endpoint's own, and nodriver,
+   whose client sends no Origin at all, connects as before.
+2. *No page may BE the endpoint's own origin*, the one Origin Chrome still accepts
+   (``http://127.0.0.1:N``). Requests to the debug port are refused in two places.
+   :func:`refuse_urls` turns a tool call whose URL names it into a ``ToolError`` (a
+   clear answer, not the guarantee). :func:`protect` is the guarantee: a second CDP
+   connection to the browser auto-attaches, recursively and with
+   ``waitForDebuggerOnStart``, to every target that can make requests (a page, a
+   cross-site iframe which is its own process, a dedicated, shared or service
+   worker), puts a narrow ``Fetch`` interception on it that fails every request to
+   ``*://*:N/*`` (any host, so no spelling of loopback gets past it), and only then
+   lets it run. The session belongs to this module's own connection, which no tool
+   can reach. Measured on Chrome 15x: ``Fetch`` does not see a WebSocket handshake
+   (Chrome's Origin check, 1, does that work), ``Fetch.enable`` is refused on a
+   dedicated worker (best effort there: the worker's own page and the Origin check
+   stand for it), and a frame nested at the endpoint's own origin still COMMITS
+   despite the interception. The belt for that last case: a document seen at the
+   endpoint's origin is left paused (its script never runs) and the page that holds
+   it is sent to ``about:blank``. The login's own tab and its popups get the
+   interception but are not watched for children (``login_seal.owns``): a paused
+   popup of a watched page holds its opener inside ``window.open`` until the
+   login's popup handling has closed it, and the key press that opened it never
+   returned (measured). Those pages are the site's, which the vault types into
+   anyway.
 
-**What blocks a WebSocket handshake.** Measured on Chrome 15x with
-``tests/test_debug_port_guard.py``: neither ``Network.setBlockedURLs`` nor a
-``Fetch`` pattern sees a WebSocket handshake. So the WebSocket itself is not
-blocked; it is refused by Chrome's Origin check (1), and (2) denies the one
-origin that check lets through.
+**Door 2: a DevTools frontend.** ``navigate("chrome://inspect")`` plus a click on
+"inspect" makes Chrome open a native DevTools window (a ``devtools://`` page) on
+every target, the sealed tab included. Its page script reaches
+``InspectorFrontendHost.sendMessageToBackend``, which carries raw CDP: no WebSocket,
+no Origin, no port. The invariant stated here: **no target an agent can address is
+ever a DevTools frontend or a page that opens one** (:func:`inspector_url`).
+
+* *Refused up front* (:func:`refusal`): ``navigate``, ``new_tab`` and the other URL
+  tools refuse ``devtools:``, ``chrome-devtools:`` and the ``chrome://`` pages that
+  open an inspector (:data:`INSPECTOR_PAGES`, picked from ``chrome://chrome-urls``).
+* *Hidden whatever the route* (``login_seal.bar``): a target whose URL is an
+  inspector is barred from ``list_tabs`` and every tool the moment Chrome announces
+  it (``targetCreated`` or ``targetInfoChanged``: so a redirect, an in-page
+  navigation, ``execute_cdp_command`` and ``go_back`` are covered, the committed URL
+  being what is judged).
+* *Dealt with*: a page that navigated to ``chrome://inspect`` is sent back to
+  ``about:blank``; a ``devtools://`` window is closed while a login is running or
+  opening, and otherwise only hidden (a person's own F12 window is not destroyed by
+  an agent that never logs in).
+* *Checked before typing* (:func:`verify_clean`): the login refuses to start, and
+  refuses before EVERY field it types, unless the browser's guard is running and no
+  inspector exists; one that will not close refuses the login. A guard whose
+  connection dropped while the browser lives fails closed the same way.
 
 **What is NOT covered**: a process running as the same OS user, which can open the
-loopback port directly (``RUNBOOK`` "Local trust boundary"). A browser started
-by an older backend, with ``--remote-allow-origins=*``, is covered by (2) only.
-Chrome does not say how many clients are attached to a target (``attached`` is
-true for our own session), so nothing here can tell that another client
-attached.
+loopback port directly (``RUNBOOK`` "Local trust boundary"); a browser started by an
+older backend with ``--remote-allow-origins=*`` (covered by 2 only); an inspector
+that is open while no login runs and is never closed (it is hidden, not destroyed);
+and any ``chrome://`` page that a later Chrome adds with a debugger action.
+Chrome does not say how many clients are attached to a target, so nothing here can
+tell that another client attached.
 """
 
 from __future__ import annotations
@@ -53,6 +80,9 @@ import logging
 import urllib.parse
 from typing import TYPE_CHECKING, cast
 
+from nodriver import cdp
+
+from stealth_chrome_devtools_mcp.embedded import login_seal, tab_open
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
@@ -79,6 +109,8 @@ URL_ARGUMENTS = {
 _WEB_SCHEMES = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 #: Every port of a browser this process has protected (an instance's debug port).
 _PORTS: set[int] = set()
+#: The running guard of each protected port (what ``protected_ports`` stands on).
+_GUARDS: dict[int, _Guard] = {}
 _TASKS: set[asyncio.Task[None]] = set()
 _COUNTER = itertools.count(1)
 
@@ -87,6 +119,40 @@ COMMAND_BUDGET_SECONDS = 10.0
 REFUSAL = (
     "that address is this browser's own DevTools port, which no page may load: "
     "it would let a page attach to every tab"
+)
+INSPECTOR_REFUSAL = (
+    "that address opens a browser inspector (DevTools), which would let a page "
+    "read every tab; it is refused"
+)
+GUARD_DOWN = (
+    "this browser's DevTools guard is not running, so the browser cannot be shown "
+    "free of inspectors; vault logins are refused in it"
+)
+INSPECTOR_OPEN = (
+    "a browser inspector (a DevTools window) is open in this browser and could not "
+    "be closed; nothing was typed"
+)
+
+#: Schemes whose pages ARE a DevTools frontend (``devtools://devtools/bundled/...``).
+INSPECTOR_SCHEMES = frozenset({"devtools", "chrome-devtools"})
+#: ``chrome://`` pages that open an inspector or carry a debugger channel, picked
+#: from ``chrome://chrome-urls`` of Chrome 158 (about 95 pages; the rest show
+#: information or settings and have no debugger action):
+#:
+#: * ``inspect``: lists every target (tab, worker, extension) with an "inspect"
+#:   link that opens DevTools on it, and its page script can call ``chrome.send``;
+#: * ``serviceworker-internals``: an "Inspect" link per service worker;
+#: * ``extensions``: "Inspect views" for an extension in developer mode.
+#:
+#: Chrome reads ``about:inspect`` and ``about://inspect`` as ``chrome://inspect``.
+INSPECTOR_PAGES = frozenset({"inspect", "serviceworker-internals", "extensions"})
+#: What a URL parser drops before it reads a scheme: C0 controls and space at both
+#: ends, tab and newlines anywhere (the WHATWG URL rules Chrome follows).
+_URL_EDGE = "".join(chr(code) for code in range(33))
+_URL_INNER = dict.fromkeys((9, 10, 13))
+#: Types of target that can make requests, each given the port interception.
+GUARDED_TYPES = frozenset(
+    {"page", "iframe", "worker", "service_worker", "shared_worker"}
 )
 
 
@@ -129,22 +195,68 @@ def url_port(url: object) -> int | None:
         return None
 
 
+def _inspector_host(url: str) -> tuple[str, str]:
+    """``(scheme, host)`` of ``url`` as Chrome reads it, both lower case; the host
+    of ``chrome:inspect`` and ``about:inspect`` is read from the path."""
+    text = url.translate(_URL_INNER).strip(_URL_EDGE).replace("\\", "/")
+    parts = urllib.parse.urlsplit(text)
+    scheme = parts.scheme.lower()
+    host = parts.hostname or parts.path.lstrip("/").split("/")[0]
+    return scheme, host.lower().rstrip(".")
+
+
+def is_frontend(url: object) -> bool:
+    """Whether ``url`` is a DevTools frontend page (``devtools://``)."""
+    if not isinstance(url, str):
+        return False
+    try:
+        return _inspector_host(url)[0] in INSPECTOR_SCHEMES
+    except ValueError:
+        return False
+
+
+def inspector_url(url: object) -> bool:
+    """Whether a page at ``url`` is a browser inspector: a DevTools frontend or a
+    ``chrome://`` page that opens one (:data:`INSPECTOR_PAGES`). The committed URL
+    of a target is what is asked, so a redirect or an in-page navigation to one
+    counts; so does any spelling Chrome accepts (case, ``about:``, a tab or
+    newline inside the URL, ``view-source:``)."""
+    if not isinstance(url, str):
+        return False
+    try:
+        scheme, host = _inspector_host(url)
+        if scheme == "view-source":
+            return inspector_url(url.strip(_URL_EDGE)[len("view-source:") :])
+    except ValueError:
+        return False
+    if scheme in INSPECTOR_SCHEMES:
+        return True
+    return scheme in ("chrome", "about") and host in INSPECTOR_PAGES
+
+
 def refusal(url: object) -> str | None:
     """Why ``url`` may not be loaded, or ``None``.
 
-    Refused when its port is the debug port of any browser of this backend,
-    WHATEVER the host: ``127.0.0.1``, ``localhost``, ``localhost.``, ``[::1]``,
-    ``0.0.0.0``, ``2130706433``, ``0x7f.1`` and ``0177.0.0.1`` all name the same
-    listener, so the port, not the spelling, is what is checked."""
+    Refused when it is a browser inspector (:func:`inspector_url`), or when its
+    port is the debug port of any browser of this backend, WHATEVER the host:
+    ``127.0.0.1``, ``localhost``, ``localhost.``, ``[::1]``, ``0.0.0.0``,
+    ``2130706433``, ``0x7f.1`` and ``0177.0.0.1`` all name the same listener, so
+    the port, not the spelling, is what is checked."""
+    if inspector_url(url):
+        return INSPECTOR_REFUSAL
     port = url_port(url)
     return REFUSAL if port is not None and port in _PORTS else None
 
 
 def refuse_urls(tool: str, arguments: dict[str, object]) -> None:
-    """Raise ``ToolError`` when a URL-loading tool is asked for the debug port."""
+    """Raise ``ToolError`` when a URL-loading tool is asked for the debug port or
+    for an inspector."""
     name = URL_ARGUMENTS.get(tool)
-    if name is not None and _PORTS and refusal(arguments.get(name)) is not None:
-        raise ToolError(REFUSAL)
+    if name is None:
+        return
+    reason = refusal(arguments.get(name))
+    if reason is not None:
+        raise ToolError(reason)
 
 
 def patterns(port: int) -> list[Json]:
@@ -180,6 +292,7 @@ async def protect(browser: Browser) -> None:
         raise ToolError(
             f"the browser's debug port could not be guarded ({type(error).__name__})"
         ) from None
+    _GUARDS[int(port)] = guard
     task = asyncio.create_task(guard.run(), name=f"debug-port-guard-{port}")
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
@@ -192,8 +305,9 @@ def _obj(value: object) -> Json:
 
 class _Guard:
     """A tiny CDP client of its own: one browser-level websocket, a session per
-    page, and nothing else. Its own client (not nodriver's) because it must read
-    the ``sessionId`` of every event, which nodriver does not hand to a handler."""
+    target that can make requests, and nothing else. Its own client (not
+    nodriver's) because it must read the ``sessionId`` of every event, which
+    nodriver does not hand to a handler."""
 
     def __init__(self, url: str, port: int) -> None:
         self.url = url
@@ -203,6 +317,12 @@ class _Guard:
         self.pending: dict[int, asyncio.Future[Json]] = {}
         self.guarded: set[str] = set()
         self.tasks: set[asyncio.Task[None]] = set()
+        #: target id -> our session on it; session -> its parent session.
+        self.sessions: dict[str, str] = {}
+        self.parents: dict[str, str] = {}
+        #: Targets first seen at an ordinary URL, and the inspectors seen so far.
+        self.clean: set[str] = set()
+        self.inspectors: set[str] = set()
 
     async def start(self) -> None:
         import websockets
@@ -211,21 +331,42 @@ class _Guard:
             self.url, max_size=None, ping_interval=None, open_timeout=10
         )
         self.reader = asyncio.create_task(self._read())
+        await self.command("Target.setDiscoverTargets", {"discover": True})
+        await self._auto_attach(None)
+        found = await self.command("Target.getTargets")
+        for info in cast("list[Json]", found.get("targetInfos", [])):
+            self._judge(info)
+            if info.get("type") in GUARDED_TYPES:
+                with contextlib.suppress(Exception):
+                    await self.command(
+                        "Target.attachToTarget",
+                        {"targetId": info["targetId"], "flatten": True},
+                    )
+        # The attach events are handled in tasks: wait until every target that was
+        # already open has its interception before the browser is handed on.
+        await self.idle()
+
+    async def idle(self) -> None:
+        """Return once no handler task is running. Not ``gather`` over
+        ``self.tasks``: a task that is done but whose done-callback has not run is
+        still in the set, ``gather`` of done tasks never yields, and the loop then
+        starves the very callbacks that would empty the set (measured: a spawn that
+        hung for minutes)."""
+        while True:
+            running = [task for task in self.tasks if not task.done()]
+            if not running:
+                return
+            await asyncio.wait(running)
+
+    async def _auto_attach(self, session: str | None) -> None:
+        """Attach to every target ``session`` (the browser when ``None``) starts
+        from now on, paused until this guard has put its interception on it, so
+        a cross-site iframe or a worker is guarded like the page that made it."""
         await self.command(
             "Target.setAutoAttach",
             {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True},
+            session,
         )
-        found = await self.command("Target.getTargets")
-        for info in cast("list[Json]", found.get("targetInfos", [])):
-            if info.get("type") == "page":
-                await self.command(
-                    "Target.attachToTarget",
-                    {"targetId": info["targetId"], "flatten": True},
-                )
-        # The attach events are handled in tasks: wait until every page that was
-        # already open has its interception before the browser is handed on.
-        if self.tasks:
-            await asyncio.gather(*tuple(self.tasks))
 
     async def stop(self) -> None:
         if self.reader is not None:
@@ -246,6 +387,10 @@ class _Guard:
             _logger.debug("debug port guard for %s ended", self.port)
         finally:
             _PORTS.discard(self.port)
+            if _GUARDS.get(self.port) is self:
+                del _GUARDS[self.port]
+            for target in self.inspectors:
+                login_seal.unbar(target)
             await self.stop()
 
     async def command(
@@ -285,39 +430,143 @@ class _Guard:
                     future.set_result(message)
                 continue
             method = message.get("method")
+            params = _obj(message.get("params"))
             if method == "Target.attachedToTarget":
-                self._spawn(self._attached(_obj(message.get("params"))))
+                parent = message.get("sessionId")
+                self._spawn(
+                    self._attached(params, parent if isinstance(parent, str) else None)
+                )
             elif method == "Fetch.requestPaused":
                 self._spawn(self._block(message))
+            elif method in ("Target.targetCreated", "Target.targetInfoChanged"):
+                self._judge(_obj(params.get("targetInfo")))
+            elif method == "Target.targetDestroyed":
+                self._forget(str(params.get("targetId", "")))
 
     def _spawn(self, work: Coroutine[object, object, None]) -> None:
         task = asyncio.create_task(work)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
-    async def _attached(self, params: Json) -> None:
-        """A target arrived. A page gets the interception BEFORE it may run; a
-        page that cannot be given it is closed rather than left unguarded."""
+    def _forget(self, target: str) -> None:
+        self.clean.discard(target)
+        self.guarded.discard(target)
+        session = self.sessions.pop(target, None)
+        if session is not None:
+            self.parents.pop(session, None)
+        if target in self.inspectors:
+            self.inspectors.discard(target)
+            login_seal.unbar(target)
+
+    def _judge(self, info: Json) -> None:
+        """A target was created or changed address. An inspector (a DevTools
+        window, ``chrome://inspect``) is barred from the tools at once, from the
+        event itself; then it is dealt with:
+
+        * a ``devtools://`` page Chrome made on its own is closed while a login
+          is running or opening, and otherwise only hidden (a person's own F12
+          window outlives an agent that never logs in);
+        * a page that NAVIGATED to an inspector (an agent tab sent to
+          ``chrome://inspect``) is sent back to ``about:blank`` at once: it may be
+          the tab a tool without a ``tab_id`` acts on."""
+        target = str(info.get("targetId", ""))
+        if not target:
+            return
+        if not inspector_url(info.get("url")):
+            self.clean.add(target)
+            if target in self.inspectors:  # it was blanked: no longer one
+                self.inspectors.discard(target)
+                login_seal.unbar(target)
+            if info.get("type") in GUARDED_TYPES and (
+                url_port(info.get("url")) == self.port
+            ):
+                self._spawn(self._leave_endpoint(target))
+            return
+        first_sight = target not in self.clean
+        login_seal.bar(target)
+        self.inspectors.add(target)
+        if is_frontend(info.get("url")) and first_sight:
+            if login_seal.login_in_flight():
+                self._spawn(self._deal(target, close=True))
+            return
+        self._spawn(self._deal(target, close=False))
+
+    async def _deal(self, target: str, *, close: bool) -> None:
+        """Blank ``target`` (or close it): the page is gone from the agent's reach
+        either way."""
+        session = self.sessions.get(target)
+        if not close and session is not None:
+            with contextlib.suppress(Exception):
+                await self.command("Page.navigate", {"url": "about:blank"}, session)
+                return
+        with contextlib.suppress(Exception):
+            await self.command("Target.closeTarget", {"targetId": target})
+
+    async def _leave_endpoint(self, target: str) -> None:
+        """A document of ``target`` committed at the endpoint's own origin (the one
+        Origin Chrome still accepts): send the page that holds it to
+        ``about:blank``."""
+        session = self.sessions.get(target)
+        while session is not None and session in self.parents:
+            session = self.parents[session]
+        if session is None:
+            return
+        _logger.warning("a page reached the DevTools port; blanking it")
+        with contextlib.suppress(Exception):
+            await self.command("Page.navigate", {"url": "about:blank"}, session)
+
+    async def _attached(self, params: Json, parent: str | None = None) -> None:
+        """A target arrived. A target that can make requests gets the interception
+        BEFORE it may run, and is watched for the children it starts in turn (a
+        cross-site iframe is its own process and its own target); a page that
+        cannot be given it is closed rather than left unguarded."""
         session = cast("str", params["sessionId"])
         info = _obj(params.get("targetInfo"))
-        if info.get("type") == "page":
-            target = str(info.get("targetId", ""))
-            if target not in self.guarded:
-                self.guarded.add(target)
-                try:
-                    await self.command(
-                        "Fetch.enable", {"patterns": patterns(self.port)}, session
-                    )
-                except Exception:  # noqa: BLE001  PERMANENT(an unguardable page is closed, never left running unguarded)
+        target = str(info.get("targetId", ""))
+        kind = info.get("type")
+        self.sessions[target] = session
+        if parent is not None:
+            self.parents[session] = parent
+        self._judge(info)
+        if kind in GUARDED_TYPES and url_port(info.get("url")) == self.port:
+            # A frame at the endpoint's own origin (``_judge`` above has sent its
+            # page to about:blank): it is left PAUSED, never resumed, so none of
+            # its script runs before that ends it.
+            return
+        guarded = kind in GUARDED_TYPES and target not in self.guarded
+        # The interception and the watch for children are SENT together (Chrome
+        # answers them in order), then the target is released: two round trips, as
+        # before the watch for children existed. A third, one after another, lost
+        # a race (measured): a paused popup whose opener is blocked inside
+        # ``window.open`` (a key handler) is closed by the login's own popup
+        # handling within milliseconds, and the opener's key press never returned.
+        if guarded:
+            self.guarded.add(target)
+            guards = [
+                self.command("Fetch.enable", {"patterns": patterns(self.port)}, session)
+            ]
+            # The login's own tab, and a popup it opens, are not watched for
+            # children: a paused popup of a page that has this watch holds the
+            # opener inside ``window.open`` (a key handler) until the login's own
+            # popup handling has closed it, and the key press never returned
+            # (measured). Those pages are the SITE's, which the vault types into
+            # anyway; an agent's pages keep the watch.
+            watch = kind in ("page", "iframe", "worker") and not (
+                kind == "page" and login_seal.owns(target, info.get("openerId"))
+            )
+            if watch:
+                guards.append(self._auto_attach(session))
+            answers = await asyncio.gather(*guards, return_exceptions=True)
+            if any(isinstance(answer, Exception) for answer in answers):
+                if kind == "page":
                     _logger.warning("a page could not be guarded; closing it")
                     with contextlib.suppress(Exception):
                         await self.command("Target.closeTarget", {"targetId": target})
                     return
-            if url_port(info.get("url")) == self.port:
-                # A page already AT the endpoint's origin (a browser an older
-                # backend started): its document could still open the socket.
-                with contextlib.suppress(Exception):
-                    await self.command("Page.navigate", {"url": "about:blank"}, session)
+                if kind == "iframe":
+                    _logger.warning("a frame could not be guarded; blanking its page")
+                    self._spawn(self._leave_endpoint(target))
+                    return
         if params.get("waitingForDebugger"):
             with contextlib.suppress(Exception):
                 await self.command("Runtime.runIfWaitingForDebugger", None, session)
@@ -332,3 +581,35 @@ class _Guard:
                 },
                 cast("str | None", message.get("sessionId")),
             )
+
+
+# --------------------------------------------------------- before a login types
+
+_CLEAN_ATTEMPTS = 3
+_CLEAN_RETRY_S = 0.2
+
+
+async def verify_clean(browser: Browser) -> None:
+    """Raise ``ToolError`` unless ``browser`` is guarded and holds no inspector.
+
+    Called before the login opens its tab and before EVERY field it types, so a
+    DevTools window that was already open (a headed person's F12, one an agent made
+    earlier through ``execute_cdp_command``) is closed before anything is typed,
+    and a browser whose guard has ended (its connection dropped while the browser
+    lives) refuses instead of carrying on unguarded. A window that stays open
+    after three tries refuses the login."""
+    port = getattr(getattr(browser, "config", None), "port", None)
+    if not port or int(port) not in _PORTS:
+        raise ToolError(GUARD_DOWN)
+    for attempt in range(_CLEAN_ATTEMPTS):
+        infos = await tab_open.send(browser, cdp.target.get_targets)
+        bad = [i for i in infos if inspector_url(i.url)]
+        if not bad:
+            return
+        for info in bad:
+            login_seal.bar(str(info.target_id))
+            with contextlib.suppress(Exception):
+                await tab_open.send(browser, cdp.target.close_target, info.target_id)
+        if attempt < _CLEAN_ATTEMPTS - 1:
+            await asyncio.sleep(_CLEAN_RETRY_S)
+    raise ToolError(INSPECTOR_OPEN)

@@ -43,6 +43,21 @@ def sealed():
 # ------------------------------------------------------------ the unit
 
 
+def test_owns_names_the_logins_tab_its_popups_and_a_tab_being_opened():
+    assert not login_seal.owns("T-any")
+    login_seal.begin(INSTANCE)
+    login_seal.seal_tab(INSTANCE, SEALED)
+    assert login_seal.owns(SEALED)
+    assert login_seal.owns("T-popup", opener_id=SEALED)  # a page its tab opened
+    assert not login_seal.owns("T-popup", opener_id="T-agent")
+    assert not login_seal.owns("T-agent")
+    token = login_seal.hold_new(OTHER_INSTANCE, ["T-agent"])
+    assert login_seal.owns("T-new")  # created while a login opens its tab
+    assert not login_seal.owns("T-agent")  # existed before it
+    login_seal.release_new(OTHER_INSTANCE, token)
+    assert not login_seal.owns("T-new")
+
+
 def test_a_tab_that_would_not_close_stays_sealed_after_the_seal_ends():
     login_seal.begin(INSTANCE)
     login_seal.seal_tab(INSTANCE, SEALED)
@@ -130,8 +145,14 @@ def test_nested_logins_hold_the_seal_until_the_last_one_ends():
     assert login_seal.sealing(INSTANCE) is False
 
 
-def test_the_instance_wide_set_is_the_two_that_can_reach_any_tab():
-    assert frozenset({"execute_cdp_command", "switch_tab"}) == login_seal.INSTANCE_WIDE
+def test_the_instance_wide_set_is_what_can_reach_any_tab_or_a_history_entry():
+    """``execute_cdp_command`` and ``switch_tab`` reach any tab; ``go_back`` and
+    ``go_forward`` can walk a tab to a page an earlier URL refusal kept out
+    (``chrome://inspect``), so they wait for the login too."""
+    assert (
+        frozenset({"execute_cdp_command", "switch_tab", "go_back", "go_forward"})
+        == login_seal.INSTANCE_WIDE
+    )
 
 
 def test_refuse_if_sealed_raises_a_tool_error_for_a_sealed_tab(sealed):
@@ -479,3 +500,47 @@ def test_a_hold_counts_as_a_seal_in_progress_for_the_wrapper():
     assert login_seal.any_sealing()
     login_seal.release_new(INSTANCE, hold)
     assert not login_seal.any_sealing()
+
+
+# ------------------------------------------------ inspectors (re-review N1)
+
+
+def test_a_barred_target_is_never_listed_or_addressable_in_any_instance():
+    login_seal.bar("T-frontend")
+    try:
+        assert login_seal.any_sealing()  # the registry wrapper looks now
+        for instance in (INSTANCE, OTHER_INSTANCE):
+            assert login_seal.is_sealed(instance, "T-frontend")
+            with pytest.raises(ToolError):
+                login_seal.refuse_if_sealed(
+                    "execute_script", {"instance_id": instance, "tab_id": "T-frontend"}
+                )
+            login_seal.refuse_if_sealed(
+                "execute_script", {"instance_id": instance, "tab_id": ELSEWHERE}
+            )
+    finally:
+        login_seal.unbar("T-frontend")
+    assert not login_seal.is_sealed(INSTANCE, "T-frontend")
+    assert not login_seal.any_sealing()
+
+
+def test_barring_is_not_a_login_in_flight():
+    login_seal.bar("T-frontend")
+    try:
+        assert not login_seal.login_in_flight()
+        assert not login_seal.sealing(INSTANCE)
+    finally:
+        login_seal.unbar("T-frontend")
+    login_seal.begin(INSTANCE)
+    assert login_seal.login_in_flight()
+    login_seal.end(INSTANCE)
+    hold = login_seal.hold_new(INSTANCE, [])
+    assert login_seal.login_in_flight()
+    login_seal.release_new(INSTANCE, hold)
+    assert not login_seal.login_in_flight()
+
+
+def test_keep_seals_a_tab_for_good():
+    login_seal.keep(INSTANCE, "T-stray")
+    assert login_seal.is_sealed(INSTANCE, "T-stray")
+    assert login_seal.any_sealing()

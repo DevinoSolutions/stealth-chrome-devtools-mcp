@@ -88,6 +88,8 @@ REFUSED_SWITCHES = frozenset(
         "remote-debugging-pipe",
         "remote-debugging-address",
         "remote-allow-origins",
+        # a DevTools window on every new tab is an inspector the agent can reach
+        "auto-open-devtools-for-tabs",
         # a record of the traffic
         "log-net-log",
         "net-log-capture-mode",
@@ -123,21 +125,39 @@ _POLICY_DIRECTORIES = (
 )
 
 
+def _without_prefix(argument: str) -> str | None:
+    """``argument`` minus ONE switch prefix (``--``, ``-`` or ``/``), or ``None``
+    when it has none. The one place Chrome's prefix rule is written down."""
+    text = argument.strip()
+    for prefix in ("--", "-", "/"):
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    return None
+
+
 def switch_name(argument: str) -> str | None:
     """The switch ``argument`` is, the way Chrome's parser reads it, or ``None``.
 
     One prefix (``--``, ``-`` or ``/``) is removed, the value after ``=`` is cut
     off, and the name is lower-cased. A bare prefix, or an argument with no name,
     is no switch."""
-    text = argument.strip()
-    for prefix in ("--", "-", "/"):
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
-            break
-    else:
+    text = _without_prefix(argument)
+    if text is None:
         return None
     name = text.partition("=")[0].strip().lower()
     return name or None
+
+
+def canonical_switch(argument: str) -> str:
+    """``argument`` spelled ``--name[=value]`` (name lower-cased, value as given),
+    so a caller that matches by ``--name`` prefix sees every spelling Chrome
+    accepts. An argument that is no switch comes back unchanged."""
+    text = _without_prefix(argument)
+    name = switch_name(argument)
+    if text is None or name is None:
+        return argument
+    _name, equals, value = text.partition("=")
+    return f"--{name}{equals}{value}"
 
 
 def switch_refusal(options: object, cmdline: list[str]) -> str | None:
