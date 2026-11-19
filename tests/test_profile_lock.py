@@ -112,8 +112,10 @@ def fake_process_table(monkeypatch, table: dict[int, list[str] | None]) -> None:
     monkeypatch.setattr(
         pid_alive,
         "alive",
-        lambda pid, *, unknown: (
-            real_alive(pid, unknown=unknown) if pid == os.getpid() else pid in table
+        lambda pid, *, unknown, kernel=False: (
+            real_alive(pid, unknown=unknown, kernel=kernel)
+            if pid == os.getpid()
+            else pid in table
         ),
     )
 

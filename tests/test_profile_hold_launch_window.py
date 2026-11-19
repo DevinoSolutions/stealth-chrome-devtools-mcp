@@ -627,7 +627,9 @@ class TestLockReadEdges:
     ):
         asked = []
         monkeypatch.setattr(
-            pid_alive, "alive", lambda pid, *, unknown: asked.append(pid) or True
+            pid_alive,
+            "alive",
+            lambda pid, *, unknown, kernel=False: asked.append(pid) or True,
         )
         write_singleton(tmp_path, f"{socket.gethostname()}-{2**31 - 1}")
         assert hold(tmp_path) is not None

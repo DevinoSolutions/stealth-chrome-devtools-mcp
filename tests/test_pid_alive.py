@@ -187,15 +187,13 @@ ALIVE_TABLE = {
         World(listed=False, ctor=psutil.NoSuchProcess(PID)),
         (False, False, False),
     ),
-    # DIVERGENCE 1 (F-1008): only the lock owner's reader asks the kernel when
-    # psutil does not list the pid (``/proc`` mounted ``hidepid=2``). CHANGED in
-    # the browser_cmdline commit: the tree member's reader now asks it too.
-    # CHANGED in the review fix: only the HELD direction reaches the kernel (a
-    # thread id answers kill(tid, 0) too), so the two ``unknown=False`` readers
-    # read an unlisted pid dead as they always did.
+    # F-1008: only the lock owner's reader asks the kernel when psutil does not
+    # list the pid (``/proc`` mounted ``hidepid=2``), by opting in with
+    # ``kernel=True``; it is covered below and through ``profile_hold``. Every reader
+    # in this table reads an unlisted pid dead, as they all did.
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, False, False),
+        (False, False, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -918,7 +916,7 @@ NEW_ALIVE = {
     ),
     "not listed by psutil, kernel says it exists": (
         World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
-        (True, False),
+        (False, False),
     ),
     "a zombie": (
         World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV),
@@ -1328,3 +1326,92 @@ def test_the_held_process_exemption_is_one_function():
     assert _probes_in(outside) == [("elsewhere", "create_time", 2)]
     assert ("client_presence.py", "capture", "create_time") in HELD_PROCESS_READS
     assert ("client_presence.py", "elsewhere", "create_time") not in HELD_PROCESS_READS
+
+
+# ---------------------------------------------------------------------------
+# The kernel probe (F-1008): the lock owner's alone, never a default.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kernel", [None, NOT_OURS], ids=["delivered", "EPERM"])
+def test_a_reader_that_did_not_ask_for_the_kernel_never_reaches_it(monkeypatch, kernel):
+    """The runner's pid table is not the test's: on Linux a made-up pid such as 9
+    IS a kernel thread, so a ``kill(9, 0)`` that nobody scripted answers "exists".
+    Only ``profile_lock`` has ever asked (``hidepid=2``); the tree member, the
+    identity wait and ``browser_is_alive`` read an unlisted pid dead, as before the
+    readers were folded together, and a thread id (which answers ``kill(tid, 0)``)
+    cannot keep a dead adopted browser alive."""
+    install(
+        monkeypatch,
+        World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=kernel),
+    )
+    monkeypatch.setattr(browser_cmdline, "arguments", lambda _pid: [])
+
+    for unknown in (True, False):
+        assert pid_alive.alive(PID, unknown=unknown) is False
+    assert process_exit.browser_is_alive(_Browser(PID)) is False
+    members = browser_cmdline.browser_members({PID}, "/profile")
+    assert members.browsers == ()
+    assert members.unreadable == ()
+    assert KERNEL_ASKED == []
+
+
+@pytest.mark.parametrize(
+    ("world", "answer", "asked"),
+    [
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=None),
+            True,
+            True,
+            id="the kernel delivers",
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_OURS),
+            True,
+            True,
+            id="EPERM: it exists and is not ours",
+        ),
+        pytest.param(
+            World(listed=False, ctor=psutil.NoSuchProcess(PID), kernel=NOT_THERE),
+            False,
+            True,
+            id="ESRCH: gone",
+        ),
+        pytest.param(
+            World(status=psutil.STATUS_ZOMBIE, cmdline=ZOMBIE_ARGV, kernel=None),
+            False,
+            False,
+            id="a LISTED zombie is never put to the kernel, which would call it alive",
+        ),
+    ],
+)
+def test_the_kernel_is_the_lock_owners_word_for_a_pid_psutil_does_not_list(
+    monkeypatch, world, answer, asked
+):
+    install(monkeypatch, world)
+
+    assert pid_alive.alive(PID, unknown=True, kernel=True) is answer
+    assert ([(PID, 0)] if asked else []) == KERNEL_ASKED
+
+
+def test_the_signal_guard_is_the_platform_it_names():
+    """On Windows ``os.kill(pid, 0)`` TERMINATES the process, so the constant that
+    keeps the probe off there is pinned on every OS rather than patched by tests."""
+    assert pid_alive._SIGNAL_ASKS is (os.name != "nt")
+
+
+def test_a_probe_signal_leaves_this_machine_only_where_it_is_a_question(monkeypatch):
+    """No test-side patch of ``_SIGNAL_ASKS``: the module's own default decides
+    whether an unlisted pid is ever put to the kernel. Nothing is ever signalled
+    for real; the signal is a recorder."""
+    sent: list[tuple[int, int]] = []
+
+    def record(pid: int, sig: int) -> None:
+        sent.append((pid, sig))
+        raise ProcessLookupError(errno.ESRCH, "no such process")
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda _pid: False)
+    monkeypatch.setattr(pid_alive, "_signal", record)
+
+    assert pid_alive.alive(PID, unknown=True, kernel=True) is False
+    assert sent == ([] if os.name == "nt" else [(PID, 0)])
