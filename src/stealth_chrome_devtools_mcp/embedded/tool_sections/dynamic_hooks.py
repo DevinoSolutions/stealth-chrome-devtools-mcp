@@ -47,8 +47,8 @@ async def create_dynamic_hook(
     the code can reach the host (for example through the `fnmatch` module it is given).
 
     Login vault: because that code can read everything the backend holds, this tool
-    is refused while the login vault is unlocked, and once it has run the vault
-    cannot be unlocked again until the backend is restarted. Use
+    is disabled in every backend for as long as a login vault exists on this machine
+    (a person removes it with `stealthy login destroy`). Use
     `create_simple_dynamic_hook` (a fixed template, no Python of yours) when you
     only need to block, redirect, add headers or log.
 

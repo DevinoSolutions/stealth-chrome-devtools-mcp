@@ -6,7 +6,6 @@ import json
 from collections import deque
 from collections.abc import Coroutine
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import nodriver as uc
@@ -18,7 +17,10 @@ from stealth_chrome_devtools_mcp.embedded.network_export import (
     request_record,
     response_record,
 )
-from stealth_chrome_devtools_mcp.embedded.path_confinement import open_text
+from stealth_chrome_devtools_mcp.embedded.path_confinement import (
+    open_text,
+    refuse_secret_path,
+)
 from stealth_chrome_devtools_mcp.embedded.tab_close import report_gone_aware
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from stealth_chrome_devtools_mcp.settings import get_settings
@@ -794,7 +796,8 @@ class NetworkInterceptor:
         filepath: str - Path to JSON file.
         Returns: bool - True if successful.
         """
-        data = json.loads(Path(filepath).read_text())  # noqa: ASYNC240  plan_M7
+        real = refuse_secret_path(filepath, tool="import_network_data", action="read")
+        data = json.loads(real.read_text())
 
         async with self._lock:
             if instance_id not in self._instance_requests:

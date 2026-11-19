@@ -45,7 +45,6 @@ from datetime import datetime, timezone
 from stealth_chrome_devtools_mcp.embedded import (
     backend_registry,
     backend_token,
-    caller_python,
     secret_registry,
     vault_crypto,
 )
@@ -195,19 +194,16 @@ def unlock(key: bytes, ttl_seconds: float | None) -> int:
     """Hold ``key`` in memory, after proving it opens the vault file.
 
     Raises :class:`vault_crypto.VaultError` (and changes nothing) for a missing
-    file, a wrong key or a damaged file, and :class:`caller_python.Tainted` (also
-    changing nothing, whatever the key) once a tool has run caller Python in this
-    process. Registers every password with :mod:`secret_registry`. Returns the
-    number of entries.
+    file, a wrong key or a damaged file. Registers every password with
+    :mod:`secret_registry`. Returns the number of entries.
     """
     if ttl_seconds is not None and not ttl_seconds > 0:
         raise ValueError("ttl_seconds must be a positive number of seconds")
-    with caller_python.unlock_gate():
-        entries = _entries_of(vault_crypto.open_sealed(key, _read_document()))
-        with _lock:
-            global _key, _deadline  # noqa: PLW0603  PERMANENT(the key lives only in this module's memory)
-            _key = bytes(key)
-            _deadline = None if ttl_seconds is None else time.monotonic() + ttl_seconds
+    entries = _entries_of(vault_crypto.open_sealed(key, _read_document()))
+    with _lock:
+        global _key, _deadline  # noqa: PLW0603  PERMANENT(the key lives only in this module's memory)
+        _key = bytes(key)
+        _deadline = None if ttl_seconds is None else time.monotonic() + ttl_seconds
     _register_passwords(entries)
     return len(entries)
 
@@ -242,8 +238,6 @@ def status() -> dict[str, object]:
         "exists": VAULT_PATH.exists(),
         "unlocked": unlocked,
         "expires_in": expires_in,
-        # True once a tool has run caller Python here: no unlock until a restart.
-        "unlock_blocked": caller_python.tainted(),
     }
 
 

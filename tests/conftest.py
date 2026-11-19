@@ -324,28 +324,35 @@ def _debug_port_guard_hygiene(request):
         debug_port_guard.protect = protect
         debug_port_guard.verify_clean = verify_clean
     debug_port_guard._PORTS.clear()
+    debug_port_guard._CLOSED.clear()
     login_seal._barred.clear()
     login_seal._internal.clear()
     yield
     debug_port_guard.protect = original
     debug_port_guard.verify_clean = original_verify
     debug_port_guard._PORTS.clear()
+    debug_port_guard._CLOSED.clear()
     login_seal._barred.clear()
     login_seal._internal.clear()
 
 
 @pytest.fixture(autouse=True)
-def _caller_python_hygiene():
-    """No test may leave the process "tainted" for the next (T-19366).
+def _caller_python_hygiene(monkeypatch, tmp_path_factory):
+    """No test sees the person's real vault, and none leaves the process marked (T-19366).
 
-    A tool that runs caller Python (``create_dynamic_hook``, ``create_python_binding``)
-    marks the PROCESS, and a marked process refuses every vault unlock until the
-    backend restarts. Tests run in one process, so without this a hook test would
-    make every later vault test fail to unlock. ``tests/test_caller_python.py`` pins
-    the rule itself.
+    ``create_dynamic_hook`` and ``create_python_binding`` are refused while a vault
+    FILE exists (``caller_python``), so a machine that has one would fail every hook
+    test: the vault path points at a file that never exists unless a test makes one
+    (they re-point it at their own). A tool that runs caller Python also marks the
+    process, which the CLI reads before it creates a vault; tests run in one
+    process, so the mark is cleared around each. ``tests/test_caller_python.py``
+    pins the rule itself.
     """
-    from stealth_chrome_devtools_mcp.embedded import caller_python
+    from stealth_chrome_devtools_mcp.embedded import caller_python, vault_store
 
+    monkeypatch.setattr(
+        vault_store, "VAULT_PATH", tmp_path_factory.getbasetemp() / "no-vault.json"
+    )
     caller_python._reset_for_tests()
     yield
     caller_python._reset_for_tests()

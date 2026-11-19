@@ -131,8 +131,9 @@ _PORTS: set[int] = set()
 #: The running guard of each protected port (what ``protected_ports`` stands on).
 _GUARDS: dict[int, _Guard] = {}
 _TASKS: set[asyncio.Task[None]] = set()
-#: DevTools windows this module has closed (by id), for the answer of ``login``.
-_CLOSED: set[str] = set()
+#: DevTools windows this module has closed (by id), per browser (debug port), for
+#: the answer of ``login``: another browser's windows are not this login's.
+_CLOSED: dict[int, set[str]] = {}
 _COUNTER = itertools.count(1)
 
 CONNECT_BUDGET_SECONDS = 15.0
@@ -195,6 +196,18 @@ INTERNAL_REFUSAL = (
 _URL_EDGE = "".join(chr(code) for code in range(33))
 _URL_INNER = dict.fromkeys((9, 10, 13))
 _DECODE_ROUNDS = 4
+#: UTS 46 (what Chrome applies to a host) maps these to a full stop; NFKC maps only
+#: the full-width one, so the ideographic and half-width ones are listed.
+_DOTS = {0x3002: ".", 0xFF61: ".", 0xFF0E: ".", 0x2024: "."}
+#: Code points UTS 46 DROPS from a host and NFKC keeps (soft hyphen, zero-width and
+#: format characters are category Cf; these are the others: the combining grapheme
+#: joiner, Hangul fillers, Mongolian free variation selectors, variation selectors).
+_IGNORED = frozenset(
+    {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x3164, 0xFFA0}
+    | set(range(0x180B, 0x180E))
+    | set(range(0xFE00, 0xFE10))
+    | set(range(0xE0100, 0xE01F0))
+)
 #: Types of target that can make requests, each given the port interception.
 GUARDED_TYPES = frozenset(
     {"page", "iframe", "worker", "service_worker", "shared_worker"}
@@ -240,17 +253,32 @@ def url_port(url: object) -> int | None:
         return None
 
 
+def _mapped(text: str) -> str:
+    """UTS 46's mapping of a host, as far as it matters here: ignorable code points
+    (a soft hyphen inside ``inspect``) dropped, every full-stop form a full stop,
+    then NFKC (full-width letters). Applied twice: a mapping can expose another."""
+    for _ in range(2):
+        text = "".join(
+            char
+            for char in text
+            if ord(char) not in _IGNORED and unicodedata.category(char) != "Cf"
+        )
+        text = unicodedata.normalize("NFKC", text).translate(_DOTS)
+    return text
+
+
 def _decoded(text: str) -> str:
-    """``text`` percent-decoded as far as it goes and NFKC-normalised, which is what
-    Chrome's host canonicalisation amounts to for a ``chrome:`` URL (``%69nspect``
-    and a full-width spelling of ``inspect`` are ``inspect``). Decoding to a fixed
+    """``text`` percent-decoded as far as it goes and mapped the way Chrome maps a
+    host (:func:`_mapped`), which is what its canonicalisation of a ``chrome:`` URL
+    amounts to: ``%69nspect``, ``i<soft hyphen>nspect``, a full-width spelling and
+    ``inspect<ideographic full stop>`` are all ``inspect``. Decoding to a fixed
     point reads MORE spellings as the same page than Chrome does: the safe side."""
     for _ in range(_DECODE_ROUNDS):
         decoded = urllib.parse.unquote(text)
         if decoded == text:
             break
         text = decoded
-    return unicodedata.normalize("NFKC", text)
+    return _mapped(text)
 
 
 def _inspector_host(url: str) -> tuple[str, str]:
@@ -310,18 +338,20 @@ def internal_url(url: object) -> bool:
     return not (scheme != "chrome-extension" and host in NEW_TAB_HOSTS)
 
 
-def refusal(url: object) -> str | None:
+def refusal(url: object, instance_id: object = None) -> str | None:
     """Why ``url`` may not be loaded, or ``None``.
 
     Refused when it is a browser inspector (:func:`inspector_url`), when a login is
-    running and it is a browser-internal page (:func:`internal_url`), or when its
+    running in ``instance_id`` (any instance when the call names none) and it is a
+    browser-internal page (:func:`internal_url`), or when its
     port is the debug port of any browser of this backend, WHATEVER the host:
     ``127.0.0.1``, ``localhost``, ``localhost.``, ``[::1]``, ``0.0.0.0``,
     ``2130706433``, ``0x7f.1`` and ``0177.0.0.1`` all name the same listener, so
     the port, not the spelling, is what is checked."""
     if inspector_url(url):
         return INSPECTOR_REFUSAL
-    if login_seal.login_in_flight() and internal_url(url):
+    instance = instance_id if isinstance(instance_id, str) else None
+    if login_seal.login_in_flight(instance) and internal_url(url):
         return INTERNAL_REFUSAL
     port = url_port(url)
     return REFUSAL if port is not None and port in _PORTS else None
@@ -333,7 +363,7 @@ def refuse_urls(tool: str, arguments: dict[str, object]) -> None:
     name = URL_ARGUMENTS.get(tool)
     if name is None:
         return
-    reason = refusal(arguments.get(name))
+    reason = refusal(arguments.get(name), arguments.get("instance_id"))
     if reason is not None:
         raise ToolError(reason)
 
@@ -573,7 +603,7 @@ class _Guard:
         login_seal.bar(target)
         self.inspectors.add(target)
         if is_frontend(info.get("url")) and first_sight:
-            if login_seal.login_in_flight():
+            if login_seal.login_in_flight_on(self.port):
                 self._spawn(self._deal(target, close=True))
             return
         self._spawn(self._deal(target, close=False))
@@ -589,7 +619,7 @@ class _Guard:
         with contextlib.suppress(Exception):
             await self.command("Target.closeTarget", {"targetId": target})
             if close:
-                _CLOSED.add(target)
+                _CLOSED.setdefault(self.port, set()).add(target)
 
     async def _leave_endpoint(self, target: str) -> None:
         """A document of ``target`` committed at the endpoint's own origin (the one
@@ -700,16 +730,18 @@ async def verify_clean(browser: Browser) -> None:
             with contextlib.suppress(Exception):
                 await tab_open.send(browser, cdp.target.close_target, info.target_id)
                 if is_frontend(info.url):
-                    _CLOSED.add(str(info.target_id))
+                    _CLOSED.setdefault(int(port), set()).add(str(info.target_id))
         if attempt < _CLEAN_ATTEMPTS - 1:
             await asyncio.sleep(_CLEAN_RETRY_S)
     raise ToolError(INSPECTOR_OPEN)
 
 
-def closed_windows() -> int:
-    """How many DevTools windows this process has closed so far. A login reports
-    the difference between its end and its start."""
-    return len(_CLOSED)
+def closed_windows(browser: Browser) -> int:
+    """How many DevTools windows this process has closed so far in ``browser``
+    (its debug port): a login reports the difference between its end and its start,
+    and never another browser's windows."""
+    port = getattr(getattr(browser, "config", None), "port", None)
+    return len(_CLOSED.get(int(port), ())) if port else 0
 
 
 @contextlib.asynccontextmanager

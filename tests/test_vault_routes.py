@@ -154,17 +154,21 @@ def test_lock_drops_the_key(client):
 
 def test_status_reports_without_unlocking(client):
     reply = client.get(vault_routes.STATUS_PATH, headers=AUTH)
-    assert reply.json() == {
-        "exists": False,
-        "unlocked": False,
-        "expires_in": None,
-        "unlock_blocked": False,
-    }
+    assert reply.json() == {"exists": False, "unlocked": False, "expires_in": None}
     make_vault({"work": password_entry()})
     assert client.get(vault_routes.STATUS_PATH, headers=AUTH).json()["exists"] is True
     post_unlock(client, good_key())
     status = client.get(vault_routes.STATUS_PATH, headers=AUTH).json()
     assert status["unlocked"] is True
+
+
+def test_caller_python_route_names_the_tool_that_ran_and_nothing_else(client):
+    from stealth_chrome_devtools_mcp.embedded import caller_python
+
+    url = vault_routes.CALLER_PYTHON_PATH
+    assert client.get(url, headers=AUTH).json() == {"ran": None}
+    caller_python.admit("create_dynamic_hook")
+    assert client.get(url, headers=AUTH).json() == {"ran": "create_dynamic_hook"}
 
 
 @pytest.mark.parametrize(
@@ -173,6 +177,7 @@ def test_status_reports_without_unlocking(client):
         ("post", vault_routes.UNLOCK_PATH),
         ("post", vault_routes.LOCK_PATH),
         ("get", vault_routes.STATUS_PATH),
+        ("get", vault_routes.CALLER_PYTHON_PATH),
     ],
 )
 def test_no_token_is_401_and_a_wrong_token_is_401(client, method, path):
@@ -197,6 +202,7 @@ def test_an_unauthenticated_lock_does_not_lock(client):
         ("post", vault_routes.UNLOCK_PATH),
         ("post", vault_routes.LOCK_PATH),
         ("get", vault_routes.STATUS_PATH),
+        ("get", vault_routes.CALLER_PYTHON_PATH),
     ],
 )
 def test_no_route_returns_an_entry_a_username_a_password_or_a_key(client, method, path):
@@ -213,7 +219,7 @@ def test_no_route_returns_an_entry_a_username_a_password_or_a_key(client, method
         "locked",
         "exists",
         "expires_in",
-        "unlock_blocked",
+        "ran",
     }
 
 

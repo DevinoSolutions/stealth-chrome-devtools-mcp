@@ -686,6 +686,17 @@ INSPECTOR_URLS = [
     "about://%49NSPECT/",
     "view-source:chrome://%69nspect",
     "  chrome://%69nspect  ",
+    # fourth review F2: Chrome maps the host with UTS 46, which drops and maps more
+    "chrome://i\u00adnspect/",  # soft hyphen
+    "chrome://inspect\u3002/",  # ideographic full stop
+    "chrome://inspect%E3%80%82",  # the same, percent-encoded
+    "chrome://inspect\uff61/",  # half-width ideographic full stop
+    "chrome://ins\u200bpect/",  # zero-width space
+    "chrome://insp\ufe0fect/",  # variation selector
+    "chrome://i\u034fnspect/",  # combining grapheme joiner
+    "chrome://%E2%80%8Binspect/",  # encoded zero-width space
+    "about:ins\u00adpect",
+    "view-source:chrome://i\u00adnspect",
     "chrome://inspect\\#pages",
 ]
 
@@ -1043,7 +1054,6 @@ def test_a_barred_window_with_no_login_is_not_called_a_login():
 
 
 async def test_the_windows_a_login_closes_are_counted_once_each(guarded):
-    before = debug_port_guard.closed_windows()
     browser = ListedBrowser(
         [
             _info("D1", FRONTEND),
@@ -1051,26 +1061,78 @@ async def test_the_windows_a_login_closes_are_counted_once_each(guarded):
             _info("T1", "about:blank"),
         ]
     )
+    before = debug_port_guard.closed_windows(browser)
     await debug_port_guard.verify_clean(browser)
-    assert debug_port_guard.closed_windows() - before == 1  # the frontend, not the page
+    assert debug_port_guard.closed_windows(browser) - before == 1  # not the page
     again = ListedBrowser([_info("D1", FRONTEND)])
     await debug_port_guard.verify_clean(again)
-    assert debug_port_guard.closed_windows() - before == 1  # the same id: not twice
+    assert debug_port_guard.closed_windows(again) - before == 1  # the same id: once
+
+
+async def test_another_browsers_closed_windows_are_not_this_logins(guarded):
+    """F11: the count is per browser (debug port). A window closed in one browser
+    must never appear in the result of a login in another."""
+    here = ListedBrowser([_info("D1", FRONTEND)])
+    elsewhere = ListedBrowser([_info("D2", FRONTEND)])
+    elsewhere.config.port = PORT + 1
+    debug_port_guard._PORTS.add(PORT + 1)
+    try:
+        await debug_port_guard.verify_clean(elsewhere)
+    finally:
+        debug_port_guard._PORTS.discard(PORT + 1)
+    assert debug_port_guard.closed_windows(elsewhere) == 1
+    assert debug_port_guard.closed_windows(here) == 0
 
 
 async def test_the_guards_own_close_of_a_frontend_is_counted(endpoint):
-    before = debug_port_guard.closed_windows()
+    browser = SimpleNamespace(config=SimpleNamespace(port=PORT))
+    before = debug_port_guard.closed_windows(browser)
     guard = await _guard(endpoint)
-    login_seal.begin("inst")
+    login_seal.begin("inst", PORT)
     try:
         await endpoint.emit("Target.targetCreated", _target("D7", FRONTEND))
         await _settle(endpoint, "Target.closeTarget")
         await _wait_until(
-            lambda: debug_port_guard.closed_windows() > before, "not counted"
+            lambda: debug_port_guard.closed_windows(browser) > before, "not counted"
         )
     finally:
         login_seal.end("inst")
     await guard.stop()
+
+
+async def test_a_login_in_another_browser_does_not_close_this_browsers_window(
+    endpoint,
+):
+    """F11: the guard closes a DevTools window only for a login in ITS browser. A
+    person's F12 window in a browser where nothing logs in is hidden, not destroyed,
+    however busy the others are."""
+    guard = await _guard(endpoint)
+    login_seal.begin("other-instance", PORT + 7)
+    try:
+        await endpoint.emit("Target.targetCreated", _target("D8", FRONTEND))
+        await _wait_until(lambda: login_seal.is_sealed("any", "D8"), "not barred")
+        await asyncio.sleep(0.2)
+        assert "Target.closeTarget" not in endpoint.methods()
+    finally:
+        login_seal.end("other-instance")
+    await guard.stop()
+
+
+def test_a_login_in_one_instance_does_not_hide_or_refuse_pages_in_another():
+    """F11: the internal-page rule is per instance. Another instance's login
+    refuses neither a ``chrome://`` URL for this instance nor its tabs."""
+    login_seal.mark_internal("V9", True)
+    login_seal.begin("busy", PORT)
+    try:
+        assert login_seal.is_sealed("busy", "V9")
+        assert not login_seal.is_sealed("idle", "V9")
+        assert debug_port_guard.refusal("chrome://version", "busy") is not None
+        assert debug_port_guard.refusal("chrome://version", "idle") is None
+        # a call that names no instance takes the cautious reading
+        assert debug_port_guard.refusal("chrome://version") is not None
+    finally:
+        login_seal.end("busy")
+        login_seal.mark_internal("V9", False)
 
 
 # ------------------------------------------ the check before a login types

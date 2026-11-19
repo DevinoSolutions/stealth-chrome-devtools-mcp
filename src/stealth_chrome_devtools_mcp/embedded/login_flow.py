@@ -183,10 +183,10 @@ async def _run(
         raise instance_not_found(instance_id)
     browser = data["browser"]
     await _check_launch(data.get("options"), browser)
-    login_seal.begin(instance_id)
+    login_seal.begin(instance_id, int(browser.config.port))
     tab = None
     result: LoginResult = {}
-    closed_before = debug_port_guard.closed_windows()
+    closed_before = debug_port_guard.closed_windows(browser)
     try:
         # If the guard ends mid-login (its connection dropped, the browser lives)
         # the login is cancelled, its cleanup clears what it typed, and the caller
@@ -200,7 +200,7 @@ async def _run(
                 "outcome": outcome,
                 "label": label,
                 "detail": detail,
-                "closed_devtools_windows": debug_port_guard.closed_windows()
+                "closed_devtools_windows": debug_port_guard.closed_windows(browser)
                 - closed_before,
             }
     finally:
