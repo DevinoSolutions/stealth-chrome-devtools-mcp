@@ -143,7 +143,7 @@ async def _resolve(browser_manager: BrowserManager, instance_id: str) -> Tab | N
     if wanted is None:
         tab = await browser_manager.get_tab(instance_id)
         if tab is not None:
-            login_seal.refuse_current_tab(instance_id, _id(tab))
+            login_seal.refuse_current_tab(instance_id, tab)
         if tab is not None and who is not None:
             if _holders(instance_id, _id(tab), who):
                 raise ToolError(
@@ -159,7 +159,7 @@ async def _resolve(browser_manager: BrowserManager, instance_id: str) -> Tab | N
         return None
     tab = await _open(browser, wanted)
     if tab is not None:
-        login_seal.refuse_current_tab(instance_id, _id(tab))
+        login_seal.refuse_current_tab(instance_id, tab)
         return tab
     if requested:
         raise ToolError(

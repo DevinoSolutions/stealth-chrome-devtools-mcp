@@ -298,10 +298,10 @@ async def _refuse_sealed_resource(instance_id: str) -> None:
             instance_id, str(tab.target.target_id)
         ):
             raise ToolError(login_seal.REFUSAL)
-    elif login_seal.any_sealing() and vault_mode.active():
+    elif vault_mode.active():
         tab = await rt.browser_manager.get_tab(instance_id)
         if tab is not None:
-            login_seal.refuse_current_tab(instance_id, str(tab.target.target_id))
+            login_seal.refuse_current_tab(instance_id, tab)
 
 
 @mcp.resource("browser://{instance_id}/state")

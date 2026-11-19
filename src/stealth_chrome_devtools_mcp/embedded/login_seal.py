@@ -345,12 +345,27 @@ CURRENT_TAB_HINT = (
 )
 
 
-def refuse_current_tab(instance_id: str, target_id: str) -> None:
+def refuse_current_tab(instance_id: str, tab: object) -> None:
     """Raise when the tab a call resolved WITHOUT a ``tab_id`` (the caller's bound
     tab, or the instance's current one) is sealed or barred while vault mode is on:
     a person can leave the browser on a ``chrome://`` page, and ``go_back`` can reach
     one, so ``refuse_if_sealed`` (which reads only a ``tab_id`` the call passed) is
-    not the only place to ask. Costs two dict truthiness checks with nothing sealed,
-    and one ``lstat`` only while a sealed target exists."""
-    if any_sealing() and vault_mode.active():
+    not the only place to ask.
+
+    With no vault it does nothing and never touches ``tab`` (one ``lstat``). With
+    one, a tab whose target id cannot be read (a rediscovered raw connection) is
+    REFUSED: "cannot tell what this is" is not "allowed", and it must not surface as
+    an ``AttributeError`` either."""
+    if not vault_mode.active():
+        return
+    target_id = getattr(getattr(tab, "target", None), "target_id", None)
+    if not target_id:
+        raise ToolError(
+            vault_mode.refusal_text(
+                "a tab this backend cannot identify",
+                "it cannot be shown not to be a browser-internal page",
+            )
+            + CURRENT_TAB_HINT
+        )
+    if any_sealing():
         _refuse_tab(instance_id, str(target_id), CURRENT_TAB_HINT)
