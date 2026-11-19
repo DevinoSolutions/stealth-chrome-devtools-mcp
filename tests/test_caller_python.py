@@ -114,23 +114,28 @@ def test_the_first_tool_to_run_is_the_one_recorded():
     assert caller_python.ran() == "create_dynamic_hook"
 
 
+class _Path:
+    """A vault path whose ``stat`` fails the way a real one can: ``os.stat`` asks
+    for ``__fspath__`` first. (Patching ``os.stat`` itself would break pytest.)"""
+
+    def __init__(self, error):
+        self.error = error
+
+    def __fspath__(self):
+        raise self.error
+
+
 def test_a_vault_path_that_cannot_be_read_counts_as_a_vault(monkeypatch):
     """Fail closed: the tools stay off when the file cannot be looked at."""
-
-    def denied(_path):
-        raise PermissionError(errno.EACCES, "denied")
-
-    monkeypatch.setattr(caller_python.os, "stat", denied)
+    denied = PermissionError(errno.EACCES, "denied")
+    monkeypatch.setattr(vault_store, "VAULT_PATH", _Path(denied))
     with pytest.raises(ToolError):
         caller_python.admit("create_python_binding")
 
 
 @pytest.mark.parametrize("code", [errno.ENOENT, errno.ENOTDIR])
 def test_a_missing_file_or_folder_is_no_vault(monkeypatch, code):
-    def missing(_path):
-        raise OSError(code, "missing")
-
-    monkeypatch.setattr(caller_python.os, "stat", missing)
+    monkeypatch.setattr(vault_store, "VAULT_PATH", _Path(OSError(code, "missing")))
     caller_python.admit("create_python_binding")
 
 
