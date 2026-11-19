@@ -307,9 +307,7 @@ def _allowed_spellings() -> list[str]:
     spellings = []
     for name, (_why, pattern) in ALLOWED_SWITCHES.items():
         fixed = pattern is not None and re.escape(pattern.pattern) == pattern.pattern
-        spellings.append(
-            f"--{name}={pattern.pattern}" if fixed and pattern else f"--{name}"
-        )
+        spellings.append(f"--{name}={pattern.pattern}" if fixed else f"--{name}")
     return spellings
 
 
