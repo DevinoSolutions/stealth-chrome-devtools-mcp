@@ -145,8 +145,14 @@ LAUNCHES = 2
 # before anything this repo installs. `tests/test_chrome_cold_start_probe.py`
 # compares it against the installed nodriver, so a version bump that changes
 # the flags fails there instead of silently re-defining what is measured.
+#
+# ONE flag is left out, on purpose: `--remote-allow-origins=*`. The product no
+# longer passes it (T-19366: with it, any web page could open a DevTools
+# connection and read the vault's login tab; `debug_port_guard.install` takes it
+# out of nodriver's defaults), so the browser this probe times must not have it
+# either. The test compares against a `Config` AFTER `install()`, as the product
+# builds it.
 NODRIVER_DEFAULT_ARGS = (
-    "--remote-allow-origins=*",
     "--no-first-run",
     "--no-service-autorun",
     "--no-default-browser-check",

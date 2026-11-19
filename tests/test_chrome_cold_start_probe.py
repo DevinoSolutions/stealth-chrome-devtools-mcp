@@ -39,6 +39,8 @@ import pytest
 # `importorskip` — a skip would hide exactly the drift they exist to catch.
 from nodriver.core import config as nodriver_config
 
+from stealth_chrome_devtools_mcp.embedded import debug_port_guard
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -494,6 +496,7 @@ def test_the_command_mirrors_nodrivers_own_launch(tmp_path: Path):
     `--disable-session-crashed-bubble` a second time, and a set comparison would
     accept losing that duplicate, or any reordering, as equivalent.
     """
+    debug_port_guard.install()  # the product builds its Config after this
     profile = tmp_path / "profile"
     port = 45123
     theirs = nodriver_config.Config(
@@ -509,6 +512,7 @@ def test_the_command_mirrors_nodrivers_own_launch(tmp_path: Path):
 
 def test_the_default_args_are_nodrivers_verbatim():
     """The copied constant, checked against its source of truth, in order."""
+    debug_port_guard.install()  # the product builds its Config after this
     theirs = nodriver_config.Config(user_data_dir="x")._default_browser_args
     assert list(probe.NODRIVER_DEFAULT_ARGS) == list(theirs)
 
