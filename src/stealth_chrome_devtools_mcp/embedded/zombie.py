@@ -31,7 +31,7 @@ A leaf: ``psutil`` and the debug logger. It states facts and decides nothing.
 
 **The zombie.** A zombie is a POSIX state: a child that has exited and whose
 parent has not collected its status yet. Four places ask it (``process_exit``'s
-``_has_exited`` and ``browser_is_alive``, ``devtools_port``, ``profile_lock``)
+``_poll_for_exit`` and ``browser_is_alive``, ``devtools_port``, ``profile_lock``)
 and they used to ask it the same way everywhere, ``process.status() ==
 psutil.STATUS_ZOMBIE``. On Windows that question has one answer, no, and asking it
 was the most expensive call in the backend.
