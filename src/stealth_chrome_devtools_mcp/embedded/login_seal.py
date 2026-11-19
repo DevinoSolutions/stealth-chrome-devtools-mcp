@@ -30,6 +30,10 @@ login could not close (``unclosed``): it is kept sealed after the login is over,
 so an agent still cannot read it, and the flow says so. It is dropped from here
 only by the backend restarting.
 
+**Popups.** A page the sealed tab opens (``window.open``, ``target=_blank``) is
+sealed by :func:`seal_popup` from the ``targetCreated`` event and closed by
+``tab_open``; :func:`release` drops it once Chrome no longer lists it.
+
 In memory, like ``tab_binding`` and ``session_lease``: a backend restart forgets
 every seal, and so does the login that was holding it (it died with the process).
 A leaf: ``tool_errors`` only.
@@ -85,6 +89,34 @@ def end(instance_id: str, unclosed: str | None = None) -> None:
             return
         _depth.pop(instance_id, None)
         _tabs.pop(instance_id, None)
+
+
+def seal_popup(opener_id: str, popup_id: str) -> bool:
+    """Seal ``popup_id``, a page the sealed tab ``opener_id`` opened, in the
+    instance that holds the opener; ``False`` when no instance does.
+
+    It is sealed from the event that announced it, so no tool can name it before
+    the backend has closed it; :func:`release` drops it once it is gone. Until then
+    it counts like a tab that would not close."""
+    opener = str(opener_id)
+    with _lock:
+        for instance_id in (*_tabs, *_unclosed):
+            if opener in _tabs.get(instance_id, ()) or opener in _unclosed.get(
+                instance_id, ()
+            ):
+                _unclosed.setdefault(instance_id, set()).add(str(popup_id))
+                return True
+    return False
+
+
+def release(target_id: str) -> None:
+    """``target_id`` is gone from the browser: it no longer needs sealing."""
+    target = str(target_id)
+    with _lock:
+        for instance_id in list(_unclosed):
+            _unclosed[instance_id].discard(target)
+            if not _unclosed[instance_id]:
+                del _unclosed[instance_id]
 
 
 def sealing(instance_id: str) -> bool:

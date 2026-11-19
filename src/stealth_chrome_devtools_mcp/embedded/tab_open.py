@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, TypeVar
 from nodriver import Browser, Tab, cdp
 from websockets.exceptions import ConnectionClosed
 
+from stealth_chrome_devtools_mcp.embedded import login_seal
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
@@ -143,8 +144,15 @@ def visible_tabs(browser: Browser, excluding: str | None = None) -> list[Tab]:
     without the target *excluding*: the tabs a caller's stored tab may fall back to
     when it is closed (nodriver drops a destroyed target only on
     ``Target.targetDestroyed``, so the closed id is excluded explicitly)."""
-    skip = {*_state(browser).internal, str(excluding)}
-    return [t for t in browser.tabs if str(t.target.target_id) not in skip]
+    skip = {*_state(browser).internal}
+    if excluding is not None:
+        skip.add(str(excluding))
+    # A rediscovered raw connection may carry no target: not ours, so it stays.
+    return [
+        t
+        for t in browser.tabs
+        if str(getattr(getattr(t, "target", None), "target_id", None)) not in skip
+    ]
 
 
 #: Where a page Chrome opens for itself lives, never a caller's page to land on.
@@ -347,8 +355,12 @@ async def arm_popups(
         if info.type_ != "page" or info.opener_id is None or is_closed(browser):
             return
         # A popup of the backend's OWN tab (a vault login's sealed tab, T-19366)
-        # is closed, never armed: arming would put it in front of every hook.
+        # is closed, never armed: arming would put it in front of every hook. It
+        # is sealed and hidden FIRST, in this handler, so no tool can name it in
+        # the moment before the close lands.
         if str(info.opener_id) in state.internal:
+            state.internal.add(str(info.target_id))
+            login_seal.seal_popup(str(info.opener_id), str(info.target_id))
             popup = _close_popup(browser, info.target_id)
         else:
             popup = _arm_popup(browser, info.target_id, arm, args)
@@ -374,12 +386,24 @@ async def arm_popups(
 
 
 async def _close_popup(browser: Browser, target_id: cdp.target.TargetID) -> None:
+    """Close a popup of the backend's own tab, and drop its seal only once Chrome
+    no longer lists it."""
     try:
         await send(browser, cdp.target.close_target, target_id)
-    except Exception as error:  # noqa: BLE001  PERMANENT(a popup that closed first is already what we wanted)
+    except Exception as error:  # noqa: BLE001  PERMANENT(a popup that closed first is already what we wanted; whether it is gone is read below)
         debug_logger.log_debug(
             "tab_open", "_close_popup", f"{type(error).__name__} closing a popup"
         )
+    try:
+        await update_targets(browser)
+        gone = find(browser, str(target_id)) is None
+    except Exception as error:  # noqa: BLE001  PERMANENT(an unreadable target list leaves the popup sealed, which is the safe answer)
+        debug_logger.log_debug(
+            "tab_open", "_close_popup", f"{type(error).__name__} listing targets"
+        )
+        gone = False
+    if gone:
+        login_seal.release(str(target_id))
 
 
 async def _arm_popup(
