@@ -41,6 +41,13 @@ the tool descriptions and the census tests read):
 6. **downloads** (:func:`download_pin`): every browser the guard protects is pinned
    to one fixed folder under generated names (``allowAndName``), so a page cannot
    choose where its bytes land, nor what they are called. See ``debug_port_guard``.
+7. **browser WebUI pages** (:func:`webui_refusal`): ``chrome://``, ``chrome-untrusted://``
+   and ``devtools://`` pages can send commands to the browser itself (``chrome.send``),
+   so while the mode is on the URL tools refuse them (a login refuses more, only while
+   it runs) and a target that is one is hidden from the tools and refused by
+   ``tab_id``, ALWAYS. ``about:blank`` and the new-tab page keep working. They are
+   hidden, not blanked: the product's own session-restore opens ``chrome://settings``
+   in a persistent profile, and blanking it would stop logins from being kept.
 
 A caller-named PATH that a tool reads or writes (``upload_file``,
 ``export_network_data``, ``import_network_data``, ``take_screenshot``,
@@ -130,14 +137,20 @@ RESTRICTIONS = (
         "browser_args",
         TAKES_BROWSER_ARGS,
         "spawn_browser(browser_args=...) takes only a short list of switches "
-        "(window size and position, language, user agent, feature lists) and "
-        "user_data_dir takes a session NAME, not a path",
+        "(window size and position, language, user agent; the feature-list "
+        "switches are refused) and user_data_dir takes a session NAME, not a path",
     ),
     Restriction(
         "file_urls",
         LOADS_URLS,
         "file: URLs are refused by navigate, new_tab and create_simple_dynamic_hook, "
         "and a tab that reaches one is hidden and blanked",
+    ),
+    Restriction(
+        "browser_pages",
+        LOADS_URLS,
+        "chrome://, chrome-untrusted:// and devtools:// pages are hidden from the "
+        "tools and cannot be opened (about:blank and the new-tab page work)",
     ),
     Restriction(
         "export_format",
@@ -168,6 +181,15 @@ DISABLED = (
     "can remove the vault with `stealthy login destroy` (that deletes every stored "
     "login); until then use execute_script or inject_and_execute_script, which run "
     "in the page."
+)
+
+#: The sentence for an unlock refused because caller Python ran in this backend.
+#: ``vault_store.unlock`` is the one place a key enters a backend (the CLI's route and
+#: a direct POST both end there), so the check is there and not only in the CLI.
+TAINTED = (
+    "this backend has run {tool} in this session, so code an agent wrote could read "
+    "the key and every password once the vault is unlocked here. Restart the backend "
+    "(or run `stealthy login unlock` against a fresh one), then unlock."
 )
 
 _lock = threading.RLock()
@@ -237,16 +259,21 @@ _DIGITS = re.compile(r"\d{1,5},\d{1,5}")
 _POSITION = re.compile(r"-?\d{1,5},-?\d{1,5}")
 _LOCALE = re.compile(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*")
 _LOCALES = re.compile(rf"{_LOCALE.pattern}(?:,{_LOCALE.pattern})*")
-_FEATURES = re.compile(r"[A-Za-z0-9_]+(?:,[A-Za-z0-9_]+)*")
 _ANY = re.compile(r"[^\x00-\x1f\x7f]{1,512}")
 
 #: Switch name (``browser_trust.switch_name``: no prefix, lower case) -> (why it is
 #: harmless, a pattern its value must match or ``None`` for "takes no value"). From
 #: what the product's own docs, tests and README use (window size, language, user
-#: agent, the feature lists the stealth notes talk about) plus the window-position
-#: and start-maximized switches that belong with the size. Everything else, including
-#: every switch that names a file or a program, is refused by name. ``--proxy-server``
-#: is not here either: ``browser_trust`` refuses a login in a proxied browser.
+#: agent) plus the window-position and start-maximized switches that belong with the
+#: size. Everything else, including every switch that names a file or a program, is
+#: refused by name. The three FEATURE-LIST switches (``--disable-features``,
+#: ``--enable-blink-features``, ``--disable-blink-features``) are not here either
+#: (audit 6, N1): their names are an open vocabulary of hundreds of Chrome features,
+#: some of which are security controls (site isolation, private-network protection,
+#: the certificate and resolver paths), and no short list of names can be argued from
+#: a use the product documents; the product sets the ones it needs itself.
+#: ``--proxy-server`` is not here: ``browser_trust`` refuses a login in a proxied
+#: browser.
 ALLOWED_SWITCHES: dict[str, tuple[str, re.Pattern[str] | None]] = {
     "window-size": ("the window's size, in pixels", _DIGITS),
     "window-position": ("the window's place on the screen", _POSITION),
@@ -254,9 +281,6 @@ ALLOWED_SWITCHES: dict[str, tuple[str, re.Pattern[str] | None]] = {
     "lang": ("the browser's UI language", _LOCALE),
     "accept-lang": ("the Accept-Language header", _LOCALES),
     "user-agent": ("the User-Agent string (text only)", _ANY),
-    "disable-features": ("turns Chrome features OFF (names only)", _FEATURES),
-    "enable-blink-features": ("Blink runtime features (names only)", _FEATURES),
-    "disable-blink-features": ("Blink runtime features off (names only)", _FEATURES),
 }
 
 #: Why a switch is not on the list, for the ones people ask about.
@@ -386,6 +410,16 @@ def admit(tool: str, arguments: dict[str, object] | None = None) -> None:
 
 
 # ---------------------------------------------------------------------- file URLs
+
+
+def webui_refusal() -> str:
+    """The sentence for a ``chrome://`` / ``chrome-untrusted://`` / ``devtools://``
+    page. ``debug_port_guard`` decides whether a URL or a target IS one, and whether
+    the mode is on, and asks this for the words."""
+    return refusal_text(
+        "a browser-internal (chrome://) page",
+        "such a page can send commands to the browser itself",
+    )
 
 
 def file_url_refusal() -> str:

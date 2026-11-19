@@ -294,15 +294,26 @@ async def test_a_tab_sent_to_chrome_inspect_over_cdp_is_blanked(site, tmp_path):
 async def test_during_a_login_no_browser_internal_page_loads_is_listed_or_scriptable(
     site, tmp_path, monkeypatch
 ):
-    """Outside a login ``chrome://version`` is ordinary use. While one runs, every
-    ``chrome://`` (and ``chrome-extension://``, ``chrome-untrusted://`` ...) page is
-    hidden, unaddressable and cannot be loaded; ``about:blank`` and the new-tab page
-    still work; afterwards the page is back."""
+    """While a login runs, every ``chrome://`` (and ``chrome-extension://``,
+    ``chrome-untrusted://`` ...) page is hidden, unaddressable and cannot be loaded;
+    ``about:blank`` and the new-tab page still work. Since the sixth audit (N6) a
+    ``chrome://`` / ``chrome-untrusted://`` / ``devtools://`` page is ALSO out of reach
+    for as long as a vault exists, login or not, so the page under test is made over
+    the test's own connection (the URL tools refuse it) and stays hidden afterwards,
+    refused with the vault sentence and not the login's."""
     monkeypatch.setattr(login_flow, "KEY_DELAY_S", 0.2)
     unlocked_vault({"work": _entry(site)})
     async with _browser(tmp_path) as iid:
-        await get_fn("navigate")(instance_id=iid, url="chrome://version/")
-        mine = next(t for t, u in await _listed(iid) if u.startswith("chrome://"))
+        browser = await _browser_of(iid)
+        with pytest.raises(ToolError):  # the tool refuses it with a vault present
+            await get_fn("navigate")(instance_id=iid, url="chrome://version/")
+        mine = str(
+            await tab_open.send(browser, cdp.target.create_target, "chrome://version/")
+        )
+        for _ in range(100):  # the guard has judged it: hidden from the tools
+            if mine not in [t for t, _u in await _listed(iid)]:
+                break
+            await asyncio.sleep(0.05)
         # navigate acts on the tab it is given: give it one that is not under test
         await get_fn("new_tab")(instance_id=iid, url="about:blank")
         scratch = next(t for t, _u in await _listed(iid) if t != mine)
@@ -342,9 +353,12 @@ async def test_during_a_login_no_browser_internal_page_loads_is_listed_or_script
         assert refused == 6
         assert not any(reached), "the page was scriptable during the login"
         assert mine not in listed
-        # the login is over: the page is shown again
-        assert mine in [t for t, _u in await _listed(iid)]
-        await get_fn("execute_script")(instance_id=iid, tab_id=mine, script="1")
+        # the login is over: the page is STILL out of reach while the vault exists
+        assert mine not in [t for t, _u in await _listed(iid)]
+        with pytest.raises(ToolError) as caught:
+            await get_fn("execute_script")(instance_id=iid, tab_id=mine, script="1")
+        assert "stealthy login destroy" in str(caught.value)
+        assert "login is running" not in str(caught.value)
 
 
 # ---------------------------------------- the guard dropping, fail closed (F4)

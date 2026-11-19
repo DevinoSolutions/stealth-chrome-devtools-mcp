@@ -787,6 +787,8 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
         return 0
     if code == HTTPStatus.UNAUTHORIZED:
         raise _RefusedError("the backend refused this shell's token (HTTP 401)")
+    if code == HTTPStatus.CONFLICT and isinstance(reply.get("error"), str):
+        raise _RefusedError(f"the backend refused the key: {reply['error']}")
     raise _RefusedError(f"the backend did not unlock (HTTP {code})")
 
 

@@ -66,6 +66,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
+from stealth_chrome_devtools_mcp.embedded import vault_mode
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
@@ -106,6 +107,9 @@ _barred: set[str] = set()
 #: only WHILE a login runs (:func:`is_sealed`): outside one, ordinary
 #: ``chrome://version`` use is untouched.
 _internal: set[str] = set()
+#: Targets that are ``chrome://``, ``chrome-untrusted://`` or ``devtools://`` pages:
+#: sealed while VAULT MODE is on, login or not (T-19366, audit 6 N6).
+_webui: set[str] = set()
 
 
 def begin(instance_id: str, port: int | None = None) -> None:
@@ -226,6 +230,14 @@ def unbar(target_id: str) -> None:
         _barred.discard(str(target_id))
 
 
+def mark_webui(target_id: str, webui: bool) -> None:
+    """Note whether ``target_id`` is a browser WebUI page (``debug_port_guard``'s
+    ``webui_url``). Such a target is sealed (:func:`is_sealed`) while vault mode is
+    on: hidden from the tools and refused by ``tab_id``, with or without a login."""
+    with _lock:
+        (_webui.add if webui else _webui.discard)(str(target_id))
+
+
 def mark_internal(target_id: str, internal: bool) -> None:
     """Record whether ``target_id`` is at a browser-internal URL (``False`` once it
     is not, or is gone)."""
@@ -268,7 +280,7 @@ def any_sealing() -> bool:
     """Whether any instance has a login in progress, or a sealed tab left over.
     Two dict truthiness checks: the registry wrapper asks it on every tool call
     and does nothing more while it is false."""
-    return bool(_depth or _unclosed or _holds or _barred)
+    return bool(_depth or _unclosed or _holds or _barred or _webui)
 
 
 def is_sealed(instance_id: str, target_id: str | None) -> bool:
@@ -279,6 +291,7 @@ def is_sealed(instance_id: str, target_id: str | None) -> bool:
     return (
         target in _barred
         or (target in _internal and login_in_flight(instance_id))
+        or (target in _webui and vault_mode.active())
         or target in _tabs.get(instance_id, ())
         or target in _unclosed.get(instance_id, ())
         or any(target not in known for known in _holds.get(instance_id, ()))
@@ -301,4 +314,6 @@ def refuse_if_sealed(tool: str, kwargs: dict[str, object]) -> None:
         # An inspector is refused for what it is, login or not: "a login is
         # running" would be untrue and send the caller to wait for nothing.
         barred_only = tab_id in _barred and not login_in_flight(instance_id)
+        if tab_id in _webui and not barred_only and not login_in_flight(instance_id):
+            raise ToolError(vault_mode.webui_refusal())
         raise ToolError(INSPECTOR_REFUSAL if barred_only else REFUSAL)

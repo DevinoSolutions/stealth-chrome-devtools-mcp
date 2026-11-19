@@ -93,7 +93,18 @@ download folder an agent set before it existed, is taken back within that time:
   is sent to the browser with :func:`vault_mode.download_pin` (``allowAndName``,
   ``~/Downloads/stealth-mcp-downloads``, or ``deny``). No tool can change it back:
   ``execute_cdp_command`` is refused in the mode. When the mode ends the guard sends
-  ``default``.
+  ``default``. A folder an agent set on ONE TAB (``Page.setDownloadBehavior``, before
+  the vault existed) does not win over this: measured on Chrome 158 by
+  ``test_login_vault_mode`` (a control proves the tab-level setting works with no
+  vault), so no per-page reset is sent; that test goes red if a release changes it;
+* *chrome://, chrome-untrusted:// and devtools:// pages are out of reach*: a target
+  at one is hidden from the tools and refused by ``tab_id`` (``login_seal.mark_webui``,
+  :func:`webui_url`) and the URL tools refuse to load one, always while the mode is
+  on. Hidden, not blanked: the product's own session restore opens
+  ``chrome://settings`` in a persistent profile;
+* *a pin that fails is not silent*: a pass that cannot pin a browser marks it
+  (``_Guard.pin_failed``), logs ONE error, and :func:`verify_clean` then refuses
+  every login in that browser until a pass succeeds.
 
 **What is NOT covered**: a process running as the same OS user, which can open the
 loopback port directly (``RUNBOOK`` "Local trust boundary"); a browser started by an
@@ -169,6 +180,10 @@ GUARD_DOWN = (
     "this browser's DevTools guard is not running, so the browser cannot be shown "
     "free of inspectors; vault logins are refused in it"
 )
+PIN_DOWN = (
+    "vault mode could not pin this browser's downloads to the fixed folder, so vault "
+    "logins are refused in it until it can (the backend log says why)"
+)
 INSPECTOR_OPEN = (
     "a browser inspector (a DevTools window) is open in this browser and could not "
     "be closed; nothing was typed"
@@ -202,6 +217,12 @@ INTERNAL_SCHEMES = frozenset(
         "chrome-search",
     }
 )
+#: While VAULT MODE is on, targets of these schemes are hidden from the tools and
+#: the URL tools refuse to load one, with or without a login (audit 6, N6): their
+#: pages can send commands to the browser itself. A subset of
+#: :data:`INTERNAL_SCHEMES`: the extension and search schemes stay usable outside a
+#: login.
+WEBUI_SCHEMES = frozenset({"chrome", "chrome-untrusted", "devtools", "chrome-devtools"})
 #: The new-tab page stays usable during a login (it is what a fresh tab shows).
 NEW_TAB_HOSTS = frozenset(
     {"newtab", "new-tab-page", "new-tab-page-third-party", "local-ntp"}
@@ -368,21 +389,34 @@ def barred_url(url: object) -> bool:
     return inspector_url(url) or (file_url(url) and vault_mode.active())
 
 
-def internal_url(url: object) -> bool:
-    """Whether ``url`` is a browser-internal page of the class
-    :data:`INTERNAL_SCHEMES` (the new-tab page excepted). ``view-source:`` is read
-    through; ``about:`` pages are not of the class (``about:blank`` is one)."""
+def _in_schemes(url: object, schemes: frozenset[str]) -> bool:
+    """Whether ``url`` is a page of one of ``schemes`` (the new-tab page excepted).
+    ``view-source:`` is read through; ``about:`` pages are not of the class."""
     if not isinstance(url, str):
         return False
     try:
         scheme, host = _inspector_host(url)
         if scheme == "view-source":
-            return internal_url(url.strip(_URL_EDGE)[len("view-source:") :])
+            return _in_schemes(url.strip(_URL_EDGE)[len("view-source:") :], schemes)
     except ValueError:
         return False
-    if scheme not in INTERNAL_SCHEMES:
+    if scheme not in schemes:
         return False
     return not (scheme != "chrome-extension" and host in NEW_TAB_HOSTS)
+
+
+def internal_url(url: object) -> bool:
+    """Whether ``url`` is a browser-internal page of the class
+    :data:`INTERNAL_SCHEMES` (the new-tab page excepted): what a RUNNING LOGIN hides.
+    ``about:`` pages are not of the class (``about:blank`` is one)."""
+    return _in_schemes(url, INTERNAL_SCHEMES)
+
+
+def webui_url(url: object) -> bool:
+    """Whether ``url`` is a ``chrome://``, ``chrome-untrusted://`` or ``devtools://``
+    page (:data:`WEBUI_SCHEMES`; the new-tab page excepted): what VAULT MODE keeps
+    out of the tools' reach, always."""
+    return _in_schemes(url, WEBUI_SCHEMES)
 
 
 def refusal(url: object, instance_id: object = None) -> str | None:
@@ -400,6 +434,8 @@ def refusal(url: object, instance_id: object = None) -> str | None:
         return INSPECTOR_REFUSAL
     if file_url(url) and vault_mode.active():
         return vault_mode.file_url_refusal()
+    if webui_url(url) and vault_mode.active():
+        return vault_mode.webui_refusal()
     instance = instance_id if isinstance(instance_id, str) else None
     if login_seal.login_in_flight(instance) and internal_url(url):
         return INTERNAL_REFUSAL
@@ -488,6 +524,9 @@ class _Guard:
         #: that re-asserts the pin and the ``file:`` bar every KEEP_SECONDS.
         self.pinned = False
         self.keeper: asyncio.Task[None] | None = None
+        #: A pass that was meant to pin this browser failed (audit 6, N4): the mode is
+        #: on and the browser is driven unpinned. ``verify_clean`` refuses logins in it.
+        self.pin_failed = False
 
     async def start(self) -> None:
         import websockets
@@ -542,10 +581,18 @@ class _Guard:
             await asyncio.sleep(KEEP_SECONDS)
             try:
                 await self.keep()
+                self.pin_failed = False
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001  PERMANENT(a failed pass is tried again; the guard ends with its socket)
-                _logger.warning("vault mode could not be kept for %s", self.port)
+            except Exception:  # PERMANENT(retried next pass; ends with its socket)
+                if vault_mode.active() and not self.pin_failed:
+                    _logger.exception(
+                        "vault mode could not pin the downloads of the browser on "
+                        "port %s: it is driven unpinned and vault logins are "
+                        "refused in it until a pass succeeds",
+                        self.port,
+                    )
+                self.pin_failed = vault_mode.active()
 
     async def idle(self) -> None:
         """Return once no handler task is running. Not ``gather`` over
@@ -661,6 +708,7 @@ class _Guard:
         if session is not None:
             self.parents.pop(session, None)
         login_seal.mark_internal(target, False)
+        login_seal.mark_webui(target, False)
         if target in self.inspectors:
             self.inspectors.discard(target)
             login_seal.unbar(target)
@@ -682,6 +730,7 @@ class _Guard:
         if not barred_url(info.get("url")):
             self.clean.add(target)
             login_seal.mark_internal(target, internal_url(info.get("url")))
+            login_seal.mark_webui(target, webui_url(info.get("url")))
             if target in self.inspectors:  # it was blanked: no longer one
                 self.inspectors.discard(target)
                 login_seal.unbar(target)
@@ -811,6 +860,9 @@ async def verify_clean(browser: Browser) -> None:
     port = getattr(getattr(browser, "config", None), "port", None)
     if not port or int(port) not in _PORTS:
         raise ToolError(GUARD_DOWN)
+    guard = _GUARDS.get(int(port))
+    if guard is not None and guard.pin_failed and vault_mode.active():
+        raise ToolError(PIN_DOWN)
     for attempt in range(_CLEAN_ATTEMPTS):
         infos = await tab_open.send(browser, cdp.target.get_targets)
         bad = [i for i in infos if inspector_url(i.url)]
@@ -830,7 +882,9 @@ async def verify_clean(browser: Browser) -> None:
 def closed_windows(browser: Browser) -> int:
     """How many DevTools windows this process has closed so far in ``browser``
     (its debug port): a login reports the difference between its end and its start,
-    and never another browser's windows."""
+    and never another browser's windows. ``0`` for a browser with no debug port: such
+    a browser has no guard to have closed anything, and a login refuses it
+    (:data:`GUARD_DOWN`) before it reads this."""
     port = getattr(getattr(browser, "config", None), "port", None)
     return len(_CLOSED.get(int(port), ())) if port else 0
 

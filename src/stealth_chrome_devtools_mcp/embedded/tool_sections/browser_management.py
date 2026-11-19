@@ -102,7 +102,7 @@ async def spawn_browser(
         viewport_height (int): Requested browser WINDOW height in pixels, same
             best-effort clamping as viewport_width.
         proxy (Optional[str]): Proxy server URL.
-        browser_args (List[str]): Additional browser launch args. While a login vault exists only --window-size, --window-position, --start-maximized, --lang, --accept-lang, --user-agent, --disable-features, --enable-blink-features, --disable-blink-features and http(s) start pages are accepted; any other switch is refused (`stealthy login destroy` removes the vault).
+        browser_args (List[str]): Additional browser launch args. While a login vault exists only --window-size, --window-position, --start-maximized, --lang, --accept-lang, --user-agent and http(s) start pages are accepted (the feature-list switches --disable-features, --enable-blink-features and --disable-blink-features are not); any other switch is refused (`stealthy login destroy` removes the vault).
         timezone_id (Optional[str]): IANA timezone ID applied via CDP timezone override.
         idle_timeout_seconds (Optional[int]): Idle timeout override in seconds for automatic instance cleanup.
         block_resources (List[str]): List of resource types to block (e.g., ['image', 'font', 'stylesheet']).

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 import pytest
 from nodriver import cdp
@@ -25,12 +26,14 @@ import test_login_flow as flow
 from e2e_helpers import eval_js, get_fn, sandbox_kwargs
 from stealth_chrome_devtools_mcp.embedded import (
     debug_port_guard,
+    login_persistence,
     tab_open,
     vault_mode,
     vault_store,
 )
 from stealth_chrome_devtools_mcp.embedded import tool_runtime as runtime
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
+from stealth_chrome_devtools_mcp.settings import get_settings
 from vault_helpers import make_vault, spawn_before_the_vault
 
 pytestmark = flow.pytestmark
@@ -170,6 +173,47 @@ async def test_a_browser_started_before_the_vault_is_pinned_to_the_fixed_folder(
         assert _files(trap) == [], _files(trap)
 
 
+async def test_a_tab_level_download_folder_set_before_the_vault_is_taken_back(
+    site, tmp_path, monkeypatch, fast_guard
+):
+    """Audit 6, N3: ``Page.setDownloadBehavior`` is stored per tab, and raw CDP could
+    set it before the vault existed. Measured here, on the Chrome this runs against,
+    not assumed: a tab-level folder set before the vault does NOT win over the
+    browser-level pin (the first download after the pin lands in the pinned folder),
+    so the keeper needs no per-page reset. If a Chrome release changes that, this
+    test goes red and the keeper must reset the page targets too."""
+    pinned = tmp_path / "pinned-tab"
+    trap = tmp_path / "trap-tab"
+    trap.mkdir()
+    monkeypatch.setattr(vault_mode, "download_dir", lambda: pinned)
+    vault_mode._reset_for_tests()
+    async with flow._browser(tmp_path) as iid:
+        await get_fn("navigate")(instance_id=iid, url=site.url("/login"))
+        tab = await runtime.browser_manager.get_tab(iid)
+        await tab.send(cdp.page.set_download_behavior("allow", download_path=str(trap)))
+        # control: with no vault the tab's own setting is what decides (so the claim
+        # below is about the pin, not about a setting that never took effect)
+        assert await eval_js(iid, f"return {DOWNLOAD};") == "clicked"
+        assert await _wait_for(lambda: "evil.pth" in _files(trap)), _files(trap)
+        (trap / "evil.pth").unlink()
+        _make_vault_file()
+        assert await _wait_for(lambda: pinned.exists()), "the pin was never made"
+        landed: list[str] = []
+        for _ in range(12):
+            await asyncio.sleep(FAST * 3)
+            assert await eval_js(iid, f"return {DOWNLOAD};") == "clicked"
+            landed = await _wait_for(lambda: _files(pinned), seconds=3.0)
+            if landed:
+                break
+        assert landed, "the tab's own folder won over the pin"
+        for leftover in _files(trap):
+            (trap / leftover).unlink()
+        count = len(_files(pinned))
+        assert await eval_js(iid, f"return {DOWNLOAD};") == "clicked"
+        assert await _wait_for(lambda: len(_files(pinned)) > count), _files(pinned)
+        assert _files(trap) == [], _files(trap)
+
+
 async def test_a_file_page_is_barred_and_blanked_wherever_it_came_from(
     site, tmp_path, fast_guard
 ):
@@ -224,6 +268,33 @@ async def test_a_browser_spawned_while_the_vault_exists_is_pinned_from_its_first
         assert await eval_js(iid, f"return {DOWNLOAD};") == "clicked"
         landed = await _wait_for(lambda: _files(pinned))
         assert landed and not any("evil" in name for name in landed), landed
+    finally:
+        await get_fn("close_instance")(instance_id=iid)
+
+
+async def test_a_named_session_still_keeps_its_logins_while_the_vault_exists(
+    tmp_empty_root, tmp_path, monkeypatch
+):
+    """Audit 6, N6: ``chrome://`` pages are out of reach of the tools in vault mode,
+    but the product's own session restore (a persistent profile, F-937) opens
+    ``chrome://settings`` to switch ``restore_on_startup`` on. Blanking that page
+    would stop logins from being kept across a close, so WebUI pages are hidden, not
+    blanked: the pref still gets set with a vault present."""
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        runtime.process_cleanup, "pid_file", tmp_path / "browser_pids.json"
+    )
+    _make_vault_file()
+    name = f"vm-restore-{uuid.uuid4().hex[:8]}"
+    spawned = await get_fn("spawn_browser")(
+        session=name, headless=True, **sandbox_kwargs()
+    )
+    iid = spawned["instance_id"]
+    try:
+        directory = spawned["spawn_diagnostics"]["profile_selection"]["user_data_dir"]
+        assert await _wait_for(
+            lambda: login_persistence._pref_is_continue(directory), seconds=60.0
+        ), "session.restore_on_startup was never set while a vault existed"
     finally:
         await get_fn("close_instance")(instance_id=iid)
 

@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import urllib.request
 
 import pytest
 
 import test_login_flow as flow
 from e2e_helpers import eval_js, get_fn
+from stealth_chrome_devtools_mcp.embedded import tool_runtime as runtime
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 from vault_helpers import unlocked_vault
 
@@ -65,11 +65,12 @@ return await new Promise((res) => {
 
 
 async def _debug_port(iid):
-    await get_fn("navigate")(instance_id=iid, url="chrome://version")
-    text = json.dumps(await get_fn("get_page_content")(instance_id=iid), default=str)
-    found = re.search(r"remote-debugging-port=(\d+)", text)
-    assert found, text[:400]
-    return found.group(1)
+    """The port the reviewer read from ``chrome://version``. With a vault that page is
+    out of reach of the tools (sixth audit, N6; ``test_login_vault_inspector`` pins
+    it), and these tests need the number whether or not a vault exists, so it is read
+    from the browser object."""
+    browser = (await runtime.browser_manager.get_instance(iid))["browser"]
+    return str(browser.config.port)
 
 
 def _browser_ws_url(port):
