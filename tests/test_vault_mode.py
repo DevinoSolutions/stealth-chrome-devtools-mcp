@@ -63,6 +63,10 @@ def server_mod(patched_server, monkeypatch):
     # the hook table is process-global: a hook made here must not outlive the test
     # (and a hook another file left must not decide this one)
     monkeypatch.setattr(dynamic_hook_system.dynamic_hook_system, "hooks", {})
+    # a hook with no instance goes to every instance the process knows, and arming it
+    # on one an earlier file left (a tab long gone) is refused: none is known here
+    monkeypatch.setattr(dynamic_hook_system.dynamic_hook_system, "instance_hooks", {})
+    monkeypatch.setattr(dynamic_hook_system.dynamic_hook_system, "_armed_tabs", {})
     return patched_server(browser_manager=FakeBrowserManager())
 
 
