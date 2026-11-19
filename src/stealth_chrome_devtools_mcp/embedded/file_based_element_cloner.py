@@ -315,37 +315,6 @@ class FileBasedElementCloner:
             },
         )
 
-    async def extract_related_files_to_file(
-        self,
-        tab,
-        element=None,
-        selector: str = None,
-        analyze_css: bool = True,
-        analyze_js: bool = True,
-        follow_imports: bool = False,
-        max_depth: int = 2,
-    ) -> dict[str, Any]:
-        """Extract related files (engine, JS+HTTP) and save to file."""
-        return await self._extract_and_save(
-            "related_files",
-            cdp_element_cloner.extract_related_files(
-                tab,
-                element,
-                selector,
-                analyze_css,
-                analyze_js,
-                follow_imports,
-                max_depth,
-            ),
-            lambda d: {
-                "selector": selector,
-                "stylesheets_count": len(d.get("stylesheets", [])),
-                "scripts_count": len(d.get("scripts", [])),
-                "imports_count": len(d.get("imports", [])),
-                "modules_count": len(d.get("modules", [])),
-            },
-        )
-
     async def clone_element_complete_to_file(
         self,
         tab,

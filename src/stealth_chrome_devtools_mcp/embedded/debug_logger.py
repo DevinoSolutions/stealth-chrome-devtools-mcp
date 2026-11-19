@@ -524,18 +524,6 @@ class DebugLogger:
             else "unknown",
         }
 
-    def export_to_file(self, filepath: str = "debug_log.json"):
-        """
-        Export debug logs to a JSON file.
-
-        Args:
-            filepath (str): Path to the file where logs will be exported.
-
-        Returns:
-            str: The filepath where logs were exported.
-        """
-        return self.export_to_file_paginated(filepath)
-
     def export_to_file_paginated(  # noqa: PLR0913  PERMANENT(the tool's own arguments one-to-one: path, three limits, format, overwrite)
         self,
         filepath: str = "debug_log.json",

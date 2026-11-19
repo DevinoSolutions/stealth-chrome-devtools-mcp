@@ -747,22 +747,6 @@ class NetworkInterceptor:
         except Exception as e:
             raise Exception(f"Failed to modify headers: {e!s}")
 
-    async def set_user_agent(self, tab: Tab, user_agent: str):
-        """
-        Set custom user agent.
-
-        tab: Tab - The browser tab.
-        user_agent: str - The user agent string to set.
-        Returns: bool - True if successful.
-        """
-        try:
-            await tab.send(
-                uc.cdp.network.set_user_agent_override(user_agent=user_agent)
-            )
-            return True
-        except Exception as e:
-            raise Exception(f"Failed to set user agent: {e!s}")
-
     async def export_to_json(
         self,
         instance_id: str,
@@ -844,22 +828,6 @@ class NetworkInterceptor:
                 self._store_response(resp.request_id, resp)
 
             return True
-
-    async def enable_cache(self, tab: Tab, enabled: bool = True):
-        """
-        Enable or disable cache.
-
-        tab: Tab - The browser tab.
-        enabled: bool - True to enable cache, False to disable.
-        Returns: bool - True if successful.
-        """
-        try:
-            await tab.send(
-                uc.cdp.network.set_cache_disabled(cache_disabled=not enabled)
-            )
-            return True
-        except Exception as e:
-            raise Exception(f"Failed to set cache state: {e!s}")
 
     async def clear_browser_cache(self, tab: Tab):
         """

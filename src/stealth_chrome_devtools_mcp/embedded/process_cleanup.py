@@ -638,7 +638,7 @@ class ProcessCleanup:
                 # Recorded as reaped BEFORE the attempt, so a failed kill or a
                 # locked profile dir still drops the entry, as the previous
                 # unconditional wipe did. Retries: _sweep_orphaned_temp_profiles
-                # (gettempdir) and clone_storage.enforce_session_storage.
+                # (gettempdir) and clone_storage.run_storage_sweep.
                 reaped.add(instance_id)
                 if browser_reattach.reap_recorded(
                     self, instance_id, metadata, protected
@@ -975,30 +975,6 @@ class ProcessCleanup:
         # is none in recovery — the file also holds other backends' browsers.
         if self.browser_processes:
             self._save_tracked_pids()
-
-    def get_tracked_processes(self) -> dict[str, int]:
-        """Currently tracked browser PIDs, keyed by instance id."""
-        return {
-            instance_id: metadata["pid"]
-            for instance_id, metadata in self.browser_processes.items()
-            if isinstance(metadata.get("pid"), int)
-        }
-
-    def is_process_alive(self, instance_id: str) -> bool:
-        """Whether the tracked process for ``instance_id`` still exists."""
-        metadata = self.browser_processes.get(instance_id)
-        if metadata is None:
-            return False
-
-        pid = metadata.get("pid")
-        if not isinstance(pid, int):
-            return bool(
-                self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
-            )
-
-        return psutil.pid_exists(pid) or bool(
-            self._get_browser_pids_for_profile(metadata.get("user_data_dir"))
-        )
 
 
 process_cleanup = ProcessCleanup()

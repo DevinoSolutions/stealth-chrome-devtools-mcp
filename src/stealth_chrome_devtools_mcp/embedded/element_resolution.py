@@ -257,11 +257,6 @@ def xpath_expression(selector: str) -> str | None:
     return None
 
 
-def is_xpath(selector: str) -> bool:
-    """Whether ``selector`` is an XPath under :func:`xpath_expression`'s contract."""
-    return xpath_expression(selector) is not None
-
-
 def _is_stale_node_error(exc: ProtocolException) -> bool:
     message = str(exc)
     return any(marker in message for marker in _STALE_NODE_MARKERS)
