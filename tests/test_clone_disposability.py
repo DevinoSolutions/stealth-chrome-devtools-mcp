@@ -341,6 +341,7 @@ class _UnreadableChrome:
         self.pid = pid
 
 
+@pytest.mark.real_process_table
 class TestUnknownMeansHeld:
     """M3."""
 

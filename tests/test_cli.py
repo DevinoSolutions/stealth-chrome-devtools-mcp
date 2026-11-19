@@ -11,10 +11,7 @@ import json
 import os
 from unittest.mock import patch
 
-import pytest
-
 from stealth_chrome_devtools_mcp import cli
-from stealth_chrome_devtools_mcp.embedded import browser_cmdline
 
 MARKER = ".stealth_chrome_devtools_mcp_clone.json"
 
@@ -618,17 +615,6 @@ class TestStatusProfiles:
 
 
 class TestCleanup:
-    @pytest.fixture(autouse=True)
-    def _the_host_has_no_unreadable_browser(self, monkeypatch):
-        """The sweep keeps a profile while ANY browser-named process has a command
-        line it may not read (T-5968), which is right and is a fact about the
-        HOST: this machine runs dozens of other Chromes, one of which can be
-        mid-start or mid-exit (``AccessDenied``) when the sweep looks, and it kept
-        ``sess-auto`` once in a full-suite run (not reproducible in 150 scans).
-        These tests are about what ``cleanup`` does with a profile nobody holds;
-        the unreadable-browser rule is pinned in ``test_clone_disposability``."""
-        monkeypatch.setattr(browser_cmdline, "unreadable_browsers", lambda _is: ())
-
     def test_dry_run_reports_plan_and_mutates_nothing(self, tmp_session_root, capsys):
         sessions = tmp_session_root["sessions"]
         named = _named(sessions, "github-session", model_mb=4)
