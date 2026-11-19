@@ -634,9 +634,10 @@ async def launch_and_attach(
     port = proxy_forwarder._free_port()
     # Derive the argv from nodriver's OWN config object rather than hand-copying
     # its defaults: the delegated Chrome must receive exactly what the normal
-    # path's uc.start would have given it (including --remote-allow-origins=*,
-    # without which the CDP websocket handshake is refused), and one home for
-    # that list is the only way the two paths cannot drift. Config also
+    # path's uc.start would have given it (T-19366: ``debug_port_guard.install``
+    # has already taken --remote-allow-origins=* out of that list, and nodriver
+    # connects without it), and one home for that list is the only way the two
+    # paths cannot drift. Config also
     # synthesizes a temp profile dir when the caller has none, so we never launch
     # against the user's REAL profile — Chrome would hand off to the already
     # running instance and exit, leaving us a dead pid to wait on.

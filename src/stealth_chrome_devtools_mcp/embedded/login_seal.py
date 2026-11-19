@@ -40,6 +40,14 @@ through ``list_tabs`` and ``execute_script`` in that moment before this existed.
 sealed by :func:`seal_popup` from the ``targetCreated`` event and closed by
 ``tab_open``; :func:`release` drops it once Chrome no longer lists it.
 
+**Barred targets.** :func:`bar` hides a target that is not a login's tab but must
+not be reachable either: a DevTools frontend or ``chrome://inspect`` page
+(``debug_port_guard.inspector_url``), whose script can send raw CDP to every tab.
+A barred target is refused and unlisted like a sealed one, whether or not any login
+is running (:func:`is_sealed`), and :func:`login_in_flight` tells the guard when to
+close such a window and not merely hide it. ``go_back`` and ``go_forward`` are
+:data:`INSTANCE_WIDE` too: history can return a tab to a page the URL tools refuse.
+
 In memory, like ``tab_binding`` and ``session_lease``: a backend restart forgets
 every seal, and so does the login that was holding it (it died with the process).
 A leaf: ``tool_errors`` only.
@@ -62,7 +70,9 @@ REFUSAL = "a vault login is running in this browser; retry when it finishes"
 
 #: Tools that can reach a sealed tab without naming it, refused for the whole
 #: instance while a seal is in progress.
-INSTANCE_WIDE = frozenset({"execute_cdp_command", "switch_tab"})
+INSTANCE_WIDE = frozenset(
+    {"execute_cdp_command", "switch_tab", "go_back", "go_forward"}
+)
 
 _lock = threading.Lock()
 _depth: dict[str, int] = {}
@@ -71,6 +81,10 @@ _unclosed: dict[str, set[str]] = {}
 #: Per instance, one frozenset of the targets that existed before each login tab
 #: was being opened (:func:`hold_new`), until the tab is sealed.
 _holds: dict[str, list[frozenset[str]]] = {}
+#: Targets that are a browser inspector (a DevTools window, ``chrome://inspect``),
+#: in ANY instance: never listed and never addressable by a tool, whether or not a
+#: login is running (``debug_port_guard`` fills it from the browser's own events).
+_barred: set[str] = set()
 
 
 def begin(instance_id: str) -> None:
@@ -160,6 +174,45 @@ def release(target_id: str) -> None:
                 del _unclosed[instance_id]
 
 
+def owns(target_id: str, opener_id: str | None = None) -> bool:
+    """Whether ``target_id`` belongs to a login: its own tab (sealed, or created
+    after a login began opening it and not yet sealed by id), or a page whose
+    opener (``opener_id``) is one. Any instance."""
+    target = str(target_id)
+    with _lock:
+        for instance_id in {*_tabs, *_unclosed, *_holds}:
+            owned = _tabs.get(instance_id, set()) | _unclosed.get(instance_id, set())
+            if target in owned or (opener_id is not None and str(opener_id) in owned):
+                return True
+            if any(target not in known for known in _holds.get(instance_id, ())):
+                return True
+    return False
+
+
+def bar(target_id: str) -> None:
+    """``target_id`` is an inspector: no tool may list or name it from now on."""
+    with _lock:
+        _barred.add(str(target_id))
+
+
+def unbar(target_id: str) -> None:
+    """``target_id`` is gone, or no longer an inspector."""
+    with _lock:
+        _barred.discard(str(target_id))
+
+
+def login_in_flight() -> bool:
+    """Whether any login is running or opening its tab, in any instance."""
+    return bool(_depth or _holds)
+
+
+def keep(instance_id: str, target_id: str) -> None:
+    """Keep ``target_id`` sealed for good in ``instance_id``: a tab the backend
+    opened and could not close, that no login holds any more."""
+    with _lock:
+        _unclosed.setdefault(instance_id, set()).add(str(target_id))
+
+
 def sealing(instance_id: str) -> bool:
     """Whether a login is in progress in ``instance_id``."""
     return instance_id in _depth
@@ -169,7 +222,7 @@ def any_sealing() -> bool:
     """Whether any instance has a login in progress, or a sealed tab left over.
     Two dict truthiness checks: the registry wrapper asks it on every tool call
     and does nothing more while it is false."""
-    return bool(_depth or _unclosed or _holds)
+    return bool(_depth or _unclosed or _holds or _barred)
 
 
 def is_sealed(instance_id: str, target_id: str | None) -> bool:
@@ -178,7 +231,8 @@ def is_sealed(instance_id: str, target_id: str | None) -> bool:
         return False
     target = str(target_id)
     return (
-        target in _tabs.get(instance_id, ())
+        target in _barred
+        or target in _tabs.get(instance_id, ())
         or target in _unclosed.get(instance_id, ())
         or any(target not in known for known in _holds.get(instance_id, ()))
     )

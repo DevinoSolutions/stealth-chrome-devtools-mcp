@@ -305,23 +305,31 @@ def _debug_port_guard_hygiene(request):
 
     The import is function-local for the reason ``_in_memory_storage_hygiene`` gives.
     """
-    from stealth_chrome_devtools_mcp.embedded import debug_port_guard
+    from stealth_chrome_devtools_mcp.embedded import debug_port_guard, login_seal
 
     real = (
         request.node.get_closest_marker("integration") is not None
         or request.module.__name__ == "test_debug_port_guard"
     )
     original = debug_port_guard.protect
+    original_verify = debug_port_guard.verify_clean
 
     async def protect(_browser):
         return None
 
+    async def verify_clean(_browser):
+        return None
+
     if not real:
         debug_port_guard.protect = protect
+        debug_port_guard.verify_clean = verify_clean
     debug_port_guard._PORTS.clear()
+    login_seal._barred.clear()
     yield
     debug_port_guard.protect = original
+    debug_port_guard.verify_clean = original_verify
     debug_port_guard._PORTS.clear()
+    login_seal._barred.clear()
 
 
 @pytest.fixture(autouse=True)

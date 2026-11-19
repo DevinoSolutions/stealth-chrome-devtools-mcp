@@ -15,9 +15,14 @@ from types import SimpleNamespace
 
 import pytest
 import websockets
+from nodriver import cdp
 
-from fakes import FakeBrowserManager, call_tool
-from stealth_chrome_devtools_mcp.embedded import debug_port_guard, platform_utils
+from fakes import FakeBrowser, FakeBrowserManager, call_tool
+from stealth_chrome_devtools_mcp.embedded import (
+    debug_port_guard,
+    login_seal,
+    platform_utils,
+)
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 PORT = 54321
@@ -62,6 +67,16 @@ def test_install_is_idempotent():
         "--remote-allow-origins=http://evil.example",
         "--Remote-Allow-Origins=*",
         "--remote-debugging-address=0.0.0.0",
+        # every spelling Chrome's own parser accepts (re-review N3)
+        "-remote-allow-origins=*",
+        "/remote-allow-origins=*",
+        "-Remote-Allow-Origins=http://evil.example",
+        "/REMOTE-ALLOW-ORIGINS=*",
+        "-remote-debugging-address=0.0.0.0",
+        # a DevTools window on every tab is an inspector the agent could reach (N4)
+        "--auto-open-devtools-for-tabs",
+        "-auto-open-devtools-for-tabs",
+        "/Auto-Open-DevTools-For-Tabs",
     ],
 )
 def test_a_caller_cannot_put_the_flag_back(arg):
@@ -266,7 +281,8 @@ async def _settle(fake, method, count=1):
 
 async def test_the_guard_turns_on_auto_attach_that_waits_for_the_debugger(endpoint):
     guard = await _guard(endpoint)
-    first = endpoint.commands[0]
+    assert endpoint.commands[0]["method"] == "Target.setDiscoverTargets"
+    first = endpoint.commands[1]
     assert first["method"] == "Target.setAutoAttach"
     assert first["params"] == {
         "autoAttach": True,
@@ -301,8 +317,10 @@ async def test_a_new_page_runs_only_after_its_interception_is_on(endpoint):
     )
     await _settle(endpoint, "Runtime.runIfWaitingForDebugger")
     sessioned = [(m, s) for m, s in endpoint.log if s == "S-new"]
+    # interception first, then the same for the children it starts, then it runs
     assert sessioned == [
         ("Fetch.enable", "S-new"),
+        ("Target.setAutoAttach", "S-new"),
         ("Runtime.runIfWaitingForDebugger", "S-new"),
     ]
     await guard.stop()
@@ -330,14 +348,14 @@ async def test_a_page_that_cannot_be_guarded_is_closed_and_never_resumed():
     await fake.stop()
 
 
-async def test_a_non_page_target_is_resumed_without_an_interception(endpoint):
+async def test_a_target_that_cannot_make_requests_is_resumed_without_one(endpoint):
     guard = await _guard(endpoint)
     before = endpoint.methods().count("Fetch.enable")
     await endpoint.emit(
         "Target.attachedToTarget",
         {
-            "sessionId": "S-worker",
-            "targetInfo": {"targetId": "W1", "type": "service_worker", "url": ""},
+            "sessionId": "S-ui",
+            "targetInfo": {"targetId": "W1", "type": "browser_ui", "url": ""},
             "waitingForDebugger": True,
         },
     )
@@ -400,3 +418,503 @@ async def test_protect_registers_the_port_and_drops_it_when_the_browser_goes(end
             break
         await asyncio.sleep(0.01)
     assert PORT not in debug_port_guard.protected_ports()
+
+
+# ------------------------------------- every target that can make requests (N2)
+
+
+@pytest.mark.parametrize(
+    "kind", ["iframe", "worker", "service_worker", "shared_worker"]
+)
+async def test_every_target_that_can_make_requests_is_guarded_before_it_runs(
+    endpoint, kind
+):
+    """A cross-site iframe is its own process and its own target: the page's
+    interception does not cover what it fetches or the frames it navigates."""
+    guard = await _guard(endpoint)
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-child",
+            "targetInfo": {"targetId": "C1", "type": kind, "url": "http://x.test/"},
+            "waitingForDebugger": True,
+        },
+        session="S-T1",
+    )
+    await _settle(endpoint, "Runtime.runIfWaitingForDebugger")
+    sessioned = [m for m, s in endpoint.log if s == "S-child"]
+    assert sessioned[0] == "Fetch.enable"
+    assert sessioned[-1] == "Runtime.runIfWaitingForDebugger"
+    patterns = next(
+        c["params"]["patterns"]
+        for c in endpoint.commands
+        if c["method"] == "Fetch.enable" and c.get("sessionId") == "S-child"
+    )
+    assert patterns[0] == {"urlPattern": f"*://*:{PORT}/*"}
+    await guard.stop()
+
+
+@pytest.mark.parametrize("kind", ["page", "iframe", "worker"])
+async def test_a_target_that_can_start_children_is_watched_for_them(endpoint, kind):
+    guard = await _guard(endpoint)
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-p",
+            "targetInfo": {"targetId": "P1", "type": kind, "url": ""},
+            "waitingForDebugger": True,
+        },
+    )
+    await _settle(endpoint, "Runtime.runIfWaitingForDebugger")
+    auto = [
+        c
+        for c in endpoint.commands
+        if c["method"] == "Target.setAutoAttach" and c.get("sessionId") == "S-p"
+    ]
+    assert [c["params"] for c in auto] == [
+        {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True}
+    ]
+    await guard.stop()
+
+
+async def test_a_frame_that_committed_at_the_endpoint_blanks_the_page_that_holds_it(
+    endpoint,
+):
+    """Belt and braces: whatever the interception missed, a document at the
+    endpoint's own origin does not stay in a page. The iframe's session is a child
+    of the page's, and it is the PAGE that is sent to ``about:blank``."""
+    guard = await _guard(endpoint)
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-frame",
+            "targetInfo": {"targetId": "F1", "type": "iframe", "url": "about:blank"},
+            "waitingForDebugger": False,
+        },
+        session="S-T1",
+    )
+    await _settle(endpoint, "Fetch.enable", count=2)
+    await endpoint.emit(
+        "Target.targetInfoChanged",
+        {
+            "targetInfo": {
+                "targetId": "F1",
+                "type": "iframe",
+                "url": f"http://127.0.0.1:{PORT}/devtools/inspector.html",
+            }
+        },
+    )
+    await _settle(endpoint, "Page.navigate")
+    navigations = [c for c in endpoint.commands if c["method"] == "Page.navigate"]
+    assert [(c["sessionId"], c["params"]) for c in navigations] == [
+        ("S-T1", {"url": "about:blank"})
+    ]
+    await guard.stop()
+
+
+async def test_the_logins_own_page_and_its_popups_are_not_watched_for_children(
+    endpoint,
+):
+    """A paused popup of a page that is watched for children holds its opener inside
+    ``window.open`` (a key handler on the login page) until the login's popup
+    handling has closed it: the key press never returned. Those pages are the
+    site's, which the vault types into anyway. An agent's page keeps the watch."""
+    guard = await _guard(endpoint)
+    login_seal.begin("inst")
+    login_seal.seal_tab("inst", "LOGIN")
+    try:
+        for target, session, opener in (
+            ("LOGIN", "S-login", None),
+            ("POPUP", "S-popup", "LOGIN"),
+            ("AGENT", "S-agent", "T1"),
+        ):
+            info = {"targetId": target, "type": "page", "url": "about:blank"}
+            if opener:
+                info["openerId"] = opener
+            await endpoint.emit(
+                "Target.attachedToTarget",
+                {"sessionId": session, "targetInfo": info, "waitingForDebugger": True},
+            )
+        await _settle(endpoint, "Runtime.runIfWaitingForDebugger", count=3)
+    finally:
+        login_seal.end("inst")
+    watched = {
+        c["sessionId"]
+        for c in endpoint.commands
+        if c["method"] == "Target.setAutoAttach" and c.get("sessionId")
+    }
+    enabled = {
+        c["sessionId"] for c in endpoint.commands if c["method"] == "Fetch.enable"
+    }
+    assert watched >= {"S-agent"}
+    assert not watched & {"S-login", "S-popup"}
+    assert {"S-login", "S-popup", "S-agent"} <= enabled  # all three are intercepted
+    await guard.stop()
+
+
+async def test_a_frame_at_the_endpoint_origin_is_held_paused_and_never_resumed(
+    endpoint,
+):
+    """A frame that commits at the endpoint's own origin (the one Origin Chrome
+    accepts) is left waiting for the debugger: none of its script runs while its
+    page is sent to ``about:blank``."""
+    guard = await _guard(endpoint)
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-frame",
+            "targetInfo": {
+                "targetId": "F1",
+                "type": "iframe",
+                "url": f"http://127.0.0.1:{PORT}/devtools/inspector.html",
+            },
+            "waitingForDebugger": True,
+        },
+        session="S-T1",
+    )
+    await _settle(endpoint, "Page.navigate")
+    await asyncio.sleep(0.1)
+    assert [m for m, s in endpoint.log if s == "S-frame"] == []
+    assert [
+        (c["sessionId"], c["params"])
+        for c in endpoint.commands
+        if c["method"] == "Page.navigate"
+    ] == [("S-T1", {"url": "about:blank"})]
+    await guard.stop()
+
+
+async def test_a_frame_that_cannot_be_guarded_sends_its_page_to_about_blank(endpoint):
+    guard = await _guard(endpoint)
+    endpoint.fail_fetch_enable = True
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-frame",
+            "targetInfo": {"targetId": "F1", "type": "iframe", "url": "http://x.test/"},
+            "waitingForDebugger": True,
+        },
+        session="S-T1",
+    )
+    await _settle(endpoint, "Page.navigate")
+    assert [
+        (c["sessionId"], c["params"])
+        for c in endpoint.commands
+        if c["method"] == "Page.navigate"
+    ] == [("S-T1", {"url": "about:blank"})]
+    await guard.stop()
+
+
+async def test_a_worker_that_cannot_be_guarded_still_runs_and_its_page_stays(endpoint):
+    """Chrome refuses ``Fetch.enable`` on a dedicated worker. That is no reason to
+    close the page that made it; the worker is resumed (the page's own interception
+    and the endpoint's Origin check are what stand for it)."""
+    guard = await _guard(endpoint)
+    endpoint.fail_fetch_enable = True
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-w",
+            "targetInfo": {
+                "targetId": "W1",
+                "type": "worker",
+                "url": "blob:http://x/1",
+            },
+            "waitingForDebugger": True,
+        },
+        session="S-T1",
+    )
+    await _settle(endpoint, "Runtime.runIfWaitingForDebugger")
+    assert "Target.closeTarget" not in endpoint.methods()
+    assert "Page.navigate" not in endpoint.methods()
+    await guard.stop()
+
+
+async def test_idle_returns_with_a_finished_task_still_in_the_set(endpoint):
+    """A task that is done but whose done-callback has not run is still in
+    ``tasks``. Waiting on it with ``gather`` never yields, so the callback that
+    would remove it never runs: a real spawn hung for minutes on exactly this."""
+    guard = await _guard(endpoint)
+    finished = asyncio.create_task(asyncio.sleep(0))
+    await finished
+    guard.tasks.add(finished)  # as if its callback had not run yet
+    async with asyncio.timeout(2):
+        await guard.idle()
+    await guard.stop()
+
+
+# -------------------------------------------------- inspectors (re-review N1)
+
+INSPECTOR_URLS = [
+    "chrome://inspect",
+    "chrome://inspect/",
+    "chrome://inspect/#pages",
+    "chrome://inspect/#devices",
+    "CHROME://INSPECT/#pages",
+    "chrome://Inspect",
+    "chrome:inspect",
+    "chrome:///inspect",
+    "about:inspect",
+    "about://inspect",
+    "ABOUT:Inspect",
+    "chrome://serviceworker-internals",
+    "chrome://serviceworker-internals/?devtools=1",
+    "chrome://extensions",
+    "chrome://extensions/?id=abc",
+    "devtools://devtools/bundled/inspector.html",
+    "devtools://devtools/bundled/devtools_app.html?ws=127.0.0.1:1/devtools/page/x",
+    "DEVTOOLS://devtools/bundled/inspector.html",
+    "chrome-devtools://devtools/bundled/inspector.html",
+    "  chrome://inspect/#pages  ",
+    "\tchrome://inspect",
+    "chrome://insp\nect",
+    "chro\tme://inspect",
+    "\x00chrome://inspect",
+    "view-source:chrome://inspect",
+    "chrome://inspect.",
+]
+
+
+@pytest.mark.parametrize("url", INSPECTOR_URLS)
+def test_every_spelling_of_an_inspector_is_one(url):
+    assert debug_port_guard.inspector_url(url), repr(url)
+    assert debug_port_guard.refusal(url) == debug_port_guard.INSPECTOR_REFUSAL
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "about:blank",
+        "https://example.com/inspect",
+        "https://example.com/?u=chrome://inspect",
+        "chrome://version",
+        "chrome://settings",
+        "chrome://flags",
+        "chrome://gpu",
+        "chrome://net-internals",
+        "chrome://inspector",
+        "chrome://myinspect",
+        "chrome-untrusted://print/",
+        "http://inspect/",
+        "data:text/html,devtools://x",
+        "",
+        None,
+        7,
+    ],
+)
+def test_ordinary_pages_are_not_inspectors(url):
+    assert not debug_port_guard.inspector_url(url), repr(url)
+
+
+def test_a_devtools_frontend_is_told_from_a_chrome_inspector_page():
+    assert debug_port_guard.is_frontend("devtools://devtools/bundled/inspector.html")
+    assert debug_port_guard.is_frontend("chrome-devtools://devtools/x")
+    assert not debug_port_guard.is_frontend("chrome://inspect")
+    assert not debug_port_guard.is_frontend(None)
+
+
+@pytest.mark.parametrize(
+    ("tool", "argument"),
+    [
+        ("navigate", "url"),
+        ("new_tab", "url"),
+        ("create_simple_dynamic_hook", "target_url"),
+    ],
+)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "chrome://inspect/#pages",
+        "devtools://devtools/bundled/inspector.html",
+        "about:inspect",
+    ],
+)
+async def test_a_url_tool_refuses_an_inspector_with_no_browser_guarded(
+    server_mod, tool, argument, url
+):
+    """The refusal needs no guarded browser: it is about the URL."""
+    assert debug_port_guard.protected_ports() == frozenset()
+    arguments = {"instance_id": "inst-1", argument: url}
+    if tool == "create_simple_dynamic_hook":
+        arguments = {
+            "name": "h",
+            "url_pattern": "*",
+            "action": "redirect",
+            argument: url,
+        }
+    with pytest.raises(ToolError) as caught:
+        await call_tool(server_mod, tool, **arguments)
+    assert caught.value.args[0] == debug_port_guard.INSPECTOR_REFUSAL
+
+
+def _target(target, url, kind="page"):
+    return {"targetInfo": {"targetId": target, "type": kind, "url": url}}
+
+
+async def _wait_until(predicate, what):
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(what)
+
+
+FRONTEND = "devtools://devtools/bundled/devtools_app.html?ws=127.0.0.1:1/x"
+
+
+async def test_a_frontend_is_barred_from_the_tools_the_moment_it_is_announced(
+    endpoint,
+):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetCreated", _target("D1", FRONTEND))
+    await _wait_until(lambda: login_seal.is_sealed("any", "D1"), "not barred")
+    with pytest.raises(ToolError):
+        login_seal.refuse_if_sealed(
+            "execute_script", {"instance_id": "any", "tab_id": "D1"}
+        )
+    # no login runs: a person's own DevTools window is hidden, not closed
+    await asyncio.sleep(0.1)
+    assert "Target.closeTarget" not in endpoint.methods()
+    # and it is not barred forever: it goes when the browser closes it
+    await endpoint.emit("Target.targetDestroyed", {"targetId": "D1"})
+    await _wait_until(lambda: not login_seal.is_sealed("any", "D1"), "still barred")
+    await guard.stop()
+
+
+async def test_a_frontend_that_appears_while_a_login_runs_is_closed(endpoint):
+    guard = await _guard(endpoint)
+    login_seal.begin("inst")
+    try:
+        await endpoint.emit("Target.targetCreated", _target("D2", FRONTEND))
+        await _settle(endpoint, "Target.closeTarget")
+    finally:
+        login_seal.end("inst")
+    closing = [c for c in endpoint.commands if c["method"] == "Target.closeTarget"]
+    assert closing[-1]["params"] == {"targetId": "D2"}
+    assert login_seal.is_sealed("any", "D2")
+    await guard.stop()
+
+
+async def test_a_tab_sent_to_chrome_inspect_is_blanked_at_once(endpoint):
+    """The agent's own tab (the one a tool with no ``tab_id`` acts on) navigates to
+    ``chrome://inspect``: it is barred AND sent back, whether or not a login runs."""
+    guard = await _guard(endpoint)  # T1 is attached: session S-T1
+    await endpoint.emit(
+        "Target.targetInfoChanged", _target("T1", "chrome://inspect/#pages")
+    )
+    await _settle(endpoint, "Page.navigate")
+    navigations = [c for c in endpoint.commands if c["method"] == "Page.navigate"]
+    assert [(c["sessionId"], c["params"]) for c in navigations] == [
+        ("S-T1", {"url": "about:blank"})
+    ]
+    assert login_seal.is_sealed("any", "T1")
+    # once it reads about:blank again the tab is the agent's again
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", "about:blank"))
+    await _wait_until(lambda: not login_seal.is_sealed("any", "T1"), "still barred")
+    await guard.stop()
+
+
+async def test_a_page_that_navigates_to_a_frontend_is_blanked_not_closed(endpoint):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetInfoChanged", _target("T1", FRONTEND))
+    await _settle(endpoint, "Page.navigate")
+    assert "Target.closeTarget" not in endpoint.methods()
+    await guard.stop()
+
+
+async def test_inspectors_already_open_when_the_guard_starts_are_barred():
+    fake = FakeEndpoint(page_url="chrome://inspect/#pages")
+    await fake.start()
+    guard = await _guard(fake)
+    assert login_seal.is_sealed("any", "T1")
+    await guard.stop()
+    await fake.stop()
+
+
+async def test_the_bars_are_lifted_when_the_guard_ends(endpoint):
+    guard = await _guard(endpoint)
+    await endpoint.emit("Target.targetCreated", _target("D3", FRONTEND))
+    await _wait_until(lambda: login_seal.is_sealed("any", "D3"), "not barred")
+    task = asyncio.create_task(guard.run())
+    await endpoint.socket.close()
+    await asyncio.wait_for(task, 5)
+    assert not login_seal.is_sealed("any", "D3")
+
+
+# ------------------------------------------ the check before a login types
+
+
+def _info(target, url):
+    return cdp.target.TargetInfo(
+        target_id=cdp.target.TargetID(target),
+        type_="page",
+        title="",
+        url=url,
+        attached=False,
+        can_access_opener=False,
+    )
+
+
+class ListedBrowser(FakeBrowser):
+    """A browser whose target list is ``listed``; ``closes`` says whether a close
+    takes the target out of it, as Chrome's does."""
+
+    def __init__(self, listed, *, closes=True):
+        super().__init__()
+        self.config = SimpleNamespace(host="127.0.0.1", port=PORT)
+        self.listed = list(listed)
+        self.closed_targets: list[str] = []
+        self._cdp_responses["get_targets"] = lambda _name: list(self.listed)
+
+        def close(_name):
+            target = self.cdp_frames[-1]["params"]["targetId"]
+            self.closed_targets.append(target)
+            if closes:
+                self.listed = [i for i in self.listed if str(i.target_id) != target]
+            return True
+
+        self._cdp_responses["close_target"] = close
+
+
+async def test_a_browser_with_no_inspector_and_a_live_guard_is_clean(guarded):
+    browser = ListedBrowser([_info("T1", "about:blank")])
+    await debug_port_guard.verify_clean(browser)
+    assert browser.closed_targets == []
+
+
+async def test_an_inspector_that_was_already_open_is_closed_before_the_login(guarded):
+    browser = ListedBrowser(
+        [
+            _info("T1", "about:blank"),
+            _info("D1", FRONTEND),
+            _info("I1", "chrome://inspect"),
+        ]
+    )
+    await debug_port_guard.verify_clean(browser)
+    assert sorted(browser.closed_targets) == ["D1", "I1"]
+    assert [str(i.target_id) for i in browser.listed] == ["T1"]
+
+
+async def test_a_window_that_will_not_close_refuses_the_login(guarded, monkeypatch):
+    monkeypatch.setattr(debug_port_guard, "_CLEAN_RETRY_S", 0.0)
+    browser = ListedBrowser([_info("D1", FRONTEND)], closes=False)
+    with pytest.raises(ToolError) as caught:
+        await debug_port_guard.verify_clean(browser)
+    assert caught.value.args[0] == debug_port_guard.INSPECTOR_OPEN
+    assert browser.closed_targets == ["D1"] * 3  # tried three times, then refused
+    assert login_seal.is_sealed("any", "D1")
+
+
+async def test_a_browser_whose_guard_has_ended_refuses_the_login(monkeypatch):
+    """The guard's connection dropped while the browser lives: the port is no
+    longer protected, and a login must not carry on as if it were."""
+    browser = ListedBrowser([_info("T1", "about:blank")])
+    assert PORT not in debug_port_guard.protected_ports()
+    with pytest.raises(ToolError) as caught:
+        await debug_port_guard.verify_clean(browser)
+    assert caught.value.args[0] == debug_port_guard.GUARD_DOWN
+    assert browser.closed_targets == []
+
+
+async def test_a_browser_with_no_known_port_refuses_the_login():
+    with pytest.raises(ToolError):
+        await debug_port_guard.verify_clean(SimpleNamespace(config=None))
