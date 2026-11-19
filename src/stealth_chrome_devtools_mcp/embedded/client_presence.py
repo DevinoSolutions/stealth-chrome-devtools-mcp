@@ -29,7 +29,7 @@ partial answer. The cost of a false "gone" is a disconnected session; the cost o
 a false "present" is one idle process that its client's next EOF will collect
 anyway. Those are not comparable, so the direction is not a judgement call.
 
-A leaf: ``psutil`` and stdlib only. It never cancels anything, never exits
+A leaf: ``psutil``, stdlib and ``zombie``. It never cancels anything, never exits
 anything and never reads the record — it answers a question and
 ``singleton._proxy_streams`` owns what to do about the answer, exactly as it
 owns what to do about ``pump_client`` returning.
@@ -41,6 +41,8 @@ import logging
 import os
 
 import psutil
+
+from stealth_chrome_devtools_mcp.embedded import zombie
 
 _logger = logging.getLogger("stealth.proxy")
 
@@ -170,14 +172,9 @@ def present(token: ClientToken) -> bool:
     if token is None:
         return True
     pid, created = token
-    try:
-        return psutil.Process(pid).create_time() == created
-    except psutil.NoSuchProcess:
-        return False
-    except (psutil.Error, OSError):
-        # Fail-open: "I could not ask" is not "it is gone".
-        _logger.debug("could not check the client process", exc_info=True)
-        return True
+    # Exact: both readings are psutil's. Fail-open (``unknown=True``): "I could
+    # not ask" is not "it is gone".
+    return zombie.same_process(pid, created, unknown=True)
 
 
 async def await_gone(token: ClientToken, *, interval: float = CHECK_SECONDS) -> None:
