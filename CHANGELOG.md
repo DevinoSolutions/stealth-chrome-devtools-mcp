@@ -12,6 +12,10 @@
 - Tests: a real-Chrome login whose password field opens a popup on each of its first ten keys (red without the fix in 5 of 6 runs; a tree that closes the popup at once fails it), plus unit tests for the close waiting for the release, the bounded wait, no wait without a guard, and the guard noting the release only for a login's own page after its resume.
 
 
+### The unit-test and coverage CI jobs get 25 minutes, not 15 (T-19366)
+
+- A full-gate run on this branch had its Windows coverage cell cancelled by the job's 15-minute limit with the last test at 100% (8,683 passed). The same cell took 13 min 40 s, 14 min 58 s and 14 min 31 s in the three runs before it: the suite had grown up to the limit. Workflow only; no test was removed or sped up.
+
 ### An interpreter crash in the test suite prints its stack again (T-19366)
 
 - The 2.1.65 publish gate's Windows coverage cell (Python 3.12 with coverage) died twice with a bare `Segmentation fault`, exit 139, about 4,510 tests in, and no stack. Eleven local attempts did not reproduce the crash; its cause is not known.
