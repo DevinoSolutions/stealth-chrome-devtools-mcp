@@ -765,19 +765,26 @@ async def test_a_timed_out_login_whose_tab_will_not_close_says_so(
             raise RuntimeError("Chrome refused")
         return await real_send(browser, command, *args)
 
+    reached = asyncio.Event()
+
     async def never(tab, entry):
+        reached.set()
         await asyncio.Event().wait()
 
     monkeypatch.setattr(runtime.browser_manager, "close_tab", refusing_close)
     monkeypatch.setattr(tab_open, "send", send)
     monkeypatch.setattr(login_flow, "_CLOSE_RETRY_S", 0.01)
     monkeypatch.setattr(login_flow, "_sealed_login", never)
-    monkeypatch.setattr(login_flow, "LOGIN_BUDGET_S", 1.5)
+    # The budget must outlast the OPEN of the login's tab, which takes seconds on a
+    # loaded machine: a budget that ended first left no tab to refuse to close (the
+    # message then said "closed"), which is a different test.
+    monkeypatch.setattr(login_flow, "LOGIN_BUDGET_S", 15.0)
     async with _browser(tmp_path) as iid:
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(60):
             with pytest.raises(login_flow.LoginTimedOutError) as caught:
                 await _run(iid)
         said = str(caught.value)
+        assert reached.is_set(), f"the budget ended before the tab was open: {said}"
         assert said.endswith(login_flow.UNCLOSED_NOTE)
         assert "its tab is closed" not in said
         assert len(login_seal._unclosed.get(iid, ())) == 1
