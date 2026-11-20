@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.67
 
-2.1.66 was tagged but never published (its gate failed on one Windows integration test, below), so the next release is the first on PyPI with everything in the 2.1.63 to 2.1.66 sections too.
+2.1.66 was tagged but never published (its gate failed on one Windows integration test, below), so 2.1.67 is the first release on PyPI with everything in the 2.1.63 to 2.1.66 sections too.
 
 ### The 2.1.66 gate's one failure was a test waiting on the wrong mark (T-19366)
 
