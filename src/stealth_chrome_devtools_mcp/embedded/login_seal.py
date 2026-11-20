@@ -63,6 +63,7 @@ A leaf: ``tool_errors`` only.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import TYPE_CHECKING
 
@@ -110,6 +111,11 @@ _internal: set[str] = set()
 #: Targets that are ``chrome://``, ``chrome-untrusted://`` or ``devtools://`` pages:
 #: sealed while VAULT MODE is on, login or not (T-19366, audit 6 N6).
 _webui: set[str] = set()
+#: Popups of a login tab that the guard has let run (``runIfWaitingForDebugger``
+#: answered). See :func:`wait_popup_released`.
+_released: set[str] = set()
+#: How often the wait for a popup's release looks, in seconds.
+_RELEASE_POLL_S = 0.01
 
 
 def begin(instance_id: str, port: int | None = None) -> None:
@@ -193,10 +199,42 @@ def seal_popup(opener_id: str, popup_id: str) -> bool:
     return False
 
 
+def popup_released(target_id: str, opener_id: object = None) -> None:
+    """The guard has let ``target_id`` run: it is no longer paused. Only a page that
+    belongs to a login (:func:`owns`) is noted, so the set stays as small as the
+    popups of a login in flight."""
+    if owns(target_id, None if opener_id is None else str(opener_id)):
+        with _lock:
+            _released.add(str(target_id))
+
+
+async def wait_popup_released(target_id: str, seconds: float) -> None:
+    """Wait until the guard has let the popup run, at most ``seconds``; at once when
+    no guard is watching any browser.
+
+    A popup of the login's tab is born PAUSED (the guard's browser-wide auto-attach
+    waits for the debugger), and the page that opened it, a key handler inside
+    ``window.open``, waits for it to exist. Closing it BEFORE the guard has let it
+    run, and before its own commands were answered, left the opener inside
+    ``window.open`` for good: the key press never returned and the login ran out
+    of its budget (measured, Windows and macOS, T-19366: the popup's resume was
+    ANSWERED after its close in every stalled run and never answered in the runs
+    that passed). So it is closed after it was let run, never before."""
+    from stealth_chrome_devtools_mcp.embedded import (
+        debug_port_guard,  # the guard imports this module
+    )
+
+    for _ in range(int(seconds / _RELEASE_POLL_S)):
+        if not debug_port_guard.protected_ports() or str(target_id) in _released:
+            return
+        await asyncio.sleep(_RELEASE_POLL_S)
+
+
 def release(target_id: str) -> None:
     """``target_id`` is gone from the browser: it no longer needs sealing."""
     target = str(target_id)
     with _lock:
+        _released.discard(target)
         for instance_id in list(_unclosed):
             _unclosed[instance_id].discard(target)
             if not _unclosed[instance_id]:

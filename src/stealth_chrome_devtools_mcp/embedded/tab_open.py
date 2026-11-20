@@ -106,6 +106,8 @@ def _state(browser: Browser) -> _State:
 #: a bound the task, the Tab and its websocket would be pinned for the life of the
 #: instance.
 POPUP_ARM_BUDGET_SECONDS = 5.0
+#: The longest a login's popup waits for the guard to let it run before it is closed.
+POPUP_RELEASE_WAIT_SECONDS = 3.0
 
 
 _CLOSED_TEXT = "the browser connection was closed by this backend"
@@ -388,6 +390,7 @@ async def arm_popups(
 async def _close_popup(browser: Browser, target_id: cdp.target.TargetID) -> None:
     """Close a popup of the backend's own tab, and drop its seal only once Chrome
     no longer lists it."""
+    await login_seal.wait_popup_released(str(target_id), POPUP_RELEASE_WAIT_SECONDS)
     try:
         await send(browser, cdp.target.close_target, target_id)
     except Exception as error:  # noqa: BLE001  PERMANENT(a popup that closed first is already what we wanted; whether it is gone is read below)

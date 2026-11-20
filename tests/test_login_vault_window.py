@@ -30,6 +30,15 @@ POPUP_LOGIN = """<html><body><form method=post action="{action}">
  onkeydown="if(!window.__o){{window.__o=1;window.open('/popup','_blank')}}">
 <button>go</button></form>{note}</body></html>"""
 
+#: A popup on EVERY key of the password, ten of them: the first key's popup stalled
+#: about one login in twelve (Windows and macOS publish gates, T-19366), so ten make
+#: a tree that closes a popup before the guard let it run fail nearly every run.
+POPUP_EVERY_KEY_LOGIN = """<html><body><form method=post action="{action}">
+<input name=username type=text autocomplete=username>
+<input name=password type=password autocomplete=current-password
+ onkeydown="if((window.__o=(window.__o||0)+1)<=10){{window.open('/popup','_blank')}}">
+<button>go</button></form>{note}</body></html>"""
+
 
 async def _agent(iid, base, seen, stop):
     """Every tab the agent is shown that it was not given, and what a script run in
@@ -112,6 +121,24 @@ async def test_the_agent_never_sees_or_runs_anything_in_the_login_tab(
 async def test_nor_the_popup_its_page_opens(site, tmp_path, monkeypatch):
     result, seen, base, after = await _watched_login(
         site, tmp_path, monkeypatch, POPUP_LOGIN
+    )
+    assert result["outcome"] == "logged_in", result
+    assert seen["listed"] == [], seen
+    assert seen["executed"] == [], seen
+    assert set(after) <= set(base), (after, base)
+
+
+async def test_a_page_that_opens_a_popup_on_every_key_still_finishes_the_login(
+    site, tmp_path, monkeypatch
+):
+    """The popup is born paused and the key handler waits inside ``window.open`` for
+    it: it must be closed AFTER the guard let it run, never before, or that key press
+    never returns (``Input.dispatchKeyEvent`` unanswered) and the login ends
+    ``timed_out`` after its whole budget."""
+    # a login takes ~10 s here: a stall is shown after 40 s instead of the full budget
+    monkeypatch.setattr(flow.login_flow, "LOGIN_BUDGET_S", 40.0)
+    result, seen, base, after = await _watched_login(
+        site, tmp_path, monkeypatch, POPUP_EVERY_KEY_LOGIN
     )
     assert result["outcome"] == "logged_in", result
     assert seen["listed"] == [], seen

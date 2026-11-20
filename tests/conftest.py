@@ -328,6 +328,7 @@ def _debug_port_guard_hygiene(request):
     login_seal._barred.clear()
     login_seal._internal.clear()
     login_seal._webui.clear()
+    login_seal._released.clear()
     yield
     debug_port_guard.protect = original
     debug_port_guard.verify_clean = original_verify
@@ -336,6 +337,7 @@ def _debug_port_guard_hygiene(request):
     login_seal._barred.clear()
     login_seal._internal.clear()
     login_seal._webui.clear()
+    login_seal._released.clear()
 
 
 @pytest.fixture(autouse=True)
