@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -156,6 +157,18 @@ def origin_allowed(url: str, hosts: list[str]) -> bool:
 LoginResult = dict[str, str | int]
 
 
+#: What the login is doing now, for the message of a login that ran out of its
+#: budget (never a secret: a fixed phrase per step). A stall used to say only
+#: "the browser stopped answering", and a CI log could not say where.
+_STEP: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "login_step", default="starting"
+)
+
+
+def _at(step: str) -> None:
+    _STEP.set(step)
+
+
 class LoginTimedOutError(ToolError):
     """The login ran out of :data:`LOGIN_BUDGET_S`. Audited as ``timed_out``."""
 
@@ -222,6 +235,7 @@ async def _run(
             budget = asyncio.timeout(LOGIN_BUDGET_S)
             try:
                 async with budget:
+                    _at("opening its tab")
                     tab = await _open_sealed_tab(browser, instance_id)
                     outcome, detail = await _sealed_login(tab, entry)
             except TimeoutError:
@@ -247,6 +261,7 @@ async def _run(
             f"the login did not finish within {LOGIN_BUDGET_S:g} s (the browser "
             "stopped answering) and was stopped; whether the form was already "
             "submitted is not known, and nothing further was typed"
+            f" (it was {_STEP.get()})"
             + ("; its tab is closed" if closed else UNCLOSED_NOTE)
         )
     if not closed:
@@ -562,10 +577,13 @@ async def _wait_for(
 
 async def _sealed_login(tab: Tab, entry: dict[str, object]) -> tuple[str, str]:
     hosts = [str(host) for host in cast("list[object]", entry["hosts"])]
+    _at("loading the login page")
     navigated = await tab.send(cdp.page.navigate(str(entry["login_url"])))
     if len(navigated) > 2 and navigated[2]:  # noqa: PLR2004  PERMANENT(errorText of Page.navigate)
-        return "needs_user", "the login page could not be loaded"
+        # Chrome's own net error name (``net::ERR_...``): never page content.
+        return "needs_user", f"the login page could not be loaded ({navigated[2]})"
 
+    _at("waiting for the login form")
     state, url = await _wait_for(tab, FIELD_WAIT_S, _has_form)
     if not _has_form(state, url):
         return await _no_form(tab, hosts, str(entry["login_url"]), url)
@@ -591,7 +609,9 @@ def _has_form(state: dict[str, bool], _url: str) -> bool:
 async def _after_username(tab: Tab, hosts: list[str]) -> tuple[str, str] | None:
     """Enter after the username, then wait for the password step. ``None`` means
     it is showing; otherwise the outcome that ends the login."""
+    _at("pressing Enter after the username")
     await text_entry.press_enter(tab)
+    _at("waiting for the password step")
     state, _url = await _wait_for(
         tab,
         OUTCOME_WAIT_S,
@@ -617,6 +637,7 @@ async def _password_step(
     tab: Tab, entry: dict[str, object], hosts: list[str]
 ) -> tuple[str, str]:
     took = await _type_into(tab, "password", entry["password"], hosts)
+    _at("reading the form after the password was typed")
     typed = await login_form.probe(tab)
     if not (took and typed["password_has_value"]):
         return "needs_user", "the password field did not take the typed text"
@@ -624,7 +645,9 @@ async def _password_step(
     urls = login_evidence.urls_for(hosts, url)
     marks = await login_evidence.session_marks(tab, urls)
     baseline = _Baseline(urls, marks, str(entry["login_url"]), bool(typed.get("error")))
+    _at("pressing Enter after the password")
     await text_entry.press_enter(tab)
+    _at("waiting for the page's answer")
     return await _outcome(tab, hosts, before, baseline)
 
 
@@ -671,6 +694,7 @@ async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> boo
     key would otherwise submit a WRONG username or password, which the site rejects
     and the vault then FREEZES a good entry for; ``False`` ends the login as
     ``needs_user`` with nothing submitted."""
+    _at(f"looking for the {kind} field")
     await debug_port_guard.verify_clean(tab.browser)
     found = await login_form.find_field(tab, kind)
     if found is None:
@@ -685,8 +709,11 @@ async def _type_into(tab: Tab, kind: str, text: object, hosts: list[str]) -> boo
     if action is not None and not origin_allowed(action, hosts):
         raise ToolError(_GENERIC_ORIGIN_REFUSAL)
     value = text.reveal() if isinstance(text, secret_registry.Secret) else str(text)
+    _at(f"waiting for the {kind} field's frame")
     await login_form.wait_for_frame(tab, frame_id)
+    _at(f"typing the {kind}")
     await text_entry.type_characters(tab, element, value, KEY_DELAY_S)
+    _at(f"reading back the {kind}")
     return await login_form.holds(element, len(value))
 
 
