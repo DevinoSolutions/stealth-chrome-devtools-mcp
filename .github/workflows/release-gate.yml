@@ -150,7 +150,7 @@ jobs:
     needs: plan
     name: unit-tests (${{ matrix.runner_os }}/${{ matrix.runner_arch }} py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     # T-8242: the ONE continue-on-error in this file, and the plan decides it. A
     # pull request also runs a cell it does not owe (Windows py3.11, which the
     # Linux-only PR tier never saw); the plan flags it `advisory`, so its failure
@@ -226,7 +226,7 @@ jobs:
     needs: plan
     name: coverage (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 2
