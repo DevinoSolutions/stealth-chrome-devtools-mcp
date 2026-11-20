@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+2.1.65 was tagged but never published (its gate failed on Windows, below).
+
+### An interpreter crash in the test suite prints its stack again (T-19366)
+
+- The 2.1.65 publish gate's Windows coverage cell (Python 3.12 with coverage) died twice with a bare `Segmentation fault`, exit 139, about 4,510 tests in, and no stack. Eleven local attempts did not reproduce the crash; its cause is not known.
+- Why there was no stack (reproduced): two test fixtures repoint `faulthandler` at a log file and restored it with a bare `faulthandler.enable()`, which puts it on `sys.stderr`, at that moment pytest's capture file for the test. Every later crash wrote its stack into a file pytest throws away. They now restore it onto the real stderr (`exit_hang_watchdog.restore_faulthandler`). Test-only.
+
 ## 2.1.65
 
 2.1.64 was tagged but never published (its gate failed on two login-vault integration tests, below), so 2.1.65 is the first release on PyPI with everything in the 2.1.63 and 2.1.64 sections too.
