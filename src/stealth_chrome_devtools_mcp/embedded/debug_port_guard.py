@@ -909,12 +909,11 @@ class _Guard:
             )
         if params.get("resourceType") == "Document":
             # A frame (or page) tried to NAVIGATE to the endpoint: its document is
-            # refused above, so no content of the endpoint ever loads, but the page
-            # that holds the frame is sent to ``about:blank`` all the same. That must
-            # not depend on what URL Chrome reports for the error page it shows
-            # instead (a release that reports ``chrome-error://`` there never says
-            # "the endpoint's own origin" to ``_judge``: the publish gate's Windows
-            # cell, Chrome 156).
+            # refused above (nothing of the endpoint loads), and the page holding the
+            # frame is sent to ``about:blank`` whatever URL Chrome reports for the
+            # error page (``chrome-error://`` on Chrome 156, which ``_judge`` never
+            # reads as the endpoint). A session is in the map once, so the first
+            # match is the only one: the loop stops there.
             for target, known in list(self.sessions.items()):
                 if known == session:
                     await self._leave_endpoint(target)
