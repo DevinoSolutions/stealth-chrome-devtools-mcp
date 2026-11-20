@@ -399,11 +399,18 @@ jobs:
         # junit.xml, and a second red from release_evidence's `pytest: null`
         # that was pure consequence (F-859 §7.2; same class as F-780). The
         # transport cell already runs at 300.
+        #
+        # -o faulthandler_timeout=240: pytest-timeout's default method on POSIX is
+        # `signal`, and its dump skips the CURRENT thread, which in that mode is
+        # the main one, so a 2.1.64 macOS hang (T-19366) printed every thread but
+        # the one that was stuck. faulthandler prints ALL threads, the main one
+        # included, once a test passes 240 s, before the 300 s kill, and lets the
+        # run go on.
         shell: bash
         run: >-
           uv run pytest
           -m "${{ runner.os == 'macOS' && 'integration and not transport' || 'integration' }}"
-          -v --tb=short --timeout=300
+          -v --tb=short --timeout=300 -o faulthandler_timeout=240
           --junitxml=junit.xml -o junit_family=xunit1
         env:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}

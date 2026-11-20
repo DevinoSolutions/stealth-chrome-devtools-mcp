@@ -256,20 +256,37 @@ def vault(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
+#: The longest a browser's spawn or close may take in these tests.
+STEP_BOUND_S = 90.0
+
+
 @contextlib.asynccontextmanager
 async def _browser(tmp_path):
     spawn, close = get_fn("spawn_browser"), get_fn("close_instance")
-    with spawn_before_the_vault():
-        spawned = await spawn(
-            headless=True,
-            user_data_dir=str(tmp_path / "login-flow"),
-            **sandbox_kwargs(),
-        )
+    # A step that never answers must fail with its name (the macOS publish gate
+    # sat 300 s in one, and pytest-timeout's signal mode dumps no main-thread
+    # stack), so the two ends of a browser's life are bounded here.
+    try:
+        async with asyncio.timeout(STEP_BOUND_S):
+            with spawn_before_the_vault():
+                spawned = await spawn(
+                    headless=True,
+                    user_data_dir=str(tmp_path / "login-flow"),
+                    **sandbox_kwargs(),
+                )
+    except TimeoutError:
+        raise AssertionError(f"spawn_browser took over {STEP_BOUND_S:g} s") from None
     iid = spawned["instance_id"]
     try:
         yield iid
     finally:
-        await close(instance_id=iid)
+        try:
+            async with asyncio.timeout(STEP_BOUND_S):
+                await close(instance_id=iid)
+        except TimeoutError:
+            raise AssertionError(
+                f"close_instance took over {STEP_BOUND_S:g} s"
+            ) from None
 
 
 def _entry(site, path="/login", **overrides):
@@ -691,6 +708,57 @@ async def test_a_cancel_after_chrome_makes_the_login_tab_leaves_no_blank_tab(
         now = {str(t.target.target_id) for t in browser.tabs}
         assert now - known == set(), "the login's tab was left behind"
         assert not set(await _tab_ids(iid)) - known
+
+
+async def test_a_login_the_browser_stops_answering_is_a_bounded_refusal(
+    site, tmp_path, monkeypatch
+):
+    """The macOS publish gate hung for 300 s inside a login and said nothing (no
+    CDP call has a bound of its own). A login that never ends is now refused, with
+    a message, its tab closed and its seal down. The OUTER bound here is only so a
+    tree without the budget fails in 20 s instead of hanging."""
+    unlocked_vault({"work": _entry(site)})
+
+    async def never(tab, entry):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(login_flow, "_sealed_login", never)
+    monkeypatch.setattr(login_flow, "LOGIN_BUDGET_S", 1.5)
+    async with _browser(tmp_path) as iid:
+        before = await _tab_ids(iid)
+        async with asyncio.timeout(20):
+            with pytest.raises(ToolError, match=r"did not finish within 1\.5 s"):
+                await _run(iid)
+        assert not login_seal.sealing(iid)
+        assert set(await _tab_ids(iid)) <= set(before)
+    assert audit_outcomes()[-1] == "refused"
+
+
+async def test_a_cleanup_that_hangs_is_not_waited_for_and_the_tab_stays_sealed(
+    site, tmp_path, monkeypatch
+):
+    unlocked_vault({"work": _entry(site)})
+    real_cleanup, gate = login_flow._cleanup, asyncio.Event()
+
+    async def done(tab, entry):
+        return "logged_in", "signed in"
+
+    async def stalled(*args):
+        await gate.wait()
+        return await real_cleanup(*args)
+
+    monkeypatch.setattr(login_flow, "_sealed_login", done)
+    monkeypatch.setattr(login_flow, "_cleanup", stalled)
+    monkeypatch.setattr(login_flow, "CLEANUP_BUDGET_S", 0.5)
+    async with _browser(tmp_path) as iid:
+        async with asyncio.timeout(20):
+            result = await _run(iid)
+        assert result["detail"] == "signed in" + login_flow.UNCLOSED_NOTE
+        assert login_seal.sealing(iid), "the seal must outlive a cleanup still running"
+        gate.set()
+        async with asyncio.timeout(20):
+            await asyncio.gather(*login_flow._CLEANUPS)
+        assert not login_seal.sealing(iid)
 
 
 async def test_a_tab_that_will_not_close_stays_sealed_and_is_reported(

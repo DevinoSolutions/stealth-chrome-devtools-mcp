@@ -60,22 +60,42 @@ async def _agent(iid, base, seen, stop):
     await asyncio.gather(*tasks)
 
 
+async def _within(seconds, what, awaitable):
+    """``awaitable``, or a failure that NAMES the step: the macOS publish gate sat
+    300 s in this test and pytest-timeout's signal mode, the default there, dumps
+    no main-thread stack, so nothing said where."""
+    try:
+        async with asyncio.timeout(seconds):
+            return await awaitable
+    except TimeoutError:
+        raise AssertionError(f"{what} did not finish within {seconds:g} s") from None
+
+
 async def _watched_login(site, tmp_path, monkeypatch, login_form):
     if login_form is not None:
         monkeypatch.setattr(flow, "LOGIN_FORM", login_form)
     unlocked_vault({"work": _entry(site)})
+    list_tabs = get_fn("list_tabs")
     async with _browser(tmp_path) as iid:
-        base = [t["tab_id"] for t in await get_fn("list_tabs")(instance_id=iid)]
+        base = [
+            t["tab_id"]
+            for t in await _within(30, "list_tabs", list_tabs(instance_id=iid))
+        ]
         seen = {"listed": [], "executed": [], "refused": []}
         stop = asyncio.Event()
         agent = asyncio.create_task(_agent(iid, base, seen, stop))
         try:
-            result = await _run(iid)
+            result = await _within(
+                flow.login_flow.LOGIN_BUDGET_S + 30, "the login", _run(iid)
+            )
             await asyncio.sleep(1.0)
         finally:
             stop.set()
-            await agent
-        after = [t["tab_id"] for t in await get_fn("list_tabs")(instance_id=iid)]
+            await _within(30, "the agent's last probe", agent)
+        after = [
+            t["tab_id"]
+            for t in await _within(30, "list_tabs", list_tabs(instance_id=iid))
+        ]
     return result, seen, base, after
 
 
