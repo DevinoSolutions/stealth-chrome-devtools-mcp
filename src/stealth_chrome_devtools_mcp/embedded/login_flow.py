@@ -83,6 +83,11 @@ LOGIN_BUDGET_S = 120.0
 #: The longest the caller waits for the cleanup (clear, close, verify). The cleanup
 #: itself is not cancelled: it ends the seal when it finishes.
 CLEANUP_BUDGET_S = 30.0
+#: The cleanup's own steps. A step that runs out leaves the tab NOT known closed, and
+#: a tab not known closed stays sealed for good (``login_seal.end(..., unclosed)``),
+#: so a browser that never answers costs a hidden tab, never an exposed one.
+CLEAR_BUDGET_S = 10.0
+CLOSE_BUDGET_S = 15.0
 POLL_S = 0.4
 #: The delay between key presses; a person's, so a page's key handlers behave.
 KEY_DELAY_S = 0.03
@@ -151,6 +156,10 @@ def origin_allowed(url: str, hosts: list[str]) -> bool:
 LoginResult = dict[str, str | int]
 
 
+class LoginTimedOutError(ToolError):
+    """The login ran out of :data:`LOGIN_BUDGET_S`. Audited as ``timed_out``."""
+
+
 async def run(
     browser_manager: BrowserManager, instance_id: str, label: str, caller: str
 ) -> LoginResult:
@@ -163,6 +172,11 @@ async def run(
         result = await _run(browser_manager, instance_id, label, caller)
     except vault_store.VaultLocked:
         outcome = "locked"
+        raise
+    except LoginTimedOutError:
+        # Its own outcome: the submit may already have gone through, so it is not
+        # a refusal, and nothing says the site rejected the password (no freeze).
+        outcome = "timed_out"
         raise
     except ToolError:
         outcome = "refused"
@@ -192,6 +206,7 @@ async def _run(
     await _check_launch(data.get("options"), browser)
     login_seal.begin(instance_id, int(browser.config.port))
     tab = None
+    timed_out = False
     result: LoginResult = {}
     closed_before = debug_port_guard.closed_windows(browser)
     try:
@@ -212,24 +227,30 @@ async def _run(
             except TimeoutError:
                 if not budget.expired():
                     raise
-                raise ToolError(
-                    f"the login did not finish within {LOGIN_BUDGET_S:g} s (the "
-                    "browser stopped answering); its tab was cleared and closed, "
-                    "and nothing further was typed"
-                ) from None
-            if outcome == "rejected":
-                detail += _FROZEN_NOTE if _freeze(label) else _NOT_FROZEN_NOTE
-            result = {
-                "outcome": outcome,
-                "label": label,
-                "detail": detail,
-                "closed_devtools_windows": debug_port_guard.closed_windows(browser)
-                - closed_before,
-            }
+                # Said AFTER the cleanup, below, when what became of the tab is
+                # known. No freeze: nothing says the site rejected the password.
+                timed_out = True
+            else:
+                if outcome == "rejected":
+                    detail += _FROZEN_NOTE if _freeze(label) else _NOT_FROZEN_NOTE
+                result = {
+                    "outcome": outcome,
+                    "label": label,
+                    "detail": detail,
+                    "closed_devtools_windows": debug_port_guard.closed_windows(browser)
+                    - closed_before,
+                }
     finally:
         closed = await _finish(browser_manager, instance_id, tab)
+    if timed_out:
+        raise LoginTimedOutError(
+            f"the login did not finish within {LOGIN_BUDGET_S:g} s (the browser "
+            "stopped answering) and was stopped; whether the form was already "
+            "submitted is not known, and nothing further was typed"
+            + ("; its tab is closed" if closed else UNCLOSED_NOTE)
+        )
     if not closed:
-        result["detail"] += UNCLOSED_NOTE
+        result["detail"] = f"{result['detail']}{UNCLOSED_NOTE}"
     return result
 
 
@@ -430,15 +451,25 @@ async def _cleanup(
     target = str(tab.target.target_id) if tab is not None else None
     try:
         if tab is not None:
+            closed = False  # until the close is read back from the browser
             try:
-                await login_form.clear_passwords(tab)
+                async with asyncio.timeout(CLEAR_BUDGET_S):
+                    await login_form.clear_passwords(tab)
             except Exception as error:  # noqa: BLE001  PERMANENT(cleanup runs every step; the tab is closed next)
                 debug_logger.log_warning(
                     "login_flow",
                     "_cleanup",
                     f"clearing failed ({type(error).__name__})",
                 )
-            closed = await _close_tab(browser_manager, instance_id, tab)
+            try:
+                async with asyncio.timeout(CLOSE_BUDGET_S):
+                    closed = await _close_tab(browser_manager, instance_id, tab)
+            except TimeoutError:
+                debug_logger.log_warning(
+                    "login_flow",
+                    "_cleanup",
+                    f"closing the tab took over {CLOSE_BUDGET_S:g} s",
+                )
     finally:
         login_seal.end(instance_id, None if closed else target)
     if not closed:

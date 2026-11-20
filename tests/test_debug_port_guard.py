@@ -582,9 +582,27 @@ async def test_a_blocked_fetch_or_script_request_does_not_blank_the_page(endpoin
             },
             session="S-frame",
         )
-    await _settle(endpoint, "Fetch.failRequest", count=4)
-    await asyncio.sleep(0.1)
-    assert "Page.navigate" not in endpoint.methods()
+    # A positive control instead of a wait for an absence: a DOCUMENT request after
+    # the four, whose navigation arrives only once everything before it was handled
+    # (each request is failed and judged in order by the one reader).
+    await endpoint.emit(
+        "Fetch.requestPaused",
+        {
+            "requestId": "R-control",
+            "resourceType": "Document",
+            "request": {"url": f"http://127.0.0.1:{PORT}/json/version"},
+        },
+        session="S-frame",
+    )
+    await _settle(endpoint, "Page.navigate")
+    failed = [
+        c["params"]["requestId"]
+        for c in endpoint.commands
+        if c["method"] == "Fetch.failRequest"
+    ]
+    assert failed == ["R-XHR", "R-Fetch", "R-Script", "R-Other", "R-control"]
+    navigations = [c for c in endpoint.commands if c["method"] == "Page.navigate"]
+    assert len(navigations) == 1, "only the Document request blanks the page"
     await guard.stop()
 
 

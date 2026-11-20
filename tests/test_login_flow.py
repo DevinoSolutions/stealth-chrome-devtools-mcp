@@ -714,9 +714,11 @@ async def test_a_login_the_browser_stops_answering_is_a_bounded_refusal(
     site, tmp_path, monkeypatch
 ):
     """The macOS publish gate hung for 300 s inside a login and said nothing (no
-    CDP call has a bound of its own). A login that never ends is now refused, with
-    a message, its tab closed and its seal down. The OUTER bound here is only so a
-    tree without the budget fails in 20 s instead of hanging."""
+    CDP call has a bound of its own). A login that never ends is now stopped, with
+    a message that says only what is known, its tab closed and its seal down, and
+    audited as ``timed_out``, not ``refused``: the submit may have gone through. It
+    is NOT a rejection, so the entry is not frozen. The OUTER bound here is only so
+    a tree without the budget fails in 20 s instead of hanging."""
     unlocked_vault({"work": _entry(site)})
 
     async def never(tab, entry):
@@ -727,11 +729,153 @@ async def test_a_login_the_browser_stops_answering_is_a_bounded_refusal(
     async with _browser(tmp_path) as iid:
         before = await _tab_ids(iid)
         async with asyncio.timeout(20):
-            with pytest.raises(ToolError, match=r"did not finish within 1\.5 s"):
+            with pytest.raises(
+                login_flow.LoginTimedOutError, match=r"did not finish within 1\.5 s"
+            ) as caught:
                 await _run(iid)
+        said = str(caught.value)
+        assert "whether the form was already submitted is not known" in said
+        assert said.endswith("; its tab is closed")
+        assert "cleared" not in said
         assert not login_seal.sealing(iid)
         assert set(await _tab_ids(iid)) <= set(before)
-    assert audit_outcomes()[-1] == "refused"
+    assert audit_outcomes()[-1] == "timed_out"
+    assert not vault_store.entry("work").get("frozen")
+
+
+async def test_a_timed_out_login_whose_tab_will_not_close_says_so(
+    site, tmp_path, monkeypatch
+):
+    """The tab's fate is read AFTER the cleanup: the message must not say "closed"
+    for a tab that is not, and carries the same note a finished login does."""
+    unlocked_vault({"work": _entry(site)})
+    real_send = tab_open.send
+
+    async def refusing_close(instance_id, tab_id):
+        return False
+
+    async def send(browser, command, *args):
+        if getattr(command, "__name__", "") == "close_target":
+            raise RuntimeError("Chrome refused")
+        return await real_send(browser, command, *args)
+
+    async def never(tab, entry):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runtime.browser_manager, "close_tab", refusing_close)
+    monkeypatch.setattr(tab_open, "send", send)
+    monkeypatch.setattr(login_flow, "_CLOSE_RETRY_S", 0.01)
+    monkeypatch.setattr(login_flow, "_sealed_login", never)
+    monkeypatch.setattr(login_flow, "LOGIN_BUDGET_S", 1.5)
+    async with _browser(tmp_path) as iid:
+        async with asyncio.timeout(30):
+            with pytest.raises(login_flow.LoginTimedOutError) as caught:
+                await _run(iid)
+        said = str(caught.value)
+        assert said.endswith(login_flow.UNCLOSED_NOTE)
+        assert "its tab is closed" not in said
+        assert len(login_seal._unclosed.get(iid, ())) == 1
+    assert audit_outcomes()[-1] == "timed_out"
+
+
+async def _unreachable(iid, tab_id):
+    """The sealed tab is not listed and no tool that names it runs."""
+    assert tab_id not in await _tab_ids(iid)
+    for call, extra in (
+        ("execute_script", {"script": "location.href"}),
+        ("take_screenshot", {}),
+    ):
+        with pytest.raises(ToolError):
+            await get_fn(call)(instance_id=iid, tab_id=tab_id, **extra)
+
+
+async def test_a_budget_that_fires_after_the_password_is_typed_leaves_nothing_behind(
+    site, tmp_path, monkeypatch
+):
+    """The budget lands with the secret IN the field. Until the cleanup ends the
+    seal holds and no tool can address the tab; the cleanup clears the field and
+    closes the tab; the attempt is ``timed_out`` and nothing was submitted."""
+    unlocked_vault({"work": _entry(site)})
+    real_type, real_clear = login_flow._type_into, login_form.clear_passwords
+    real_cleanup = login_flow._cleanup
+    gate, typed, seen = asyncio.Event(), asyncio.Event(), {}
+    read = "document.querySelector('input[type=password]').value"
+
+    async def type_then_stall(tab, kind, text, hosts):
+        held = await real_type(tab, kind, text, hosts)
+        if kind == "password":
+            seen["typed"] = await tab.evaluate(read) == RIGHT
+            typed.set()
+            await asyncio.Event().wait()
+        return held
+
+    async def spying_clear(tab):
+        await real_clear(tab)
+        seen["after_clear"] = await tab.evaluate(read)
+
+    async def stalled(*args):
+        await gate.wait()
+        return await real_cleanup(*args)
+
+    monkeypatch.setattr(login_flow, "_type_into", type_then_stall)
+    monkeypatch.setattr(login_form, "clear_passwords", spying_clear)
+    monkeypatch.setattr(login_flow, "_cleanup", stalled)
+    monkeypatch.setattr(login_flow, "LOGIN_BUDGET_S", 12.0)
+    monkeypatch.setattr(login_flow, "CLEANUP_BUDGET_S", 0.5)
+    async with _browser(tmp_path) as iid:
+        task = asyncio.create_task(_run(iid))
+        async with asyncio.timeout(30):
+            await typed.wait()
+        tab_id = next(iter(login_seal._tabs[iid]))
+        assert seen["typed"] is True, "the secret was not in the field when it stalled"
+        await _unreachable(iid, tab_id)
+        async with asyncio.timeout(40):
+            with pytest.raises(login_flow.LoginTimedOutError):
+                await task
+        # the caller has its answer; the cleanup has not run, so the seal must hold
+        assert login_seal.sealing(iid)
+        assert "after_clear" not in seen
+        await _unreachable(iid, tab_id)
+        gate.set()
+        async with asyncio.timeout(30):
+            await asyncio.gather(*login_flow._CLEANUPS)
+        assert seen["after_clear"] == ""
+        assert not login_seal.sealing(iid)
+        browser = await runtime.browser_manager.get_browser(iid)
+        await tab_open.update_targets(browser)
+        assert tab_open.find(browser, tab_id) is None
+    assert audit_outcomes()[-1] == "timed_out"
+    assert not vault_store.entry("work").get("frozen")
+    assert site.posts == []
+
+
+async def test_a_cleanup_whose_steps_never_answer_ends_with_the_tab_sealed(
+    site, tmp_path, monkeypatch
+):
+    """Bounded without unsealing: a clear or a close that never returns ends as a
+    tab NOT known closed, which stays sealed for good (the cost of a browser that
+    stopped answering is a hidden tab, never an exposed one)."""
+    unlocked_vault({"work": _entry(site)})
+
+    async def done(tab, entry):
+        return "logged_in", "signed in"
+
+    async def hangs(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(login_flow, "_sealed_login", done)
+    monkeypatch.setattr(login_form, "clear_passwords", hangs)
+    monkeypatch.setattr(login_flow, "_close_tab", hangs)
+    monkeypatch.setattr(login_flow, "CLEAR_BUDGET_S", 0.3)
+    monkeypatch.setattr(login_flow, "CLOSE_BUDGET_S", 0.3)
+    async with _browser(tmp_path) as iid:
+        async with asyncio.timeout(20):
+            result = await _run(iid)
+        assert result["detail"] == "signed in" + login_flow.UNCLOSED_NOTE
+        assert not login_seal.sealing(iid)
+        (leftover,) = login_seal._unclosed[iid]
+        assert login_seal.is_sealed(iid, leftover)
+        await _unreachable(iid, leftover)
 
 
 async def test_a_cleanup_that_hangs_is_not_waited_for_and_the_tab_stays_sealed(
