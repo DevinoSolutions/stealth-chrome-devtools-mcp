@@ -4,6 +4,14 @@
 
 2.1.65 was tagged but never published (its gate failed on Windows, below).
 
+### A login whose page opens a popup on a key press stalled one time in twelve (T-19366)
+
+- `test_nor_the_popup_its_page_opens` hung on macOS in the 2.1.64 gate and timed out on Windows in the canary (`LoginTimedOutError`, 120 s). It is a PRODUCT race, reproduced locally at 5 of 60 fresh-process logins (8 percent) and found by a stack dump at the stall: the login was inside `Input.dispatchKeyEvent` for the first key of the password, which the page's key handler answers with `window.open`.
+- Cause: the popup of the login's tab is born paused (the guard's browser-wide auto-attach waits for the debugger) and the page that opened it waits inside `window.open` for it to exist. The login's popup handling closed the popup at once, racing the guard's own `Fetch.enable` and `Runtime.runIfWaitingForDebugger` on it. In every stalled run the guard's resume was ANSWERED after the close (the popup was resumed and closed in the middle of its creation); in every run that passed it was never answered (the popup died while paused). In the first case the opener never came back, the key press was never acknowledged and the login ran out of its budget.
+- Fix: a popup of a login is closed only AFTER the guard has let it run (`login_seal.popup_released`, called by the guard after the resume; `login_seal.wait_popup_released`, waited for by `tab_open._close_popup`, bounded by `POPUP_RELEASE_WAIT_SECONDS`, 3 s, and skipped when no guard watches a browser). It stays sealed and hidden the whole time, as before. 0 of 102 stalled with the fix.
+- Tests: a real-Chrome login whose password field opens a popup on each of its first ten keys (red without the fix in 5 of 6 runs; a tree that closes the popup at once fails it), plus unit tests for the close waiting for the release, the bounded wait, no wait without a guard, and the guard noting the release only for a login's own page after its resume.
+
+
 ### An interpreter crash in the test suite prints its stack again (T-19366)
 
 - The 2.1.65 publish gate's Windows coverage cell (Python 3.12 with coverage) died twice with a bare `Segmentation fault`, exit 139, about 4,510 tests in, and no stack. Eleven local attempts did not reproduce the crash; its cause is not known.

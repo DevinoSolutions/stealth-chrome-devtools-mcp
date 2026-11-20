@@ -897,6 +897,7 @@ class _Guard:
         if params.get("waitingForDebugger"):
             with contextlib.suppress(Exception):
                 await self.command("Runtime.runIfWaitingForDebugger", None, session)
+        login_seal.popup_released(target, info.get("openerId"))
 
     async def _block(self, message: Json) -> None:
         params = _obj(message.get("params"))

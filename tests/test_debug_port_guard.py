@@ -646,6 +646,60 @@ async def test_the_logins_own_page_and_its_popups_are_not_watched_for_children(
     await guard.stop()
 
 
+async def test_the_guard_says_a_logins_popup_ran_only_after_it_resumed_it(endpoint):
+    """The login closes its popup only after this release (``tab_open``), because a
+    popup closed while still paused left its opener inside ``window.open`` for good
+    (T-19366). The release is noted for a login's own page, after the resume was
+    answered, and for no other page."""
+    guard = await _guard(endpoint)
+    login_seal.begin("inst")
+    login_seal.seal_tab("inst", "LOGIN")
+    try:
+        seen = []
+        real = login_seal.popup_released
+
+        def spying(target, opener=None):
+            seen.append(
+                (target, "Runtime.runIfWaitingForDebugger" in endpoint.methods())
+            )
+            real(target, opener)
+
+        login_seal.popup_released = spying
+        try:
+            for target, session, opener in (
+                ("POPUP", "S-popup", "LOGIN"),
+                ("AGENT", "S-agent", "T1"),
+            ):
+                await endpoint.emit(
+                    "Target.attachedToTarget",
+                    {
+                        "sessionId": session,
+                        "targetInfo": {
+                            "targetId": target,
+                            "type": "page",
+                            "url": "about:blank",
+                            "openerId": opener,
+                        },
+                        "waitingForDebugger": True,
+                    },
+                )
+            await _settle(endpoint, "Runtime.runIfWaitingForDebugger", count=2)
+            for _ in range(100):
+                if len(seen) == 2:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            login_seal.popup_released = real
+        assert [target for target, _resumed in seen] == ["POPUP", "AGENT"] or [
+            target for target, _resumed in seen
+        ] == ["AGENT", "POPUP"]
+        assert all(resumed for _target, resumed in seen), "released before the resume"
+        assert login_seal._released == {"POPUP"}
+    finally:
+        login_seal.end("inst")
+    await guard.stop()
+
+
 async def test_a_frame_at_the_endpoint_origin_is_held_paused_and_never_resumed(
     endpoint,
 ):
