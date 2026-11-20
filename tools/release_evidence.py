@@ -67,6 +67,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from release_change import cuts_release
 from release_policy import (
     _QUERY_VALUE_RE,
     _USERINFO_RE,
@@ -145,6 +146,7 @@ from release_schema import (
     NON_PER_TOOL_NODES,
     NUMERIC_RE,
     PR_ADVISORY_KEYS,
+    PR_EVENTS,
     PR_TIER,
     PYTHON_RE,
     RECORD_KEYS,
@@ -293,6 +295,8 @@ class AggregateSpec:
     run_attempt: str
     event: str
     claims_path: Path
+    #: A pull request that cuts a release owes the full ledger (release_change.py).
+    release_change: bool = False
 
 
 def _discover_children(
@@ -490,7 +494,7 @@ def build_aggregate(spec: AggregateSpec) -> tuple[dict[str, object], list[str]]:
     problems: list[str] = []
     if not sha_dir.is_dir():
         return {}, [f"no evidence directory for release SHA {spec.release_sha!r}"]
-    tier = tier_for_event(spec.event)
+    tier = tier_for_event(spec.event, spec.release_change)
     paths, problems_found = _discover_children(sha_dir, tier)
     problems.extend(problems_found)
     records: dict[str, dict[str, object]] = {}
@@ -718,7 +722,22 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _release_change(args: argparse.Namespace) -> bool:
+    """Does this pull request cut a release? Asked only when the flag is given.
+
+    The plan job and the aggregate both ask, from the same checkout, so the cells
+    a run executes and the cells the ledger demands cannot disagree. The reason
+    goes to stderr: stdout is the plan's ``$GITHUB_OUTPUT``.
+    """
+    if not args.detect_release_change or args.event not in PR_EVENTS:
+        return False
+    changed, reason = cuts_release()
+    print(f"release_evidence: {reason}", file=sys.stderr)
+    return changed
+
+
 def _cmd_aggregate(args: argparse.Namespace) -> int:
+    release_change = _release_change(args)
     spec = AggregateSpec(
         root=args.root,
         release_sha=args.release_sha,
@@ -727,6 +746,7 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
         run_attempt=args.run_attempt,
         event=args.event,
         claims_path=args.claims,
+        release_change=release_change,
     )
     aggregate, problems = build_aggregate(spec)
     if aggregate:
@@ -739,14 +759,14 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
     if problems:
         print(f"::error::release_evidence: {len(problems)} ledger problem(s)")
         return 1
-    cells = len(keys_for_tier(tier_for_event(args.event)))
-    print(f"aggregate: all {cells} {tier_for_event(args.event)}-tier cells validated")
+    tier = tier_for_event(args.event, release_change)
+    print(f"aggregate: all {len(keys_for_tier(tier))} {tier}-tier cells validated")
     return 0
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
     """Print ``<job>=<matrix json>`` lines for ``$GITHUB_OUTPUT`` (T-6910)."""
-    tier = tier_for_event(args.event)
+    tier = tier_for_event(args.event, _release_change(args))
     for job, matrix in sorted(plan_matrices(tier).items()):
         print(f"{job.replace('-', '_')}={json.dumps(matrix, separators=(',', ':'))}")
     print(f"tier={tier}")
@@ -798,6 +818,17 @@ def _add_emit_parser(sub: argparse._SubParsersAction) -> None:
     parser.set_defaults(func=_cmd_emit)
 
 
+def _add_release_change_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--detect-release-change",
+        action="store_true",
+        help=(
+            "the checkout is a pull request's merge commit: if it moves "
+            "[project] version against its base, owe the full tier (release_change.py)"
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -816,10 +847,12 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--run-attempt", required=True)
     aggregate.add_argument("--event", required=True)
     aggregate.add_argument("--claims", type=Path, default=CLAIMS_PATH)
+    _add_release_change_flag(aggregate)
     aggregate.set_defaults(func=_cmd_aggregate)
 
     plan = sub.add_parser("plan", help="print the matrices this event runs")
     plan.add_argument("--event", required=True)
+    _add_release_change_flag(plan)
     plan.set_defaults(func=_cmd_plan)
 
     claims = sub.add_parser("claims", help="validate the tool claim ledger")

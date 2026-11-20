@@ -278,8 +278,15 @@ RUNS_ON = {
 _JOBS_WITHOUT_MATRIX = ("quality", "known-gaps", "build-dist", "package-verify")
 
 
-def tier_for_event(event: str) -> str:
-    return PR_TIER if event in PR_EVENTS else FULL_TIER
+def tier_for_event(event: str, release_change: bool = False) -> str:
+    """The tier an event owes. ``release_change`` can only RAISE a PR to FULL.
+
+    A pull request that cuts a release (``release_change.cuts_release``) owes the
+    ledger a tag owes, so a red Windows or macOS cell shows on the PR and not
+    after a tag that can never be moved or deleted. No input can lower a tier: an
+    event this table does not name is FULL whatever ``release_change`` says.
+    """
+    return PR_TIER if event in PR_EVENTS and not release_change else FULL_TIER
 
 
 def _in_pr_tier(spec: CellSpec) -> bool:
