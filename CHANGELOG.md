@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.66
 
-2.1.65 was tagged but never published (its gate failed on Windows, below).
+2.1.65 was tagged but never published (its gate failed on Windows, below), so 2.1.66 is the first release on PyPI with everything in the 2.1.63, 2.1.64 and 2.1.65 sections too.
 
 ### A login whose page opens a popup on a key press stalled one time in twelve (T-19366)
 
