@@ -77,6 +77,12 @@ FORBIDDEN_FLAGS = browser_trust.FORBIDDEN_FLAGS
 
 FIELD_WAIT_S = 15.0
 OUTCOME_WAIT_S = 15.0
+#: The longest a whole login (open the tab, type, read the outcome) may take; a
+#: two-step login with every wait spent is about 70 s.
+LOGIN_BUDGET_S = 120.0
+#: The longest the caller waits for the cleanup (clear, close, verify). The cleanup
+#: itself is not cancelled: it ends the seal when it finishes.
+CLEANUP_BUDGET_S = 30.0
 POLL_S = 0.4
 #: The delay between key presses; a person's, so a page's key handlers behave.
 KEY_DELAY_S = 0.03
@@ -193,8 +199,24 @@ async def _run(
         # the login is cancelled, its cleanup clears what it typed, and the caller
         # is told why.
         async with debug_port_guard.watch(browser):
-            tab = await _open_sealed_tab(browser, instance_id)
-            outcome, detail = await _sealed_login(tab, entry)
+            # Every page wait inside has its own bound, but a CDP call has none:
+            # one Chrome never answers (a key event that opened a popup, a tab that
+            # closed under a command) would hold the login, its seal and the
+            # caller for ever. The whole login is bounded, and the cleanup below
+            # still runs when it is.
+            budget = asyncio.timeout(LOGIN_BUDGET_S)
+            try:
+                async with budget:
+                    tab = await _open_sealed_tab(browser, instance_id)
+                    outcome, detail = await _sealed_login(tab, entry)
+            except TimeoutError:
+                if not budget.expired():
+                    raise
+                raise ToolError(
+                    f"the login did not finish within {LOGIN_BUDGET_S:g} s (the "
+                    "browser stopped answering); its tab was cleared and closed, "
+                    "and nothing further was typed"
+                ) from None
             if outcome == "rejected":
                 detail += _FROZEN_NOTE if _freeze(label) else _NOT_FROZEN_NOTE
             result = {
@@ -385,7 +407,18 @@ async def _finish(
     task = asyncio.ensure_future(_cleanup(browser_manager, instance_id, tab))
     _CLEANUPS.add(task)
     task.add_done_callback(_CLEANUPS.discard)
-    return await asyncio.shield(task)
+    try:
+        async with asyncio.timeout(CLEANUP_BUDGET_S):
+            return await asyncio.shield(task)
+    except TimeoutError:
+        # The task goes on behind the shield and ends the seal itself; until it
+        # does, the tab stays sealed. The caller is told it is not known closed.
+        debug_logger.log_warning(
+            "login_flow",
+            "_finish",
+            f"the cleanup took over {CLEANUP_BUDGET_S:g} s; not waiting for it",
+        )
+        return False
 
 
 async def _cleanup(

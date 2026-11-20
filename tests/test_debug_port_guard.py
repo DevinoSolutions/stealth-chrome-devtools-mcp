@@ -516,6 +516,78 @@ async def test_a_frame_that_committed_at_the_endpoint_blanks_the_page_that_holds
     await guard.stop()
 
 
+async def _a_frame_of_the_page(endpoint):
+    await endpoint.emit(
+        "Target.attachedToTarget",
+        {
+            "sessionId": "S-frame",
+            "targetInfo": {"targetId": "F1", "type": "iframe", "url": ""},
+            "waitingForDebugger": False,
+        },
+        session="S-T1",
+    )
+    await _settle(endpoint, "Fetch.enable", count=2)
+
+
+async def test_a_blocked_navigation_of_a_frame_to_the_endpoint_blanks_its_page(
+    endpoint,
+):
+    """The interception refuses the frame's DOCUMENT, so nothing of the endpoint
+    loads; the page that holds the frame is blanked as well, whatever URL Chrome
+    reports for the error page it shows instead (publish gate, Windows, Chrome 156:
+    ``chrome-error://``, which ``_judge`` cannot read as the endpoint)."""
+    guard = await _guard(endpoint)
+    await _a_frame_of_the_page(endpoint)
+    await endpoint.emit(
+        "Target.targetInfoChanged",
+        {
+            "targetInfo": {
+                "targetId": "F1",
+                "type": "iframe",
+                "url": "chrome-error://chromewebdata/",
+            }
+        },
+    )
+    await endpoint.emit(
+        "Fetch.requestPaused",
+        {
+            "requestId": "R-doc",
+            "resourceType": "Document",
+            "request": {"url": f"http://127.0.0.1:{PORT}/devtools/inspector.html"},
+        },
+        session="S-frame",
+    )
+    await _settle(endpoint, "Page.navigate")
+    navigations = [c for c in endpoint.commands if c["method"] == "Page.navigate"]
+    assert [(c["sessionId"], c["params"]) for c in navigations] == [
+        ("S-T1", {"url": "about:blank"})
+    ]
+    failed = [c for c in endpoint.commands if c["method"] == "Fetch.failRequest"]
+    assert [c["params"]["requestId"] for c in failed] == ["R-doc"]
+    await guard.stop()
+
+
+async def test_a_blocked_fetch_or_script_request_does_not_blank_the_page(endpoint):
+    """Only a DOCUMENT request is a navigation to the endpoint; the cross-site
+    fetch the other tests block leaves the page where it is."""
+    guard = await _guard(endpoint)
+    await _a_frame_of_the_page(endpoint)
+    for kind in ("XHR", "Fetch", "Script", "Other"):
+        await endpoint.emit(
+            "Fetch.requestPaused",
+            {
+                "requestId": f"R-{kind}",
+                "resourceType": kind,
+                "request": {"url": f"http://127.0.0.1:{PORT}/json/version"},
+            },
+            session="S-frame",
+        )
+    await _settle(endpoint, "Fetch.failRequest", count=4)
+    await asyncio.sleep(0.1)
+    assert "Page.navigate" not in endpoint.methods()
+    await guard.stop()
+
+
 async def test_the_logins_own_page_and_its_popups_are_not_watched_for_children(
     endpoint,
 ):

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+2.1.64 was tagged but never published (its gate failed on two login-vault integration tests, below), so the next release is the first on PyPI with everything in the 2.1.63 and 2.1.64 sections too.
+
+### Two login-vault integration tests failed the 2.1.64 publish gate (T-19366)
+
+- **Windows (Chrome 156): a frame nested at the debug endpoint was left with its page on the endpoint's URL.** The guard blanked the holding page only when Chrome REPORTED the refused frame's URL as the endpoint's own. The endpoint document is refused either way (`Fetch.failRequest` on the frame's `Document` request, 12 of 12 local runs, so no endpoint content loads or runs and nothing can be read from it), but on the publish runner the refused frame is evidently reported as `chrome-error://`, never as the endpoint URL, and the page stayed on the address the agent had put it at. The guard now blanks the page on the blocked `Document` request itself, whatever URL Chrome reports; a blocked `Fetch`, `XHR` or script request does not. The test that read the page too early now polls for it, and a second test simulates Chrome's `chrome-error://` report (red without the fix).
+- **macOS/ARM64: `test_nor_the_popup_its_page_opens` hung for 300 s and the job was cancelled, with no message.** A login had no bound: every wait on a page is bounded, but a CDP call is not, so a Chrome that stops answering held the login, its seal and the caller for ever. The whole login now has a budget (`LOGIN_BUDGET_S`, 120 s) and ends as a refusal that says so, its tab cleared and closed; the caller waits at most `CLEANUP_BUDGET_S` (30 s) for the cleanup, which is not cancelled and ends the seal when it finishes. The tests' spawn and close of a browser, and the popup test's login, list and agent, are bounded with a message that names the step. The cause of the stall itself is not established (see the commit).
+- The integration step now passes `-o faulthandler_timeout=240`: pytest-timeout's default `signal` method skips the main thread in its dump, so the hang above printed every thread but the stuck one.
+
 ## 2.1.64
 
 2.1.63 was tagged but never published (its gate failed on macOS, below), so 2.1.64 is the first release on PyPI with everything in the 2.1.63 section too.

@@ -552,19 +552,59 @@ async def test_a_cross_site_iframe_cannot_fetch_the_debug_port(site, tmp_path):
         attacker.close()
 
 
+async def _location_once_blank(iid, seconds=15.0):
+    """``location.href`` of the instance's tab, read until it is ``about:blank`` or
+    ``seconds`` have passed (the blanking is the guard's, after the attack ran)."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while True:
+        now = await get_fn("execute_script")(instance_id=iid, script="location.href")
+        if str(now.get("result")) == "about:blank":
+            return now
+        if asyncio.get_running_loop().time() > deadline:
+            return now
+        await asyncio.sleep(0.25)
+
+
 async def test_a_frame_nested_at_the_endpoint_origin_never_runs(site, tmp_path):
-    """The one Origin Chrome accepts is the endpoint's own. A frame that commits
-    there (in its own process, nested in a cross-site frame) is held paused so none
-    of its script runs, and the page that holds it is sent to ``about:blank``."""
+    """The one Origin Chrome accepts is the endpoint's own. A frame that tries to load
+    a document there (in its own process, nested in a cross-site frame) has the
+    request refused, so none of the endpoint's content loads, and the page that holds
+    it is sent to ``about:blank``."""
     attacker = _Attacker(nest=True)
     try:
         async with _browser(tmp_path) as iid:
             browser = await _browser_of(iid)
             infos, _said = await _attack(iid, attacker, browser)
             assert _at_the_port(infos, int(browser.config.port)) == []
-            now = await get_fn("execute_script")(
-                instance_id=iid, script="location.href"
-            )
+            now = await _location_once_blank(iid)
+            assert str(now.get("result")) == "about:blank", now
+    finally:
+        attacker.close()
+
+
+async def test_the_page_is_blanked_when_chrome_reports_the_refused_frame_as_an_error_page(
+    site, tmp_path, monkeypatch
+):
+    """The publish gate's Windows cell (Chrome 156) left the page where it was: the
+    refused document's frame was not reported at the endpoint's URL, so the URL rule
+    never fired. Simulated here on any Chrome: every report of the endpoint's own
+    URL is rewritten to the error page Chrome 156 is read to show. The refusal of the
+    document itself must blank the page."""
+    real = debug_port_guard._Guard._judge
+
+    def as_an_error_page(self, info):
+        url = str(info.get("url", ""))
+        if f":{self.port}/" in url and not url.startswith("chrome-error"):
+            info = {**info, "url": "chrome-error://chromewebdata/"}
+        return real(self, info)
+
+    monkeypatch.setattr(debug_port_guard._Guard, "_judge", as_an_error_page)
+    attacker = _Attacker(nest=True)
+    try:
+        async with _browser(tmp_path) as iid:
+            browser = await _browser_of(iid)
+            await _attack(iid, attacker, browser)
+            now = await _location_once_blank(iid)
             assert str(now.get("result")) == "about:blank", now
     finally:
         attacker.close()

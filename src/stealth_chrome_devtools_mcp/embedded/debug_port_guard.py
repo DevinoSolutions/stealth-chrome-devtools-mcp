@@ -899,15 +899,26 @@ class _Guard:
                 await self.command("Runtime.runIfWaitingForDebugger", None, session)
 
     async def _block(self, message: Json) -> None:
+        params = _obj(message.get("params"))
+        session = cast("str | None", message.get("sessionId"))
         with contextlib.suppress(Exception):
             await self.command(
                 "Fetch.failRequest",
-                {
-                    "requestId": _obj(message.get("params"))["requestId"],
-                    "errorReason": "BlockedByClient",
-                },
-                cast("str | None", message.get("sessionId")),
+                {"requestId": params["requestId"], "errorReason": "BlockedByClient"},
+                session,
             )
+        if params.get("resourceType") == "Document":
+            # A frame (or page) tried to NAVIGATE to the endpoint: its document is
+            # refused above, so no content of the endpoint ever loads, but the page
+            # that holds the frame is sent to ``about:blank`` all the same. That must
+            # not depend on what URL Chrome reports for the error page it shows
+            # instead (a release that reports ``chrome-error://`` there never says
+            # "the endpoint's own origin" to ``_judge``: the publish gate's Windows
+            # cell, Chrome 156).
+            for target, known in list(self.sessions.items()):
+                if known == session:
+                    await self._leave_endpoint(target)
+                    break
 
 
 # --------------------------------------------------------- before a login types
