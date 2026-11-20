@@ -400,3 +400,202 @@ def test_the_early_navigate_warning_carries_what_the_first_probe_saw():
         asyncio.run(fixture_routes.wait_fixture_ready(probe, expect_app=True))
     assert "the first probe saw" in str(record[0].message)
     assert "'loadEnd': 0" in str(record[0].message)
+
+
+# ── The hit list must say something about the page that failed, not the first 50 ──
+
+
+def _parsed(path):
+    """A real ``_FixtureHandler`` that has parsed ``GET path`` (no socket): the
+    recorder is what is under test, and ``parse_request`` is where it writes."""
+    import io
+
+    import release_gate_harness_fixture as fixture
+
+    class Probe(fixture._FixtureHandler):
+        def __init__(self):
+            self.client_address = ("127.0.0.1", 1)
+            self.rfile = io.BytesIO(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            self.raw_requestline = self.rfile.readline()
+            self._hit = None
+
+    probe = Probe()
+    probe.parse_request()
+    return probe
+
+
+def test_the_hit_list_keeps_the_newest_requests_not_the_first():
+    """It kept the FIRST fifty and dropped every later request, so on the
+    session-scoped server of an integration run a late test's ``app.js`` was never
+    in it (the 2.1.67 canary's failure could not have shown it)."""
+    import release_gate_harness_fixture as fixture
+
+    fixture._clear_hits()
+    early = [_parsed(f"/n{i}") for i in range(fixture._FIXTURE_HITS_CAP + 30)]
+    late = _parsed("/late-app.js")
+    hits = fixture._FIXTURE_HITS
+    assert len(hits) == fixture._FIXTURE_HITS_CAP
+    assert hits[-1].endswith("GET /late-app.js HTTP/1.1 [unfinished]")
+    assert not any("GET /n0 " in hit for hit in hits)
+    late._end_hit(fixture._HIT_RESET)  # its index moved as older entries fell off
+    assert hits[-1].endswith("GET /late-app.js HTTP/1.1 [reset]")
+    early[-1]._end_hit("")
+    assert hits[-2].endswith("GET /n229 HTTP/1.1")
+    early[0]._end_hit("")  # pushed off the front: nothing of anyone else's changes
+    assert hits[0].endswith("[unfinished]")
+    fixture._clear_hits()
+    early[-2]._end_hit("")  # a cleared list is not written to
+    assert hits == []
+
+
+def test_the_report_places_each_hit_on_the_pages_own_clock():
+    import release_gate_harness_fixture as fixture
+
+    fixture._clear_hits()
+    assert "(it served NOTHING)" in fixture.fixture_hits_report()
+    probe = _parsed("/app.js")
+    probe._end_hit(fixture._HIT_RESET)
+    stamp = float(fixture._FIXTURE_HITS[0].split(" @")[1].split(" ")[0])
+    report = fixture.fixture_hits_report(origin_ms=stamp * 1000 - 21)
+    assert "newest 1 of 1" in report
+    assert "@+21ms GET /app.js HTTP/1.1 [reset]" in report
+    fixture._clear_hits()
+
+
+def test_a_page_that_never_settles_carries_what_the_server_saw(monkeypatch):
+    """The failure named the page's state and not one request the server received,
+    so "Chrome never asked for app.js" and "asked, then lost it" read the same (the
+    2.1.67 canary: app.js fetched, status 0, 20 ms)."""
+    import asyncio
+
+    import fixture_routes
+    import release_gate_harness_fixture as fixture
+
+    _fake_settle_clock(monkeypatch, fixture_routes)
+    fixture._clear_hits()
+    _parsed("/app.js")._end_hit(fixture._HIT_RESET)
+
+    async def probe(expression):
+        return (
+            '{"href":"http://x/interactions.html","state":"complete","script":true,'
+            '"fetched":true,"ready":false,"origin":1,"resources":[{"name":"/app.js",'
+            '"status":0,"size":0,"start":21,"ms":20}]}'
+        )
+
+    try:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe))
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("an unwired page must not count as settled")
+    finally:
+        fixture._clear_hits()
+    assert "fixture server hits: newest 1 of 1" in message
+    assert "GET /app.js HTTP/1.1 [reset]" in message
+
+
+# ── A document whose own app.js ended with no response is reloaded, loudly ──
+
+
+def _page(origin, *, ready, app_status=200, size=900):
+    import json
+
+    return json.dumps(
+        {
+            "href": "http://x/interactions.html",
+            "state": "complete",
+            "script": True,
+            "fetched": True,
+            "ready": ready,
+            "origin": origin,
+            "resources": [
+                {"name": "/styles.css", "status": 200, "size": 1888},
+                {"name": "/app.js", "status": app_status, "size": size},
+            ],
+        }
+    )
+
+
+def test_a_script_that_ended_with_no_response_is_recognised_only_as_that():
+    import json
+
+    import fixture_routes
+
+    def failed(raw):
+        return fixture_routes.fixture_script_failed(json.loads(raw))
+
+    assert failed(_page(1, ready=False, app_status=0, size=0))
+    assert not failed(_page(1, ready=True, app_status=0, size=0))
+    assert not failed(_page(1, ready=False, app_status=200))  # wired late, not lost
+    assert not failed(_page(1, ready=False, app_status=0, size=300))
+    assert not failed(
+        _page(1, ready=False, app_status=0, size=0).replace('"complete"', '"loading"')
+    )
+
+
+def test_a_lost_app_js_is_recovered_by_one_reload_and_the_warning_names_it(
+    monkeypatch,
+):
+    """The 2.1.67 canary: app.js ended in 20 ms with status 0, the document was
+    `complete`, and the wait probed 141 times for 15 s without the page ever
+    retrying a script that had failed."""
+    import asyncio
+
+    import pytest
+
+    import fixture_routes
+
+    _fake_settle_clock(monkeypatch, fixture_routes)
+    calls = []
+
+    async def probe(expression):
+        calls.append(expression)
+        reloaded = fixture_routes.FIXTURE_RELOAD_JS in calls
+        if expression == fixture_routes.FIXTURE_RELOAD_JS:
+            return None
+        if not reloaded:
+            return _page(1, ready=False, app_status=0, size=0)
+        # the old document is still on screen for one probe, then the new one
+        stale = calls.count(fixture_routes.FIXTURE_STATE_JS) < 3
+        return (
+            _page(1, ready=False, app_status=0, size=0)
+            if stale
+            else _page(2, ready=True)
+        )
+
+    with pytest.warns(UserWarning, match="navigate had already returned") as record:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe, expect_app=True))
+    assert calls.count(fixture_routes.FIXTURE_RELOAD_JS) == 1
+    message = str(record[0].message)
+    assert "reloaded 1x after app.js ended with no response" in message
+    assert "'status': 0" in message or '"status": 0' in message
+
+
+def test_the_reloads_are_bounded_and_the_failure_counts_them(monkeypatch):
+    import asyncio
+
+    import fixture_routes
+
+    _fake_settle_clock(monkeypatch, fixture_routes)
+    monkeypatch.setattr(fixture_routes, "FIXTURE_READY_TIMEOUT", 2.0)
+    calls = []
+    documents = [0]
+
+    async def probe(expression):
+        calls.append(expression)
+        if expression == fixture_routes.FIXTURE_RELOAD_JS:
+            documents[0] += 1  # every reload yields a fresh, equally broken document
+            return None
+        return _page(documents[0] + 1, ready=False, app_status=0, size=0)
+
+    try:
+        asyncio.run(fixture_routes.wait_fixture_ready(probe, expect_app=True))
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("a page that never wires must not count as settled")
+    assert fixture_routes.FIXTURE_RELOADS >= 1
+    assert (
+        calls.count(fixture_routes.FIXTURE_RELOAD_JS) == fixture_routes.FIXTURE_RELOADS
+    )
+    assert f"{fixture_routes.FIXTURE_RELOADS} reloads" in message

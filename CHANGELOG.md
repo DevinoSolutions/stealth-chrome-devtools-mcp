@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### The fixture settle wait reloads a page whose own `app.js` was lost, and its failure says what the server saw (follow-up to T-4709)
+
+Test-only. The 2.1.67 canary's Windows integration run failed 1 of 481 tests (`test_a_selection_that_works_reports_the_index_it_landed_on[index]`): the document was `complete`, the `app.js` tag was there, and the page's resource timing showed `/app.js` ended after 20 ms with `status` 0 and `size` 0 (`/styles.css`, requested 1 ms earlier, was 200). The page never retries a failed script, so `wait_fixture_ready` probed 141 times for 15 s and failed. The failure carried no server-side evidence: the fixture hit list kept only the FIRST 50 requests of the session-scoped server (`_FIXTURE_HITS_CAP`, never rotated) and the "never settled" message did not print it at all (only the release-gate journey did), so which of the three cases it was (never asked, asked and cancelled, served) could not be read from the log. Captured stderr of the failing node was empty, so the server raised nothing it did not swallow as a `ConnectionError`.
+
+- The hit list now keeps the NEWEST 200 requests, each stamped with its wall-clock second, and `fixture_hits_report` places them on the page's own clock (`performance.timeOrigin`, now in the settle probe): `@+21ms GET /app.js HTTP/1.1 [reset]` reads against the resource entry `start: 21`. Both the "never settled" failure and the recovery warning print it.
+- A `complete` document whose own `app.js` resource ended with `status` 0 and `size` 0 and that is not wired is reloaded (`location.reload()`), at most `FIXTURE_RELOADS` = 2 times; the same document still on screen right after the request is not counted again (`timeOrigin` is compared). A page whose `app.js` is slow (status 200, not yet wired) is not reloaded. A recovery always warns, naming the state that prompted the reload and what the server saw, so a recovered flake stays in the CI warnings; a page that never wires still fails, with the reload count in the message.
+- Not established: why the fetch ended with no response. It was NOT reproduced: 0 of 100 fresh-browser first loads of `interactions.html` with the debug-port guard (`Fetch.enable` on every page, T-19366) and 0 of 100 with `debug_port_guard.protect` replaced by a no-op, run on 2 cores shared with 6 busy-loop processes, so this run cannot tell the guard from anything else (at the canary's 1-in-481 rate, 200 runs expect 0.4 failures). F-999 measured `Fetch.enable` alone aborting a page's own request (25/216 macOS runs against 0/216), so the guard is a candidate, unproven here. If the new warning names the same shape again, that is the lead; no product change was made.
+
 ## 2.1.67
 
 2.1.66 was tagged but never published (its gate failed on one Windows integration test, below), so 2.1.67 is the first release on PyPI with everything in the 2.1.63 to 2.1.66 sections too.
