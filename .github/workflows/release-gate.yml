@@ -56,6 +56,15 @@ jobs:
   # each matrix job reads its slice through fromJSON. The release-evidence
   # aggregate derives the SAME tier from the same event, so a tag still owes every
   # cell and a PR is never credited with a cell it did not run.
+  #
+  # One exception raises a pull request to the FULL tier: it cuts a release, i.e.
+  # its merge commit moves `[project] version` in pyproject.toml against its base
+  # (tools/release_change.py). The tag that follows runs every cell and is never
+  # moved or deleted, so a cell that is red only off-Linux used to burn a version
+  # number (v2.1.63 to v2.1.66); the release PR now shows it first. `plan` and the
+  # aggregate both pass --detect-release-change and so ask the same question of the
+  # same checkout. `fetch-depth: 2` is what makes the merge commit's parents
+  # readable; the detector fails closed to FULL when they are not.
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -72,10 +81,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 2
       - name: Plan the matrices for this event
         id: plan
         shell: bash
-        run: python3 tools/release_evidence.py plan --event "${{ github.event_name }}" | tee -a "$GITHUB_OUTPUT"
+        run: >-
+          python3 tools/release_evidence.py plan
+          --event "${{ github.event_name }}" --detect-release-change
+          | tee -a "$GITHUB_OUTPUT"
 
   quality:
     name: quality
@@ -1201,6 +1214,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          # The aggregate asks `plan`'s release-change question of the same
+          # merge commit, so it owes exactly the cells `plan` ran.
+          fetch-depth: 2
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Set up Python 3.12
@@ -1223,7 +1239,7 @@ jobs:
           --release-sha "$(git rev-parse HEAD)"
           --run-id "${{ github.run_id }}"
           --run-attempt "${{ github.run_attempt }}"
-          --event "${{ github.event_name }}"
+          --event "${{ github.event_name }}" --detect-release-change
       - name: Upload the aggregate ledger
         if: always()
         uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)

@@ -104,6 +104,12 @@ failure blocks nothing, its record is not read by the PR aggregate, and
 it is not counted in the PR cells above. The cell is still required on
 every other event.
 
+A pull request that **cuts a release** runs and demands every cell, as a
+tag does. That is a pull request whose merge commit changes `[project]
+version` in `pyproject.toml` against its base (`tools/release_change.py`;
+a checkout it cannot read fails closed to this tier), so a cell that is
+red only on Windows or macOS shows on the release PR and not after a tag.
+
 The exact Chrome Stable executable path and version are **not** written
 into this document: they are image-provided and change under us. They
 are recorded per run in
