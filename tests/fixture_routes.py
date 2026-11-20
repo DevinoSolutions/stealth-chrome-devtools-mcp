@@ -671,6 +671,7 @@ FIXTURE_STATE_JS = (
     "fetched:r.some(function(e){return e.name.indexOf('/app.js')>=0;}),"
     "ready:window.__fixtureReady===true,"
     "scripts:Array.prototype.map.call(document.scripts,function(e){return e.src;}),"
+    "origin:Math.round(performance.timeOrigin),"
     "dcl:n?Math.round(n.domContentLoadedEventEnd):null,"
     "loadEnd:n?Math.round(n.loadEventEnd):null,now:Math.round(performance.now()),"
     "resources:r.slice(0,12).map(function(e){return {name:new URL(e.name).pathname,"
@@ -689,6 +690,45 @@ def fixture_state_ready(state: dict[str, Any], expect_app: bool = False) -> bool
     return state.get("ready") is True
 
 
+def _fixture_hits_report(page_state: Any) -> str:
+    """What the fixture server saw, placed against the page's own clock, for a
+    failure message: a page that ended without ``app.js`` says whether the server
+    was never asked, was asked and lost the client, or answered. Never raises."""
+    origin = page_state.get("origin") if isinstance(page_state, dict) else None
+    try:
+        from release_gate_harness_fixture import fixture_hits_report
+
+        return fixture_hits_report(origin if isinstance(origin, (int, float)) else None)
+    except Exception as exc:  # noqa: BLE001  PERMANENT(a diagnostic must not replace the failure it explains)
+        return f"fixture server hits unavailable: {exc!r}"
+
+
+#: How many times the wait reloads a document whose own ``app.js`` fetch ended
+#: with no response (see :func:`fixture_script_failed`). Bounded and loud.
+FIXTURE_RELOADS = 2
+FIXTURE_RELOAD_JS = "location.reload()"
+
+
+def fixture_script_failed(state: dict[str, Any]) -> bool:
+    """The document is ``complete``, carries the ``app.js`` tag, never wired it, and
+    its resource timing shows the fixture's own script ended with NO response
+    (``responseStatus`` 0, nothing transferred). A same-origin fetch of a file the
+    server has does not end that way; the 2.1.67 canary's did, in 20 ms, and the
+    page then sat unwired for the whole 15 s (a script that failed is never
+    retried by the page)."""
+    if state.get("state") != "complete" or not state.get("script"):
+        return False
+    if state.get("ready") is True:
+        return False
+    return any(
+        isinstance(r, dict)
+        and str(r.get("name", "")).endswith("/app.js")
+        and r.get("status") == 0
+        and r.get("size") == 0
+        for r in state.get("resources") or []
+    )
+
+
 async def wait_fixture_ready(
     probe: Callable[[str], Any], expect_app: bool = False
 ) -> None:
@@ -701,15 +741,23 @@ async def wait_fixture_ready(
     false means the page recorded no resource timing for the script, true with
     ``ready`` false means it was fetched but did not finish wiring, and
     ``resources``, ``scripts`` and ``loadEnd`` say what each request and the
-    document's own ``load`` did. A wait that recovers within the deadline
-    still warns: ``navigate`` had already returned, so the page was not ready at
-    the moment the tool said it was (T-4709)."""
+    document's own ``load`` did, followed by what the fixture server saw. A wait
+    that recovers within the deadline still warns: ``navigate`` had already
+    returned, so the page was not ready at the moment the tool said it was
+    (T-4709).
+
+    A document whose ``app.js`` fetch ended with no response
+    (:func:`fixture_script_failed`) is reloaded, at most ``FIXTURE_RELOADS`` times:
+    the page never retries a failed script, so waiting out the deadline cannot
+    help. The reload is always reported by the warning, which names the state that
+    prompted it and what the server saw, so a recovered flake stays visible."""
     started = time.monotonic()
     deadline = started + FIXTURE_READY_TIMEOUT
     last: Any = None
     first: Any = None
     probes = 0
     unanswered = 0
+    reloads: list[Any] = []  # the failed state each reload answered
     while True:
         probes += 1
         raw = await probe(FIXTURE_STATE_JS)
@@ -725,21 +773,39 @@ async def wait_fixture_ready(
                 first = state
             if fixture_state_ready(state, expect_app):
                 if probes > 1:
+                    recovered = (
+                        f"; reloaded {len(reloads)}x after app.js ended with no "
+                        f"response, the state that prompted it: {reloads[0]}\n"
+                        f"{_fixture_hits_report(reloads[0])}"
+                        if reloads
+                        else ""
+                    )
                     warnings.warn(
                         f"navigate had already returned but {state.get('href')} was "
                         f"not settled: needed {probes} probes and "
                         f"{time.monotonic() - started:.2f}s before the document was "
                         "complete with app.js wired; the first probe saw: "
-                        f"{first}",
+                        f"{first}{recovered}",
                         stacklevel=2,
                     )
                 return
+            # The same document (same ``timeOrigin``) is still on screen right
+            # after a reload was asked for: it is not a second failure.
+            stale = bool(reloads) and state.get("origin") == reloads[-1].get("origin")
+            if (
+                len(reloads) < FIXTURE_RELOADS
+                and not stale
+                and fixture_script_failed(state)
+            ):
+                reloads.append(state)
+                await probe(FIXTURE_RELOAD_JS)
         else:
             unanswered += 1
         assert time.monotonic() < deadline, (
             "fixture page never settled (app.js did not wire window.__fixtureReady "
             f"within {FIXTURE_READY_TIMEOUT:g}s; {probes} probes, {unanswered} "
-            f"unanswered); first page state: {first}; last page state: {last}"
+            f"unanswered, {len(reloads)} reloads); first page state: {first}; "
+            f"last page state: {last}\n{_fixture_hits_report(first)}"
         )
         await asyncio.sleep(0.1)
 

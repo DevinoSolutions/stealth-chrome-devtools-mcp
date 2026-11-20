@@ -9,7 +9,9 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import re
 import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import fixture_routes
@@ -33,11 +35,45 @@ from release_gate_harness_consts import (
 # was served, ``[reset]`` when the client went away mid-request. So a request
 # Chrome sent and then cancelled, or one still being served, is visible instead
 # of absent (T-4709: "no GET /app.js" used to mean "none served to completion").
-# Bounded, and never asserted on.
+# Bounded to the NEWEST ``_FIXTURE_HITS_CAP`` requests, and never asserted on: the
+# session-scoped server of an integration run serves thousands of requests, and a
+# list that kept the first fifty would show a late test nothing of its own page.
+# Each entry carries the wall-clock second it was parsed at (``@<epoch>``) so
+# :func:`fixture_hits_report` can place it against a page's own ``timeOrigin``.
 _FIXTURE_HITS: list[str] = []
-_FIXTURE_HITS_CAP = 50
+_FIXTURE_HITS_CAP = 200
+_FIXTURE_HITS_LOCK = threading.Lock()
+_FIXTURE_HITS_DROPPED = [0]  # entries pushed off the front since the last clear
 _HIT_UNFINISHED = " [unfinished]"
 _HIT_RESET = " [reset]"
+_HIT_STAMP = re.compile(r" @(\d+\.\d+) ")
+
+
+def _clear_hits() -> None:
+    with _FIXTURE_HITS_LOCK:
+        _FIXTURE_HITS.clear()
+        _FIXTURE_HITS_DROPPED[0] = 0
+
+
+def fixture_hits_report(origin_ms: float | None = None, limit: int = 12) -> str:
+    """The newest *limit* requests the fixture server saw, one per line.
+
+    *origin_ms* is a page's ``performance.timeOrigin``: each ``@<epoch>`` stamp is
+    then shown as milliseconds from it, so a request can be read against the
+    page's own resource timing (``start`` / ``duration``) — a hit at ``+21ms``
+    with ``[reset]`` against ``app.js`` at ``start: 21`` is that fetch."""
+    with _FIXTURE_HITS_LOCK:
+        newest = list(_FIXTURE_HITS[-limit:])
+        total = len(_FIXTURE_HITS) + _FIXTURE_HITS_DROPPED[0]
+
+    def place(match: re.Match[str]) -> str:
+        if origin_ms is None:
+            return match.group(0)
+        return f" @{float(match.group(1)) * 1000 - origin_ms:+.0f}ms "
+
+    lines = [_HIT_STAMP.sub(place, hit, count=1) for hit in newest]
+    head = f"fixture server hits: newest {len(lines)} of {total}"
+    return "\n".join([head, *lines]) if lines else f"{head} (it served NOTHING)"
 
 
 class _FixtureHandler(SimpleHTTPRequestHandler):
@@ -63,24 +99,28 @@ class _FixtureHandler(SimpleHTTPRequestHandler):
     def parse_request(self):
         """Record the request the moment its line is parsed (stdlib override)."""
         parsed = super().parse_request()
-        line = f"{self.client_address[0]} {self.requestline}"
-        if len(_FIXTURE_HITS) < _FIXTURE_HITS_CAP:
+        line = f"{self.client_address[0]} @{time.time():.3f} {self.requestline}"
+        with _FIXTURE_HITS_LOCK:
+            if len(_FIXTURE_HITS) >= _FIXTURE_HITS_CAP:
+                del _FIXTURE_HITS[0]
+                _FIXTURE_HITS_DROPPED[0] += 1
             _FIXTURE_HITS.append(line + _HIT_UNFINISHED)
-            self._hit = (len(_FIXTURE_HITS) - 1, line)
+            self._hit = (_FIXTURE_HITS_DROPPED[0] + len(_FIXTURE_HITS) - 1, line)
         return parsed
 
     def _end_hit(self, suffix: str) -> None:
         """Rewrite this request's entry to its outcome; no-op when it was never
-        recorded or the list was cleared for another server since."""
+        recorded, or when the list was cleared or has moved on past it since."""
         hit, self._hit = self._hit, None
         if hit is None:
             return
-        index, line = hit
-        if (
-            index < len(_FIXTURE_HITS)
-            and _FIXTURE_HITS[index] == line + _HIT_UNFINISHED
-        ):
-            _FIXTURE_HITS[index] = line + suffix
+        sequence, line = hit
+        with _FIXTURE_HITS_LOCK:
+            index = sequence - _FIXTURE_HITS_DROPPED[0]
+            if 0 <= index < len(_FIXTURE_HITS) and (
+                _FIXTURE_HITS[index] == line + _HIT_UNFINISHED
+            ):
+                _FIXTURE_HITS[index] = line + suffix
 
     def handle_one_request(self):
         """Serve one request and record how it ended (stdlib override).
@@ -239,7 +279,7 @@ def serve_fixture_app():
     the lifetime; the journey below owns its own instance so it can close it in a
     ``finally``.
     """
-    _FIXTURE_HITS.clear()
+    _clear_hits()
     state = fixture_routes.new_origin_state("a")
     httpd, base_url = _bind_origin(state)
     state["self_url"] = base_url
@@ -259,7 +299,7 @@ def serve_fixture_origin_pair():
     half-linked pair. Same handler, same fixture tree, same shutdown discipline
     as the single-origin form above.
     """
-    _FIXTURE_HITS.clear()
+    _clear_hits()
     states = [
         fixture_routes.new_origin_state("a"),
         fixture_routes.new_origin_state("b"),
