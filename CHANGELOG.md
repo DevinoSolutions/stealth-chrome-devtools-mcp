@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+2.1.66 was tagged but never published (its gate failed on one Windows integration test, below), so the next release is the first on PyPI with everything in the 2.1.63 to 2.1.66 sections too.
+
+### The 2.1.66 gate's one failure was a test waiting on the wrong mark (T-19366)
+
+- `test_a_page_tool_with_no_tab_id_refuses_a_chrome_page_left_current` failed on Windows (`DID NOT RAISE ToolError`, line 276). It waited for `login_seal.any_sealing()`, which is true as soon as ANY target is marked; the keeper pass marks each Chrome-owned target when it reaches it, and on a loaded machine the omnibox popup's mark arrives first, so the call went through before THIS tab (the chrome:// page left current) was marked. Measured with the marks logged: in 4 of 31 fresh-process runs the first mark was another target's. The product answered correctly on every call once the tab's own mark was there (0 failures in 40 runs of the corrected test, against 1 in 40 of the old wait).
+- Fix (test): it reads the left-current page's target id first and waits for `login_seal.is_sealed(instance, that id)`. The README and the design spec now say what an agent can do in the window: until the keeper pass reaches that page (one pass is 5 s, and measured up to 11 s on a loaded machine) a no-`tab_id` tool can still act on it, and another page's mark arriving first does not mean this one is sealed.
+
+### Flakes found by running every login and vault test file 15 times under load (T-19366)
+
+- **A login whose page navigated between "get the page's world" and "evaluate in it" died with a raw `ProtocolException: Cannot find context with specified id` (-32000).** A single-page login moving to its next step destroys the execution context under the read. `login_form._evaluate` now asks for the new document's world and tries again (3 tries, 0.1 s apart); a frame that still has none reads as absent, as a frame that went away already did. Any other protocol error is raised as before. Four unit tests, three red without the retry.
+- **A stalled login now says where it stalled.** The `LoginTimedOutError` message ends with `(it was <step>)` (a fixed phrase per step, such as `waiting for the password step`; never a secret), and a page that "could not be loaded" carries Chrome's own `net::ERR_...` name. Both were guesses from a CI log before.
+- **`test_a_cancelled_login_never_has_its_tab_open_while_the_seal_is_down` failed in 5 of 15 loaded runs** on its last assertions: the tab a cancelled login leaves is closed by a task of its own, which the test did not wait for, and its poll loop was bounded by a count of polls, not time. The product held the seal throughout (the point of the test); the test now waits for that task and polls for up to 60 s.
+
 ## 2.1.66
 
 2.1.65 was tagged but never published (its gate failed on Windows, below), so 2.1.66 is the first release on PyPI with everything in the 2.1.63, 2.1.64 and 2.1.65 sections too.

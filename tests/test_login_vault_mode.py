@@ -262,11 +262,19 @@ async def test_a_page_tool_with_no_tab_id_refuses_a_chrome_page_left_current(
         # no vault yet: the page loads and is the current tab
         await get_fn("navigate")(instance_id=iid, url="chrome://version")
         assert "version" in (await get_fn("get_page_content")(instance_id=iid))["url"]
+        left_current = str(
+            (await runtime.browser_manager.get_tab(iid)).target.target_id
+        )
         _make_vault_file()
         assert vault_mode.active()
-        # the keeper has judged the target: its first pass resolves the path rules,
-        # which takes seconds on a cold machine, so wait for the mark, not a time
-        assert await _wait_for(login_seal.any_sealing, seconds=30.0), "never marked"
+        # the keeper has judged THIS target: its first pass resolves the path rules,
+        # which takes seconds on a cold machine, so wait for the mark of this very
+        # tab, not for "something is marked" (an unrelated WebUI target, such as the
+        # omnibox popup, is marked from its own event before the pass reaches this
+        # one: 4 of 31 fresh real-Chrome runs had the first mark on another target)
+        assert await _wait_for(
+            lambda: login_seal.is_sealed(iid, left_current), seconds=30.0
+        ), "the tab left current was never marked"
         for call in (
             lambda: get_fn("execute_script")(instance_id=iid, script="1 + 1"),
             lambda: get_fn("get_page_content")(instance_id=iid),

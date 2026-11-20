@@ -584,3 +584,105 @@ async def test_holds_counts_code_points_and_returns_a_boolean():
     assert await login_form.holds(_Field("abc"), 3) is True
     assert await login_form.holds(_Field("bc"), 3) is False
     assert await login_form.holds(_Field("h\U0001f44dx"), 3) is True  # one emoji
+
+
+class _ContextTab:
+    """A tab whose ``Runtime.evaluate`` answers from a script: an exception in the
+    script is raised, anything else is the reply."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.sent = 0
+
+    async def send(self, _command):
+        self.sent += 1
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def _no_context():
+    from nodriver.core.connection import ProtocolException
+
+    return ProtocolException(
+        {"code": -32000, "message": "Cannot find context with specified id"}
+    )
+
+
+@pytest.fixture
+def _worlds(monkeypatch):
+    """``login_form._world`` counts its asks: each retry must ask again, because
+    the new document has a new world."""
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    asked = []
+
+    async def world(_tab, frame):
+        asked.append(frame)
+        return len(asked)
+
+    monkeypatch.setattr(login_form, "_world", world)
+    monkeypatch.setattr(login_form, "CONTEXT_RETRY_S", 0)
+    return asked
+
+
+async def test_an_evaluation_whose_context_vanished_asks_for_the_new_world(_worlds):
+    """A page that navigates between "get the world" and "evaluate in it" answers
+    ``-32000 Cannot find context``: that is a retry in the new document's world,
+    never a login that dies on a raw protocol error."""
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    answer = SimpleNamespace(value={"password": True})
+    tab = _ContextTab(_no_context(), _no_context(), (answer, None))
+    result = await login_form._evaluate(tab, "F", "1", by_value=True)
+    assert result is answer
+    assert _worlds == ["F", "F", "F"]  # a fresh world per try
+
+
+async def test_a_context_that_stays_gone_reads_as_a_frame_that_is_absent(_worlds):
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    tab = _ContextTab(*[_no_context() for _ in range(login_form.CONTEXT_TRIES)])
+    assert await login_form._evaluate(tab, "F", "1", by_value=True) is None
+    assert tab.sent == login_form.CONTEXT_TRIES  # bounded, not a loop
+
+
+async def test_another_protocol_error_is_not_swallowed(_worlds):
+    from nodriver.core.connection import ProtocolException
+
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    other = ProtocolException({"code": -32000, "message": "Target closed"})
+    with pytest.raises(ProtocolException):
+        await login_form._evaluate(_ContextTab(other), "F", "1", by_value=True)
+
+
+async def test_probe_survives_a_navigation_under_it(_worlds, monkeypatch):
+    from stealth_chrome_devtools_mcp.embedded import login_form
+
+    async def frames(_tab, *, everything=False):
+        return ["F"]
+
+    monkeypatch.setattr(login_form, "_frame_ids", frames)
+    seen = SimpleNamespace(value={"password": True})
+    tab = _ContextTab(_no_context(), (seen, None))
+    assert (await login_form.probe(tab))["password"] is True
+
+
+async def test_a_page_that_could_not_be_loaded_says_which_net_error():
+    """Chrome's own ``errorText`` (``net::ERR_...``, a name, never page content) is
+    in the detail: "could not be loaded" alone could not tell a CI log a DNS failure
+    from a refused connection."""
+
+    class Tab:
+        async def send(self, command):
+            next(command)
+            command.close()
+            return ("FRAME", None, "net::ERR_NAME_NOT_RESOLVED")
+
+    entry = {"hosts": ["login.test"], "login_url": "https://login.test/"}
+    outcome, detail = await login_flow._sealed_login(Tab(), entry)
+    assert outcome == "needs_user"
+    assert detail == "the login page could not be loaded (net::ERR_NAME_NOT_RESOLVED)"
+    assert login_flow._STEP.get() == "loading the login page"

@@ -651,7 +651,11 @@ async def test_a_cancelled_login_never_has_its_tab_open_while_the_seal_is_down(
         await asyncio.sleep(0)
         task.cancel()
         exposed = []
-        for _ in range(300):
+        # Bounded by time, not by a count of polls: how long the cleanup takes
+        # (a cancelled login's strays are closed by a task of their own) depends
+        # on the machine, and the invariant is about ORDER, not speed.
+        end = asyncio.get_running_loop().time() + 60
+        while asyncio.get_running_loop().time() < end:
             listed = sealed in await _tab_ids(iid)
             try:
                 await get_fn("execute_script")(
@@ -667,6 +671,8 @@ async def test_a_cancelled_login_never_has_its_tab_open_while_the_seal_is_down(
             await asyncio.sleep(0.01)
         with pytest.raises(asyncio.CancelledError):
             await task
+        # the tab a cancelled login left is closed by a task of its own
+        await asyncio.gather(*tuple(login_flow._STRAYS))
         assert exposed == []
         assert not login_seal.sealing(iid)
         assert not login_seal.is_sealed(iid, sealed)
@@ -830,8 +836,11 @@ async def test_a_budget_that_fires_after_the_password_is_typed_leaves_nothing_be
         assert seen["typed"] is True, "the secret was not in the field when it stalled"
         await _unreachable(iid, tab_id)
         async with asyncio.timeout(40):
-            with pytest.raises(login_flow.LoginTimedOutError):
+            with pytest.raises(login_flow.LoginTimedOutError) as caught:
                 await task
+        # a CI log of a stalled login says WHERE it stalled (never a secret)
+        assert "(it was reading back the password)" in str(caught.value)
+        assert RIGHT not in str(caught.value)
         # the caller has its answer; the cleanup has not run, so the seal must hold
         assert login_seal.sealing(iid)
         assert "after_clear" not in seen

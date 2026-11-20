@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from nodriver import cdp
 from nodriver.core import element as nodriver_element
+from nodriver.core.connection import ProtocolException
 
 from stealth_chrome_devtools_mcp.embedded import page_natives
 from stealth_chrome_devtools_mcp.embedded.debug_logger import debug_logger
@@ -169,15 +170,51 @@ async def _world(
         return None
 
 
+#: Chrome's answer to an evaluation in an execution context that no longer exists.
+_NO_CONTEXT_CODE = -32000
+_NO_CONTEXT_TEXT = "context with specified id"
+#: Tries for one evaluation when its context vanishes under it, and the wait between.
+CONTEXT_TRIES = 3
+CONTEXT_RETRY_S = 0.1
+
+
+def _context_vanished(error: ProtocolException) -> bool:
+    return error.code == _NO_CONTEXT_CODE and _NO_CONTEXT_TEXT in (error.message or "")
+
+
 async def _evaluate(
-    tab: Tab, world: cdp.runtime.ExecutionContextId, expression: str, *, by_value: bool
+    tab: Tab, frame_id: cdp.page.FrameId, expression: str, *, by_value: bool
 ) -> cdp.runtime.RemoteObject | None:
-    result, thrown = await tab.send(
-        cdp.runtime.evaluate(
-            expression, context_id=world, return_by_value=by_value, user_gesture=False
-        )
-    )
-    return None if thrown is not None else result
+    """Evaluate ``expression`` in the isolated world of ``frame_id``; ``None`` when
+    the frame has no world, or the script threw.
+
+    A page that navigates (a single-page login moving to its next step, a redirect)
+    destroys the world between "get the world" and "evaluate in it": Chrome answers
+    ``-32000 Cannot find context with specified id``, which nodriver raises. The
+    world is asked for again, up to :data:`CONTEXT_TRIES` times, because the new
+    document has a new one; a frame that still has none then reads as absent, the
+    same as a frame that went away. Any other protocol error is raised."""
+    for attempt in range(CONTEXT_TRIES):
+        world = await _world(tab, frame_id)
+        if world is None:
+            return None
+        try:
+            result, thrown = await tab.send(
+                cdp.runtime.evaluate(
+                    expression,
+                    context_id=world,
+                    return_by_value=by_value,
+                    user_gesture=False,
+                )
+            )
+        except ProtocolException as error:
+            if not _context_vanished(error):
+                raise
+            if attempt < CONTEXT_TRIES - 1:
+                await asyncio.sleep(CONTEXT_RETRY_S)
+            continue
+        return None if thrown is not None else result
+    return None
 
 
 async def probe(tab: Tab, frame_id: str | None = None) -> dict[str, bool]:
@@ -191,10 +228,7 @@ async def probe(tab: Tab, frame_id: str | None = None) -> dict[str, bool]:
         ("username", "password", "otp", "password_has_value", "error"), False
     )
     for frame in frames:
-        world = await _world(tab, frame)
-        if world is None:
-            continue
-        result = await _evaluate(tab, world, PROBE_JS, by_value=True)
+        result = await _evaluate(tab, frame, PROBE_JS, by_value=True)
         if result is not None and isinstance(result.value, dict):
             for key in answer:
                 answer[key] = answer[key] or result.value.get(key) is True
@@ -207,10 +241,7 @@ async def find_field(tab: Tab, kind: str) -> tuple[Element, str] | None:
     direct child frame."""
     script = _find_js(kind)
     for frame in await _frame_ids(tab):
-        world = await _world(tab, frame)
-        if world is None:
-            continue
-        result = await _evaluate(tab, world, script, by_value=False)
+        result = await _evaluate(tab, frame, script, by_value=False)
         if result is None or result.object_id is None or result.subtype == "null":
             continue
         node = await tab.send(cdp.dom.describe_node(object_id=result.object_id))
@@ -226,10 +257,7 @@ async def form_action(tab: Tab, kind: str, frame_id: str) -> str | None:
     script = "(() => {" + _LIB_JS + _ACTION_JS + f"return form({picked}); }})()"
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
-    world = await _world(tab, cdp.page.FrameId(frame_id))
-    if world is None:
-        return None
-    result = await _evaluate(tab, world, script, by_value=True)
+    result = await _evaluate(tab, cdp.page.FrameId(frame_id), script, by_value=True)
     value = None if result is None else result.value
     return value if isinstance(value, str) else None
 
@@ -273,11 +301,8 @@ async def clear_passwords(tab: Tab) -> None:
     """Set every password input of every frame to ``""``. Best effort per frame:
     a frame that has gone is skipped, which leaves nothing to clear in it."""
     for frame in await _frame_ids(tab, everything=True):
-        world = await _world(tab, frame)
-        if world is None:
-            continue
         try:
-            await _evaluate(tab, world, _CLEAR_JS, by_value=True)
+            await _evaluate(tab, frame, _CLEAR_JS, by_value=True)
         except Exception as error:  # noqa: BLE001  PERMANENT(clearing is best effort; the tab is closed next)
             debug_logger.log_debug(
                 "login_form",

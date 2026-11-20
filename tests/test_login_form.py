@@ -222,10 +222,9 @@ async def test_probe_sees_a_typed_value_and_clear_passwords_empties_it(site, tmp
         assert (await login_form.probe(tab))["password_has_value"] is False
         # the one in the child frame is empty too
         for frame in await login_form._frame_ids(tab, everything=True):
-            world = await login_form._world(tab, frame)
             result = await login_form._evaluate(
                 tab,
-                world,
+                frame,
                 "Array.from(document.querySelectorAll('input[type=password]'))"
                 ".every((e) => e.value === '')",
                 by_value=True,
