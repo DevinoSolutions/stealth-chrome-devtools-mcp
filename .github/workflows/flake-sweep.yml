@@ -1,0 +1,145 @@
+name: flake-sweep
+
+# A measuring instrument, not a gate. Dispatch it by hand to find out how often a
+# test file goes red on each OS, BEFORE a tag finds out for you:
+#
+#   gh workflow run flake-sweep.yml --ref <branch> \
+#     -f repeat=10 -f oses=windows,macos \
+#     -f files='tests/test_login_*.py tests/test_vault_*.py'
+#
+# Each file runs `repeat` times as FRESH pytest processes (tools/flake_sweep.py), on
+# the release gate's own integration cells (Linux x64, Windows x64, macOS ARM64:
+# `plan` asks release_schema for them, so the runner labels cannot drift from the
+# gate's), and a failure never stops the sweep. Each job's summary tab has the
+# table (file, runs, failures, failing node ids); every run's log and junit file
+# is in the `flake-sweep-<os>` artifact. A job is red when any run was red, or when
+# the deadline cut runs short, or when the marker selected no test anywhere.
+#
+# The setup steps below (uv, Python, dependencies, Chrome identity, Xvfb) are the
+# release-gate.yml `integration` job's, step for step. There is no composite action
+# to call, and moving the gate's own steps into one is a change to the gate that a
+# sweep must not ride in on, so they are copied, and
+# tests/test_flake_sweep.py::test_the_setup_steps_are_the_gates_integration_steps
+# fails if either side changes without the other.
+#
+# `marker` defaults to `integration`: the login and vault files hold their Chrome
+# tests under it, and their other tests already run in every unit cell. On macOS
+# `and not transport` is added, exactly as the gate does (F-773).
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: >-
+          Whitespace-separated test file paths or globs, relative to the repo root.
+          A pattern that matches no file fails the run.
+        type: string
+        required: false
+        default: >-
+          tests/test_login_*.py tests/test_logins_tools*.py tests/test_vault_*.py
+          tests/test_sealed_popup*.py tests/test_popup_arming*.py
+          tests/test_debug_port_guard*.py
+      repeat:
+        description: Fresh pytest processes per file (1 to 100).
+        type: number
+        required: false
+        default: 10
+      oses:
+        description: "Comma-separated subset of: linux, windows, macos (or all)."
+        type: string
+        required: false
+        default: linux,windows,macos
+      marker:
+        description: pytest -m expression. A file with no test it selects is skipped.
+        type: string
+        required: true
+        default: integration
+      deadline_minutes:
+        description: >-
+          Stop starting runs after this many minutes (the unrun ones are listed and
+          the job is red). 0 = no deadline. Keep it under the job's 240-minute cap.
+        type: number
+        required: false
+        default: 200
+
+permissions:
+  id-token: write # DevinoSolutions/artifact (OIDC)
+  contents: read
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pick the cells for the requested operating systems
+        id: plan
+        shell: bash
+        env:
+          OSES: ${{ inputs.oses }}
+        run: python3 tools/flake_sweep.py plan --oses "$OSES" | tee -a "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: plan
+    name: sweep (${{ matrix.runner_os }}/${{ matrix.runner_arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      id-token: write # DevinoSolutions/artifact (OIDC)
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --locked --extra test --extra sentry
+      - name: Resolve image Chrome Stable identity
+        # Same as release-gate.yml's integration job: --freeze-updater first, so the
+        # Chrome the sweep launches is the one this file records.
+        shell: bash
+        run: uv run python tools/resolve_chrome.py --freeze-updater --out chrome-identity.json
+      - name: Start Xvfb (Linux headed cases only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 3
+      - name: Run the sweep
+        # The inputs reach the shell through env, never through the script text.
+        # Step-level env because the `runner` context is not available in job-level
+        # env. Headless cases must not depend on DISPLAY: only Linux sets it.
+        shell: bash
+        env:
+          FILES: ${{ inputs.files }}
+          REPEAT: ${{ inputs.repeat }}
+          DEADLINE: ${{ inputs.deadline_minutes }}
+          MARKER: ${{ runner.os == 'macOS' && format('({0}) and not transport', inputs.marker) || inputs.marker }}
+          LABEL: ${{ runner.os }}
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+          STEALTH_MCP_BROWSER_SESSION_ROOT: ${{ runner.temp }}/stealth-mcp-session-root
+        run: >-
+          uv run python tools/flake_sweep.py run
+          --files "$FILES" --repeat "$REPEAT" --marker "$MARKER"
+          --deadline-minutes "$DEADLINE" --label "$LABEL"
+          --out-dir flake-sweep --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload every run's log and junit file
+        if: always()
+        uses: DevinoSolutions/artifact/upload@67676f30bcd9a876562aafa007f19c2eb2fe148d # v1.2.2 + Cloudflare 52x retry (artifact#7)
+        with:
+          name: flake-sweep-${{ matrix.runner_os }}-${{ matrix.runner_arch }}
+          path: |
+            flake-sweep
+            chrome-identity.json
+          if-no-files-found: error

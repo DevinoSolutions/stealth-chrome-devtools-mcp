@@ -376,6 +376,23 @@ Diff the `### ` headings under the previous release heading against the tag:
 
 Anything extra belongs back under `## Unreleased`.
 
+### The release PR runs the publish gate
+
+A tag is never moved or deleted, so a gate that fails after the tag burns a version
+number (v2.1.63 to v2.1.66 each did). An ordinary pull request runs the reduced plan
+(Linux, plus one advisory Windows unit cell), but a pull request whose merge commit
+changes `[project] version` in `pyproject.toml` against its base runs the same plan
+`publish.yml` runs: all three OSes, both artifacts, and an aggregate that owes every
+cell (`tools/release_change.py`; a checkout it cannot read fails closed to the full
+plan, and the `release-gate` log prints the reason). So the release PR's red Windows or
+macOS cell shows before the merge; fix it there. To measure how often one test file
+goes red, dispatch the sweep on any branch, for example `gh workflow run
+flake-sweep.yml --ref <branch> -f repeat=10 -f oses=windows,macos -f files='tests/test_login_*.py'`
+(`files`, `repeat`, `oses`, `marker` and `deadline_minutes` are all optional; the
+default is the login and vault set, 10 fresh pytest processes per file on all three
+OSes). Its job summaries tabulate file, runs, failures and failing node ids, and the
+`flake-sweep-<os>` artifacts hold every run's log and junit file.
+
 ---
 
 ## Golden discipline (two-tier)
