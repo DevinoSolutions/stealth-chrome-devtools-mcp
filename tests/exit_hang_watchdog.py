@@ -154,6 +154,23 @@ def arm(seconds: float) -> None:
     _wake.set()
 
 
+def restore_faulthandler() -> None:
+    """Point ``faulthandler`` back at the REAL stderr, as pytest had it.
+
+    Tests that bootstrap the backend's logging repoint ``faulthandler`` at a log
+    file and, when they finish, put it back. A bare ``faulthandler.enable()`` puts it
+    on ``sys.stderr``, which at that moment is pytest's CAPTURE file for the test, so
+    every later interpreter crash wrote its "Windows fatal exception" and its stack
+    into a file pytest throws away, and the 2.1.65 publish gate's Windows coverage
+    cell died with a bare ``Segmentation fault`` (exit 139) and no stack at all
+    (T-19366). The dup taken in ``pytest_configure`` is the same destination
+    pytest's own plugin enables it on."""
+    if "stderr" in _fds:
+        faulthandler.enable(file=_fds["stderr"], all_threads=True)
+    else:
+        faulthandler.enable()
+
+
 def pytest_configure(config):
     # Registered from conftest's own ``pytest_configure`` this is still called:
     # pytest replays the historic hook to a plugin registered while configuring.

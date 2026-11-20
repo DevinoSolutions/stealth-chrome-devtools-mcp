@@ -42,6 +42,7 @@ if TYPE_CHECKING:  # ``Path`` is annotation-only here since the uvicorn-config
     # guard started deriving its file set from tests/source_scan.py.
     from pathlib import Path
 
+import exit_hang_watchdog
 from stealth_chrome_devtools_mcp.embedded import logging_setup, singleton
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     BOOT_LOG_NAME,
@@ -301,7 +302,7 @@ def restore_process_hooks():
     threading.excepthook = prior_thread_excepthook
     faulthandler.disable()
     if was_fault_enabled:
-        faulthandler.enable()
+        exit_hang_watchdog.restore_faulthandler()
     logging_setup._bootstrapped_roles.discard("backend")
 
 

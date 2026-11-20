@@ -24,6 +24,7 @@ import threading
 
 import pytest
 
+import exit_hang_watchdog
 from stealth_chrome_devtools_mcp.embedded import logging_setup
 from stealth_chrome_devtools_mcp.embedded.logging_setup import (
     bootstrap_backend_process_logging,
@@ -52,7 +53,7 @@ def _restore_process_globals():
     threading.excepthook = prior_thread_excepthook
     faulthandler.disable()
     if was_fault_enabled:
-        faulthandler.enable()
+        exit_hang_watchdog.restore_faulthandler()
     logging_setup._bootstrapped_roles.clear()
 
 
