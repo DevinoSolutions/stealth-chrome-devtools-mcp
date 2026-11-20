@@ -2,7 +2,7 @@
 
 ## 2.1.65
 
-2.1.64 was tagged but never published (its gate failed on two login-vault integration tests, below), so the next release is the first on PyPI with everything in the 2.1.63 and 2.1.64 sections too.
+2.1.64 was tagged but never published (its gate failed on two login-vault integration tests, below), so 2.1.65 is the first release on PyPI with everything in the 2.1.63 and 2.1.64 sections too.
 
 ### Two login-vault integration tests failed the 2.1.64 publish gate (T-19366)
 
