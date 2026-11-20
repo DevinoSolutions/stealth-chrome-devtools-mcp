@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.65
 
 2.1.64 was tagged but never published (its gate failed on two login-vault integration tests, below), so the next release is the first on PyPI with everything in the 2.1.63 and 2.1.64 sections too.
 
