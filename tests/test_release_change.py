@@ -46,15 +46,27 @@ def test_project_version_reads_the_project_table_only():
 
 # ── the decision, against a real merge commit ──────────────────────────────
 def _git(repo: Path, *args: str) -> str:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@example.invalid",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@example.invalid",
-    }
+    # Every inherited GIT_* is dropped: under a git hook (the pre-push lane) GIT_DIR
+    # names the REAL repository, and a git that inherits it ignores ``cwd``. This
+    # helper once ran its init/checkout/add against the checkout under test that
+    # way (2026-11-20: it staged the deletion of every file and set core.bare).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(
+        GIT_AUTHOR_NAME="t",
+        GIT_AUTHOR_EMAIL="t@example.invalid",
+        GIT_COMMITTER_NAME="t",
+        GIT_COMMITTER_EMAIL="t@example.invalid",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+    )
+    assert (repo / ".git").is_dir() or args[0] == "init", f"{repo} is not a repository"
     done = subprocess.run(  # noqa: S603  PERMANENT(test helper; fixed program, arguments written in this file)
-        ["git", *args],  # noqa: S607  PERMANENT(git is resolved from PATH, as in the workflow) cwd=repo, env=env, capture_output=True, text=True, check=True
+        ["git", *args],  # noqa: S607  PERMANENT(git is resolved from PATH, as in the workflow)
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return done.stdout
 
@@ -91,6 +103,9 @@ def _merged_pr(repo: Path, edit, main_edit=None) -> None:
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
+    # the tool's own git must read THIS repository, not the one a hook's GIT_DIR names
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
     return tmp_path
 
 
