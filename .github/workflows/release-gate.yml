@@ -207,6 +207,7 @@ jobs:
         shell: bash
         run: >-
           uv run pytest -m "not integration" -v --tb=short
+          --timeout=600 -o faulthandler_timeout=300
           --junitxml=junit.xml -o junit_family=xunit1
       - name: Emit this cell's release-evidence record
         # W5: `always()` so a RED cell still writes a record saying it was
@@ -262,6 +263,12 @@ jobs:
           --runner-name "${{ runner.name }}" --expect-os "${{ matrix.runner_os }}"
           --expect-arch "${{ matrix.runner_arch }}" --python "3.12"
           --out "runner-identity.json"
+      # --timeout=600 -o faulthandler_timeout=300 (here and in the unit cell): a
+      # test that stalls MID-RUN is the one case tests/exit_hang_watchdog.py does
+      # not cover, and the runner's cancel serves no log (BlobNotFound). PR #426's
+      # Windows coverage cell was cancelled at 25 minutes that way (it takes 12 to
+      # 14). faulthandler prints every thread at 300 s; pytest-timeout then ends
+      # the run at 600 s, naming the test, while the log can still be read.
       - name: Run unit tests with coverage floor
         # CI path form of --cov (NOT the module form: the module form mis-resolves
         # the editable install to a false ~53%). Same reviewed floor on every OS;
@@ -269,6 +276,7 @@ jobs:
         shell: bash
         run: >-
           uv run pytest -m "not integration" -v --tb=short
+          --timeout=600 -o faulthandler_timeout=300
           --cov=src/stealth_chrome_devtools_mcp
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
