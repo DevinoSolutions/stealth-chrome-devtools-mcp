@@ -131,6 +131,7 @@ from typing import TYPE_CHECKING, cast
 from nodriver import cdp
 
 from stealth_chrome_devtools_mcp.embedded import login_seal, tab_open, vault_mode
+from stealth_chrome_devtools_mcp.embedded.guard_report import refused, why
 from stealth_chrome_devtools_mcp.embedded.tool_errors import ToolError
 
 if TYPE_CHECKING:
@@ -735,7 +736,7 @@ class _Guard:
         finally:
             self.pending.pop(number, None)
         if "error" in reply:
-            raise RuntimeError(f"{method} refused")
+            raise RuntimeError(refused(method, reply["error"]))
         return _obj(reply.get("result"))
 
     async def _read(self) -> None:
@@ -886,12 +887,12 @@ class _Guard:
             answers = await asyncio.gather(*guards, return_exceptions=True)
             if any(isinstance(answer, Exception) for answer in answers):
                 if kind == "page":
-                    _logger.warning("a page could not be guarded; closing it")
+                    _logger.warning(*why("page", info, answers))
                     with contextlib.suppress(Exception):
                         await self.command("Target.closeTarget", {"targetId": target})
                     return
                 if kind == "iframe":
-                    _logger.warning("a frame could not be guarded; blanking its page")
+                    _logger.warning(*why("iframe", info, answers))
                     self._spawn(self._leave_endpoint(target))
                     return
         if params.get("waitingForDebugger"):
