@@ -55,10 +55,14 @@ _PROXY_PROBE_SECONDS = 0.5
 
 
 def arguments(pid: int) -> list[str]:
-    """That pid's argv, or empty when it cannot be read."""
+    """That pid's argv, or empty when it cannot be read.
+
+    ``SystemError`` is the macOS binding's own failure (psutil 7.2.2,
+    "proc_cmdline returned a result with an exception set", seen for a process
+    that was exiting): it is not a ``psutil.Error``, so it is named here."""
     try:
         return list(psutil.Process(pid).cmdline())
-    except (psutil.Error, OSError, ValueError):
+    except (psutil.Error, OSError, ValueError, SystemError):
         return []
 
 
@@ -77,7 +81,7 @@ def unreadable_browsers(is_browser_name: Callable[[str], bool]) -> tuple[int, ..
             process.cmdline()
         except psutil.AccessDenied:
             found.append(process.pid)
-        except psutil.Error:
+        except (psutil.Error, OSError, SystemError):
             continue
     return tuple(found)
 

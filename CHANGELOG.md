@@ -2,6 +2,13 @@
 
 ## 2.1.68
 
+### An argv that cannot be read on macOS is empty, not a `SystemError` (first full release-PR gate, run 44852628122)
+
+The first complete run of the publish plan on a pull request failed two integration cells, each on one test (macOS 1 failed / 441 passed, Windows 1 failed / 480 passed).
+
+- **macOS:** `psutil.Process.cmdline()` raised `SystemError` ("proc_cmdline returned a result with an exception set", psutil 7.2.2) inside a test helper that was waiting for a browser to leave. T-11618 fixed the same error for the process NAME; the argv reads were still open. `browser_cmdline.arguments` now answers empty for it, as it does for any argv it cannot read, and `unreadable_browsers`, `process_exit.browser_pid` and the stale-backend check in `cli_login` no longer let it out. The test helper `browsers_on` walks with the product's `named_processes` instead of asking psutil's generator for attributes.
+- **Windows:** `test_the_kill_path_never_runs_against_a_live_browser` found Chrome still running when the close reached its kill path. The node took 17.5 s against 2.0 s in the previous run of the same cell. Cause not established: the test discarded what the close's wait had observed. Its failure now states how long the close took, the wait's own diagnostics line and the close's warnings. No product change: the 5 s grace is unchanged.
+
 ### The captcha speed test charges the monitor for its own delay, not for time the page held its CDP calls (v2.1.67 publish gate)
 
 Test-only; no product code changed. 2.1.67 was tagged but never published: its gate failed on one macOS/ARM64 integration test (1 failed, 441 passed), `test_the_monitor_clicks_the_widget_fast[recaptcha-v2]`: one click (attempt 1) 1590 ms after the checkbox was ready, over the 1 s budget. The monitor's timeline (ms after ready): widget found by the scan ending at +49 (130 ms), state `idle` at +106, no press; the next scan took 781 ms (normally ~10 ms) and ended at +1141, state `idle` at +1242, press at +1243, click logged at +1590 (a press is ~75 ms on a healthy page); the following scan took 646 ms, then 5-43 ms.

@@ -116,3 +116,32 @@ def test_only_an_unusual_skip_leaves_a_trace(monkeypatch, error, logged):
     message = log.log_warning.call_args.args[2]
     assert "pid 2" in message
     assert type(error).__name__ in message
+
+
+# ── the argv reads outside the walk (2.1.68 gate, run 44852628122) ───────────
+@pytest.mark.parametrize(
+    "error",
+    [SystemError("proc_cmdline"), OSError("EIO"), psutil.NoSuchProcess(3)],
+)
+def test_an_argv_that_cannot_be_read_is_empty_not_an_exception(monkeypatch, error):
+    """``Process.cmdline()`` itself raised the macOS ``SystemError`` for an
+    exiting process; ``arguments`` promises empty for any argv it cannot read."""
+
+    def cmdline(self):
+        raise error
+
+    monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+    assert browser_cmdline.arguments(os.getpid()) == []
+
+
+def test_the_close_wait_keeps_a_pid_whose_argv_cannot_be_read(monkeypatch):
+    """The wait before a kill must still happen for a browser whose argv the
+    binding failed to read: the pid is handed back unjudged, not raised out of
+    the close."""
+    from stealth_chrome_devtools_mcp.embedded import process_exit
+
+    def cmdline(self):
+        raise SystemError("proc_cmdline")
+
+    monkeypatch.setattr(psutil.Process, "cmdline", cmdline)
+    assert process_exit.browser_pid(None, os.getpid()) == os.getpid()

@@ -449,7 +449,7 @@ def _backend_gone(entry: dict[str, object]) -> bool:
         )
     except psutil.NoSuchProcess:
         return True
-    except psutil.Error:
+    except (psutil.Error, OSError, SystemError):
         return False
 
 
