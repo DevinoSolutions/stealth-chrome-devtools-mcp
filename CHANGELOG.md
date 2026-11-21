@@ -7,7 +7,7 @@
 The first publish run of 2.1.68 (44876025032) failed one macOS integration test, 1 failed / 441 passed: in two of six browsers spawned together the guard logged "a page could not be guarded; closing it" and the tab `ensure_session_restore` had opened was gone. The same test passed on an identical tree in the run before and in the full rerun. Cause not established: the guard dropped Chrome's error text and its warning named neither the command nor the page.
 
 - A refused guard command now carries Chrome's own message (first 200 characters).
-- The "could not be guarded" warnings for a page and for a frame carry the page's scheme and host (never its path or query) and what each failed command said, a timeout included.
+- The "could not be guarded" warnings for a page and for a frame say where the target is and what each failed command said, a timeout included. One of Chrome's own pages is named (`chrome://settings`, `about:blank`); a site is named by its scheme alone, because a warning becomes a Sentry breadcrumb and a host says where a person was browsing.
 - No change to what the guard does: a page it cannot guard is still closed.
 
 ## 2.1.68
