@@ -224,7 +224,7 @@ def browser_pid(process: object | None, fallback_pid: int | None) -> int | None:
         return None
     try:
         cmdline = psutil.Process(pid).cmdline()
-    except (psutil.Error, OSError):
+    except (psutil.Error, OSError, SystemError):
         # Cannot be read: it may already be gone, which the wait handles, or it
         # may be a process we have no business inspecting. Either way the pid
         # is the one the kill path would use, so hand it back unjudged.

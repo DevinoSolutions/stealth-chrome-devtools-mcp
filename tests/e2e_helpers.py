@@ -516,18 +516,24 @@ def browsers_on(profile) -> bool:
 
     Deliberately NOT ``async``: a ``psutil`` walk has no yield point, and a
     coroutine here would promise the loop one it never gets.
-    """
-    import contextlib
 
-    import psutil
+    It walks with the product's own ``browser_cmdline.named_processes``. Its
+    first form asked ``psutil.process_iter`` for ``name`` and ``cmdline``, which
+    reads them INSIDE psutil's generator: on macOS one exiting process raised
+    ``SystemError`` there and failed the node that was only waiting for a
+    browser to leave (2.1.68 gate, run 44852628122), and no ``try`` in the loop
+    body can catch that.
+    """
+    from stealth_chrome_devtools_mcp.embedded import browser_cmdline
 
     target = str(profile).lower()
-    for proc in psutil.process_iter(["name", "cmdline"]):
-        with contextlib.suppress(Exception):
-            if "chrome" not in (proc.info["name"] or "").lower():
-                continue
-            if any(target in (arg or "").lower() for arg in proc.info["cmdline"] or ()):
-                return True
+    for proc, name in browser_cmdline.named_processes():
+        if "chrome" not in name.lower():
+            continue
+        if any(
+            target in (arg or "").lower() for arg in browser_cmdline.arguments(proc.pid)
+        ):
+            return True
     return False
 
 

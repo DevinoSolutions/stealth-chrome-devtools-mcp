@@ -151,6 +151,17 @@ def _exit_lines(instance_id: str) -> list[str]:
     ]
 
 
+def _close_warnings(instance_id: str) -> list[str]:
+    """Every warning and error the ring holds that names this instance."""
+    view = debug_logger.get_debug_view_paginated()
+    return [
+        f"{entry.get('component')}.{entry.get('method')}: {entry.get('message', '')}"
+        for key in ("all_warnings", "all_errors")
+        for entry in view.get(key) or []
+        if instance_id in entry.get("message", "")
+    ]
+
+
 async def test_the_kill_path_never_runs_against_a_live_browser(spawned, monkeypatch):
     """The browser must have exited on its own before the kill path runs, and
     the close must SAY so where a post-mortem can read it.
@@ -194,9 +205,15 @@ async def test_the_kill_path_never_runs_against_a_live_browser(spawned, monkeypa
     # side effect a pin about a kill path is entitled to.
     profile = _profile("killpath")
     instance_id = await spawned.spawn(profile)
+    close_started = time.monotonic()
     assert await spawned.close(instance_id) is True
+    close_seconds = time.monotonic() - close_started
 
     assert observed, "the kill path never ran, so this node measured nothing"
+    # What the close itself saw, read BEFORE the verdict so a RED carries it: a
+    # browser that was never asked to leave, one that took longer than the
+    # grace, and a wait that failed all end in the same 'running' reading.
+    reported = _exit_lines(instance_id)
     # `zombie` is an EXITED browser and belongs in this set: on POSIX the wait
     # deliberately does not reap (`process_exit`'s POSIX paragraph — asyncio's
     # child watcher owns that `waitpid`), so between Chrome's exit and its
@@ -205,10 +222,11 @@ async def test_the_kill_path_never_runs_against_a_live_browser(spawned, monkeypa
     assert observed[0] in {"gone", "no-pid", psutil.STATUS_ZOMBIE}, (
         "close_instance reached its kill path while the browser was still "
         f"running (status {observed[0]!r}) — Chrome was mid-shutdown, and a "
-        "terminate there truncates the cookie-store commit (F-910)"
+        "terminate there truncates the cookie-store commit (F-910); the close "
+        f"took {close_seconds:.1f}s, its wait reported {reported!r}, and its "
+        f"warnings were {_close_warnings(instance_id)!r}"
     )
 
-    reported = _exit_lines(instance_id)
     assert len(reported) == 1, (
         "the close wrote no close-diagnostics line for this instance, so "
         "nothing afterwards can say whether the browser left on its own or "
