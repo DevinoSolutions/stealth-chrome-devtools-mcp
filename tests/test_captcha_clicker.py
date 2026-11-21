@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from types import GeneratorType
 from typing import Any
 
@@ -1074,15 +1075,29 @@ class TestCheckboxState:
     async def test_a_click_that_made_its_checkbox_busy_waits_out_the_retry(
         self, monitor, monkeypatch
     ):
+        """The retry timer runs from the moment the monitor decides to click,
+        which is the line before it calls ``press``, so that is where this
+        stamps. ``press`` sleeps 50 ms between its move and its press, and that
+        sleep ran 51 to 65 ms in 8 local runs: stamped at the press itself, two
+        clicks 0.40 s apart read as 0.376 and 0.370 s on the macOS runner
+        (2.1.68 gate, runs 44860724100 and 44864412477)."""
         monkeypatch.setattr(captcha_clicker, "DROPPED_AFTER", 0.01)
         monkeypatch.setitem(RETRY_AFTER, "recaptcha-v2", 0.4)
+        decided: list[float] = []
+        real_press = captcha_clicker.press
+
+        async def press(*args):
+            decided.append(time.monotonic())
+            await real_press(*args)
+
+        monkeypatch.setattr(captcha_clicker, "press", press)
         tab = TakesTheClick(frame("recaptcha-v2", checkbox="idle"))
         monitor.start("i1", manager_with(tab))
         await until(lambda: monitor.status("i1")["clicks"])
         await scans(tab, 2)  # the busy mark is seen
         tab.frames[0]["checkbox"] = "idle"  # e.g. a puzzle was closed unsolved
         await until(lambda: len(monitor.status("i1")["clicks"]) == 2)
-        first, second = monitor_click_times(tab)[:2]
+        first, second = decided[:2]
         assert second - first >= 0.39
 
     @pytest.mark.parametrize("state", ["busy", "absent", "checked"])
@@ -1250,14 +1265,8 @@ def monitor_click_times(tab):
 
 @pytest.fixture(autouse=True)
 def _press_clock(monkeypatch):
-    """Stamp every press a CaptchaTab receives with the loop's clock.
-
-    The stamp is taken when the press is SENT, not when its reply comes back:
-    the monitor starts its retry timer just before it sends, so a stamp taken
-    after the reply adds each press's own duration to the gap between two
-    presses. On a loaded runner the first press took longer than the second and
-    a 0.4 s retry read as 0.376 s (2.1.68 gate, run 44860724100, macOS).
-    """
+    """Stamp every press a CaptchaTab receives with the loop's clock, taken
+    when the press is sent rather than when its reply comes back."""
     original = CaptchaTab.send
 
     async def send(self, cdp_obj, *args, **kwargs):
