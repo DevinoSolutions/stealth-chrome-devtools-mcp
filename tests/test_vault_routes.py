@@ -95,7 +95,10 @@ def test_a_ttl_is_applied(client):
     make_vault({"work": password_entry()})
     assert post_unlock(client, good_key(), ttl=600).status_code == 200
     left = vault_store.status()["expires_in"]
-    assert 590 <= left <= 600
+    # ``(now + 600) - now`` in floats can exceed 600 by one rounding step when
+    # the clock has not ticked between the unlock and this read (Windows: the
+    # gate read 600.0000000000002, run 44860724100), so the ceiling has slack.
+    assert 590 <= left <= 600.001
 
 
 @pytest.mark.parametrize("ttl", [0, -5, "soon", True])
