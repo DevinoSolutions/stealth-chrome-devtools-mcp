@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.68
 
 ### The captcha speed test charges the monitor for its own delay, not for time the page held its CDP calls (v2.1.67 publish gate)
 
