@@ -1250,17 +1250,23 @@ def monitor_click_times(tab):
 
 @pytest.fixture(autouse=True)
 def _press_clock(monkeypatch):
-    """Stamp every press a CaptchaTab receives with the loop's clock."""
+    """Stamp every press a CaptchaTab receives with the loop's clock.
+
+    The stamp is taken when the press is SENT, not when its reply comes back:
+    the monitor starts its retry timer just before it sends, so a stamp taken
+    after the reply adds each press's own duration to the gap between two
+    presses. On a loaded runner the first press took longer than the second and
+    a 0.4 s retry read as 0.376 s (2.1.68 gate, run 44860724100, macOS).
+    """
     original = CaptchaTab.send
 
     async def send(self, cdp_obj, *args, **kwargs):
+        sent = asyncio.get_running_loop().time()
         result = await original(self, cdp_obj, *args, **kwargs)
         if self.cdp_frames and self.cdp_frames[-1].get("params", {}).get("type") == (
             "mousePressed"
         ):
-            self.__dict__.setdefault("press_times", []).append(
-                asyncio.get_running_loop().time()
-            )
+            self.__dict__.setdefault("press_times", []).append(sent)
         return result
 
     monkeypatch.setattr(CaptchaTab, "send", send)
