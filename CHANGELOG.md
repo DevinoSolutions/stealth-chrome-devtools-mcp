@@ -10,6 +10,10 @@ The first publish run of 2.1.68 (44876025032) failed one macOS integration test,
 - The "could not be guarded" warnings for a page and for a frame say where the target is and what each failed command said, a timeout included. One of Chrome's own pages is named (`chrome://settings`, `about:blank`); a site is named by its scheme alone, because a warning becomes a Sentry breadcrumb and a host says where a person was browsing.
 - No change to what the guard does: a page it cannot guard is still closed.
 
+### A second captcha retry test measured its own clock (PR 427, run 44897131916)
+
+`test_a_retry_waits_for_its_kinds_delay` failed once on Windows unit py3.11, 1 failed / 8755 passed: two clicks 0.15 s apart read as under 0.14 s. It stamped each click at the mouse press, 50 ms after the monitor starts its retry timer; it now stamps where the timer starts, as its sibling has since 2.1.68. Test only. Not measured on the Windows runner.
+
 ## 2.1.68
 
 ### An argv that cannot be read on macOS is empty, not a `SystemError` (first full release-PR gate, run 44852628122)
