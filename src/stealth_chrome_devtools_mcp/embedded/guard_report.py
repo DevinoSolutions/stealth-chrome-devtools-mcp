@@ -57,8 +57,8 @@ def _said(answer: BaseException) -> str:
     because a raise here would leave the target neither guarded nor closed."""
     try:
         return f"{type(answer).__name__} {answer}".strip()
-    except Exception:  # noqa: BLE001  PERMANENT(any __str__ may raise, and a raise here leaves the target unclosed)
-        return type(answer).__name__
+    except Exception as unread:  # noqa: BLE001  PERMANENT(any __str__ may raise, and a raise here leaves the target unclosed)
+        return f"{type(answer).__name__} (text unreadable: {type(unread).__name__})"
 
 
 def why(

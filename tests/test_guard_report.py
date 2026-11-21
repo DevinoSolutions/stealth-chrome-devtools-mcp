@@ -54,4 +54,6 @@ def test_an_error_whose_text_cannot_be_read_is_named_by_its_type():
         def __str__(self):
             raise ValueError("no text")
 
-    assert why("page", {}, [MuteError()])[2] == "MuteError"
+    assert why("page", {}, [MuteError()])[2] == (
+        "MuteError (text unreadable: ValueError)"
+    )
