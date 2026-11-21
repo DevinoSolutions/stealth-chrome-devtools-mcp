@@ -783,7 +783,7 @@ async def test_a_page_that_cannot_be_guarded_is_closed_and_the_log_says_why(
     """T-20441: on the 2.1.68 publish gate the guard closed two pages and its
     warning named neither the command Chrome refused nor the page, so the cause
     could not be read from the log. The line carries the command, Chrome's own
-    words and the page's scheme and host; never its path or query."""
+    words and the page's scheme; never a site's host, path or query."""
     guard = await _guard(endpoint)
     endpoint.fail_fetch_enable = True
     with caplog.at_level("WARNING", logger="stealth.debug_port_guard"):
@@ -807,8 +807,9 @@ async def test_a_page_that_cannot_be_guarded_is_closed_and_the_log_says_why(
     ]
     assert len(lines) == 1, lines
     assert "Fetch.enable refused: no" in lines[0]
-    assert "https://site.example" in lines[0]
-    assert "SECRET-IN-QUERY" not in lines[0] and "/account" not in lines[0]
+    assert "(https: a site: " in lines[0]
+    for private in ("site.example", "SECRET-IN-QUERY", "/account"):
+        assert private not in lines[0]
     await guard.stop()
 
 
