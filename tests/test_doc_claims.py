@@ -92,6 +92,8 @@ class TestDocumentedCliVerbs:
         "supervise",
         # T-19366 — the login vault's human side.
         "login",
+        # T-22092 — `login` under the name of the thing it manages.
+        "vault",
     ]
 
     @staticmethod

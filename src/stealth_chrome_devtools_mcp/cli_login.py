@@ -59,6 +59,8 @@ if TYPE_CHECKING:
     from stealth_chrome_devtools_mcp.embedded.vault_crypto import Document
 
 VERB = "login"
+#: The same verb under the name of the thing: `stealthy vault unlock`.
+ALIAS = "vault"
 
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)")
 _UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -106,11 +108,13 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     """Contribute ``login`` to ``cli``'s ONE parser tree."""
     login = sub.add_parser(
         VERB,
+        aliases=[ALIAS],
         allow_abbrev=False,
         help="the login vault: store logins an agent can use without ever "
         "seeing the password (stealthy login --help)",
         description="Store logins in an encrypted vault, and unlock it so agents "
-        "can ask the backend to sign in by label. Nothing here prints a password.",
+        "can ask the backend to sign in by label. Nothing here prints a password. "
+        "`stealthy vault ...` is the same command.",
     )
     verbs = login.add_subparsers(dest="login_command")
     login.set_defaults(login_help=login.print_help)  # bare `stealthy login`
@@ -989,4 +993,6 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 #: Verb name -> body, for ``cli``'s ``_DISPATCH`` (``cli_supervise.DISPATCH``'s shape).
-DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {VERB: cmd_login}
+DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = dict.fromkeys(
+    (VERB, ALIAS), cmd_login
+)

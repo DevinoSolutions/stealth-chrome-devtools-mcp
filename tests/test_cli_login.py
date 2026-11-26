@@ -135,6 +135,18 @@ def add_work(term, **extra):
     return term.run(*args, hidden=[PASSPHRASE, PASSWORD, PASSWORD], **extra)
 
 
+def test_vault_is_the_same_verb_as_login(term, capsys):
+    assert cli._DISPATCH["vault"] is cli._DISPATCH["login"]
+    init(term)
+    assert term.run("status") == 0
+    as_login = term.out
+    assert "second factor:" in as_login
+    assert cli.main(["vault", "status"]) == 0
+    assert capsys.readouterr().out == as_login
+    with pytest.raises(SystemExit):
+        cli.main(["vault", "add", "--password", "x"])  # still no such option
+
+
 def test_the_verb_is_one_dispatch_entry_and_one_parser():
     assert cli._DISPATCH["login"] is cli_login.cmd_login
     assert cli_login.DISPATCH["login"] is cli_login.cmd_login

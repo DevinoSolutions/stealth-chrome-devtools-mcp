@@ -401,6 +401,7 @@ A person stores logins once; an agent asks the backend to sign one in by label. 
 
 ```bash
 stealthy login init                                   # new passphrase, typed twice; ties the vault to this OS account
+                                                      # `stealthy vault ...` is the same command under another name
 stealthy login add                                    # asks for the label, site, sign-in page, username and password
 stealthy login add work --site example.com --login-url https://accounts.example.com/signin --user me@example.com   # or give them as flags
 stealthy login unlock --for 8h                        # puts the key in the backend's memory
