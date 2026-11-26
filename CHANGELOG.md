@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.70
 
 ### The login vault's key needs this OS account as well as the passphrase (T-22092)
 
