@@ -284,7 +284,7 @@ def test_a_provider_entry_asks_for_no_secret(term):
         hidden=[PASSPHRASE],
     )  # fmt: skip
     assert code == 0
-    assert term.prompts == ["passphrase: "]
+    assert term.prompts == ["vault passphrase: "]
     assert decrypted()["shop"] == {
         "kind": "provider",
         "site": "shop.example",
@@ -603,3 +603,71 @@ def test_audit_prints_the_last_lines(term):
 def test_audit_with_no_log_yet(term):
     assert term.run("audit") == 0
     assert "no login has been attempted" in term.out
+
+
+# ------------------------------------------------- asking for what was left out
+
+
+def test_add_asks_for_everything_it_was_not_given(term):
+    init(term)
+    code = term.run(
+        "add",
+        hidden=[PASSPHRASE, PASSWORD, PASSWORD],
+        typed=["", "work", "example.com", URL, "a@b.co"],  # an empty answer re-asks
+    )
+    assert code == 0, term.err
+    entry = decrypted()["work"]
+    assert (entry["site"], entry["login_url"], entry["username"]) == (
+        "example.com",
+        URL,
+        "a@b.co",
+    )
+    assert entry["password"] == PASSWORD
+    assert term.prompts == [
+        "vault passphrase: ",
+        "password for work: ",
+        "password for work (again): ",
+    ]
+
+
+def test_add_with_an_empty_sign_in_page_asks_which_login_to_go_through(term):
+    init(term)
+    add_work(term)
+    code = term.run(
+        "add", "shop", "--site", "shop.example", hidden=[PASSPHRASE], typed=["", "work"]
+    )
+    assert code == 0, term.err
+    assert decrypted()["shop"]["via"] == "work"
+
+
+@pytest.mark.parametrize(
+    ("argv", "named"),
+    [
+        (["add"], "LABEL, --site"),
+        (["add", "w", "--site", "s"], "--login-url or --via"),
+        (["edit"], "LABEL"),
+        (["remove"], "LABEL"),
+    ],
+)
+def test_without_a_terminal_a_missing_answer_is_named_not_asked_for(term, argv, named):
+    init(term)
+    assert term.run(*argv, stdin=FakeStdin(tty=False)) == 2
+    assert f"missing {named}" in term.err
+    assert term.prompts == []  # refused before the passphrase
+
+
+def test_remove_asks_for_the_label(term):
+    init(term)
+    add_work(term)
+    assert term.run("remove", hidden=[PASSPHRASE], typed=["work"]) == 0
+    assert decrypted() == {}
+
+
+def test_login_alone_prints_its_help(term):
+    assert term.run() == 0
+    assert "unlock" in term.out and "error" not in term.err
+
+
+def test_init_ends_by_saying_what_to_do_next(term):
+    init(term)
+    assert "stealthy login add" in term.out and "stealthy login unlock" in term.out
