@@ -65,18 +65,29 @@ class Terminal:
         self.monkeypatch = monkeypatch
         self.capsys = capsys
         self.prompts: list[str] = []
+        self.asked: list[str] = []
+        self.order: list[str] = []
 
     def run(self, *argv, hidden=(), typed=(), stdin: FakeStdin | None = None):
-        self.prompts = []
+        self.prompts, self.asked, self.order = [], [], []
         answers = iter(hidden)
         lines = iter(typed)
 
         def getpass_(prompt="Password: ", stream=None):
             self.prompts.append(prompt)
+            self.order.append("hidden")
             return next(answers)
 
+        def input_(prompt=""):
+            self.asked.append(prompt)
+            self.order.append("visible")
+            answer = next(lines)
+            if answer is EOFError:
+                raise EOFError
+            return answer
+
         self.monkeypatch.setattr(getpass, "getpass", getpass_)
-        self.monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+        self.monkeypatch.setattr("builtins.input", input_)
         self.monkeypatch.setattr("sys.stdin", stdin or FakeStdin())
         code = cli.main(["login", *argv])
         out = self.capsys.readouterr()
@@ -628,6 +639,45 @@ def test_add_asks_for_everything_it_was_not_given(term):
         "password for work: ",
         "password for work (again): ",
     ]
+    # No visible question asks for a secret, and every one comes before the
+    # first hidden prompt: a password typed in rhythm cannot land in an echo.
+    assert [q.split(" ")[0] for q in term.asked] == [
+        "label",
+        "label",
+        "site",
+        "sign-in",
+        "username:",
+    ]
+    assert not any("pass" in question for question in term.asked)
+    assert term.order == ["visible"] * 5 + ["hidden"] * 3
+
+
+def test_a_typed_label_or_page_that_cannot_be_stored_is_asked_for_again(term):
+    init(term)
+    code = term.run(
+        "add",
+        hidden=[PASSPHRASE, PASSWORD, PASSWORD],
+        typed=["Work", "work", "example.com", "http://example.com/", URL, "u"],
+    )
+    assert code == 0, term.err
+    assert decrypted()["work"]["login_url"] == URL
+    assert "a label is" in term.out and "https://" in term.out
+    assert term.order.index("hidden") == 6  # asked again before any secret
+
+
+def test_a_terminal_that_ends_at_once_is_a_missing_answer(term):
+    """Windows reports NUL as a terminal; its first read is the end of input."""
+    init(term)
+    assert term.run("add", typed=[EOFError]) == 2
+    assert "missing LABEL" in term.err
+
+
+def test_what_the_flags_alone_decide_is_refused_before_any_question(term):
+    init(term)
+    code = term.run("add", "--login-url", URL, "--allow-consent")
+    assert code == 2
+    assert "--allow-consent applies to a --via login" in term.err
+    assert term.order == []
 
 
 def test_add_with_an_empty_sign_in_page_asks_which_login_to_go_through(term):
@@ -643,8 +693,9 @@ def test_add_with_an_empty_sign_in_page_asks_which_login_to_go_through(term):
 @pytest.mark.parametrize(
     ("argv", "named"),
     [
-        (["add"], "LABEL, --site"),
-        (["add", "w", "--site", "s"], "--login-url or --via"),
+        (["add"], "LABEL, --site, --login-url or --via;"),
+        (["add", "w", "--site", "s"], "--login-url or --via;"),
+        (["add", "w", "--site", "s", "--login-url", URL], "--user;"),
         (["edit"], "LABEL"),
         (["remove"], "LABEL"),
     ],

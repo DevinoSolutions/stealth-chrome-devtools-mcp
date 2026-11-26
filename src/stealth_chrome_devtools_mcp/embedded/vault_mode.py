@@ -78,6 +78,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import textwrap
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,15 +110,18 @@ CHOOSES_EXPORT_FORMAT = frozenset({"export_debug_logs"})
 
 @dataclass(frozen=True)
 class Restriction:
-    """One capability class: its key, the tools it touches and what it says."""
+    """One capability class: its key, the tools it touches, what it says in
+    full (``status``) and in a few words (``init``'s notice)."""
 
     key: str
     tools: frozenset[str]
     summary: str
+    short: str
 
 
-#: THE list of what vault mode restricts. ``stealthy login init`` prints it before a
-#: passphrase is asked for, ``status`` prints it while the mode is on, and the census
+#: THE list of what vault mode restricts. ``stealthy login init`` names each one in
+#: a few words before a passphrase is asked for, ``status`` prints each in full while
+#: the mode is on, and the census
 #: tests fail when a tool that has the capability is not named here.
 RESTRICTIONS = (
     Restriction(
@@ -125,6 +129,7 @@ RESTRICTIONS = (
         RUNS_CALLER_PYTHON,
         "create_python_binding and create_dynamic_hook are disabled (they run an "
         "agent's Python inside the backend, where the key is)",
+        "Python bindings and Python hooks",
     ),
     Restriction(
         "raw_cdp",
@@ -132,6 +137,7 @@ RESTRICTIONS = (
         "execute_cdp_command is disabled (raw CDP can point Chrome's downloads at "
         "any folder, read a local file into a page or load code); "
         "list_cdp_commands still works",
+        "raw CDP commands",
     ),
     Restriction(
         "browser_args",
@@ -140,29 +146,34 @@ RESTRICTIONS = (
         "(window size and position, language, user agent, and "
         "--disable-blink-features=AutomationControlled; every other feature-list "
         "switch is refused) and user_data_dir takes a session NAME, not a path",
+        "most browser switches and profile paths",
     ),
     Restriction(
         "file_urls",
         LOADS_URLS,
         "file: URLs are refused by navigate, new_tab and create_simple_dynamic_hook, "
         "and a tab that reaches one is hidden and blanked",
+        "file: pages",
     ),
     Restriction(
         "browser_pages",
         LOADS_URLS,
         "chrome://, chrome-untrusted:// and devtools:// pages are hidden from the "
         "tools and cannot be opened (about:blank and the new-tab page work)",
+        "chrome://, chrome-untrusted:// and devtools:// pages",
     ),
     Restriction(
         "export_format",
         CHOOSES_EXPORT_FORMAT,
         "export_debug_logs writes JSON only (no pickle)",
+        "pickle exports",
     ),
     Restriction(
         "downloads",
         frozenset(),
         "a page's downloads are saved by Chrome under generated names in one fixed "
         "folder, in every browser a backend drives",
+        "where a page's downloads are saved",
     ),
 )
 
@@ -520,8 +531,27 @@ def download_pin() -> dict[str, object] | None:
 
 
 def describe() -> list[str]:
-    """One line per restriction, for ``init``'s notice and ``status``."""
+    """One line per restriction, in full, for ``status``."""
     return [item.summary for item in RESTRICTIONS]
+
+
+def notice() -> str:
+    """What creating a vault costs, for ``stealthy login init``: short enough to
+    read before the passphrase prompt and wrapped here so no terminal has to.
+    Every restriction is named in a few words; ``status`` prints each in full."""
+    named = "; ".join(item.short for item in RESTRICTIONS)
+    return (
+        textwrap.fill(
+            "Creating the login vault turns VAULT MODE on in every backend on "
+            "this machine. While the vault exists, what could reach its key is "
+            f"restricted for agent tools: {named}. JavaScript tools "
+            "(execute_script and the like) keep working.",
+            width=76,
+            break_on_hyphens=False,
+        )
+        + "\n  each one in full:  stealthy login status   (once the vault exists)"
+        "\n  undo:              stealthy login destroy"
+    )
 
 
 def _reset_for_tests() -> None:

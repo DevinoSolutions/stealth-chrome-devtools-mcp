@@ -170,6 +170,16 @@ def _validate_provider_entry(
         raise _fail(label, "via must name a password entry")
 
 
+def problem(field: str, value: str) -> str | None:
+    """Why *value* cannot be an entry's ``label`` or ``login_url``, else ``None``:
+    the CLI asks again at once, not after the secrets were typed."""
+    if field == "label" and not _LABEL_RE.fullmatch(value):
+        return "a label is 1-63 characters of a-z, 0-9 and '-', not starting with '-'"
+    if field == "login_url" and _login_url_host(value) is None:
+        return "the sign-in page must be an https:// URL without credentials"
+    return None
+
+
 def _login_url_host(url: object) -> str | None:
     """The lower-case host of an acceptable login URL, else ``None``."""
     if not isinstance(url, str):
