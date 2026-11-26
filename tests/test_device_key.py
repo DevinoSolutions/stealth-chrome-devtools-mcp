@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import subprocess
 import sys
 
 import pytest
 
-from stealth_chrome_devtools_mcp.embedded import device_key, vault_crypto
-from vault_helpers import fake_account_store
+from stealth_chrome_devtools_mcp.embedded import device_key, vault_crypto, vault_store
+from vault_helpers import PASSPHRASE, fake_account_store, password_entry, reset
 
 #: Captured at import, before ``conftest`` stands every test on "no store".
 REAL_STORE_NAME = device_key.store_name
@@ -68,11 +69,12 @@ def test_a_vault_bound_with_dpapi_opens_and_names_no_second_file(monkeypatch):
     assert vault_crypto.open_sealed(again, document) == {"entries": {"a": {}}}
 
 
-def test_a_tool_store_gets_the_secret_on_stdin_and_gives_it_back(monkeypatch):
-    items = fake_account_store(monkeypatch)
+@pytest.mark.parametrize("kind", ["keychain", "secret-service"])
+def test_a_tool_store_gets_the_secret_on_stdin_and_gives_it_back(monkeypatch, kind):
+    items = fake_account_store(monkeypatch, kind=kind)
     descriptor = device_key.create()
     assert descriptor is not None
-    assert descriptor["store"] == "keychain"
+    assert descriptor["store"] == kind
     assert bytes.fromhex(items[descriptor["id"]]) == device_key.load(descriptor)
     device_key.forget(descriptor)
     assert items == {}
@@ -158,3 +160,120 @@ def test_a_rewrite_keeps_the_device_object(monkeypatch):
     assert again["device"] == document["device"]
     assert again["nonce"] != document["nonce"]
     assert vault_crypto.open_sealed(key, again) == {"entries": {}}
+
+
+# ----------------------------------------------- the tool's own answers
+
+
+def tool(monkeypatch, kind, outcome):
+    """``_tool_run`` itself, against a ``subprocess.run`` that answers *outcome*
+    (a ``(returncode, stdout, stderr)`` or an exception to raise)."""
+    monkeypatch.setattr(device_key, "_native", lambda: kind)
+    monkeypatch.setattr(device_key, "store_name", lambda: kind)
+
+    def run(argv, **options):
+        assert options["input"] is None, "a lookup sends nothing"
+        assert options["timeout"] == device_key._TOOL_TIMEOUT_S
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return subprocess.CompletedProcess(argv, *outcome)
+
+    monkeypatch.setattr(device_key.subprocess, "run", run)
+
+
+SECRET_HEX = "ab" * 32
+TIMED_OUT = subprocess.TimeoutExpired(["tool"], 15, output=SECRET_HEX)
+
+
+@pytest.mark.parametrize(
+    ("kind", "outcome", "said"),
+    [
+        ("keychain", (44, "", "could not be found"), device_key.MOVED),
+        ("secret-service", (1, "", ""), device_key.MOVED),
+        ("keychain", (0, "not hex\n", ""), device_key.MOVED),
+        ("keychain", (0, "abcd\n", ""), device_key.MOVED),  # too short
+        (
+            "keychain",
+            (51, "", "User interaction is not allowed."),
+            device_key.UNREACHABLE,
+        ),
+        ("secret-service", (1, "", "Cannot autolaunch D-Bus"), device_key.UNREACHABLE),
+        ("secret-service", (2, "", ""), device_key.UNREACHABLE),
+        ("keychain", TIMED_OUT, device_key.UNREACHABLE),
+        ("secret-service", FileNotFoundError("secret-tool"), device_key.UNREACHABLE),
+    ],
+)
+def test_a_missing_key_is_told_from_a_store_that_did_not_answer(
+    monkeypatch, kind, outcome, said
+):
+    tool(monkeypatch, kind, outcome)
+    with pytest.raises(device_key.DeviceKeyError) as refusal:
+        device_key.load({"store": kind, "id": "ab12"})
+    assert str(refusal.value) == said
+    # Nothing the tool printed rides along, a timeout's captured output included.
+    chain = [refusal.value.__context__, refusal.value.__cause__]
+    assert SECRET_HEX not in repr([refusal.value, *chain])
+
+
+def test_a_lookup_that_answers_is_the_key(monkeypatch):
+    tool(monkeypatch, "secret-service", (0, SECRET_HEX, ""))
+    assert (
+        device_key.load({"store": "secret-service", "id": "ab12"}).hex() == SECRET_HEX
+    )
+
+
+def test_a_platform_whose_tool_is_not_installed_is_unreachable_not_moved(monkeypatch):
+    monkeypatch.setattr(device_key, "_native", lambda: "secret-service")
+    with pytest.raises(device_key.DeviceKeyError) as refusal:
+        device_key.load({"store": "secret-service", "id": "ab12"})
+    assert str(refusal.value) == device_key.UNREACHABLE
+
+
+@pytest.mark.parametrize(
+    "descriptor", [None, {}, {"store": "dpapi", "blob": "AAAA"}, {"store": "dpapi"}]
+)
+def test_forget_of_what_has_no_store_item_does_nothing(monkeypatch, descriptor):
+    monkeypatch.setattr(device_key, "store_name", REAL_STORE_NAME)
+    monkeypatch.setattr(
+        device_key, "_tool_run", lambda *_a, **_k: pytest.fail("a tool was run")
+    )
+    device_key.forget(descriptor)
+
+
+# ------------------------------------------- a tied vault, end to end
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault_store, "VAULT_PATH", tmp_path / "vault.json")
+    monkeypatch.setattr(vault_store, "AUDIT_PATH", tmp_path / "audit.jsonl")
+    reset()
+    yield tmp_path
+    reset()
+
+
+def tied_vault(entries):
+    header = vault_crypto.new_header()
+    assert vault_crypto.is_bound(header)
+    key = vault_crypto.derive_key(PASSPHRASE, header)
+    vault_crypto.write_file(
+        vault_store.VAULT_PATH, vault_crypto.seal(key, header, {"entries": entries})
+    )
+    return key
+
+
+def test_a_freeze_rewrites_a_tied_vault_and_it_still_needs_both(home, monkeypatch):
+    items = fake_account_store(monkeypatch)
+    key = tied_vault({"work": password_entry()})
+    before = vault_crypto.read_file(vault_store.VAULT_PATH)
+    vault_store.unlock(key, None)
+    vault_store.freeze("work")
+    after = vault_crypto.read_file(vault_store.VAULT_PATH)
+    assert after["v"] == vault_crypto.BOUND_VERSION
+    assert after["device"] == before["device"]
+    assert after["nonce"] != before["nonce"]
+    again = vault_crypto.derive_key(PASSPHRASE, after)
+    assert vault_crypto.open_sealed(again, after)["entries"]["work"]["frozen"]
+    items.clear()
+    with pytest.raises(vault_crypto.VaultMoved):
+        vault_crypto.derive_key(PASSPHRASE, after)

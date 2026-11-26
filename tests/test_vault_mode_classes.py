@@ -951,6 +951,7 @@ OS_COMMAND_SITES = {
 #: spy test above proves each writer asks); the rest are the product's own files.
 WRITE_SITES = {
     ("cli_call.py", "_abandon_stdout"): "the CLI's own stdout redirect",
+    ("cli_login_device.py", "cmd_export"): "`stealthy login export`: a person at a terminal names the file; no tool calls it",
     ("cli_supervise.py", "cmd_supervise"): "the supervisor's own log",
     ("embedded/atomic_file.py", "write_text"): "THE atomic writer: its callers pass the product's own state files",
     ("embedded/atomic_file.py", "write_json"): "the same writer, serialising first",

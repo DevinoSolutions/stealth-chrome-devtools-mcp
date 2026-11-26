@@ -18,6 +18,7 @@ Module scope imports only the standard library, as ``cli_login`` does.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,10 +58,17 @@ def describe(document: Document) -> str:
     if vault_crypto.is_bound(document):
         device = document.get("device")
         store = device.get("store") if isinstance(device, dict) else None
+        unsaved = (
+            " A keyring that is not saved across restarts loses the key: make "
+            "that export now."
+            if store == "secret-service"
+            else ""
+        )
         return (
             f"second factor: this {_STORES.get(str(store), 'OS account')}; a copy of "
             "the file cannot be opened elsewhere. Before a new machine, a new "
-            "account or an OS reinstall: `stealthy login export FILE`"
+            "account, an OS reinstall or an administrator resetting your "
+            f"password: `stealthy login export FILE`.{unsaved}"
         )
     if device_key.store_name() is None:
         return (
@@ -74,29 +82,52 @@ def describe(document: Document) -> str:
 
 
 def describe_file() -> str:
-    """:func:`describe` for the vault on disk, or why it could not be read."""
-    from stealth_chrome_devtools_mcp.cli_login import _store
-    from stealth_chrome_devtools_mcp.embedded import vault_crypto
-
-    try:
-        return describe(vault_crypto.read_file(_store().VAULT_PATH))
-    except vault_crypto.VaultError as exc:
-        return f"second factor: unknown ({exc})"
-
-
-def forget_file() -> None:
-    """Drop the account's secret for the vault on disk, before ``destroy``
-    deletes the file that names it."""
+    """:func:`describe` for the vault on disk, after asking the store for its
+    key (no passphrase, no scrypt): a tied vault whose key is not there says so."""
     from stealth_chrome_devtools_mcp.cli_login import _store
     from stealth_chrome_devtools_mcp.embedded import device_key, vault_crypto
 
     try:
-        device_key.forget(vault_crypto.read_file(_store().VAULT_PATH).get("device"))
+        document = vault_crypto.read_file(_store().VAULT_PATH)
     except vault_crypto.VaultError as exc:
-        print(
-            f"warning: the vault's key-store item was not removed ({exc})",
-            file=sys.stderr,
-        )
+        return f"second factor: unknown ({exc})"
+    if vault_crypto.is_bound(document):
+        try:
+            device_key.load(document.get("device"))
+        except device_key.DeviceKeyError as exc:
+            return f"second factor: ! {exc}"
+    return describe(document)
+
+
+def _device_on_disk() -> object:
+    """The ``device`` object of the vault file, or ``None``."""
+    from stealth_chrome_devtools_mcp.cli_login import _store
+    from stealth_chrome_devtools_mcp.embedded import vault_crypto
+
+    try:
+        return vault_crypto.read_file(_store().VAULT_PATH).get("device")
+    except vault_crypto.VaultError:
+        return None
+
+
+def forgetter() -> Callable[[], None]:
+    """Read NOW which key-store item the vault on disk names; the call returned
+    drops it. ``destroy`` makes the call only after it deleted the file: the
+    other order leaves a tied file with no key when the delete fails."""
+    from stealth_chrome_devtools_mcp.embedded import device_key
+
+    device = _device_on_disk()
+    return lambda: device_key.forget(device)
+
+
+def forget_unused(header: Document) -> None:
+    """Drop the key *header* names unless the file on disk is the one using it:
+    for an ``init`` or a ``bind`` that did not finish."""
+    from stealth_chrome_devtools_mcp.embedded import device_key
+
+    device = header.get("device")
+    if device is not None and _device_on_disk() != device:
+        device_key.forget(device)
 
 
 def _reopen(document: Document) -> tuple[str, dict[str, dict[str, object]]]:
@@ -149,11 +180,13 @@ def cmd_bind(_args: argparse.Namespace) -> int:
         key = vault_crypto.derive_key(passphrase, header)
         _write({**header, "nonce": document["nonce"]}, key, entries)
     except BaseException:
-        device_key.forget(header.get("device"))  # the file still has the old key
+        forget_unused(header)  # unless the write landed, the file has the old key
         raise
     for warning in _lock_everywhere():  # every held key is the old one now
         print(f"warning: {warning}", file=sys.stderr)
     print(describe(header))
+    print("Copies of the file made before now (backups, sync history) still open")
+    print("with the passphrase alone.")
     print("the key changed: `stealthy login unlock` again to let agents use it")
     return 0
 
@@ -175,11 +208,24 @@ def cmd_export(args: argparse.Namespace) -> int:
     header = vault_crypto.new_header(bound=False)
     key = vault_crypto.derive_key(passphrase, header)
     try:
+        # Claim the name first: a file that appeared since the check above is
+        # refused here, never replaced.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except OSError as exc:
+        raise _RefusedError(
+            f"could not create {target} ({exc.strerror or type(exc).__name__}); "
+            "nothing was written"
+        ) from None
+    try:
         vault_crypto.write_file(
             target, vault_crypto.seal(key, header, {"entries": entries})
         )
-    except (OSError, vault_crypto.VaultError) as exc:
-        raise _RefusedError(f"could not write {target} ({exc})") from None
+    except BaseException as exc:
+        target.unlink(missing_ok=True)
+        if isinstance(exc, (OSError, vault_crypto.VaultError)):
+            raise _RefusedError(f"could not write {target} ({exc})") from None
+        raise
     print(f"wrote {target}")
     print("It opens with the passphrase alone, on any machine: keep it somewhere")
     print("safe and delete it once it is no longer needed. To use it elsewhere,")

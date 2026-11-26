@@ -108,34 +108,53 @@ def sealed_state():
     }
 
 
-def fake_account_store(monkeypatch, *, keeps=True):
-    """Stand a dict in for the macOS keychain: ``device_key`` runs its real
-    ``security`` command lines against it, so what is checked is the argv and the
-    stdin it builds. ``keeps=False`` is a store that accepts a write and then
-    hands back something else. Returns the dict (item id -> hex secret)."""
+def fake_account_store(monkeypatch, *, keeps=True, kind="keychain"):
+    """Stand a dict in for the macOS keychain (or, ``kind="secret-service"``, a
+    Linux keyring): ``device_key`` runs its real command lines against it, so
+    what is checked is the argv and the stdin it builds. ``keeps=False`` is a
+    store that accepts a write and then hands back something else. Returns the
+    dict (item id -> hex secret). It replaces ``_tool_run``, so exit codes and
+    timeouts are ``test_device_key``'s, against ``subprocess.run`` itself."""
     import shlex
 
     from stealth_chrome_devtools_mcp.embedded import device_key
 
     items = {}
+    service = device_key._SERVICE
 
-    def run(argv, stdin=None):
+    def answer(verb, item, secret):
+        if verb == "add":
+            items[item] = secret if keeps else "00" * 32
+            return ""
+        if item not in items:
+            raise device_key.DeviceKeyError(device_key.MOVED)
+        return items[item] if verb == "find" else items.pop(item) and ""
+
+    def security(argv, stdin=None, lookup_in=None):
         assert argv[0] == "security", argv
         words = shlex.split(stdin) if argv[1] == "-i" else argv[1:]
         flags = dict(zip(words[1::2], words[2::2], strict=False))
-        assert flags["-s"] == device_key._SERVICE
-        if words[0] == "add-generic-password":
-            assert argv == ["security", "-i"], "the secret must travel on stdin"
-            items[flags["-a"]] = flags["-w"] if keeps else "00" * 32
-            return ""
-        if flags["-a"] not in items:
-            raise device_key.DeviceKeyError(device_key.MOVED)
-        if words[0] == "delete-generic-password":
-            del items[flags["-a"]]
-            return ""
-        assert words[0] == "find-generic-password"
-        return items[flags["-a"]] + "\n"
+        assert flags["-s"] == service
+        verb = words[0].removesuffix("-generic-password")
+        assert verb in {"add", "find", "delete"}, words
+        assert (verb == "add") == (argv == ["security", "-i"]), "secret on stdin only"
+        assert (lookup_in == "keychain") == (verb == "find")
+        return answer(verb, flags["-a"], flags.get("-w"))
 
-    monkeypatch.setattr(device_key, "store_name", lambda: "keychain")
+    def secret_tool(argv, stdin=None, lookup_in=None):
+        tool, verb, *rest = argv
+        assert tool == "secret-tool", argv
+        if verb == "store":
+            assert rest[:2] == ["--label", service]
+            rest = rest[2:]
+        assert rest[:3] == ["service", service, "account"], argv
+        assert len(rest) == 4, "the secret is never an argument"
+        assert (lookup_in == "secret-service") == (verb == "lookup")
+        verbs = {"store": "add", "lookup": "find", "clear": "delete"}
+        return answer(verbs[verb], rest[3], stdin)
+
+    run = security if kind == "keychain" else secret_tool
+    monkeypatch.setattr(device_key, "_native", lambda: kind)
+    monkeypatch.setattr(device_key, "store_name", lambda: kind)
     monkeypatch.setattr(device_key, "_tool_run", run)
     return items
