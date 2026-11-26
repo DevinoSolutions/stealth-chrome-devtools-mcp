@@ -4,8 +4,10 @@
 
 ### `stealthy login` asks for what is missing, and `init` says less
 
-- `stealthy login add` with nothing else now asks for the label, the site and the sign-in page (leave that empty to sign in through another login), then the username and password. Flags still work and skip their question. `edit` and `remove` ask for the label. Without a terminal nothing is asked: the refusal names what is missing (exit 2), before any passphrase prompt.
-- `stealthy login init` printed every vault-mode restriction, 17 wrapped lines, before its prompt. It now prints 7 lines of at most 79 characters that name the restricted areas and point at `stealthy login status` (the full list, once the vault exists) and `stealthy login destroy`. After creating the vault it says what to run next.
+- `stealthy login add` with nothing else now asks for the label, the site, the sign-in page (leave that empty to sign in through another login) and the username, then the vault passphrase and the password. Every visible question comes before the first hidden one. Flags still work and skip their question. `edit` and `remove` ask for the label.
+- A typed label or sign-in page that cannot be stored is asked for again at once, not refused after the secrets were typed.
+- Without a terminal nothing is asked: one refusal names everything missing (exit 2), before any passphrase prompt. This now includes `add` without `--user`, which used to read the username from stdin.
+- `stealthy login init` printed every vault-mode restriction in full, 17 wrapped lines, before its prompt. It now names each one in a few words (built from the same list, so a new restriction cannot be left out), wrapped at 76 columns, and points at `stealthy login status` (each in full, once the vault exists) and `stealthy login destroy`. After creating the vault it says what to run next.
 - The prompts say which secret they want: `vault passphrase:` and `password for LABEL:`.
 - `stealthy login` alone prints its help instead of an argparse error.
 

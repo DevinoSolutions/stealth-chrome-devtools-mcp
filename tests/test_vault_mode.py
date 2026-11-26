@@ -404,8 +404,11 @@ def test_init_says_what_it_disables_before_it_asks_for_a_passphrase(
     # says where every restriction is listed (`status`, pinned below) and how
     # to undo it. The whole list here was 17 wrapped lines nobody read.
     notice = out[: out.index("created")]
-    assert len(notice.splitlines()) <= 8
+    assert len(notice.splitlines()) <= 10
     assert max(len(line) for line in notice.splitlines()) <= 79
+    said = " ".join(notice.split())
+    for restriction in vault_mode.RESTRICTIONS:  # EVERY one, from the one list
+        assert restriction.short in said
     assert "VAULT MODE" in out
     assert "stealthy login status" in out
     assert "stealthy login destroy" in out

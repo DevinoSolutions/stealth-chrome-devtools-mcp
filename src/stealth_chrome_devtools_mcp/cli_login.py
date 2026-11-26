@@ -16,7 +16,7 @@ half-typed flag cannot turn into one.
 **Vault mode (``embedded.vault_mode``).** While a vault file exists every raw or
 unbounded tool capability is refused in every backend: caller Python, raw CDP,
 browser switches off a short list, ``file:`` URLs, pickle exports and page
-downloads outside one folder. So ``init`` lists them all before it asks for a
+downloads outside one folder. So ``init`` names each in a few words before it asks for a
 passphrase, refuses while any backend the registry knows has run caller Python
 (or cannot say), and checks again once the file exists (one of the two always sees
 the other); ``unlock`` and ``status`` run the same census; ``destroy`` locks every
@@ -48,7 +48,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from types import ModuleType
 
     import httpx
@@ -219,23 +219,44 @@ def _hidden(prompt: str) -> str:
     return getpass.getpass(prompt)
 
 
-def _fill(args: argparse.Namespace, questions: dict[str, tuple[str, str]]) -> None:
+def _missing(flags: Iterable[str]) -> _RefusedError:
+    return _RefusedError(
+        f"missing {', '.join(flags)}; nothing can be asked without a terminal, "
+        "so pass each on the command line",
+        code=2,
+    )
+
+
+def _ask(name: str, flag: str, question: str, *, optional: bool = False) -> str:
+    """One visible question, asked until its answer fits *name*'s rule (an empty
+    one too, unless *optional*). Never a secret: those go through ``_hidden``."""
+    while True:
+        try:
+            answer = input(f"{question}: ").strip()
+        except EOFError:  # Windows calls NUL a terminal; its first read ends
+            raise _missing([flag]) from None
+        problem = _store().problem(name, answer) if answer else None
+        if problem:
+            print(f"  {problem}")
+        elif answer or optional:
+            return answer
+
+
+def _fill(
+    args: argparse.Namespace,
+    questions: dict[str, tuple[str, str]],
+    also: Iterable[str] = (),
+) -> None:
     """Ask for each of *questions* (attribute -> its flag and its question) that
     the command line left out. Without a terminal nothing can be asked, so the
-    refusal names every one that is missing."""
+    refusal names every one that is missing, and *also* what a later question
+    would have asked for."""
     missing = {name: q for name, q in questions.items() if not getattr(args, name)}
-    if missing and not sys.stdin.isatty():
-        flags = ", ".join(flag for flag, _question in missing.values())
-        raise _RefusedError(
-            f"missing {flags}: give it on the command line (it is only asked "
-            "for at a terminal)",
-            code=2,
-        )
-    for name, (_flag, question) in missing.items():
-        answer = ""
-        while not answer:  # an empty answer asks again; Ctrl-C cancels
-            answer = input(f"{question}: ").strip()
-        setattr(args, name, answer)
+    flags = [flag for flag, _question in missing.values()] + list(also)
+    if flags and not sys.stdin.isatty():
+        raise _missing(flags)
+    for name, (flag, question) in missing.items():
+        setattr(args, name, _ask(name, flag, question))
 
 
 _LABEL = ("LABEL", "label")
@@ -402,21 +423,6 @@ def _reload_backend(key: bytes) -> None:
 # -------------------------------------------------------------------- commands
 
 
-def _init_notice() -> str:
-    """What creating a vault costs, short enough to read before the passphrase
-    prompt and with no line a terminal has to wrap; ``status`` lists every
-    restriction once the vault exists."""
-    return (
-        "Creating the login vault turns VAULT MODE on in every backend on this\n"
-        "machine. While the vault exists, agent tools that could reach its key are\n"
-        "restricted: raw CDP, Python bindings and hooks, file: and chrome:// pages,\n"
-        "custom browser switches, pickle exports and where downloads are saved.\n"
-        "JavaScript tools (execute_script and the like) keep working.\n"
-        "  every restriction:  stealthy login status   (once the vault exists)\n"
-        "  undo:               stealthy login destroy"
-    )
-
-
 @dataclass
 class _Answer:
     """What one recorded backend said to one request."""
@@ -579,7 +585,7 @@ def _cmd_init(_args: argparse.Namespace) -> int:
     if vault_mode.vault_exists():
         raise _RefusedError(f"a vault already exists at {path}; nothing was changed")
     _refuse_while_resident(_backend_problems(), "no vault was created")
-    print(_init_notice())
+    print(vault_mode.notice())
     header = vault_crypto.new_header()
     passphrase = _new_secret("new passphrase")
     if len(passphrase) < _SHORT_PASSPHRASE:
@@ -697,29 +703,39 @@ def _check_add(args: argparse.Namespace) -> None:
 
 
 def _ask_add(args: argparse.Namespace) -> None:
-    """Ask for what an ``add`` was not given: its label, its site, and how it
-    signs in (an empty sign-in page means through another login)."""
+    """Ask for what an ``add`` was not given: its label, its site, how it signs
+    in (an empty sign-in page means through another login) and its username.
+    Every visible question comes before the first hidden one."""
+    kind_known = bool(args.login_url or args.via)
+    if kind_known:
+        _check_add(args)  # what the flags alone decide, before any question
+    later = [] if kind_known else ["--login-url or --via"]
+    if args.login_url and not args.user:
+        later.append("--user")
     _fill(
         args,
         {
             "label": ("LABEL", "label (a-z, 0-9 and '-'; what agents call it by)"),
             "site": ("--site", "site this login is for (example.com)"),
         },
+        also=later,
     )
-    if args.login_url or args.via:
-        return
-    if not sys.stdin.isatty():
-        _fill(args, {"login_url": ("--login-url or --via", "")})
-    args.login_url = input(
-        "sign-in page, https://... (empty: sign in through another login): "
-    ).strip()
-    if not args.login_url:
-        _fill(args, {"via": ("--via", "label of the login to sign in through")})
+    if not kind_known:
+        args.login_url = _ask(
+            "login_url",
+            "--login-url or --via",
+            "sign-in page, https://... (empty: sign in through another login)",
+            optional=True,
+        )
+        if not args.login_url:
+            _fill(args, {"via": ("--via", "label of the login to sign in through")})
+    _check_add(args)
+    if not args.via:
+        _fill(args, {"user": ("--user", "username")})
 
 
 def _cmd_add(args: argparse.Namespace) -> int:
     _ask_add(args)
-    _check_add(args)
     header, key, entries = _open()
     if args.label in entries:
         raise _RefusedError(
@@ -734,13 +750,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
         }
     else:
         host = urllib.parse.urlsplit(args.login_url).hostname
-        username = args.user or input("username: ").strip()
         entries[args.label] = {
             "kind": "password",
             "site": args.site,
             "login_url": args.login_url,
             "hosts": [h.lower() for h in args.host] or ([host] if host else []),
-            "username": username,
+            "username": args.user,
             "password": _password(args),
             "show_username": args.show_username,
             "frozen": None,
