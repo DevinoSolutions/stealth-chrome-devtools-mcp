@@ -80,7 +80,7 @@ https://github.com/user-attachments/assets/f81fc0c2-9233-48cd-8a9d-2577b1d33d57
 ### The right way — `uv tool install` (persistent, fleet-safe)
 
 ```bash
-uv tool install stealth-chrome-devtools-mcp==2.1.68
+uv tool install stealth-chrome-devtools-mcp==2.1.69
 ```
 
 This installs a version-pinned executable at `~/.local/bin/stealth-chrome-devtools-mcp`
@@ -123,13 +123,13 @@ Zero-install trial (fine for a first look, not for fleets):
   "mcpServers": {
     "stealth-chrome-devtools-mcp": {
       "command": "uvx",
-      "args": ["stealth-chrome-devtools-mcp==2.1.68"]
+      "args": ["stealth-chrome-devtools-mcp==2.1.69"]
     }
   }
 }
 ```
 
-Or via pip (`pip install stealth-chrome-devtools-mcp==2.1.68`), then use the
+Or via pip (`pip install stealth-chrome-devtools-mcp==2.1.69`), then use the
 `stealth-chrome-devtools-mcp` console script from that environment as the
 `command`.
 
