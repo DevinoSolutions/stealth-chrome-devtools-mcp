@@ -12,6 +12,7 @@ import base64
 import getpass
 import io
 import json
+import sys
 
 import pytest
 from fastmcp import FastMCP
@@ -21,6 +22,7 @@ from starlette.testclient import TestClient
 from stealth_chrome_devtools_mcp import cli, cli_login
 from stealth_chrome_devtools_mcp.embedded import (
     backend_token,
+    device_key,
     vault_crypto,
     vault_routes,
     vault_store,
@@ -36,6 +38,8 @@ from vault_helpers import (
 
 TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+#: Captured at import, before ``conftest`` stands every test on no store.
+REAL_STORE_NAME = device_key.store_name
 PASSWORD = "Tr0ub4dor&3-marker"
 URL = "https://accounts.example.com/signin"
 
@@ -807,6 +811,108 @@ def test_bind_changes_nothing_when_it_cannot_finish(term, monkeypatch):
     assert "wrong passphrase" in term.err
     assert on_disk() == before
     assert items == {}
+
+
+def test_a_bind_that_loses_the_file_to_another_writer_keeps_no_key(term, monkeypatch):
+    init(term)
+    before = on_disk()
+    items = fake_account_store(monkeypatch)
+
+    def changed(*_args, **_kwargs):
+        raise vault_crypto.VaultChanged("the vault file changed since it was read")
+
+    monkeypatch.setattr(vault_crypto, "write_file", changed)
+    assert term.run("bind", hidden=[PASSPHRASE]) == 1
+    assert "changed while you were editing" in term.err
+    assert on_disk() == before
+    assert items == {}
+
+
+def test_a_bind_interrupted_after_the_file_was_replaced_keeps_its_key(
+    term, monkeypatch
+):
+    init(term)
+    items = fake_account_store(monkeypatch)
+    write_file = vault_crypto.write_file
+
+    def then_interrupted(*args, **kwargs):
+        write_file(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(vault_crypto, "write_file", then_interrupted)
+    assert term.run("bind", hidden=[PASSPHRASE]) != 0
+    monkeypatch.setattr(vault_crypto, "write_file", write_file)
+    assert on_disk()["v"] == vault_crypto.BOUND_VERSION
+    assert len(items) == 1  # the file on disk uses it
+    assert decrypted() == {}
+
+
+def test_an_init_that_is_cancelled_leaves_no_key_behind(term, monkeypatch):
+    items = fake_account_store(monkeypatch)
+    assert term.run("init", hidden=[PASSPHRASE, "a different one"]) != 0
+    assert items == {}
+    assert not vault_store.VAULT_PATH.exists()
+
+    def refused(*_args, **_kwargs):
+        raise vault_crypto.VaultChanged("the vault file changed since it was read")
+
+    monkeypatch.setattr(vault_crypto, "write_file", refused)
+    assert term.run("init", hidden=[PASSPHRASE, PASSPHRASE]) != 0
+    assert items == {}
+
+
+def test_status_says_when_a_tied_vaults_key_is_not_in_the_store(term, monkeypatch):
+    items = fake_account_store(monkeypatch)
+    init(term)
+    items.clear()
+    assert term.run("status") == 0
+    assert "second factor: ! this vault is tied to another machine" in term.out
+    assert "cannot be opened elsewhere" not in term.out
+
+
+def test_a_destroy_that_cannot_delete_the_file_keeps_its_key(term, monkeypatch):
+    items = fake_account_store(monkeypatch)
+    init(term)
+
+    def held(self, *_args, **_kwargs):
+        raise PermissionError(13, "in use")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(vault_store.VAULT_PATH), "unlink", held)
+        assert term.run("destroy", typed=["DESTROY"]) == 1
+    assert "vault mode stays on" in term.err
+    assert len(items) == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="DPAPI is Windows")
+def test_a_vault_tied_with_dpapi_is_made_used_and_destroyed(term, monkeypatch):
+    """With the real store: the stand-ins hid that ``forget`` built a keychain
+    command line for a DPAPI vault and ``destroy`` died before deleting it."""
+    monkeypatch.setattr(device_key, "store_name", REAL_STORE_NAME)
+    init(term)
+    assert on_disk()["device"]["store"] == "dpapi"
+    assert "second factor: this Windows account (DPAPI)" in term.out
+    assert add_work(term) == 0, term.err
+    assert decrypted()["work"]["username"] == "a@b.co"
+    assert term.run("destroy", typed=["DESTROY"]) == 0, term.err
+    assert not vault_store.VAULT_PATH.exists()
+
+
+def test_export_never_replaces_a_file_that_appears_meanwhile(
+    term, monkeypatch, tmp_path
+):
+    init(term)
+    target = tmp_path / "copy.json"
+    hidden = cli_login._hidden
+
+    def typed_while_a_file_appears(prompt):
+        target.write_text("someone else's")
+        return hidden(prompt)
+
+    monkeypatch.setattr(cli_login, "_hidden", typed_while_a_file_appears)
+    assert term.run("export", str(target), hidden=[PASSPHRASE]) == 1
+    assert "could not create" in term.err
+    assert target.read_text() == "someone else's"
 
 
 def test_destroy_takes_the_accounts_secret_with_the_vault(term, monkeypatch):

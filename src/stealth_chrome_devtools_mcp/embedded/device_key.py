@@ -57,17 +57,35 @@ MOVED = (
 )
 
 
+#: Not the same thing as MOVED: the vault may be fine and the store merely shut.
+UNREACHABLE = (
+    "this account's key store did not answer (locked, not running, or its tool "
+    "is missing), so the vault's second key could not be read; unlock the "
+    "keychain or keyring and try again. The vault file is unchanged"
+)
+#: ``security find-generic-password``: errSecItemNotFound.
+_KEYCHAIN_NOT_FOUND = 44
+_TOOL_STORES = ("keychain", "secret-service")
+
+
 class DeviceKeyError(Exception):
-    """The store has no key for this vault. Never carries a secret."""
+    """The store gave no key for this vault: its message is :data:`MOVED` (no
+    such key here) or :data:`UNREACHABLE` (the store did not answer). Never
+    carries a secret."""
 
 
 def store_name() -> str | None:
     """Which store this machine would use for a NEW vault, or ``None``."""
+    native = _native()
+    tool = {"keychain": "security", "secret-service": "secret-tool"}.get(native)
+    return native if tool is None or shutil.which(tool) else None
+
+
+def _native() -> str:
+    """The store this PLATFORM has, whether or not its tool is installed."""
     if sys.platform == "win32":
         return "dpapi"
-    if sys.platform == "darwin":
-        return "keychain" if shutil.which("security") else None
-    return "secret-service" if shutil.which("secret-tool") else None
+    return "keychain" if sys.platform == "darwin" else "secret-service"
 
 
 def create() -> Descriptor | None:
@@ -85,27 +103,28 @@ def create() -> Descriptor | None:
             descriptor = {"store": store, "id": secrets.token_hex(_ID_BYTES)}
             _tool_store(descriptor, secret)
         kept = load(descriptor) == secret
-    except (DeviceKeyError, OSError, subprocess.SubprocessError):
+    except (DeviceKeyError, OSError):
         return None
     return descriptor if kept else None
 
 
 def load(descriptor: object) -> bytes:
     """The secret ``descriptor`` names, or :class:`DeviceKeyError`."""
-    if not isinstance(descriptor, dict):
-        raise DeviceKeyError(MOVED)
-    store = descriptor.get("store")
+    store = descriptor.get("store") if isinstance(descriptor, dict) else None
+    if store != _native() or not isinstance(descriptor, dict):
+        raise DeviceKeyError(MOVED)  # another platform's store, or no descriptor
     try:
-        if store == "dpapi" and sys.platform == "win32":
+        if store == "dpapi":
             blob = descriptor.get("blob")
             if not isinstance(blob, str):
                 raise DeviceKeyError(MOVED)
             secret = _unprotect(base64.b64decode(blob, validate=True))
-        elif store in {"keychain", "secret-service"} and store == store_name():
-            secret = bytes.fromhex(_tool_run(_lookup_argv(descriptor)).strip())
+        elif store_name() is None:
+            raise DeviceKeyError(UNREACHABLE)  # this platform's tool is not installed
         else:
-            raise DeviceKeyError(MOVED)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            found = _tool_run(_lookup_argv(descriptor), lookup_in=store)
+            secret = bytes.fromhex(found.strip())
+    except (OSError, ValueError) as exc:
         raise DeviceKeyError(MOVED) from exc
     if len(secret) != SECRET_BYTES:
         raise DeviceKeyError(MOVED)
@@ -113,23 +132,20 @@ def load(descriptor: object) -> bytes:
 
 
 def forget(descriptor: object) -> None:
-    """Drop the secret from the store when its vault is deleted. A DPAPI blob
-    lives in the vault file and goes with it; a store that will not answer keeps
-    an item that opens nothing."""
-    if not isinstance(descriptor, dict) or descriptor.get("store") != store_name():
+    """Drop the secret from the store once its vault is gone. A DPAPI blob lives
+    in the vault file and goes with it, so there is nothing to drop; a store
+    that will not answer keeps an item that opens nothing."""
+    if not isinstance(descriptor, dict):
         return
-    argv = {
-        "keychain": [
-            "security",
-            "delete-generic-password",
-            *_keychain_item(descriptor),
-        ],
-        "secret-service": ["secret-tool", "clear", *_secret_item(descriptor)],
-    }.get(str(descriptor.get("store")))
-    if argv:
-        # A store that will not answer keeps an item that opens nothing.
-        with contextlib.suppress(OSError, subprocess.SubprocessError, DeviceKeyError):
-            _tool_run(argv)
+    store = descriptor.get("store")
+    if store not in _TOOL_STORES or store != store_name():
+        return
+    with contextlib.suppress(DeviceKeyError):
+        if store == "keychain":
+            item = _keychain_item(descriptor)
+            _tool_run(["security", "delete-generic-password", *item])
+        else:
+            _tool_run(["secret-tool", "clear", *_secret_item(descriptor)])
 
 
 # ------------------------------------------------------- macOS and Linux tools
@@ -172,18 +188,35 @@ def _tool_store(descriptor: Descriptor, secret: bytes) -> None:
         )
 
 
-def _tool_run(argv: list[str], stdin: str | None = None) -> str:
-    done = subprocess.run(  # noqa: S603  PERMANENT(a fixed OS key-store tool found on PATH, with an argv built here; the secret travels on stdin)
-        argv,
-        input=stdin,
-        capture_output=True,
-        text=True,
-        timeout=_TOOL_TIMEOUT_S,
-        check=False,
+def _tool_run(
+    argv: list[str], stdin: str | None = None, lookup_in: str | None = None
+) -> str:
+    """Run one key-store command and return its stdout. *lookup_in* names the
+    store a lookup is asked of, so "no such item" (:data:`MOVED`) is told from a
+    store that did not answer (:data:`UNREACHABLE`)."""
+    try:
+        done = subprocess.run(  # noqa: S603  PERMANENT(a fixed OS key-store tool found on PATH, with an argv built here; the secret travels on stdin)
+            argv,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=_TOOL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        done = None
+    if done is None:
+        # Raised out here so the error has no context: a timeout's own exception
+        # carries whatever the tool had printed, which for a lookup is the key.
+        raise DeviceKeyError(UNREACHABLE)
+    if done.returncode == 0:
+        return done.stdout
+    absent = (lookup_in == "keychain" and done.returncode == _KEYCHAIN_NOT_FOUND) or (
+        lookup_in == "secret-service"
+        and done.returncode == 1
+        and not done.stderr.strip()
     )
-    if done.returncode != 0:
-        raise DeviceKeyError(MOVED)
-    return done.stdout
+    raise DeviceKeyError(MOVED if absent else UNREACHABLE)
 
 
 # ---------------------------------------------------------------- Windows DPAPI

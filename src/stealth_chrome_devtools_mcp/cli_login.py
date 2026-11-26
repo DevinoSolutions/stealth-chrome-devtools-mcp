@@ -590,7 +590,6 @@ def _cmd_init(_args: argparse.Namespace) -> int:
         raise _RefusedError(f"a vault already exists at {path}; nothing was changed")
     _refuse_while_resident(_backend_problems(), "no vault was created")
     print(vault_mode.notice())
-    header = vault_crypto.new_header()
     passphrase = _new_secret("new passphrase")
     if len(passphrase) < _SHORT_PASSPHRASE:
         print(
@@ -599,9 +598,9 @@ def _cmd_init(_args: argparse.Namespace) -> int:
             "guesses offline; `stealthy login destroy` and `init` start over.",
             file=sys.stderr,
         )
-    key = vault_crypto.derive_key(passphrase, header)
+    header = vault_crypto.new_header()  # after the prompts: it may store a key
     try:
-        _write(header, key, {})
+        _write(header, vault_crypto.derive_key(passphrase, header), {})
         # The file exists now, so every tool admitted from here on is refused. One
         # that was admitted before it is seen here: take the vault back rather than
         # keep a key's worth of secrets next to code that is already running.
@@ -621,6 +620,7 @@ def _cmd_init(_args: argparse.Namespace) -> int:
                         path=path, reason=exc.strerror or type(exc).__name__
                     )
                 ) from None
+        cli_login_device.forget_unused(header)
         raise
     print(f"created {path}")
     print(cli_login_device.describe(header))
@@ -668,7 +668,7 @@ def _cmd_destroy(_args: argparse.Namespace) -> int:
     if input("type DESTROY to go on: ").strip() != "DESTROY":
         raise _RefusedError("nothing was deleted")
     warnings = _lock_everywhere()  # drop every key a backend still holds, first
-    cli_login_device.forget_file()
+    forget = cli_login_device.forgetter()
     try:
         path.unlink()
     except OSError as exc:
@@ -676,6 +676,7 @@ def _cmd_destroy(_args: argparse.Namespace) -> int:
             f"could not delete {path} ({exc.strerror or type(exc).__name__}); "
             "vault mode stays on"
         ) from None
+    forget()
     for warning in warnings:
         print(
             f"warning: {warning}; it may still hold the key until it restarts",
