@@ -400,9 +400,14 @@ def test_init_says_what_it_disables_before_it_asks_for_a_passphrase(
     )
     assert _run("init") == 0
     out = capsys.readouterr().out
-    for line in vault_mode.describe():  # EVERY restriction, from the one list
-        assert line in out
+    # A notice a person reads: short, no line a terminal has to wrap, and it
+    # says where every restriction is listed (`status`, pinned below) and how
+    # to undo it. The whole list here was 17 wrapped lines nobody read.
+    notice = out[: out.index("created")]
+    assert len(notice.splitlines()) <= 8
+    assert max(len(line) for line in notice.splitlines()) <= 79
     assert "VAULT MODE" in out
+    assert "stealthy login status" in out
     assert "stealthy login destroy" in out
     assert out.index("VAULT MODE") < out.index("created")
     assert asked == [False, True]  # before the file, and again once it exists

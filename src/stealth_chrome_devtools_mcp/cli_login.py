@@ -109,7 +109,8 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
         description="Store logins in an encrypted vault, and unlock it so agents "
         "can ask the backend to sign in by label. Nothing here prints a password.",
     )
-    verbs = login.add_subparsers(dest="login_command", required=True)
+    verbs = login.add_subparsers(dest="login_command")
+    login.set_defaults(login_help=login.print_help)  # bare `stealthy login`
 
     def verb(name: str, help_text: str) -> argparse.ArgumentParser:
         return verbs.add_parser(name, help=help_text, allow_abbrev=False)
@@ -117,9 +118,12 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     verb("init", "create the vault (asks for a new passphrase twice)")
 
     add = verb("add", "add a login; the password is asked for at a hidden prompt")
-    add.add_argument("label", help="a-z, 0-9 and '-'; what agents call it by")
-    add.add_argument("--site", required=True, help="the site this login is for")
-    kind = add.add_mutually_exclusive_group(required=True)
+    add.epilog = "Whatever is left out is asked for when this runs at a terminal."
+    add.add_argument(
+        "label", nargs="?", help="a-z, 0-9 and '-'; what agents call it by"
+    )
+    add.add_argument("--site", help="the site this login is for")
+    kind = add.add_mutually_exclusive_group()
     kind.add_argument("--login-url", help="https:// page that shows the sign-in form")
     kind.add_argument(
         "--via", metavar="OTHER", help="sign in with that login's account"
@@ -150,7 +154,7 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     )
 
     edit = verb("edit", "change a login and clear its frozen state")
-    edit.add_argument("label")
+    edit.add_argument("label", nargs="?")
     edit.add_argument("--site")
     edit.add_argument("--login-url")
     edit.add_argument(
@@ -171,7 +175,7 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     _secret_source(edit)
 
     remove = verb("remove", "remove a login")
-    remove.add_argument("label")
+    remove.add_argument("label", nargs="?")
 
     unlock = verb(
         "unlock", "put the key in the running backend's memory (a terminal only)"
@@ -215,6 +219,28 @@ def _hidden(prompt: str) -> str:
     return getpass.getpass(prompt)
 
 
+def _fill(args: argparse.Namespace, questions: dict[str, tuple[str, str]]) -> None:
+    """Ask for each of *questions* (attribute -> its flag and its question) that
+    the command line left out. Without a terminal nothing can be asked, so the
+    refusal names every one that is missing."""
+    missing = {name: q for name, q in questions.items() if not getattr(args, name)}
+    if missing and not sys.stdin.isatty():
+        flags = ", ".join(flag for flag, _question in missing.values())
+        raise _RefusedError(
+            f"missing {flags}: give it on the command line (it is only asked "
+            "for at a terminal)",
+            code=2,
+        )
+    for name, (_flag, question) in missing.items():
+        answer = ""
+        while not answer:  # an empty answer asks again; Ctrl-C cancels
+            answer = input(f"{question}: ").strip()
+        setattr(args, name, answer)
+
+
+_LABEL = ("LABEL", "label")
+
+
 def _new_secret(what: str) -> str:
     """A secret typed twice, so a typo cannot be stored unnoticed."""
     first = _hidden(f"{what}: ")
@@ -233,7 +259,7 @@ def _password(args: argparse.Namespace) -> str:
                 "--password-stdin: stdin had no password on its first line"
             )
         return line
-    return _new_secret("password")
+    return _new_secret(f"password for {args.label}")
 
 
 # ----------------------------------------------------------------------- vault
@@ -260,7 +286,7 @@ def _open() -> tuple[Document, bytes, dict[str, dict[str, object]]]:
 
     document = _read_header()
     try:
-        key = vault_crypto.derive_key(_hidden("passphrase: "), document)
+        key = vault_crypto.derive_key(_hidden("vault passphrase: "), document)
         plaintext = vault_crypto.open_sealed(key, document)
     except vault_crypto.VaultError:
         raise _RefusedError("wrong passphrase, or the vault file was changed") from None
@@ -377,16 +403,17 @@ def _reload_backend(key: bytes) -> None:
 
 
 def _init_notice() -> str:
-    from stealth_chrome_devtools_mcp.embedded import vault_mode
-
-    lines = "\n".join(f"  - {line}" for line in vault_mode.describe())
+    """What creating a vault costs, short enough to read before the passphrase
+    prompt and with no line a terminal has to wrap; ``status`` lists every
+    restriction once the vault exists."""
     return (
-        "Note: while this vault exists VAULT MODE is on in every backend on this "
-        "machine. An agent's tools could otherwise reach the vault's key and "
-        f"passwords, so these are restricted:\n{lines}\n"
-        "JavaScript tools (execute_script and the like) are not affected. "
-        "`stealthy login destroy` deletes the vault and turns every one of these "
-        "back on."
+        "Creating the login vault turns VAULT MODE on in every backend on this\n"
+        "machine. While the vault exists, agent tools that could reach its key are\n"
+        "restricted: raw CDP, Python bindings and hooks, file: and chrome:// pages,\n"
+        "custom browser switches, pickle exports and where downloads are saved.\n"
+        "JavaScript tools (execute_script and the like) keep working.\n"
+        "  every restriction:  stealthy login status   (once the vault exists)\n"
+        "  undo:               stealthy login destroy"
     )
 
 
@@ -586,6 +613,8 @@ def _cmd_init(_args: argparse.Namespace) -> int:
                 ) from None
         raise
     print(f"created {path}")
+    print("next: `stealthy login add` stores a login (it asks for each detail),")
+    print("      then `stealthy login unlock` lets agents use it")
     return 0
 
 
@@ -667,7 +696,29 @@ def _check_add(args: argparse.Namespace) -> None:
         raise _RefusedError("--password-stdin reads stdin, so give --user", code=2)
 
 
+def _ask_add(args: argparse.Namespace) -> None:
+    """Ask for what an ``add`` was not given: its label, its site, and how it
+    signs in (an empty sign-in page means through another login)."""
+    _fill(
+        args,
+        {
+            "label": ("LABEL", "label (a-z, 0-9 and '-'; what agents call it by)"),
+            "site": ("--site", "site this login is for (example.com)"),
+        },
+    )
+    if args.login_url or args.via:
+        return
+    if not sys.stdin.isatty():
+        _fill(args, {"login_url": ("--login-url or --via", "")})
+    args.login_url = input(
+        "sign-in page, https://... (empty: sign in through another login): "
+    ).strip()
+    if not args.login_url:
+        _fill(args, {"via": ("--via", "label of the login to sign in through")})
+
+
 def _cmd_add(args: argparse.Namespace) -> int:
+    _ask_add(args)
     _check_add(args)
     header, key, entries = _open()
     if args.label in entries:
@@ -724,6 +775,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
+    _fill(args, {"label": _LABEL})
     header, key, entries = _open()
     entry = entries.get(args.label)
     if entry is None:
@@ -769,6 +821,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
+    _fill(args, {"label": _LABEL})
     header, key, entries = _open()
     if args.label not in entries:
         raise _RefusedError(f"there is no login {args.label!r}")
@@ -788,7 +841,7 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
     # the census runs here too, before a passphrase is typed.
     _refuse_while_resident(_backend_problems(), "nothing was unlocked")
     try:
-        key = vault_crypto.derive_key(_hidden("passphrase: "), document)
+        key = vault_crypto.derive_key(_hidden("vault passphrase: "), document)
         vault_crypto.open_sealed(key, document)
     except vault_crypto.VaultError:
         raise _RefusedError("wrong passphrase, or the vault file was changed") from None
@@ -898,6 +951,9 @@ def cmd_login(args: argparse.Namespace) -> int:
     """Run one ``login`` subcommand; a refusal is one line on stderr and its code."""
     from stealth_chrome_devtools_mcp import cli_call
 
+    if args.login_command is None:
+        args.login_help()
+        return 0
     try:
         return _COMMANDS[args.login_command](args)
     except _RefusedError as exc:

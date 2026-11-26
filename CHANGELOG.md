@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### `stealthy login` asks for what is missing, and `init` says less
+
+- `stealthy login add` with nothing else now asks for the label, the site and the sign-in page (leave that empty to sign in through another login), then the username and password. Flags still work and skip their question. `edit` and `remove` ask for the label. Without a terminal nothing is asked: the refusal names what is missing (exit 2), before any passphrase prompt.
+- `stealthy login init` printed every vault-mode restriction, 17 wrapped lines, before its prompt. It now prints 7 lines of at most 79 characters that name the restricted areas and point at `stealthy login status` (the full list, once the vault exists) and `stealthy login destroy`. After creating the vault it says what to run next.
+- The prompts say which secret they want: `vault passphrase:` and `password for LABEL:`.
+- `stealthy login` alone prints its help instead of an argparse error.
+
 ### The DevTools-port guard says which page it closed and why (T-20441)
 
 The first publish run of 2.1.68 (44876025032) failed one macOS integration test, 1 failed / 441 passed: in two of six browsers spawned together the guard logged "a page could not be guarded; closing it" and the tab `ensure_session_restore` had opened was gone. The same test passed on an identical tree in the run before and in the full rerun. Cause not established: the guard dropped Chrome's error text and its warning named neither the command nor the page.
