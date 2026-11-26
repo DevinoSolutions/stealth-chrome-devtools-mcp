@@ -25,7 +25,14 @@ from stealth_chrome_devtools_mcp.embedded import (
     vault_routes,
     vault_store,
 )
-from vault_helpers import PASSPHRASE, make_vault, password_entry, provider_entry, reset
+from vault_helpers import (
+    PASSPHRASE,
+    fake_account_store,
+    make_vault,
+    password_entry,
+    provider_entry,
+    reset,
+)
 
 TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -722,3 +729,90 @@ def test_login_alone_prints_its_help(term):
 def test_init_ends_by_saying_what_to_do_next(term):
     init(term)
     assert "stealthy login add" in term.out and "stealthy login unlock" in term.out
+
+
+# ------------------------------------------------- the second factor (T-22092)
+
+
+def on_disk():
+    return vault_crypto.read_file(vault_store.VAULT_PATH)
+
+
+def test_init_without_a_key_store_says_the_passphrase_stands_alone(term):
+    init(term)
+    assert on_disk()["v"] == vault_crypto.VERSION
+    assert "second factor: none (this machine has no account key store)" in term.out
+
+
+def test_init_ties_the_vault_to_the_account_when_there_is_a_store(term, monkeypatch):
+    items = fake_account_store(monkeypatch)
+    init(term)
+    assert on_disk()["v"] == vault_crypto.BOUND_VERSION
+    assert len(items) == 1
+    assert "second factor: this macOS login keychain" in term.out
+    assert "stealthy login export FILE" in term.out
+    assert add_work(term) == 0, term.err
+    assert decrypted()["work"]["username"] == "a@b.co"
+    assert on_disk()["v"] == vault_crypto.BOUND_VERSION  # a rewrite keeps it
+    assert term.run("status") == 0
+    assert "second factor: this macOS login keychain" in term.out
+
+
+def test_bind_ties_an_old_vault_and_export_is_what_opens_elsewhere(
+    term, monkeypatch, tmp_path
+):
+    init(term)
+    assert add_work(term) == 0
+    items = fake_account_store(monkeypatch)
+    assert term.run("status") == 0
+    assert "`stealthy login bind` ties it to this OS account" in term.out
+
+    assert term.run("bind", hidden=[PASSPHRASE]) == 0, term.err
+    assert on_disk()["v"] == vault_crypto.BOUND_VERSION
+    assert "`stealthy login unlock` again" in term.out
+    assert decrypted()["work"]["username"] == "a@b.co"
+    assert PASSPHRASE not in term.out + term.err
+
+    assert term.run("bind") == 0  # already tied: nothing asked, nothing changed
+    assert term.prompts == []
+    assert len(items) == 1
+
+    copy = tmp_path / "carry" / "copy.json"
+    assert term.run("export", str(copy), hidden=[PASSPHRASE]) == 0, term.err
+    assert term.run("export", str(copy), hidden=[PASSPHRASE]) == 1
+    assert "already exists" in term.err
+
+    items.clear()  # another machine: the account's store has no such key
+    carried = vault_crypto.read_file(copy)
+    assert carried["v"] == vault_crypto.VERSION
+    key = vault_crypto.derive_key(PASSPHRASE, carried)
+    assert vault_crypto.open_sealed(key, carried)["entries"]["work"]["site"] == (
+        "example.com"
+    )
+    assert term.run("list", hidden=[PASSPHRASE]) == 1
+    assert "`stealthy login export`" in term.err
+    assert "wrong passphrase" not in term.err
+
+
+def test_bind_changes_nothing_when_it_cannot_finish(term, monkeypatch):
+    init(term)
+    before = on_disk()
+    assert term.run("bind") == 1  # no store on this machine
+    assert "no account key store" in term.err
+    assert term.prompts == []
+
+    items = fake_account_store(monkeypatch)
+    assert term.run("bind", stdin=FakeStdin(tty=False)) == 2
+    assert term.run("bind", hidden=["not the passphrase"]) == 1
+    assert "wrong passphrase" in term.err
+    assert on_disk() == before
+    assert items == {}
+
+
+def test_destroy_takes_the_accounts_secret_with_the_vault(term, monkeypatch):
+    items = fake_account_store(monkeypatch)
+    init(term)
+    assert len(items) == 1
+    assert term.run("destroy", typed=["DESTROY"]) == 0, term.err
+    assert items == {}
+    assert not vault_store.VAULT_PATH.exists()

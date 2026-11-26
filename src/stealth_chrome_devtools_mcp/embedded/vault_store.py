@@ -315,7 +315,7 @@ def _load() -> tuple[dict[str, object], dict[str, Entry]]:
         lock()
         raise VaultLocked("the login vault no longer opens with the held key") from exc
     _register_passwords(entries)
-    return {"v": document["v"], "kdf": document["kdf"]}, entries
+    return vault_crypto.header_of(document), entries
 
 
 def _read_document() -> vault_crypto.Document:
@@ -372,7 +372,7 @@ def freeze(label: str) -> None:
             _register_passwords(entries)
             stamp = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
             entries[label]["frozen"] = stamp
-            header = {"v": document["v"], "kdf": document["kdf"]}
+            header = vault_crypto.header_of(document)
             try:
                 vault_crypto.write_file(
                     VAULT_PATH,

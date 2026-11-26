@@ -106,3 +106,36 @@ def sealed_state():
     return {
         name: getattr(login_seal, name) for name in names if getattr(login_seal, name)
     }
+
+
+def fake_account_store(monkeypatch, *, keeps=True):
+    """Stand a dict in for the macOS keychain: ``device_key`` runs its real
+    ``security`` command lines against it, so what is checked is the argv and the
+    stdin it builds. ``keeps=False`` is a store that accepts a write and then
+    hands back something else. Returns the dict (item id -> hex secret)."""
+    import shlex
+
+    from stealth_chrome_devtools_mcp.embedded import device_key
+
+    items = {}
+
+    def run(argv, stdin=None):
+        assert argv[0] == "security", argv
+        words = shlex.split(stdin) if argv[1] == "-i" else argv[1:]
+        flags = dict(zip(words[1::2], words[2::2], strict=False))
+        assert flags["-s"] == device_key._SERVICE
+        if words[0] == "add-generic-password":
+            assert argv == ["security", "-i"], "the secret must travel on stdin"
+            items[flags["-a"]] = flags["-w"] if keeps else "00" * 32
+            return ""
+        if flags["-a"] not in items:
+            raise device_key.DeviceKeyError(device_key.MOVED)
+        if words[0] == "delete-generic-password":
+            del items[flags["-a"]]
+            return ""
+        assert words[0] == "find-generic-password"
+        return items[flags["-a"]] + "\n"
+
+    monkeypatch.setattr(device_key, "store_name", lambda: "keychain")
+    monkeypatch.setattr(device_key, "_tool_run", run)
+    return items

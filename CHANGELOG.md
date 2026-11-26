@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### The login vault's key needs this OS account as well as the passphrase (T-22092)
+
+Until now the vault key was scrypt(passphrase, salt), and the salt is in `vault.json`: anyone with a copy of the file could try passphrases offline on their own hardware. A new vault's key is now also made from 32 random bytes that the operating system keeps for your account, so a copy of the file cannot be opened on another machine or by another account, with or without the passphrase.
+
+- **Where the second secret lives.** Windows: encrypted by DPAPI for your user, inside the vault file itself. macOS: the login keychain. Linux: the Secret Service keyring through `secret-tool`. It is tied to the OS account, not to hardware: changing RAM, a disk or a board changes nothing.
+- **No key store, no second factor.** A Linux server without a Secret Service has nowhere to keep it. `init` then makes a passphrase-only vault, as before, and says so. A store is used only after it handed the new secret back.
+- **`stealthy login bind`** ties an existing vault (any made before this release) to this account. The key changes, so every backend is locked and `unlock` is asked for again.
+- **`stealthy login export FILE`** writes a passphrase-only copy. A tied vault is lost with the account's key store (a new machine, a new OS account, an OS reinstall, on Windows an administrator resetting your password), so make a copy before any of those; on the new machine put it at the vault path and run `bind`.
+- `init` and `status` print one line saying which of the two a vault is. A tied vault opened where its key is missing says so instead of "wrong passphrase". `destroy` removes the keychain or keyring item.
+- File format version 2 adds a `device` object to the header, authenticated with the ciphertext. Version 1 files are still read and written.
+- Not covered: a program already running as you on this machine can ask the OS for the secret, as it could log the passphrase. The second factor is about copies of the file.
+- Tested: DPAPI for real on Windows. The macOS and Linux command lines are checked against a stand-in, not run against a real keychain or keyring.
+
 ## 2.1.69
 
 ### `stealthy login` asks for what is missing, and `init` says less

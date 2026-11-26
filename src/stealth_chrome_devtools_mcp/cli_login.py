@@ -1,8 +1,9 @@
 """The ``login`` verb (T-19366): a person's side of the login vault.
 
 ``stealthy login init | add | list | edit | remove | unlock | lock | status |
-audit | destroy``. The vault's format and the meaning of an entry are
-``embedded.vault_crypto``'s and ``embedded.vault_store``'s; this file is the
+audit | destroy``, and ``bind | export`` from ``cli_login_device``. The vault's
+format and the meaning of an entry are ``embedded.vault_crypto``'s and
+``embedded.vault_store``'s; this file is the
 parser, the prompts and the one HTTP conversation with a running backend (the
 unlock routes of ``embedded.vault_routes``). Its own module because ``cli.py`` is
 at its line cap, on ``cli_supervise``'s precedent.
@@ -46,6 +47,8 @@ import urllib.parse
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING
+
+from stealth_chrome_devtools_mcp import cli_login_device
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -190,6 +193,7 @@ def add_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     )
 
     verb("lock", "drop the key from the running backend")
+    cli_login_device.add_verbs(verb)
     verb("status", "is there a vault, and is it unlocked")
     verb(
         "destroy",
@@ -309,14 +313,14 @@ def _open() -> tuple[Document, bytes, dict[str, dict[str, object]]]:
     try:
         key = vault_crypto.derive_key(_hidden("vault passphrase: "), document)
         plaintext = vault_crypto.open_sealed(key, document)
-    except vault_crypto.VaultError:
-        raise _RefusedError("wrong passphrase, or the vault file was changed") from None
+    except vault_crypto.VaultError as exc:
+        raise _RefusedError(vault_crypto.refusal(exc)) from None
     entries = plaintext.get("entries")
     if not isinstance(entries, dict):
         raise _RefusedError("the vault file is not a valid vault document")
     # The nonce names the version of the file this was read from: `_write` passes
     # it back, so a freeze the backend made meanwhile is refused, not erased.
-    header = {"v": document["v"], "kdf": document["kdf"], "nonce": document["nonce"]}
+    header = {**vault_crypto.header_of(document), "nonce": document["nonce"]}
     return header, key, entries
 
 
@@ -619,6 +623,7 @@ def _cmd_init(_args: argparse.Namespace) -> int:
                 ) from None
         raise
     print(f"created {path}")
+    print(cli_login_device.describe(header))
     print("next: `stealthy login add` stores a login (it asks for each detail),")
     print("      then `stealthy login unlock` lets agents use it")
     return 0
@@ -663,6 +668,7 @@ def _cmd_destroy(_args: argparse.Namespace) -> int:
     if input("type DESTROY to go on: ").strip() != "DESTROY":
         raise _RefusedError("nothing was deleted")
     warnings = _lock_everywhere()  # drop every key a backend still holds, first
+    cli_login_device.forget_file()
     try:
         path.unlink()
     except OSError as exc:
@@ -858,8 +864,8 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
     try:
         key = vault_crypto.derive_key(_hidden("vault passphrase: "), document)
         vault_crypto.open_sealed(key, document)
-    except vault_crypto.VaultError:
-        raise _RefusedError("wrong passphrase, or the vault file was changed") from None
+    except vault_crypto.VaultError as exc:
+        raise _RefusedError(vault_crypto.refusal(exc)) from None
     code, reply = _post_key(key, args.duration)
     if code == HTTPStatus.OK:
         until = (
@@ -898,6 +904,7 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     if here:
         for line in vault_mode.describe():
             print(f"  - {line}")
+        print(cli_login_device.describe_file())
     problems = _backend_problems()
     if problems:
         for problem in problems:
@@ -959,6 +966,7 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "status": _cmd_status,
     "audit": _cmd_audit,
     "destroy": _cmd_destroy,
+    **cli_login_device.COMMANDS,
 }
 
 
