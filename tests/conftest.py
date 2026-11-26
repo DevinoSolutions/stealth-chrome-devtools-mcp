@@ -756,3 +756,14 @@ def pytest_configure(config):
     import exit_hang_watchdog
 
     config.pluginmanager.register(exit_hang_watchdog, "exit-hang-watchdog")
+
+
+@pytest.fixture(autouse=True)
+def _no_account_key_store(monkeypatch):
+    """A test never touches this account's real key store (a developer's login
+    keychain would collect an item per run): new vaults are passphrase-only
+    unless a test asks for a store (``vault_helpers.fake_account_store``, or the
+    real DPAPI one in ``test_device_key``)."""
+    from stealth_chrome_devtools_mcp.embedded import device_key
+
+    monkeypatch.setattr(device_key, "store_name", lambda: None)

@@ -939,6 +939,7 @@ def _sites():
 OS_COMMAND_SITES = {
     ("cli_call.py", "_run"): "the `stealthy call` CLI's own subprocess (a shell, no tool)",
     ("embedded/backend_launch.py", "_popen"): "starts the backend: a fixed argv",
+    ("embedded/device_key.py", "_tool_run"): "the CLI's key-store tool: a fixed argv plus an item id checked alphanumeric; no tool calls it",
     ("embedded/desktop_launch.py", "_schtasks"): "schtasks with a fixed argv; the task name is a token",
     ("embedded/display_context.py", "_macos_context"): "a fixed macOS argv",
     ("embedded/platform_utils.py", "_probe_browser_major_version"): "`<operator's browser> --version`",
