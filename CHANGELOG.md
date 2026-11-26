@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.69
 
 ### `stealthy login` asks for what is missing, and `init` says less
 
